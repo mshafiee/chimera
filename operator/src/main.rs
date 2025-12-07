@@ -39,8 +39,8 @@ use crate::engine::{RecoveryManager, TipManager};
 use crate::handlers::{
     export_trades, get_config, get_position, get_wallet, health_check, health_simple,
     list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
-    roster_validate, update_config, update_wallet, webhook_handler, ApiState, AppState,
-    RosterState, WebhookState,
+    roster_validate, update_config, update_wallet, wallet_auth, webhook_handler, ws_handler,
+    ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use crate::middleware::{bearer_auth, AuthState, HmacState, Role};
 use crate::price_cache::PriceCache;
@@ -254,6 +254,10 @@ async fn main() -> anyhow::Result<()> {
         config: shared_config.clone(),
     });
 
+    // Create WebSocket state for real-time updates
+    let ws_state = Arc::new(WsState::new());
+    tracing::info!("WebSocket broadcast channel initialized");
+
     // Create auth state with API keys from config
     let mut api_keys_map = std::collections::HashMap::new();
     for key_config in &config.security.api_keys {
@@ -390,6 +394,20 @@ async fn main() -> anyhow::Result<()> {
             bearer_auth,
         ));
 
+    // WebSocket route for real-time updates
+    let ws_routes = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(ws_state);
+
+    // Wallet authentication route
+    let wallet_auth_state = Arc::new(WalletAuthState {
+        db: db_pool.clone(),
+        jwt_secret: std::env::var("JWT_SECRET").unwrap_or_else(|_| "chimera-dev-secret".to_string()),
+    });
+    let auth_routes = Router::new()
+        .route("/auth/wallet", post(wallet_auth))
+        .with_state(wallet_auth_state);
+
     // Simple health check for load balancers
     let root_routes = Router::new().route("/health", get(health_simple));
 
@@ -398,7 +416,9 @@ async fn main() -> anyhow::Result<()> {
         .merge(webhook_routes)
         .merge(health_routes)
         .merge(roster_routes)
-        .merge(authenticated_api_routes);
+        .merge(authenticated_api_routes)
+        .merge(ws_routes)
+        .merge(auth_routes);
 
     // Build final router
     let app = Router::new()

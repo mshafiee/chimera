@@ -1,0 +1,118 @@
+import { useMemo, ReactNode, useCallback, useEffect } from 'react'
+import {
+  ConnectionProvider,
+  WalletProvider as SolanaWalletProvider,
+  useWallet,
+} from '@solana/wallet-adapter-react'
+import { WalletModalProvider, WalletMultiButton } from '@solana/wallet-adapter-react-ui'
+import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adapter-wallets'
+import { clusterApiUrl } from '@solana/web3.js'
+import { useAuthStore } from '../../stores/authStore'
+import { apiClient } from '../../api/client'
+
+// Import wallet adapter CSS
+import '@solana/wallet-adapter-react-ui/styles.css'
+
+interface WalletProviderProps {
+  children: ReactNode
+}
+
+// Solana RPC endpoint
+const SOLANA_NETWORK = 'mainnet-beta'
+const SOLANA_RPC = import.meta.env.VITE_SOLANA_RPC || clusterApiUrl(SOLANA_NETWORK)
+
+export function WalletProvider({ children }: WalletProviderProps) {
+  const wallets = useMemo(
+    () => [
+      new PhantomWalletAdapter(),
+      new SolflareWalletAdapter(),
+    ],
+    []
+  )
+
+  return (
+    <ConnectionProvider endpoint={SOLANA_RPC}>
+      <SolanaWalletProvider wallets={wallets} autoConnect>
+        <WalletModalProvider>
+          <WalletAuthProvider>{children}</WalletAuthProvider>
+        </WalletModalProvider>
+      </SolanaWalletProvider>
+    </ConnectionProvider>
+  )
+}
+
+// Inner component that handles auth
+function WalletAuthProvider({ children }: { children: ReactNode }) {
+  const { publicKey, signMessage, connected, disconnect } = useWallet()
+  const { login, logout, isAuthenticated, user } = useAuthStore()
+
+  // Handle wallet connection and authentication
+  const authenticate = useCallback(async () => {
+    if (!publicKey || !signMessage) return
+
+    try {
+      // Create a message to sign
+      const message = `Chimera Dashboard Authentication\n\nWallet: ${publicKey.toBase58()}\nTimestamp: ${Date.now()}`
+      const encodedMessage = new TextEncoder().encode(message)
+      
+      // Sign the message
+      const signature = await signMessage(encodedMessage)
+      
+      // Send to backend for verification
+      const response = await apiClient.post<{
+        token: string
+        role: string
+        identifier: string
+      }>('/auth/wallet', {
+        wallet_address: publicKey.toBase58(),
+        message,
+        signature: Buffer.from(signature).toString('base64'),
+      })
+
+      // Store auth state
+      login({
+        identifier: response.data.identifier,
+        role: response.data.role as any,
+        token: response.data.token,
+      })
+    } catch (error) {
+      console.error('Authentication failed:', error)
+      // Disconnect wallet on auth failure
+      disconnect()
+    }
+  }, [publicKey, signMessage, login, disconnect])
+
+  // Handle wallet connection/disconnection
+  useEffect(() => {
+    if (connected && publicKey && !isAuthenticated) {
+      // Wallet connected but not authenticated - trigger auth
+      authenticate()
+    } else if (!connected && isAuthenticated) {
+      // Wallet disconnected - logout
+      logout()
+    }
+  }, [connected, publicKey, isAuthenticated, authenticate, logout])
+
+  // Handle wallet change
+  useEffect(() => {
+    if (connected && publicKey && isAuthenticated && user) {
+      // Check if wallet changed
+      if (user.identifier !== publicKey.toBase58()) {
+        // Different wallet connected - re-authenticate
+        logout()
+        authenticate()
+      }
+    }
+  }, [connected, publicKey, isAuthenticated, user, authenticate, logout])
+
+  return <>{children}</>
+}
+
+// Custom styled wallet button
+export function ConnectWalletButton() {
+  return (
+    <div className="wallet-adapter-button-wrapper">
+      <WalletMultiButton className="!bg-shield hover:!bg-shield-dark !text-background !font-medium !rounded-lg !h-10" />
+    </div>
+  )
+}

@@ -1,0 +1,79 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+  
+  body {
+    @apply bg-background text-text;
+  }
+
+  /* Custom scrollbar for dark mode */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    @apply bg-background;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-light rounded-full;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-border;
+  }
+}
+
+@layer components {
+  /* Monospace numbers */
+  .font-mono-numbers {
+    font-family: 'JetBrains Mono', monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Status indicators */
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block;
+  }
+
+  .status-dot-healthy {
+    @apply bg-profit;
+    box-shadow: 0 0 8px rgba(0, 255, 136, 0.5);
+  }
+
+  .status-dot-degraded {
+    @apply bg-spear;
+    box-shadow: 0 0 8px rgba(255, 136, 0, 0.5);
+  }
+
+  .status-dot-unhealthy {
+    @apply bg-loss;
+    box-shadow: 0 0 8px rgba(255, 68, 68, 0.5);
+  }
+}
+
+@layer utilities {
+  /* Profit/Loss text colors */
+  .text-profit {
+    @apply text-[#00FF88];
+  }
+
+  .text-loss {
+    @apply text-[#FF4444];
+  }
+
+  /* Glow effects */
+  .glow-shield {
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+  }
+
+  .glow-spear {
+    box-shadow: 0 0 20px rgba(255, 136, 0, 0.3);
+  }
+}
