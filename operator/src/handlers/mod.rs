@@ -12,4 +12,4 @@ pub use auth::*;
 pub use health::*;
 pub use roster::*;
 pub use webhook::*;
-pub use ws::*;
+pub use ws::{ws_handler, WsEvent, WsState, TradeUpdateData, PositionUpdateData, HealthUpdateData, AlertData};

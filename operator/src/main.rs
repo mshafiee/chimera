@@ -25,13 +25,16 @@ use chimera_operator::config::AppConfig;
 use chimera_operator::db;
 use chimera_operator::engine::{self, RecoveryManager, TipManager};
 use chimera_operator::handlers::{
-    export_trades, get_config, get_position, get_wallet, health_check, health_simple,
+    export_trades, get_config, get_performance_metrics, get_position, get_strategy_performance,
+    get_wallet, health_check, health_simple, list_config_audit, list_dead_letter_queue,
     list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
-    roster_validate, update_config, update_wallet, wallet_auth, webhook_handler, ws_handler,
+    roster_validate, update_config, update_wallet, update_reconciliation_metrics,
+    update_secret_rotation_metrics, wallet_auth, webhook_handler, ws_handler,
     ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::middleware::{self, bearer_auth, AuthState, HmacState, Role};
-use chimera_operator::notifications::{self, CompositeNotifier, NotificationEvent, TelegramNotifier};
+use chimera_operator::metrics::{MetricsState, metrics_router};
+use chimera_operator::notifications::{self, CompositeNotifier, DiscordNotifier, NotificationEvent, TelegramNotifier};
 use chimera_operator::price_cache::PriceCache;
 use chimera_operator::roster;
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
@@ -69,10 +72,14 @@ async fn main() -> anyhow::Result<()> {
     db::run_migrations(&db_pool).await?;
     tracing::info!("Database initialized");
 
-    // Initialize circuit breaker
-    let circuit_breaker = Arc::new(CircuitBreaker::new(
+    // Create WebSocket state for real-time updates (needed for circuit breaker)
+    let ws_state = Arc::new(WsState::new());
+
+    // Initialize circuit breaker with WebSocket support
+    let circuit_breaker = Arc::new(CircuitBreaker::new_with_ws(
         config.circuit_breakers.clone(),
         db_pool.clone(),
+        Some(ws_state.clone()),
     ));
     tracing::info!("Circuit breaker initialized");
 
@@ -127,6 +134,12 @@ async fn main() -> anyhow::Result<()> {
     let notifier = {
         let mut composite = CompositeNotifier::new();
 
+        // Add Discord notifier if configured
+        if let Some(discord) = DiscordNotifier::from_env() {
+            composite.add_service(Arc::new(discord));
+            tracing::info!("Discord notifications enabled");
+        }
+
         // Add Telegram notifier if configured
         if config.notifications.telegram.enabled {
             let telegram_config = notifications::telegram::TelegramConfig {
@@ -148,12 +161,22 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        // Add Discord notifier if configured via environment variable
+        if let Some(discord) = DiscordNotifier::from_env() {
+            composite.add_service(Arc::new(discord));
+            tracing::info!("Discord notifications enabled");
+        }
+
         Arc::new(composite)
     };
     tracing::info!("Notification service initialized");
 
-    // Initialize stuck-state recovery manager
-    let recovery_manager = Arc::new(RecoveryManager::new(db_pool.clone()));
+    // Initialize stuck-state recovery manager with WebSocket support
+    let recovery_manager = Arc::new(RecoveryManager::new_with_ws(
+        db_pool.clone(),
+        config.rpc.primary_url.clone(),
+        Some(ws_state.clone()),
+    ));
 
     // Spawn recovery background task
     let recovery_manager_clone = recovery_manager.clone();
@@ -311,9 +334,19 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("SIGHUP roster merge handler started");
     }
 
-    // Create engine with notification support
-    let (engine, engine_handle) =
-        engine::Engine::new_with_notifier(config.clone(), db_pool.clone(), notifier.clone());
+    // Create metrics state
+    let metrics_state = Arc::new(MetricsState::new());
+
+    // Create engine with notification, metrics, WebSocket support, and tip manager
+    // (ws_state already created above)
+    let (engine, engine_handle) = engine::Engine::new_with_extras_and_tip_manager(
+        config.clone(),
+        db_pool.clone(),
+        notifier.clone(),
+        Some(metrics_state.clone()),
+        Some(ws_state.clone()),
+        Some(tip_manager.clone()),
+    );
 
     // Spawn engine processing loop
     tokio::spawn(async move {
@@ -321,10 +354,66 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Engine started");
 
+    // Spawn metrics update task
+    let metrics_state_clone = metrics_state.clone();
+    let circuit_breaker_clone = circuit_breaker.clone();
+    let db_pool_metrics = db_pool.clone();
+    // Spawn periodic RPC health check task
+    let engine_handle_rpc = engine_handle.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            engine_handle_rpc.refresh_rpc_health().await;
+        }
+    });
+    tracing::info!("RPC health check task started");
+
+    let engine_handle_metrics = engine_handle.clone();
+    let ws_state_metrics = ws_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+
+            // Update circuit breaker state
+            let cb_state = circuit_breaker_clone.current_state();
+            let is_active = cb_state == chimera_operator::circuit_breaker::CircuitBreakerState::Active;
+            metrics_state_clone
+                .circuit_breaker_state
+                .set(if is_active { 1 } else { 0 });
+
+            // Update active positions count
+            if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
+                metrics_state_clone.active_positions.set(count as i64);
+            }
+
+            // Update total trades count
+            if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
+                metrics_state_clone.total_trades.set(count as i64);
+            }
+
+            // Broadcast health update via WebSocket
+            ws_state_metrics.broadcast(chimera_operator::handlers::WsEvent::HealthUpdate(
+                chimera_operator::handlers::HealthUpdateData {
+                    status: "healthy".to_string(), // Could be more sophisticated
+                    queue_depth: engine_handle_metrics.queue_depth(),
+                    trading_allowed: is_active,
+                },
+            ));
+        }
+    });
+    tracing::info!("Metrics update task started");
+
+    // Clone engine handle for all states that need it
+    let engine_handle_for_app = engine_handle.clone();
+    let engine_handle_for_webhook = engine_handle.clone();
+    let engine_handle_for_api = engine_handle.clone();
+    
     // Create shared state
     let app_state = Arc::new(AppState {
         db: db_pool.clone(),
-        engine: engine_handle.clone(),
+        engine: engine_handle_for_app,
         started_at: Utc::now(),
         circuit_breaker: circuit_breaker.clone(),
         price_cache: price_cache.clone(),
@@ -332,7 +421,7 @@ async fn main() -> anyhow::Result<()> {
 
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
-        engine: engine_handle,
+        engine: engine_handle_for_webhook,
         token_parser,
         circuit_breaker: circuit_breaker.clone(),
     });
@@ -357,10 +446,11 @@ async fn main() -> anyhow::Result<()> {
         circuit_breaker: circuit_breaker.clone(),
         config: shared_config.clone(),
         notifier: notifier.clone(),
+        engine: Some(Arc::new(engine_handle_for_api)),
+        metrics: metrics_state.clone(),
     });
 
-    // Create WebSocket state for real-time updates
-    let ws_state = Arc::new(WsState::new());
+    // WebSocket state is created above with engine
     tracing::info!("WebSocket broadcast channel initialized");
 
     // Create auth state with API keys from config
@@ -475,11 +565,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/:address", get(get_wallet))
         .route("/trades", get(list_trades))
         .route("/trades/export", get(export_trades))
+        .route("/metrics/performance", get(get_performance_metrics))
+        .route("/metrics/strategy/:strategy", get(get_strategy_performance))
+        .route("/incidents/dead-letter", get(list_dead_letter_queue))
+        .route("/incidents/config-audit", get(list_config_audit))
         .with_state(api_state.clone());
 
-    // Operator routes (operator+ role) - wallet updates
+    // Operator routes (operator+ role) - wallet updates and metrics
     let operator_api_routes = Router::new()
         .route("/wallets/:address", axum::routing::put(update_wallet))
+        .route("/metrics/reconciliation", axum::routing::post(update_reconciliation_metrics))
+        .route("/metrics/secret-rotation", axum::routing::post(update_secret_rotation_metrics))
         .with_state(api_state.clone());
 
     // Admin routes (admin role) - config management
@@ -516,6 +612,9 @@ async fn main() -> anyhow::Result<()> {
     // Simple health check for load balancers
     let root_routes = Router::new().route("/health", get(health_simple));
 
+    // Metrics endpoint (Prometheus) - reuse the same metrics_state
+    let metrics_routes = metrics_router().with_state(metrics_state.clone());
+
     // Combine all routes under /api/v1
     let api_routes = Router::new()
         .merge(webhook_routes)
@@ -529,6 +628,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .nest("/api/v1", api_routes)
         .merge(root_routes)
+        .merge(metrics_routes)
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

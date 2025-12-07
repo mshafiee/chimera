@@ -58,19 +58,24 @@ pub async fn wallet_auth(
         .decode(&req.signature)
         .map_err(|_| AppError::Auth("Invalid signature encoding".to_string()))?;
 
-    // Verify signature using ed25519
-    // In production, use solana-sdk to verify properly
-    // For now, we'll do basic validation
-    if signature_bytes.len() != 64 {
-        return Err(AppError::Auth("Invalid signature length".to_string()));
-    }
+    // Verify signature using Solana SDK
+    use solana_sdk::{
+        pubkey::Pubkey,
+        signature::Signature,
+    };
 
-    // TODO: Implement proper Ed25519 signature verification using solana-sdk
-    // let pubkey = Pubkey::from_str(&req.wallet_address)?;
-    // let signature = Signature::new(&signature_bytes);
-    // if !signature.verify(&pubkey.to_bytes(), req.message.as_bytes()) {
-    //     return Err(AppError::Unauthorized("Invalid signature".to_string()));
-    // }
+    let pubkey = req.wallet_address
+        .parse::<Pubkey>()
+        .map_err(|_| AppError::Auth("Invalid wallet address format".to_string()))?;
+
+    // Create signature from bytes
+    let signature = Signature::try_from(signature_bytes.as_slice())
+        .map_err(|_| AppError::Auth("Invalid signature format".to_string()))?;
+
+    // Verify signature
+    if !signature.verify(pubkey.as_ref(), req.message.as_bytes()) {
+        return Err(AppError::Auth("Invalid signature verification".to_string()));
+    }
 
     // Check if wallet is in admin_wallets table
     let role = check_wallet_role(&state.db, &req.wallet_address).await?;
@@ -92,7 +97,7 @@ pub async fn wallet_auth(
 async fn check_wallet_role(db: &SqlitePool, wallet_address: &str) -> Result<String, AppError> {
     // Check admin_wallets table
     let result = sqlx::query_scalar::<_, String>(
-        "SELECT role FROM admin_wallets WHERE wallet_address = ? AND is_active = 1",
+        "SELECT role FROM admin_wallets WHERE wallet_address = ?",
     )
     .bind(wallet_address)
     .fetch_optional(db)
@@ -101,9 +106,9 @@ async fn check_wallet_role(db: &SqlitePool, wallet_address: &str) -> Result<Stri
     match result {
         Some(role) => Ok(role),
         None => {
-            // Check if wallet is in watched_wallets (readonly access)
+            // Check if wallet is in wallets table (readonly access for tracked wallets)
             let in_roster = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM watched_wallets WHERE address = ?",
+                "SELECT COUNT(*) FROM wallets WHERE address = ?",
             )
             .bind(wallet_address)
             .fetch_one(db)

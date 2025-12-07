@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
-use crate::db::{self, DbPool, PositionDetail, TradeDetail, WalletDetail};
-use crate::error::{AppError, AppResult};
+use crate::db::{self, ConfigAuditItem, DeadLetterItem, DbPool, PositionDetail, TradeDetail, WalletDetail};
+use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 
@@ -32,6 +32,10 @@ pub struct ApiState {
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
     pub notifier: Arc<CompositeNotifier>,
+    /// Engine handle for accessing executor state
+    pub engine: Option<Arc<crate::engine::EngineHandle>>,
+    /// Metrics state for updating Prometheus metrics
+    pub metrics: Arc<crate::metrics::MetricsState>,
 }
 
 // =============================================================================
@@ -222,13 +226,17 @@ pub async fn update_wallet(
         // Get WQS score from existing wallet or default to 0
         let wqs_score = existing.as_ref().and_then(|w| w.wqs_score).unwrap_or(0.0);
 
-        state
-            .notifier
-            .notify(NotificationEvent::WalletPromoted {
-                address: address.clone(),
-                wqs_score,
-            })
-            .await;
+        // Check notification rules before sending
+        let config = state.config.read().await;
+        if config.notifications.rules.wallet_promoted {
+            state
+                .notifier
+                .notify(NotificationEvent::WalletPromoted {
+                    address: address.clone(),
+                    wqs_score,
+                })
+                .await;
+        }
     }
 
     // Fetch updated wallet
@@ -288,6 +296,7 @@ pub struct RpcStatus {
 pub struct UpdateConfigRequest {
     pub circuit_breakers: Option<UpdateCircuitBreakerConfig>,
     pub strategy_allocation: Option<UpdateStrategyAllocation>,
+    pub notification_rules: Option<UpdateNotificationRulesConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,6 +311,17 @@ pub struct UpdateCircuitBreakerConfig {
 pub struct UpdateStrategyAllocation {
     pub shield_percent: Option<u32>,
     pub spear_percent: Option<u32>,
+}
+
+/// Notification rules update configuration
+#[derive(Debug, Deserialize)]
+pub struct UpdateNotificationRulesConfig {
+    pub circuit_breaker_triggered: Option<bool>,
+    pub wallet_drained: Option<bool>,
+    pub position_exited: Option<bool>,
+    pub wallet_promoted: Option<bool>,
+    pub daily_summary: Option<bool>,
+    pub rpc_fallback: Option<bool>,
 }
 
 /// Get current configuration
@@ -332,8 +352,26 @@ pub async fn get_config(
         },
         rpc_status: RpcStatus {
             primary: "helius".to_string(),
-            active: "helius".to_string(), // TODO: Get from executor state
-            fallback_triggered: false,     // TODO: Get from executor state
+            active: {
+                // Try to get actual RPC mode from executor if available
+                if let Some(ref engine) = state.engine {
+                    use crate::engine::executor::RpcMode;
+                    match engine.rpc_mode() {
+                        RpcMode::Jito => "helius".to_string(),
+                        RpcMode::Standard => "quicknode".to_string(),
+                    }
+                } else {
+                    state.config.read().await.rpc.primary_url.clone()
+                }
+            },
+            fallback_triggered: {
+                // Check if executor is in fallback mode
+                if let Some(ref engine) = state.engine {
+                    engine.is_in_fallback()
+                } else {
+                    false
+                }
+            },
         },
     }))
 }
@@ -494,6 +532,9 @@ pub struct TradesQuery {
     pub limit: Option<i64>,
     /// Offset for pagination
     pub offset: Option<i64>,
+    /// Export format: csv, json, pdf
+    #[serde(default)]
+    pub format: Option<String>,
 }
 
 /// Response for trades list
@@ -544,9 +585,9 @@ pub async fn list_trades(
     }))
 }
 
-/// Export trades as CSV
+/// Export trades in various formats (CSV, JSON, PDF)
 ///
-/// GET /api/v1/trades/export
+/// GET /api/v1/trades/export?format=csv|json|pdf
 /// Requires: readonly+ role
 pub async fn export_trades(
     State(state): State<Arc<ApiState>>,
@@ -564,26 +605,372 @@ pub async fn export_trades(
     )
     .await?;
 
-    let csv_content = db::trades_to_csv(&trades);
+    let format = params.format.as_deref().unwrap_or("csv").to_lowercase();
+    let date_from = params.from.as_deref().unwrap_or("all");
+    let date_to = params.to.as_deref().unwrap_or("now");
 
-    let filename = format!(
-        "chimera_trades_{}_{}.csv",
-        params.from.as_deref().unwrap_or("all"),
-        params.to.as_deref().unwrap_or("now")
-    );
+    match format.as_str() {
+        "pdf" => {
+            let pdf_content = db::trades_to_pdf(&trades)?;
+            let filename = format!("chimera_trades_{}_{}.pdf", date_from, date_to);
+            
+            Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/pdf"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        &format!("attachment; filename=\"{}\"", filename),
+                    ),
+                ],
+                pdf_content,
+            )
+                .into_response())
+        }
+        "json" => {
+            let json_content = serde_json::to_string(&trades).map_err(|e| {
+                AppError::Internal(format!("Failed to serialize trades to JSON: {}", e))
+            })?;
+            let filename = format!("chimera_trades_{}_{}.json", date_from, date_to);
+            
+            Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "application/json"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        &format!("attachment; filename=\"{}\"", filename),
+                    ),
+                ],
+                json_content,
+            )
+                .into_response())
+        }
+        _ => {
+            // Default to CSV
+            let csv_content = db::trades_to_csv(&trades);
+            let filename = format!("chimera_trades_{}_{}.csv", date_from, date_to);
 
-    Ok((
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/csv"),
-            (
-                header::CONTENT_DISPOSITION,
-                &format!("attachment; filename=\"{}\"", filename),
-            ),
-        ],
-        csv_content,
+            Ok((
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/csv"),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        &format!("attachment; filename=\"{}\"", filename),
+                    ),
+                ],
+                csv_content,
+            )
+                .into_response())
+        }
+    }
+}
+
+// =============================================================================
+// PERFORMANCE METRICS API
+// =============================================================================
+
+/// Performance metrics response
+#[derive(Debug, Serialize)]
+pub struct PerformanceMetricsResponse {
+    pub pnl_24h: f64,
+    pub pnl_7d: f64,
+    pub pnl_30d: f64,
+    pub pnl_24h_change_percent: Option<f64>,
+    pub pnl_7d_change_percent: Option<f64>,
+    pub pnl_30d_change_percent: Option<f64>,
+}
+
+/// Strategy performance response
+#[derive(Debug, Serialize)]
+pub struct StrategyPerformanceResponse {
+    pub strategy: String,
+    pub win_rate: f64,
+    pub avg_return: f64,
+    pub trade_count: u32,
+    pub total_pnl: f64,
+}
+
+/// Get performance metrics (24H, 7D, 30D PnL)
+///
+/// GET /api/v1/metrics/performance
+/// Requires: readonly+ role
+pub async fn get_performance_metrics(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<PerformanceMetricsResponse>, AppError> {
+    let pnl_24h = db::get_pnl_24h(&state.db).await?;
+    let pnl_7d = db::get_pnl_7d(&state.db).await?;
+    let pnl_30d = db::get_pnl_30d(&state.db).await?;
+
+    // Calculate change percentages (simplified - in production, compare to previous period)
+    // For now, we'll return None for change percentages
+    Ok(Json(PerformanceMetricsResponse {
+        pnl_24h,
+        pnl_7d,
+        pnl_30d,
+        pnl_24h_change_percent: None,
+        pnl_7d_change_percent: None,
+        pnl_30d_change_percent: None,
+    }))
+}
+
+/// Get strategy performance breakdown
+///
+/// GET /api/v1/metrics/strategy/:strategy
+/// Requires: readonly+ role
+pub async fn get_strategy_performance(
+    State(state): State<Arc<ApiState>>,
+    Path(strategy): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<StrategyPerformanceResponse>, AppError> {
+    // Get days parameter (default to 30)
+    let days = params
+        .get("days")
+        .and_then(|d| d.parse::<i64>().ok())
+        .unwrap_or(30);
+
+    let (win_rate, avg_return, trade_count) =
+        db::get_strategy_performance(&state.db, &strategy, days).await?;
+
+    // Calculate total PnL for the period
+    // We need to query the actual trades to get total PnL (not just average)
+    let from_date = chrono::Utc::now() - chrono::Duration::days(days);
+    let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    
+    let trades = db::get_trades(
+        &state.db,
+        Some(&from_date_str),
+        None,
+        Some("CLOSED"),
+        Some(&strategy),
+        None,
+        None,
     )
-        .into_response())
+    .await?;
+    
+    let total_pnl = trades
+        .iter()
+        .filter_map(|t| t.pnl_usd)
+        .sum::<f64>();
+
+    Ok(Json(StrategyPerformanceResponse {
+        strategy: strategy.clone(),
+        win_rate,
+        avg_return,
+        trade_count,
+        total_pnl,
+    }))
+}
+
+// =============================================================================
+// INCIDENTS API
+// =============================================================================
+
+/// Query parameters for dead letter queue
+#[derive(Debug, Deserialize)]
+pub struct DeadLetterQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response for dead letter queue
+#[derive(Debug, Serialize)]
+pub struct DeadLetterResponse {
+    pub items: Vec<DeadLetterItem>,
+    pub total: i64,
+}
+
+/// List dead letter queue items
+///
+/// GET /api/v1/incidents/dead-letter
+/// Requires: readonly+ role
+pub async fn list_dead_letter_queue(
+    State(state): State<Arc<ApiState>>,
+    Query(params): Query<DeadLetterQuery>,
+) -> Result<Json<DeadLetterResponse>, AppError> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
+    let items = db::get_dead_letter_queue(&state.db, Some(limit), Some(offset)).await?;
+    let total = db::count_dead_letter_queue(&state.db).await?;
+
+    Ok(Json(DeadLetterResponse { items, total }))
+}
+
+/// Query parameters for config audit
+#[derive(Debug, Deserialize)]
+pub struct ConfigAuditQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+/// Response for config audit
+#[derive(Debug, Serialize)]
+pub struct ConfigAuditResponse {
+    pub items: Vec<ConfigAuditItem>,
+    pub total: i64,
+}
+
+/// List config audit log entries
+///
+/// GET /api/v1/incidents/config-audit
+/// Requires: readonly+ role
+pub async fn list_config_audit(
+    State(state): State<Arc<ApiState>>,
+    Query(params): Query<ConfigAuditQuery>,
+) -> Result<Json<ConfigAuditResponse>, AppError> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
+    let items = db::get_config_audit(&state.db, Some(limit), Some(offset)).await?;
+    let total = db::count_config_audit(&state.db).await?;
+
+    Ok(Json(ConfigAuditResponse { items, total }))
+}
+
+// =============================================================================
+// METRICS UPDATE API
+// =============================================================================
+
+/// Request body for reconciliation metrics update
+#[derive(Debug, Deserialize)]
+pub struct ReconciliationMetricsUpdate {
+    pub checked: Option<i64>,
+    pub discrepancies: Option<i64>,
+    pub unresolved: Option<i64>,
+}
+
+/// Request body for secret rotation metrics update
+#[derive(Debug, Deserialize)]
+pub struct SecretRotationMetricsUpdate {
+    pub last_success_timestamp: Option<i64>,
+    pub days_until_due: Option<i64>,
+}
+
+/// Update reconciliation metrics
+///
+/// POST /api/v1/metrics/reconciliation
+/// Requires: operator+ role
+pub async fn update_reconciliation_metrics(
+    State(state): State<Arc<ApiState>>,
+    Json(payload): Json<ReconciliationMetricsUpdate>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Log the update request
+    tracing::info!(
+        checked = payload.checked,
+        discrepancies = payload.discrepancies,
+        unresolved = payload.unresolved,
+        "Reconciliation metrics update requested"
+    );
+    
+    // Update Prometheus metrics
+    // Note: Scripts should send absolute values for counters (they will be incremented by delta)
+    // For gauges (unresolved), scripts send the current value
+    if let Some(checked) = payload.checked {
+        // For counters, scripts typically send the total checked in this run
+        // We increment by that amount (assuming it's a delta from last update)
+        if checked > 0 {
+            state.metrics.reconciliation_checked.inc_by(checked as u64);
+        }
+        
+        db::log_config_change(
+            &state.db,
+            "metrics.reconciliation.checked",
+            None,
+            &checked.to_string(),
+            "SYSTEM_METRICS",
+            Some("Metrics update from reconciliation script"),
+        )
+        .await?;
+    }
+    
+    if let Some(discrepancies) = payload.discrepancies {
+        // Increment discrepancy counter
+        if discrepancies > 0 {
+            state.metrics.reconciliation_discrepancies.inc_by(discrepancies as u64);
+        }
+        
+        db::log_config_change(
+            &state.db,
+            "metrics.reconciliation.discrepancies",
+            None,
+            &discrepancies.to_string(),
+            "SYSTEM_METRICS",
+            Some("Metrics update from reconciliation script"),
+        )
+        .await?;
+    }
+    
+    if let Some(unresolved) = payload.unresolved {
+        // Set gauge to current unresolved count
+        state.metrics.reconciliation_unresolved.set(unresolved);
+        
+        db::log_config_change(
+            &state.db,
+            "metrics.reconciliation.unresolved",
+            None,
+            &unresolved.to_string(),
+            "SYSTEM_METRICS",
+            Some("Metrics update from reconciliation script"),
+        )
+        .await?;
+    }
+    
+    Ok(Json(serde_json::json!({
+        "status": "updated",
+        "message": "Reconciliation metrics updated"
+    })))
+}
+
+/// Update secret rotation metrics
+///
+/// POST /api/v1/metrics/secret-rotation
+/// Requires: operator+ role
+pub async fn update_secret_rotation_metrics(
+    State(state): State<Arc<ApiState>>,
+    Json(payload): Json<SecretRotationMetricsUpdate>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Log the update request
+    tracing::info!(
+        last_success_timestamp = payload.last_success_timestamp,
+        days_until_due = payload.days_until_due,
+        "Secret rotation metrics update requested"
+    );
+    
+    // Update Prometheus metrics
+    if let Some(timestamp) = payload.last_success_timestamp {
+        state.metrics.secret_rotation_last_success.set(timestamp);
+        
+        db::log_config_change(
+            &state.db,
+            "metrics.secret_rotation.last_success_timestamp",
+            None,
+            &timestamp.to_string(),
+            "SYSTEM_METRICS",
+            Some("Metrics update from secret rotation script"),
+        )
+        .await?;
+    }
+    
+    if let Some(days) = payload.days_until_due {
+        state.metrics.secret_rotation_days_until_due.set(days);
+        
+        db::log_config_change(
+            &state.db,
+            "metrics.secret_rotation.days_until_due",
+            None,
+            &days.to_string(),
+            "SYSTEM_METRICS",
+            Some("Metrics update from secret rotation script"),
+        )
+        .await?;
+    }
+    
+    Ok(Json(serde_json::json!({
+        "status": "updated",
+        "message": "Secret rotation metrics updated"
+    })))
 }
 
 /// Helper to check role in request extensions

@@ -101,6 +101,35 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     // Get last trade timestamp
     let last_trade_at = get_last_trade_time(&state.db).await;
 
+    // Get RPC health from executor
+    let rpc_health_result = state.engine.get_rpc_health().await;
+    let (rpc_health_status, rpc_latency_ms, rpc_message) = match rpc_health_result {
+        Some(health) => {
+            let status = if health.healthy {
+                HealthStatus::Healthy
+            } else {
+                HealthStatus::Unhealthy
+            };
+            let latency = health.latency_ms.unwrap_or(0);
+            let message = if health.healthy {
+                None
+            } else {
+                Some("RPC health check failed".to_string())
+            };
+            (status, latency, message)
+        }
+        None => {
+            // No cached health, perform a quick check (non-blocking if possible)
+            // For now, mark as degraded if no health info available
+            (HealthStatus::Degraded, 0, Some("RPC health not yet checked".to_string()))
+        }
+    };
+
+    let rpc_health = ComponentHealth {
+        status: rpc_health_status,
+        message: rpc_message,
+    };
+
     // Get circuit breaker status
     let cb_status = state.circuit_breaker.status();
     let circuit_breaker_health = CircuitBreakerHealth {
@@ -121,6 +150,7 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Js
     let overall_status = if matches!(db_health.status, HealthStatus::Unhealthy) {
         HealthStatus::Unhealthy
     } else if matches!(db_health.status, HealthStatus::Degraded)
+        || matches!(rpc_health.status, HealthStatus::Unhealthy)
         || queue_depth > 800
         || cb_status.state == CircuitBreakerState::Tripped
     {
@@ -139,13 +169,10 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Js
         status: overall_status,
         uptime_seconds: uptime,
         queue_depth,
-        rpc_latency_ms: 0, // TODO: Implement RPC latency tracking
+        rpc_latency_ms,
         last_trade_at,
         database: db_health,
-        rpc: ComponentHealth {
-            status: HealthStatus::Healthy, // TODO: Implement RPC health tracking
-            message: None,
-        },
+        rpc: rpc_health,
         circuit_breaker: circuit_breaker_health,
         price_cache: price_cache_health,
     };
