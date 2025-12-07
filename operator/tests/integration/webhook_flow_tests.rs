@@ -255,6 +255,51 @@ async fn test_unique_uuid_for_different_inputs() {
     assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
 }
 
+/// Test duplicate trade_uuid rejection
+#[tokio::test]
+async fn test_duplicate_trade_uuid_rejection() {
+    use crate::db;
+    use crate::models::SignalPayload;
+    use crate::models::Strategy;
+    
+    // This test verifies that the idempotency check works
+    // by checking if trade_uuid_exists correctly identifies duplicates
+    
+    // Create a test database
+    let db = db::create_test_pool().await;
+    
+    // Insert a trade with a specific UUID
+    let test_uuid = "test-duplicate-uuid-12345";
+    db::insert_trade(
+        &db,
+        test_uuid,
+        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+        Some("USDC"),
+        "SHIELD",
+        "BUY",
+        0.5,
+        "ACTIVE",
+    )
+    .await
+    .expect("Failed to insert test trade");
+    
+    // Check that the UUID exists
+    let exists = db::trade_uuid_exists(&db, test_uuid)
+        .await
+        .expect("Failed to check trade UUID");
+    
+    assert!(exists, "Trade UUID should exist after insertion");
+    
+    // Check that a different UUID doesn't exist
+    let different_uuid = "different-uuid-67890";
+    let not_exists = db::trade_uuid_exists(&db, different_uuid)
+        .await
+        .expect("Failed to check different trade UUID");
+    
+    assert!(!not_exists, "Different trade UUID should not exist");
+}
+
 // =============================================================================
 // WEBHOOK RESPONSE TESTS
 // =============================================================================
