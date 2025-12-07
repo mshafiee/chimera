@@ -245,6 +245,12 @@ pub struct JitoConfig {
     /// Enabled flag
     #[serde(default = "default_jito_enabled")]
     pub enabled: bool,
+    /// Jito Searcher endpoint URL (for direct integration)
+    #[serde(default = "default_jito_searcher_endpoint")]
+    pub searcher_endpoint: Option<String>,
+    /// Use Helius Sender API as fallback if direct Jito fails
+    #[serde(default = "default_helius_fallback")]
+    pub helius_fallback: bool,
     /// Minimum tip in SOL
     #[serde(default = "default_tip_floor")]
     pub tip_floor_sol: f64,
@@ -260,6 +266,14 @@ pub struct JitoConfig {
 }
 
 fn default_jito_enabled() -> bool {
+    true
+}
+
+fn default_jito_searcher_endpoint() -> Option<String> {
+    Some("https://mainnet.block-engine.jito.wtf".to_string())
+}
+
+fn default_helius_fallback() -> bool {
     true
 }
 
@@ -370,7 +384,7 @@ impl Default for TokenSafetyConfig {
 }
 
 /// Notification configuration
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct NotificationsConfig {
     /// Telegram notification settings
     #[serde(default)]
@@ -479,16 +493,6 @@ impl Default for DailySummaryConfig {
             enabled: true,
             hour_utc: default_summary_hour(),
             minute: 0,
-        }
-    }
-}
-
-impl Default for NotificationsConfig {
-    fn default() -> Self {
-        Self {
-            telegram: TelegramNotificationConfig::default(),
-            rules: NotificationRulesConfig::default(),
-            daily_summary: DailySummaryConfig::default(),
         }
     }
 }

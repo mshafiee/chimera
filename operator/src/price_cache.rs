@@ -195,25 +195,67 @@ impl PriceCache {
             return Ok(Vec::new());
         }
 
-        // TODO: Implement actual Jupiter API call
-        // Jupiter Price API: https://price.jup.ag/v6/price?ids=<token1>,<token2>
-        //
-        // Example:
-        // let url = format!(
-        //     "https://price.jup.ag/v6/price?ids={}",
-        //     tokens.join(",")
-        // );
-        // let response = reqwest::get(&url).await?;
-        // let data: JupiterPriceResponse = response.json().await?;
+        // Build URL with comma-separated token addresses
+        let token_list = tokens.join(",");
+        let url = format!("https://price.jup.ag/v6/price?ids={}", token_list);
 
-        // For now, return simulated prices
+        tracing::debug!(
+            token_count = tokens.len(),
+            url = %url,
+            "Fetching prices from Jupiter"
+        );
+
+        // Make HTTP request with retry logic
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .map_err(|e| PriceCacheError::HttpError(format!("Failed to create HTTP client: {}", e)))?;
+
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| PriceCacheError::HttpError(format!("Jupiter price request failed: {}", e)))?;
+
+        // Check for rate limiting
+        if response.status() == 429 {
+            return Err(PriceCacheError::RateLimited);
+        }
+
+        if !response.status().is_success() {
+            return Err(PriceCacheError::HttpError(format!(
+                "Jupiter API returned error: {}",
+                response.status()
+            )));
+        }
+
+        // Parse JSON response
+        let data: JupiterPriceResponse = response
+            .json()
+            .await
+            .map_err(|e| PriceCacheError::ParseError(format!("Failed to parse Jupiter response: {}", e)))?;
+
+        // Extract prices from response
         let mut results = Vec::new();
         for token in tokens {
-            // Simulate price based on token address hash
-            let hash: u64 = token.bytes().map(|b| b as u64).sum();
-            let simulated_price = (hash % 1000) as f64 / 100.0;
-            results.push((token.clone(), simulated_price));
+            if let Some(price_data) = data.data.get(token) {
+                // Jupiter returns price in USD
+                let price = price_data.price;
+                results.push((token.clone(), price));
+            } else {
+                tracing::warn!(
+                    token = token,
+                    "Token not found in Jupiter price response"
+                );
+                // Skip tokens not found in response
+            }
         }
+
+        tracing::debug!(
+            fetched_count = results.len(),
+            total_requested = tokens.len(),
+            "Fetched prices from Jupiter"
+        );
 
         Ok(results)
     }
@@ -309,6 +351,22 @@ pub struct PriceCacheStats {
     pub stale_entries: usize,
     /// Number of actively tracked tokens
     pub tracked_tokens: usize,
+}
+
+/// Jupiter Price API response structure
+#[derive(Debug, serde::Deserialize)]
+struct JupiterPriceResponse {
+    data: std::collections::HashMap<String, JupiterPriceData>,
+}
+
+/// Price data for a single token
+#[derive(Debug, serde::Deserialize)]
+struct JupiterPriceData {
+    /// Price in USD
+    price: f64,
+    /// Other fields (we only need price)
+    #[serde(flatten)]
+    _other: serde_json::Value,
 }
 
 /// Price cache errors

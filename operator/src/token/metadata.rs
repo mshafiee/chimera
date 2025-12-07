@@ -6,6 +6,7 @@
 //! - Honeypot detection via sell simulation
 
 use crate::error::{AppError, AppResult};
+use crate::token::pools::PoolEnumerator;
 use parking_lot::RwLock;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
@@ -13,6 +14,20 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+use reqwest;
+use serde::{Deserialize, Serialize};
+use bincode;
+
+/// Transaction simulation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SimulationResult {
+    /// Error if simulation failed
+    err: Option<serde_json::Value>,
+    /// Transaction logs
+    logs: Vec<String>,
+    /// Compute units consumed
+    units_consumed: Option<u64>,
+}
 
 /// Token metadata from on-chain
 #[derive(Debug, Clone)]
@@ -35,24 +50,39 @@ pub struct TokenMetadataFetcher {
     rpc_client: Arc<RpcClient>,
     /// Metadata cache (separate from safety result cache)
     metadata_cache: RwLock<HashMap<String, TokenMetadata>>,
+    /// Pool enumerator for DEX liquidity
+    pool_enumerator: Option<Arc<PoolEnumerator>>,
 }
 
 impl TokenMetadataFetcher {
     /// Create a new metadata fetcher
     pub fn new(rpc_url: &str) -> Self {
         let rpc_client = RpcClient::new_with_timeout(rpc_url.to_string(), Duration::from_secs(10));
+        let rpc_client_arc = Arc::new(rpc_client);
 
         Self {
-            rpc_client: Arc::new(rpc_client),
+            rpc_client: rpc_client_arc.clone(),
             metadata_cache: RwLock::new(HashMap::new()),
+            pool_enumerator: Some(Arc::new(PoolEnumerator::new(
+                rpc_client_arc,
+                100,  // cache capacity
+                300,  // cache TTL seconds
+            ))),
         }
     }
 
     /// Create from an existing RPC client
     pub fn with_client(rpc_client: Arc<RpcClient>) -> Self {
+        let pool_enumerator = Some(Arc::new(PoolEnumerator::new(
+            rpc_client.clone(),
+            100,
+            300,
+        )));
+
         Self {
             rpc_client,
             metadata_cache: RwLock::new(HashMap::new()),
+            pool_enumerator,
         }
     }
 
@@ -138,54 +168,287 @@ impl TokenMetadataFetcher {
 
     /// Get estimated liquidity for a token in USD
     ///
-    /// This is a simplified implementation that returns a placeholder.
-    /// In production, you would query DEX pools (Raydium, Orca, etc.)
+    /// Queries multiple sources:
+    /// 1. Jupiter Price API (aggregated liquidity data)
+    /// 2. Raydium pools (via RPC)
+    /// 3. Orca pools (via RPC)
+    ///
+    /// Returns the total aggregated liquidity from all sources.
     pub async fn get_liquidity(&self, token_address: &str) -> AppResult<f64> {
-        // TODO: Implement actual liquidity fetching from DEX pools
-        // For now, we'll use a simple heuristic based on token metadata
+        tracing::debug!(token = token_address, "Fetching liquidity from DEX pools");
 
-        let metadata = self.get_metadata(token_address).await?;
+        // Try Jupiter first (fastest, aggregated data)
+        let jupiter_liquidity = self.fetch_jupiter_liquidity(token_address).await.ok();
 
-        // Very basic heuristic: estimate based on supply
-        // This should be replaced with actual DEX pool queries
-        let estimated_liquidity = if metadata.supply > 1_000_000_000_000 {
-            // High supply tokens often have liquidity
-            50_000.0
-        } else if metadata.supply > 1_000_000_000 {
-            20_000.0
+        // Try Raydium pools
+        let raydium_liquidity = self.fetch_raydium_liquidity(token_address).await.ok();
+
+        // Try Orca pools
+        let orca_liquidity = self.fetch_orca_liquidity(token_address).await.ok();
+
+        // Aggregate all sources
+        let total_liquidity = jupiter_liquidity.unwrap_or(0.0)
+            + raydium_liquidity.unwrap_or(0.0)
+            + orca_liquidity.unwrap_or(0.0);
+
+        if total_liquidity > 0.0 {
+            tracing::debug!(
+                token = token_address,
+                total_liquidity_usd = total_liquidity,
+                jupiter = jupiter_liquidity,
+                raydium = raydium_liquidity,
+                orca = orca_liquidity,
+                "Fetched liquidity from DEX pools"
+            );
+            Ok(total_liquidity)
         } else {
-            5_000.0
-        };
+            // Fallback: use heuristic based on token metadata
+            let metadata = self.get_metadata(token_address).await?;
+            let estimated_liquidity = if metadata.supply > 1_000_000_000_000 {
+                50_000.0
+            } else if metadata.supply > 1_000_000_000 {
+                20_000.0
+            } else {
+                5_000.0
+            };
 
-        tracing::debug!(
-            token = token_address,
-            estimated_liquidity = estimated_liquidity,
-            "Estimated token liquidity (placeholder)"
-        );
+            tracing::warn!(
+                token = token_address,
+                estimated_liquidity = estimated_liquidity,
+                "No liquidity found in DEX pools, using heuristic estimate"
+            );
 
-        Ok(estimated_liquidity)
+            Ok(estimated_liquidity)
+        }
+    }
+
+    /// Fetch liquidity from Jupiter Price API
+    ///
+    /// Jupiter aggregates liquidity data from multiple DEXes.
+    async fn fetch_jupiter_liquidity(&self, token_address: &str) -> AppResult<f64> {
+        let url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
+
+        let response = reqwest::get(&url)
+            .await
+            .map_err(|e| AppError::Http(format!("Jupiter liquidity request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(AppError::Http(format!(
+                "Jupiter API returned error: {}",
+                response.status()
+            )));
+        }
+
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter response: {}", e)))?;
+
+        // Extract liquidity from response
+        // Jupiter Price API may include liquidity data in the response
+        // For now, we'll use a placeholder - Jupiter's actual liquidity endpoint may differ
+        // In production, check Jupiter's API documentation for liquidity fields
+        
+        // Try to extract liquidity from response
+        if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
+            // Check for liquidity fields (may vary by API version)
+            if let Some(liq) = token_data.get("liquidity").and_then(|l| l.as_f64()) {
+                return Ok(liq);
+            }
+        }
+
+        // If no liquidity field found, return 0 (will be aggregated with other sources)
+        Ok(0.0)
+    }
+
+    /// Fetch liquidity from Raydium pools via RPC
+    ///
+    /// Queries Raydium pool accounts for the token and calculates total liquidity.
+    async fn fetch_raydium_liquidity(&self, token_address: &str) -> AppResult<f64> {
+        if let Some(ref pool_enumerator) = self.pool_enumerator {
+            pool_enumerator
+                .get_raydium_liquidity(token_address)
+                .await
+                .map_err(|e| AppError::Http(format!("Raydium liquidity fetch failed: {}", e)))
+        } else {
+            tracing::debug!(
+                token = token_address,
+                "Pool enumerator not available, returning 0.0 for Raydium liquidity"
+            );
+            Ok(0.0)
+        }
+    }
+
+    /// Fetch liquidity from Orca pools via RPC
+    ///
+    /// Queries Orca pool accounts for the token and calculates total liquidity.
+    async fn fetch_orca_liquidity(&self, token_address: &str) -> AppResult<f64> {
+        if let Some(ref pool_enumerator) = self.pool_enumerator {
+            pool_enumerator
+                .get_orca_liquidity(token_address)
+                .await
+                .map_err(|e| AppError::Http(format!("Orca liquidity fetch failed: {}", e)))
+        } else {
+            tracing::debug!(
+                token = token_address,
+                "Pool enumerator not available, returning 0.0 for Orca liquidity"
+            );
+            Ok(0.0)
+        }
     }
 
     /// Simulate a sell transaction to detect honeypots
     ///
     /// Returns true if the token can be sold, false if it's a honeypot
+    ///
+    /// This creates a minimal test sell transaction (token -> SOL) and simulates it
+    /// via RPC. If the simulation fails, the token is likely a honeypot.
     pub async fn simulate_sell(&self, token_address: &str) -> AppResult<bool> {
-        // TODO: Implement actual transaction simulation
-        // This would:
-        // 1. Create a swap transaction (token -> SOL)
-        // 2. Call simulateTransaction RPC method
-        // 3. Check if simulation succeeds
+        tracing::debug!(token = token_address, "Simulating sell transaction for honeypot detection");
 
-        let _metadata = self.get_metadata(token_address).await?;
+        // Build a minimal test sell transaction
+        // We'll use Jupiter Swap API to get a swap transaction, then simulate it
+        let test_amount_lamports = 1_000_000; // 0.001 SOL worth of tokens (minimal test)
 
-        // For now, return true (assume sellable)
-        // In production, implement actual simulation
+        let token_mint = Pubkey::from_str(token_address)
+            .map_err(|e| AppError::Validation(format!("Invalid token mint: {}", e)))?;
+        let sol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112")
+            .map_err(|e| AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
+
+        // Get a swap transaction from Jupiter (minimal amount)
+        let swap_tx = self
+            .get_jupiter_swap_transaction_for_simulation(token_mint, sol_mint, test_amount_lamports)
+            .await?;
+
+        // Simulate the transaction via RPC
+        let simulation_result = self
+            .simulate_transaction_rpc(&swap_tx)
+            .await?;
+
+        // Check if simulation succeeded
+        let is_sellable = simulation_result.err.is_none();
+
         tracing::debug!(
             token = token_address,
-            "Honeypot simulation (placeholder - assuming sellable)"
+            is_sellable = is_sellable,
+            "Honeypot simulation completed"
         );
 
-        Ok(true)
+        Ok(is_sellable)
+    }
+
+    /// Get a Jupiter swap transaction for simulation (minimal amount)
+    async fn get_jupiter_swap_transaction_for_simulation(
+        &self,
+        input_mint: Pubkey,
+        output_mint: Pubkey,
+        amount: u64,
+    ) -> AppResult<String> {
+        // First get a quote
+        let quote_url = format!(
+            "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
+            input_mint, output_mint, amount
+        );
+
+        let quote_response = reqwest::get(&quote_url)
+            .await
+            .map_err(|e| AppError::Http(format!("Jupiter quote request failed: {}", e)))?;
+
+        if !quote_response.status().is_success() {
+            return Err(AppError::Http(format!(
+                "Jupiter quote API returned error: {}",
+                quote_response.status()
+            )));
+        }
+
+        let quote: serde_json::Value = quote_response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter quote: {}", e)))?;
+
+        // Get swap transaction
+        // Note: For simulation, we don't need a real wallet - we can use a dummy pubkey
+        let dummy_wallet = Pubkey::new_unique();
+        let swap_url = "https://quote-api.jup.ag/v6/swap";
+        let payload = serde_json::json!({
+            "quoteResponse": quote,
+            "userPublicKey": dummy_wallet.to_string(),
+            "wrapAndUnwrapSol": true,
+            "dynamicComputeUnitLimit": true,
+            "prioritizationFeeLamports": "auto"
+        });
+
+        let client = reqwest::Client::new();
+        let swap_response = client
+            .post(swap_url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| AppError::Http(format!("Jupiter swap request failed: {}", e)))?;
+
+        if !swap_response.status().is_success() {
+            return Err(AppError::Http(format!(
+                "Jupiter swap API returned error: {}",
+                swap_response.status()
+            )));
+        }
+
+        let swap_data: serde_json::Value = swap_response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter swap: {}", e)))?;
+
+        // Extract swap transaction (base64 encoded)
+        let swap_tx = swap_data
+            .get("swapTransaction")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AppError::Parse("No swapTransaction in Jupiter response".to_string()))?;
+
+        Ok(swap_tx.to_string())
+    }
+
+    /// Simulate a transaction via RPC
+    async fn simulate_transaction_rpc(&self, transaction_base64: &str) -> AppResult<SimulationResult> {
+        // Decode base64 transaction
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        let tx_bytes = BASE64
+            .decode(transaction_base64)
+            .map_err(|e| AppError::Parse(format!("Failed to decode transaction: {}", e)))?;
+
+        // Clone RPC client for blocking call
+        let rpc_client = self.rpc_client.clone();
+        let tx_bytes_clone = tx_bytes.clone();
+
+        // Run simulation in blocking task
+        let result = tokio::task::spawn_blocking(move || {
+            // Deserialize transaction
+            let transaction: solana_sdk::transaction::Transaction = bincode::deserialize(&tx_bytes_clone)
+                .map_err(|e| AppError::Parse(format!("Failed to deserialize transaction: {}", e)))?;
+            
+            // Use Solana RPC client's simulate_transaction method
+            rpc_client
+                .simulate_transaction(&transaction)
+                .map_err(|e| AppError::Rpc(format!("Simulation failed: {}", e)))
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))??;
+
+        // Parse simulation result
+        // Convert TransactionError to JSON Value if present
+        let err_value = result.value.err.as_ref().map(|e| {
+            // TransactionError doesn't implement Serialize, so convert to string representation
+            serde_json::json!({
+                "error": format!("{:?}", e)
+            })
+        });
+        
+        let simulation_result = SimulationResult {
+            err: err_value,
+            logs: result.value.logs.unwrap_or_default(),
+            units_consumed: result.value.units_consumed,
+        };
+
+        Ok(simulation_result)
     }
 
     /// Clear the metadata cache

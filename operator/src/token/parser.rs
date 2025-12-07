@@ -6,8 +6,8 @@
 //! - Liquidity below threshold
 //! - Honeypot detection (sell simulation fails)
 
-use super::{TokenCache, TokenMetadata, TokenMetadataFetcher};
-use crate::error::{AppError, AppResult};
+use super::{TokenCache, TokenMetadataFetcher};
+use crate::error::AppResult;
 use crate::models::Strategy;
 use std::collections::HashSet;
 use std::sync::Arc;

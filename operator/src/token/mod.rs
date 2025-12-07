@@ -7,7 +7,9 @@
 mod cache;
 mod metadata;
 mod parser;
+mod pools;
 
 pub use cache::*;
 pub use metadata::*;
 pub use parser::*;
+pub use pools::*;
