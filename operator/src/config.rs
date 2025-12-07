@@ -26,6 +26,9 @@ pub struct AppConfig {
     pub jito: JitoConfig,
     /// Queue configuration
     pub queue: QueueConfig,
+    /// Token safety configuration
+    #[serde(default)]
+    pub token_safety: TokenSafetyConfig,
 }
 
 /// HTTP server configuration
@@ -116,6 +119,9 @@ pub struct SecurityConfig {
     /// HMAC secret for webhook verification (loaded from env)
     #[serde(default)]
     pub webhook_secret: String,
+    /// Previous HMAC secret (for rotation grace period)
+    #[serde(default)]
+    pub webhook_secret_previous: Option<String>,
     /// Maximum timestamp drift in seconds for replay protection
     #[serde(default = "default_max_timestamp_drift")]
     pub max_timestamp_drift_secs: i64,
@@ -125,6 +131,19 @@ pub struct SecurityConfig {
     /// Rate limit: burst size
     #[serde(default = "default_webhook_burst")]
     pub webhook_burst_size: u32,
+}
+
+impl SecurityConfig {
+    /// Get all valid secrets for HMAC verification (current + previous)
+    pub fn get_all_secrets(&self) -> Vec<String> {
+        let mut secrets = vec![self.webhook_secret.clone()];
+        if let Some(ref prev) = self.webhook_secret_previous {
+            if !prev.is_empty() {
+                secrets.push(prev.clone());
+            }
+        }
+        secrets
+    }
 }
 
 fn default_max_timestamp_drift() -> i64 {
@@ -262,6 +281,77 @@ fn default_queue_capacity() -> usize {
 
 fn default_load_shed_threshold() -> u32 {
     80
+}
+
+/// Token safety configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenSafetyConfig {
+    /// Token mints allowed to have freeze authority
+    #[serde(default = "default_authority_whitelist")]
+    pub freeze_authority_whitelist: Vec<String>,
+    /// Token mints allowed to have mint authority
+    #[serde(default = "default_authority_whitelist")]
+    pub mint_authority_whitelist: Vec<String>,
+    /// Minimum liquidity for Shield strategy (USD)
+    #[serde(default = "default_min_liquidity_shield")]
+    pub min_liquidity_shield_usd: f64,
+    /// Minimum liquidity for Spear strategy (USD)
+    #[serde(default = "default_min_liquidity_spear")]
+    pub min_liquidity_spear_usd: f64,
+    /// Enable honeypot detection
+    #[serde(default = "default_honeypot_detection")]
+    pub honeypot_detection_enabled: bool,
+    /// Token cache capacity
+    #[serde(default = "default_token_cache_capacity")]
+    pub cache_capacity: usize,
+    /// Token cache TTL in seconds
+    #[serde(default = "default_token_cache_ttl")]
+    pub cache_ttl_seconds: i64,
+}
+
+fn default_authority_whitelist() -> Vec<String> {
+    vec![
+        // USDC
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+        // USDT
+        "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB".to_string(),
+        // Wrapped SOL
+        "So11111111111111111111111111111111111111112".to_string(),
+    ]
+}
+
+fn default_min_liquidity_shield() -> f64 {
+    10_000.0
+}
+
+fn default_min_liquidity_spear() -> f64 {
+    5_000.0
+}
+
+fn default_honeypot_detection() -> bool {
+    true
+}
+
+fn default_token_cache_capacity() -> usize {
+    1000
+}
+
+fn default_token_cache_ttl() -> i64 {
+    3600 // 1 hour
+}
+
+impl Default for TokenSafetyConfig {
+    fn default() -> Self {
+        Self {
+            freeze_authority_whitelist: default_authority_whitelist(),
+            mint_authority_whitelist: default_authority_whitelist(),
+            min_liquidity_shield_usd: default_min_liquidity_shield(),
+            min_liquidity_spear_usd: default_min_liquidity_spear(),
+            honeypot_detection_enabled: default_honeypot_detection(),
+            cache_capacity: default_token_cache_capacity(),
+            cache_ttl_seconds: default_token_cache_ttl(),
+        }
+    }
 }
 
 impl AppConfig {

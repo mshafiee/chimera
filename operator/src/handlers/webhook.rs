@@ -6,14 +6,16 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 
+use crate::circuit_breaker::CircuitBreaker;
 use crate::db::{self, DbPool};
 use crate::engine::EngineHandle;
-use crate::error::{AppError, AppResult};
+use crate::error::AppError;
 use crate::middleware::TIMESTAMP_HEADER;
-use crate::models::{Signal, SignalPayload};
+use crate::models::{Signal, SignalPayload, Strategy};
+use crate::token::TokenParser;
 
 /// Webhook request - already validated by HMAC middleware
 /// Body is the SignalPayload
@@ -47,6 +49,10 @@ pub struct WebhookState {
     pub db: DbPool,
     /// Engine handle for queueing signals
     pub engine: EngineHandle,
+    /// Token parser for safety checks
+    pub token_parser: Arc<TokenParser>,
+    /// Circuit breaker
+    pub circuit_breaker: Arc<CircuitBreaker>,
 }
 
 /// Webhook handler
@@ -55,11 +61,37 @@ pub struct WebhookState {
 ///
 /// Receives trading signals, validates them, and queues for execution.
 /// HMAC signature verification is handled by middleware.
+///
+/// Security checks performed:
+/// 1. Circuit breaker check
+/// 2. Payload validation
+/// 3. Idempotency check (duplicate detection)
+/// 4. Token safety fast-path check (freeze/mint authority)
 pub async fn webhook_handler(
     State(state): State<Arc<WebhookState>>,
     headers: HeaderMap,
     Json(payload): Json<WebhookRequest>,
 ) -> Result<(StatusCode, Json<WebhookResponse>), AppError> {
+    // Check circuit breaker first
+    if !state.circuit_breaker.is_trading_allowed() {
+        let reason = state
+            .circuit_breaker
+            .trip_reason()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "Circuit breaker tripped".to_string());
+
+        tracing::warn!(reason = %reason, "Signal rejected by circuit breaker");
+
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(WebhookResponse {
+                status: WebhookStatus::Rejected,
+                trade_uuid: String::new(),
+                reason: Some(format!("circuit_breaker_triggered: {}", reason)),
+            }),
+        ));
+    }
+
     // Extract timestamp from header (already validated by middleware)
     let timestamp = headers
         .get(TIMESTAMP_HEADER)
@@ -87,6 +119,61 @@ pub async fn webhook_handler(
     if db::trade_uuid_exists(&state.db, &trade_uuid).await? {
         tracing::info!(trade_uuid = %trade_uuid, "Duplicate signal rejected");
         return Err(AppError::Duplicate(trade_uuid));
+    }
+
+    // Fast path token safety check (for BUY signals only)
+    // EXIT signals don't need token validation, SELL signals already own the token
+    if payload.strategy != Strategy::Exit {
+        if let Some(ref token_address) = payload.token_address {
+            match state
+                .token_parser
+                .fast_check(token_address, payload.strategy)
+                .await
+            {
+                Ok(result) => {
+                    if !result.safe {
+                        let reason = result
+                            .rejection_reason
+                            .unwrap_or_else(|| "Token failed safety check".to_string());
+
+                        tracing::warn!(
+                            trade_uuid = %trade_uuid,
+                            token = %token_address,
+                            reason = %reason,
+                            "Token rejected by fast-path safety check"
+                        );
+
+                        // Log to dead letter queue
+                        let _ = db::insert_dead_letter(
+                            &state.db,
+                            Some(&trade_uuid),
+                            &serde_json::to_string(&payload).unwrap_or_default(),
+                            "TOKEN_SAFETY_FAILED",
+                            Some(&reason),
+                            None,
+                        )
+                        .await;
+
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            Json(WebhookResponse {
+                                status: WebhookStatus::Rejected,
+                                trade_uuid,
+                                reason: Some(reason),
+                            }),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    // Log error but allow through - slow path will do full check
+                    tracing::warn!(
+                        token = %token_address,
+                        error = %e,
+                        "Fast-path token check failed, allowing to slow path"
+                    );
+                }
+            }
+        }
     }
 
     // Create signal

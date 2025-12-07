@@ -1,11 +1,15 @@
 //! HMAC verification middleware
 //!
 //! Verifies webhook signatures and prevents replay attacks.
-//! 
+//!
 //! Security checks:
-//! 1. HMAC-SHA256 signature verification
+//! 1. HMAC-SHA256 signature verification (supports multiple secrets for rotation)
 //! 2. Timestamp within acceptable drift window
 //! 3. Request body integrity
+//!
+//! Secret Rotation:
+//! - Supports both current and previous secret during grace period
+//! - Logs which secret was used for audit purposes
 
 use axum::{
     body::Body,
@@ -21,22 +25,48 @@ use serde_json::json;
 use sha2::Sha256;
 use std::sync::Arc;
 
-/// HMAC verification state
+/// HMAC verification state with support for secret rotation
 #[derive(Clone)]
 pub struct HmacState {
-    /// HMAC secret key
-    secret: Arc<Vec<u8>>,
+    /// List of valid HMAC secrets (current + previous during rotation)
+    secrets: Arc<Vec<Vec<u8>>>,
     /// Maximum timestamp drift in seconds
     max_drift_secs: i64,
 }
 
 impl HmacState {
-    /// Create a new HMAC state
+    /// Create a new HMAC state with a single secret
     pub fn new(secret: String, max_drift_secs: i64) -> Self {
         Self {
-            secret: Arc::new(secret.into_bytes()),
+            secrets: Arc::new(vec![secret.into_bytes()]),
             max_drift_secs,
         }
+    }
+
+    /// Create a new HMAC state with multiple secrets (for rotation grace period)
+    ///
+    /// The first secret is the current/primary secret.
+    /// Additional secrets are previous secrets that are still valid during rotation.
+    pub fn with_rotation(secrets: Vec<String>, max_drift_secs: i64) -> Self {
+        let secret_bytes: Vec<Vec<u8>> = secrets
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.into_bytes())
+            .collect();
+
+        if secret_bytes.is_empty() {
+            tracing::warn!("HmacState created with no valid secrets!");
+        }
+
+        Self {
+            secrets: Arc::new(secret_bytes),
+            max_drift_secs,
+        }
+    }
+
+    /// Check if rotation is active (multiple secrets configured)
+    pub fn is_rotation_active(&self) -> bool {
+        self.secrets.len() > 1
     }
 }
 
@@ -44,10 +74,21 @@ impl HmacState {
 pub const SIGNATURE_HEADER: &str = "X-Signature";
 pub const TIMESTAMP_HEADER: &str = "X-Timestamp";
 
+/// Result of signature verification
+#[derive(Debug)]
+enum VerificationResult {
+    /// Signature matched using secret at given index
+    Valid { secret_index: usize },
+    /// No secrets matched
+    Invalid,
+}
+
 /// HMAC verification middleware
 ///
 /// Extracts signature and timestamp from headers, verifies HMAC-SHA256,
 /// and checks timestamp is within acceptable drift window.
+///
+/// During secret rotation, tries all configured secrets and logs which one matched.
 pub async fn hmac_verify(
     State(state): State<HmacState>,
     headers: HeaderMap,
@@ -107,7 +148,10 @@ pub async fn hmac_verify(
         );
         return error_response(
             StatusCode::UNAUTHORIZED,
-            &format!("Request expired (drift: {}s, max: {}s)", drift, state.max_drift_secs),
+            &format!(
+                "Request expired (drift: {}s, max: {}s)",
+                drift, state.max_drift_secs
+            ),
         );
     }
 
@@ -120,39 +164,71 @@ pub async fn hmac_verify(
         }
     };
 
-    // Verify HMAC signature
-    // Signature = HMAC_SHA256(timestamp + body, secret)
-    let mut mac = match Hmac::<Sha256>::new_from_slice(&state.secret) {
-        Ok(m) => m,
-        Err(_) => {
-            tracing::error!("Failed to create HMAC instance - invalid secret");
-            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
+    // Try verification with each secret
+    let verification_result =
+        verify_with_secrets(&state.secrets, &signature, &timestamp_str, &body_bytes);
+
+    match verification_result {
+        VerificationResult::Valid { secret_index } => {
+            if secret_index > 0 {
+                // Using a previous/rotated secret
+                tracing::info!(
+                    secret_index = secret_index,
+                    "HMAC verified with rotated secret (grace period active)"
+                );
+            } else {
+                tracing::debug!(
+                    timestamp = timestamp,
+                    body_size = body_bytes.len(),
+                    "HMAC verification successful"
+                );
+            }
+
+            // Reconstruct request with body and continue
+            let request = Request::from_parts(parts, Body::from(body_bytes));
+            next.run(request).await
         }
-    };
+        VerificationResult::Invalid => {
+            tracing::warn!(
+                provided_signature = %signature,
+                secrets_tried = state.secrets.len(),
+                "HMAC signature verification failed"
+            );
+            error_response(StatusCode::UNAUTHORIZED, "Invalid signature")
+        }
+    }
+}
 
-    mac.update(timestamp_str.as_bytes());
-    mac.update(&body_bytes);
+/// Verify signature against multiple secrets
+fn verify_with_secrets(
+    secrets: &[Vec<u8>],
+    signature: &str,
+    timestamp_str: &str,
+    body_bytes: &[u8],
+) -> VerificationResult {
+    for (index, secret) in secrets.iter().enumerate() {
+        let mut mac = match Hmac::<Sha256>::new_from_slice(secret) {
+            Ok(m) => m,
+            Err(_) => {
+                tracing::error!(secret_index = index, "Failed to create HMAC instance");
+                continue;
+            }
+        };
 
-    let expected_signature = hex::encode(mac.finalize().into_bytes());
+        mac.update(timestamp_str.as_bytes());
+        mac.update(body_bytes);
 
-    // Constant-time comparison to prevent timing attacks
-    if !constant_time_compare(&signature, &expected_signature) {
-        tracing::warn!(
-            provided_signature = %signature,
-            "HMAC signature verification failed"
-        );
-        return error_response(StatusCode::UNAUTHORIZED, "Invalid signature");
+        let expected_signature = hex::encode(mac.finalize().into_bytes());
+
+        // Constant-time comparison to prevent timing attacks
+        if constant_time_compare(signature, &expected_signature) {
+            return VerificationResult::Valid {
+                secret_index: index,
+            };
+        }
     }
 
-    tracing::debug!(
-        timestamp = timestamp,
-        body_size = body_bytes.len(),
-        "HMAC verification successful"
-    );
-
-    // Reconstruct request with body and continue
-    let request = Request::from_parts(parts, Body::from(body_bytes));
-    next.run(request).await
+    VerificationResult::Invalid
 }
 
 /// Constant-time string comparison to prevent timing attacks
@@ -195,23 +271,79 @@ mod tests {
     }
 
     #[test]
-    fn test_hmac_generation() {
-        let secret = b"test-secret";
+    fn test_hmac_state_single_secret() {
+        let state = HmacState::new("secret".to_string(), 60);
+        assert!(!state.is_rotation_active());
+        assert_eq!(state.secrets.len(), 1);
+    }
+
+    #[test]
+    fn test_hmac_state_with_rotation() {
+        let state = HmacState::with_rotation(
+            vec!["new-secret".to_string(), "old-secret".to_string()],
+            60,
+        );
+        assert!(state.is_rotation_active());
+        assert_eq!(state.secrets.len(), 2);
+    }
+
+    #[test]
+    fn test_hmac_state_filters_empty_secrets() {
+        let state = HmacState::with_rotation(
+            vec![
+                "secret1".to_string(),
+                "".to_string(),
+                "secret2".to_string(),
+            ],
+            60,
+        );
+        assert_eq!(state.secrets.len(), 2);
+    }
+
+    #[test]
+    fn test_verify_with_primary_secret() {
+        let secrets = vec![b"primary-secret".to_vec(), b"old-secret".to_vec()];
+
         let timestamp = "1234567890";
         let body = b"test body";
 
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+        // Generate signature with primary secret
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secrets[0]).unwrap();
         mac.update(timestamp.as_bytes());
         mac.update(body);
-
         let signature = hex::encode(mac.finalize().into_bytes());
-        
-        // Verify signature is deterministic
-        let mut mac2 = Hmac::<Sha256>::new_from_slice(secret).unwrap();
-        mac2.update(timestamp.as_bytes());
-        mac2.update(body);
-        let signature2 = hex::encode(mac2.finalize().into_bytes());
-        
-        assert_eq!(signature, signature2);
+
+        let result = verify_with_secrets(&secrets, &signature, timestamp, body);
+        match result {
+            VerificationResult::Valid { secret_index } => assert_eq!(secret_index, 0),
+            _ => panic!("Expected valid result with secret_index 0"),
+        }
+    }
+
+    #[test]
+    fn test_verify_with_rotated_secret() {
+        let secrets = vec![b"new-secret".to_vec(), b"old-secret".to_vec()];
+
+        let timestamp = "1234567890";
+        let body = b"test body";
+
+        // Generate signature with OLD secret (simulating rotation)
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secrets[1]).unwrap();
+        mac.update(timestamp.as_bytes());
+        mac.update(body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        let result = verify_with_secrets(&secrets, &signature, timestamp, body);
+        match result {
+            VerificationResult::Valid { secret_index } => assert_eq!(secret_index, 1),
+            _ => panic!("Expected valid result with secret_index 1"),
+        }
+    }
+
+    #[test]
+    fn test_verify_invalid_signature() {
+        let secrets = vec![b"secret".to_vec()];
+        let result = verify_with_secrets(&secrets, "invalid-signature", "123", b"body");
+        assert!(matches!(result, VerificationResult::Invalid));
     }
 }

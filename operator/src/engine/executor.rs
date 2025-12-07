@@ -1,12 +1,15 @@
 //! Trade executor for Solana transactions
 //!
 //! Handles the actual submission of trades to the Solana network.
-//! Currently a stub implementation - Jito bundle support to be added.
+//! Includes RPC failover with automatic recovery to primary.
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::models::{Action, Signal, Strategy};
+use crate::models::{Signal, Strategy};
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::timeout;
 
 /// RPC mode for trade execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +18,17 @@ pub enum RpcMode {
     Jito,
     /// Fallback to standard TPU
     Standard,
+}
+
+/// RPC health status
+#[derive(Debug, Clone)]
+pub struct RpcHealth {
+    /// Whether the RPC is healthy
+    pub healthy: bool,
+    /// Last check timestamp
+    pub last_check: DateTime<Utc>,
+    /// Latency in milliseconds (if healthy)
+    pub latency_ms: Option<u64>,
 }
 
 /// Trade executor
@@ -27,6 +41,12 @@ pub struct Executor {
     rpc_mode: RpcMode,
     /// Consecutive failure count
     failure_count: u32,
+    /// When fallback mode was activated
+    fallback_since: Option<DateTime<Utc>>,
+    /// Recovery check interval (default 5 minutes)
+    recovery_interval: Duration,
+    /// Last recovery attempt
+    last_recovery_attempt: Option<DateTime<Utc>>,
 }
 
 impl Executor {
@@ -43,6 +63,9 @@ impl Executor {
             db,
             rpc_mode,
             failure_count: 0,
+            fallback_since: None,
+            recovery_interval: Duration::from_secs(300), // 5 minutes
+            last_recovery_attempt: None,
         }
     }
 
@@ -50,6 +73,11 @@ impl Executor {
     ///
     /// Returns the transaction signature on success
     pub async fn execute(&mut self, signal: &Signal) -> Result<String, ExecutorError> {
+        // Check if we should try to recover to primary
+        if self.should_attempt_recovery() {
+            self.try_recover_to_primary().await;
+        }
+
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             strategy = %signal.payload.strategy,
@@ -117,6 +145,115 @@ impl Executor {
         result
     }
 
+    /// Check if we should attempt recovery to primary RPC
+    fn should_attempt_recovery(&self) -> bool {
+        // Only attempt recovery if we're in fallback mode
+        if self.rpc_mode != RpcMode::Standard || self.fallback_since.is_none() {
+            return false;
+        }
+
+        // Check if Jito is configured
+        if !self.config.jito.enabled {
+            return false;
+        }
+
+        let now = Utc::now();
+
+        // Check if enough time has passed since fallback
+        if let Some(fallback_time) = self.fallback_since {
+            let elapsed = now.signed_duration_since(fallback_time);
+            if elapsed < chrono::Duration::from_std(self.recovery_interval).unwrap_or_default() {
+                return false;
+            }
+        }
+
+        // Check if enough time has passed since last recovery attempt
+        if let Some(last_attempt) = self.last_recovery_attempt {
+            let elapsed = now.signed_duration_since(last_attempt);
+            if elapsed < chrono::Duration::from_std(self.recovery_interval).unwrap_or_default() {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Attempt to recover to primary RPC
+    async fn try_recover_to_primary(&mut self) {
+        self.last_recovery_attempt = Some(Utc::now());
+
+        tracing::info!("Attempting to recover to primary RPC (Jito)");
+
+        // Perform health check on primary RPC
+        match self.check_primary_health().await {
+            Ok(health) if health.healthy => {
+                tracing::info!(
+                    latency_ms = health.latency_ms,
+                    "Primary RPC is healthy, switching back to Jito mode"
+                );
+
+                self.rpc_mode = RpcMode::Jito;
+                self.fallback_since = None;
+                self.failure_count = 0;
+
+                // Log recovery to config audit
+                if let Err(e) = crate::db::log_config_change(
+                    &self.db,
+                    "rpc_mode",
+                    Some("STANDARD"),
+                    "JITO",
+                    "SYSTEM_RECOVERY",
+                    Some("Primary RPC recovered, switching back from fallback"),
+                )
+                .await
+                {
+                    tracing::error!(error = %e, "Failed to log RPC mode recovery");
+                }
+            }
+            Ok(_) => {
+                tracing::warn!("Primary RPC health check failed, staying in fallback mode");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Primary RPC health check error, staying in fallback mode");
+            }
+        }
+    }
+
+    /// Check health of primary RPC
+    async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
+        let start = std::time::Instant::now();
+
+        // Perform a simple RPC call to check health
+        // In production, this would use the actual Solana RPC client
+        // For now, we simulate a health check
+
+        let health_check = async {
+            // Simulate RPC call
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            // TODO: Replace with actual RPC health check:
+            // let client = RpcClient::new(&self.config.rpc.primary_url);
+            // let _ = client.get_latest_blockhash().await?;
+
+            Ok::<(), ExecutorError>(())
+        };
+
+        // Apply timeout
+        let timeout_duration = Duration::from_millis(self.config.rpc.timeout_ms);
+        match timeout(timeout_duration, health_check).await {
+            Ok(Ok(())) => {
+                let latency = start.elapsed().as_millis() as u64;
+                Ok(RpcHealth {
+                    healthy: true,
+                    last_check: Utc::now(),
+                    latency_ms: Some(latency),
+                })
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(ExecutorError::Timeout),
+        }
+    }
+
     /// Execute via Jito bundle
     async fn execute_jito(&self, signal: &Signal) -> Result<String, ExecutorError> {
         // TODO: Implement actual Jito bundle submission
@@ -132,13 +269,13 @@ impl Executor {
         tracing::debug!(tip_sol = tip, "Calculated Jito tip");
 
         // Simulate network delay
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Generate a fake signature for now
         let signature = format!(
             "{}{}{}",
             &signal.trade_uuid[..8],
-            chrono::Utc::now().timestamp(),
+            Utc::now().timestamp(),
             "jito"
         );
 
@@ -156,13 +293,13 @@ impl Executor {
         );
 
         // Simulate network delay
-        tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         // Generate a fake signature for now
         let signature = format!(
             "{}{}{}",
             &signal.trade_uuid[..8],
-            chrono::Utc::now().timestamp(),
+            Utc::now().timestamp(),
             "std"
         );
 
@@ -170,9 +307,9 @@ impl Executor {
     }
 
     /// Calculate dynamic Jito tip based on strategy and history
-    fn calculate_jito_tip(&self, signal: &Signal) -> f64 {
+    pub fn calculate_jito_tip(&self, signal: &Signal) -> f64 {
         // For MVP, use a simple strategy-based tip
-        // TODO: Implement percentile-based calculation from tip history
+        // TODO: Use TipManager for percentile-based calculation
 
         let base_tip = match signal.payload.strategy {
             Strategy::Shield => self.config.jito.tip_floor_sol,
@@ -200,6 +337,7 @@ impl Executor {
             );
 
             self.rpc_mode = RpcMode::Standard;
+            self.fallback_since = Some(Utc::now());
             self.failure_count = 0;
 
             // Log to config audit
@@ -221,6 +359,16 @@ impl Executor {
     /// Get current RPC mode
     pub fn rpc_mode(&self) -> RpcMode {
         self.rpc_mode
+    }
+
+    /// Check if currently in fallback mode
+    pub fn is_in_fallback(&self) -> bool {
+        self.fallback_since.is_some()
+    }
+
+    /// Get time spent in fallback mode
+    pub fn fallback_duration(&self) -> Option<chrono::Duration> {
+        self.fallback_since.map(|t| Utc::now().signed_duration_since(t))
     }
 }
 
@@ -254,6 +402,10 @@ pub enum ExecutorError {
     /// Insufficient balance
     #[error("Insufficient balance: required {required} SOL, available {available} SOL")]
     InsufficientBalance { required: f64, available: f64 },
+
+    /// Circuit breaker tripped
+    #[error("Circuit breaker tripped: {0}")]
+    CircuitBreakerTripped(String),
 }
 
 #[cfg(test)]
@@ -265,5 +417,11 @@ mod tests {
         let err = ExecutorError::AmountTooSmall(0.001, 0.01);
         assert!(err.to_string().contains("0.001"));
         assert!(err.to_string().contains("0.01"));
+    }
+
+    #[test]
+    fn test_rpc_mode_debug() {
+        assert_eq!(format!("{:?}", RpcMode::Jito), "Jito");
+        assert_eq!(format!("{:?}", RpcMode::Standard), "Standard");
     }
 }

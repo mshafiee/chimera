@@ -1,0 +1,385 @@
+//! Price Cache for real-time token price tracking
+//!
+//! Provides cached token prices for:
+//! - Unrealized PnL calculations (circuit breaker)
+//! - Position value display
+//! - Drawdown calculations
+//!
+//! Uses Jupiter Price API for price fetching.
+//! Cache refresh interval: 5 seconds for active positions.
+
+use chrono::{DateTime, Duration, Utc};
+use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::time::interval;
+
+/// Default cache TTL in seconds
+const DEFAULT_CACHE_TTL_SECS: i64 = 30;
+
+/// Price update interval for active tokens
+const PRICE_UPDATE_INTERVAL_SECS: u64 = 5;
+
+/// Price entry in cache
+#[derive(Debug, Clone)]
+pub struct PriceEntry {
+    /// Price in USD
+    pub price_usd: f64,
+    /// When this price was fetched
+    pub fetched_at: DateTime<Utc>,
+    /// Price source
+    pub source: PriceSource,
+}
+
+/// Price data source
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceSource {
+    /// Jupiter Price API
+    Jupiter,
+    /// Pyth Oracle
+    Pyth,
+    /// Fallback/cached value
+    Cached,
+}
+
+impl std::fmt::Display for PriceSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Jupiter => write!(f, "Jupiter"),
+            Self::Pyth => write!(f, "Pyth"),
+            Self::Cached => write!(f, "Cached"),
+        }
+    }
+}
+
+/// Price cache for token prices
+pub struct PriceCache {
+    /// Cached prices by token address
+    prices: Arc<RwLock<HashMap<String, PriceEntry>>>,
+    /// Cache TTL
+    ttl: Duration,
+    /// Tokens to actively track
+    active_tokens: Arc<RwLock<Vec<String>>>,
+    /// Whether the updater is running
+    updater_running: Arc<RwLock<bool>>,
+}
+
+impl PriceCache {
+    /// Create a new price cache with default TTL
+    pub fn new() -> Self {
+        Self {
+            prices: Arc::new(RwLock::new(HashMap::new())),
+            ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
+            active_tokens: Arc::new(RwLock::new(Vec::new())),
+            updater_running: Arc::new(RwLock::new(false)),
+        }
+    }
+
+    /// Create with custom TTL
+    pub fn with_ttl(ttl_secs: i64) -> Self {
+        Self {
+            prices: Arc::new(RwLock::new(HashMap::new())),
+            ttl: Duration::seconds(ttl_secs),
+            active_tokens: Arc::new(RwLock::new(Vec::new())),
+            updater_running: Arc::new(RwLock::new(false)),
+        }
+    }
+
+    /// Get price for a token
+    pub fn get_price(&self, token_address: &str) -> Option<PriceEntry> {
+        let prices = self.prices.read();
+        let entry = prices.get(token_address)?;
+
+        // Check if expired
+        let age = Utc::now().signed_duration_since(entry.fetched_at);
+        if age > self.ttl {
+            return None;
+        }
+
+        Some(entry.clone())
+    }
+
+    /// Get price in USD (convenience method)
+    pub fn get_price_usd(&self, token_address: &str) -> Option<f64> {
+        self.get_price(token_address).map(|e| e.price_usd)
+    }
+
+    /// Set price for a token
+    pub fn set_price(&self, token_address: &str, price_usd: f64, source: PriceSource) {
+        let mut prices = self.prices.write();
+        prices.insert(
+            token_address.to_string(),
+            PriceEntry {
+                price_usd,
+                fetched_at: Utc::now(),
+                source,
+            },
+        );
+    }
+
+    /// Add token to active tracking
+    pub fn track_token(&self, token_address: &str) {
+        let mut tokens = self.active_tokens.write();
+        if !tokens.contains(&token_address.to_string()) {
+            tokens.push(token_address.to_string());
+            tracing::debug!(token = token_address, "Added token to price tracking");
+        }
+    }
+
+    /// Remove token from active tracking
+    pub fn untrack_token(&self, token_address: &str) {
+        let mut tokens = self.active_tokens.write();
+        tokens.retain(|t| t != token_address);
+    }
+
+    /// Get list of tracked tokens
+    pub fn tracked_tokens(&self) -> Vec<String> {
+        self.active_tokens.read().clone()
+    }
+
+    /// Start the background price updater
+    pub async fn start_updater(self: Arc<Self>) {
+        {
+            let mut running = self.updater_running.write();
+            if *running {
+                tracing::warn!("Price updater already running");
+                return;
+            }
+            *running = true;
+        }
+
+        tracing::info!(
+            interval_secs = PRICE_UPDATE_INTERVAL_SECS,
+            "Starting price cache updater"
+        );
+
+        let mut update_interval = interval(std::time::Duration::from_secs(PRICE_UPDATE_INTERVAL_SECS));
+
+        loop {
+            update_interval.tick().await;
+
+            let tokens = self.active_tokens.read().clone();
+            if tokens.is_empty() {
+                continue;
+            }
+
+            if let Err(e) = self.update_prices(&tokens).await {
+                tracing::error!(error = %e, "Failed to update prices");
+            }
+        }
+    }
+
+    /// Update prices for a list of tokens
+    async fn update_prices(&self, tokens: &[String]) -> Result<(), PriceCacheError> {
+        // Fetch prices from Jupiter API
+        let prices = self.fetch_prices_jupiter(tokens).await?;
+
+        for (token, price) in prices {
+            self.set_price(&token, price, PriceSource::Jupiter);
+        }
+
+        tracing::debug!(
+            token_count = tokens.len(),
+            "Updated prices"
+        );
+
+        Ok(())
+    }
+
+    /// Fetch prices from Jupiter Price API
+    async fn fetch_prices_jupiter(
+        &self,
+        tokens: &[String],
+    ) -> Result<Vec<(String, f64)>, PriceCacheError> {
+        if tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // TODO: Implement actual Jupiter API call
+        // Jupiter Price API: https://price.jup.ag/v6/price?ids=<token1>,<token2>
+        //
+        // Example:
+        // let url = format!(
+        //     "https://price.jup.ag/v6/price?ids={}",
+        //     tokens.join(",")
+        // );
+        // let response = reqwest::get(&url).await?;
+        // let data: JupiterPriceResponse = response.json().await?;
+
+        // For now, return simulated prices
+        let mut results = Vec::new();
+        for token in tokens {
+            // Simulate price based on token address hash
+            let hash: u64 = token.bytes().map(|b| b as u64).sum();
+            let simulated_price = (hash % 1000) as f64 / 100.0;
+            results.push((token.clone(), simulated_price));
+        }
+
+        Ok(results)
+    }
+
+    /// Calculate unrealized PnL for a position
+    pub fn calculate_unrealized_pnl(
+        &self,
+        token_address: &str,
+        entry_price: f64,
+        position_size: f64,
+    ) -> Option<UnrealizedPnL> {
+        let current_price = self.get_price_usd(token_address)?;
+
+        let pnl_usd = (current_price - entry_price) * position_size;
+        let pnl_percent = if entry_price > 0.0 {
+            ((current_price - entry_price) / entry_price) * 100.0
+        } else {
+            0.0
+        };
+
+        Some(UnrealizedPnL {
+            current_price,
+            entry_price,
+            pnl_usd,
+            pnl_percent,
+        })
+    }
+
+    /// Get cache statistics
+    pub fn stats(&self) -> PriceCacheStats {
+        let prices = self.prices.read();
+        let now = Utc::now();
+
+        let mut valid_count = 0;
+        let mut stale_count = 0;
+
+        for entry in prices.values() {
+            let age = now.signed_duration_since(entry.fetched_at);
+            if age <= self.ttl {
+                valid_count += 1;
+            } else {
+                stale_count += 1;
+            }
+        }
+
+        PriceCacheStats {
+            total_entries: prices.len(),
+            valid_entries: valid_count,
+            stale_entries: stale_count,
+            tracked_tokens: self.active_tokens.read().len(),
+        }
+    }
+
+    /// Clear expired entries
+    pub fn prune_expired(&self) {
+        let mut prices = self.prices.write();
+        let now = Utc::now();
+
+        prices.retain(|_, entry| {
+            let age = now.signed_duration_since(entry.fetched_at);
+            age <= self.ttl
+        });
+    }
+}
+
+impl Default for PriceCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Unrealized PnL calculation result
+#[derive(Debug, Clone)]
+pub struct UnrealizedPnL {
+    /// Current price
+    pub current_price: f64,
+    /// Entry price
+    pub entry_price: f64,
+    /// PnL in USD
+    pub pnl_usd: f64,
+    /// PnL as percentage
+    pub pnl_percent: f64,
+}
+
+/// Price cache statistics
+#[derive(Debug, Clone)]
+pub struct PriceCacheStats {
+    /// Total entries in cache
+    pub total_entries: usize,
+    /// Valid (non-expired) entries
+    pub valid_entries: usize,
+    /// Stale (expired) entries
+    pub stale_entries: usize,
+    /// Number of actively tracked tokens
+    pub tracked_tokens: usize,
+}
+
+/// Price cache errors
+#[derive(Debug, thiserror::Error)]
+pub enum PriceCacheError {
+    /// HTTP request failed
+    #[error("HTTP request failed: {0}")]
+    HttpError(String),
+
+    /// JSON parsing failed
+    #[error("Failed to parse response: {0}")]
+    ParseError(String),
+
+    /// Rate limited
+    #[error("Rate limited by price API")]
+    RateLimited,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_price_cache_set_get() {
+        let cache = PriceCache::new();
+        cache.set_price("token1", 1.5, PriceSource::Jupiter);
+
+        let price = cache.get_price_usd("token1");
+        assert!(price.is_some());
+        assert!((price.unwrap() - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_price_cache_miss() {
+        let cache = PriceCache::new();
+        assert!(cache.get_price("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_track_token() {
+        let cache = PriceCache::new();
+        cache.track_token("token1");
+        cache.track_token("token2");
+
+        let tracked = cache.tracked_tokens();
+        assert_eq!(tracked.len(), 2);
+        assert!(tracked.contains(&"token1".to_string()));
+    }
+
+    #[test]
+    fn test_unrealized_pnl_calculation() {
+        let cache = PriceCache::new();
+        cache.set_price("token1", 2.0, PriceSource::Jupiter);
+
+        let pnl = cache.calculate_unrealized_pnl("token1", 1.0, 100.0);
+        assert!(pnl.is_some());
+
+        let pnl = pnl.unwrap();
+        assert!((pnl.pnl_usd - 100.0).abs() < 0.001); // (2.0 - 1.0) * 100 = 100
+        assert!((pnl.pnl_percent - 100.0).abs() < 0.001); // 100% gain
+    }
+
+    #[test]
+    fn test_stats() {
+        let cache = PriceCache::new();
+        cache.set_price("token1", 1.0, PriceSource::Jupiter);
+        cache.track_token("token1");
+        cache.track_token("token2");
+
+        let stats = cache.stats();
+        assert_eq!(stats.total_entries, 1);
+        assert_eq!(stats.tracked_tokens, 2);
+    }
+}

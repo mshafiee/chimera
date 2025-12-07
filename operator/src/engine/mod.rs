@@ -4,9 +4,13 @@
 
 mod channel;
 mod executor;
+pub mod recovery;
+pub mod tips;
 
 pub use channel::*;
 pub use executor::*;
+pub use recovery::RecoveryManager;
+pub use tips::TipManager;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;

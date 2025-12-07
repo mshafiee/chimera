@@ -295,6 +295,220 @@ pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
     Ok(consecutive)
 }
 
+// =============================================================================
+// JITO TIP HISTORY
+// =============================================================================
+
+/// Insert a Jito tip record
+pub async fn insert_jito_tip(
+    pool: &DbPool,
+    tip_amount_sol: f64,
+    bundle_signature: Option<&str>,
+    strategy: &str,
+    success: bool,
+) -> AppResult<i64> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO jito_tip_history (tip_amount_sol, bundle_signature, strategy, success)
+        VALUES (?, ?, ?, ?)
+        "#,
+    )
+    .bind(tip_amount_sol)
+    .bind(bundle_signature)
+    .bind(strategy)
+    .bind(if success { 1 } else { 0 })
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+/// Get recent successful tips for percentile calculation
+/// Returns tip amounts in descending order (most recent first)
+pub async fn get_recent_tips(pool: &DbPool, limit: u32) -> AppResult<Vec<f64>> {
+    let tips: Vec<(f64,)> = sqlx::query_as(
+        r#"
+        SELECT tip_amount_sol
+        FROM jito_tip_history
+        WHERE success = 1
+        ORDER BY created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(tips.into_iter().map(|(t,)| t).collect())
+}
+
+/// Get count of successful tips (for cold start detection)
+pub async fn get_tip_count(pool: &DbPool) -> AppResult<u32> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM jito_tip_history WHERE success = 1"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0 as u32)
+}
+
+/// Clean up old tip history (keep only last 7 days)
+pub async fn prune_old_tips(pool: &DbPool) -> AppResult<u64> {
+    let result = sqlx::query(
+        "DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days')"
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
+// =============================================================================
+// POSITIONS & STUCK STATE RECOVERY
+// =============================================================================
+
+/// Position record from database
+#[derive(Debug, Clone)]
+pub struct PositionRecord {
+    pub id: i64,
+    pub trade_uuid: String,
+    pub wallet_address: String,
+    pub token_address: String,
+    pub strategy: String,
+    pub state: String,
+    pub entry_tx_signature: String,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+/// Get positions stuck in EXITING state for too long
+pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>> {
+    let positions: Vec<(i64, String, String, String, String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT id, trade_uuid, wallet_address, token_address, strategy, state, 
+               entry_tx_signature, last_updated
+        FROM positions
+        WHERE state = 'EXITING'
+        AND last_updated < datetime('now', ? || ' seconds')
+        "#,
+    )
+    .bind(-stuck_seconds)
+    .fetch_all(pool)
+    .await?;
+
+    positions
+        .into_iter()
+        .map(|(id, trade_uuid, wallet_address, token_address, strategy, state, entry_tx_signature, last_updated)| {
+            Ok(PositionRecord {
+                id,
+                trade_uuid,
+                wallet_address,
+                token_address,
+                strategy,
+                state,
+                entry_tx_signature,
+                last_updated: chrono::DateTime::parse_from_rfc3339(&last_updated)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            })
+        })
+        .collect()
+}
+
+/// Update position state
+pub async fn update_position_state(
+    pool: &DbPool,
+    trade_uuid: &str,
+    new_state: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE positions SET state = ? WHERE trade_uuid = ?"
+    )
+    .bind(new_state)
+    .bind(trade_uuid)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Insert reconciliation log entry
+pub async fn insert_reconciliation_log(
+    pool: &DbPool,
+    trade_uuid: &str,
+    expected_state: &str,
+    actual_on_chain: Option<&str>,
+    discrepancy: &str,
+    on_chain_tx_signature: Option<&str>,
+    notes: Option<&str>,
+) -> AppResult<i64> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO reconciliation_log (
+            trade_uuid, expected_state, actual_on_chain, discrepancy,
+            on_chain_tx_signature, notes
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(trade_uuid)
+    .bind(expected_state)
+    .bind(actual_on_chain)
+    .bind(discrepancy)
+    .bind(on_chain_tx_signature)
+    .bind(notes)
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+// =============================================================================
+// CIRCUIT BREAKER SUPPORT
+// =============================================================================
+
+/// Get maximum drawdown from peak (for circuit breaker)
+pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<f64> {
+    // Calculate drawdown from highest cumulative PnL to current
+    let result: (Option<f64>,) = sqlx::query_as(
+        r#"
+        WITH cumulative_pnl AS (
+            SELECT 
+                created_at,
+                SUM(COALESCE(pnl_usd, 0)) OVER (ORDER BY created_at) as running_pnl
+            FROM trades
+            WHERE status = 'CLOSED'
+        ),
+        peaks AS (
+            SELECT 
+                MAX(running_pnl) as peak_pnl,
+                (SELECT running_pnl FROM cumulative_pnl ORDER BY created_at DESC LIMIT 1) as current_pnl
+            FROM cumulative_pnl
+        )
+        SELECT 
+            CASE 
+                WHEN peak_pnl > 0 THEN ((peak_pnl - current_pnl) / peak_pnl) * 100
+                ELSE 0
+            END as drawdown_percent
+        FROM peaks
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.0.unwrap_or(0.0).max(0.0))
+}
+
+/// Get active positions count
+pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0 as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

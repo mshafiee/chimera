@@ -49,3 +49,22 @@ jito:
 queue:
   capacity: 1000
   load_shed_threshold_percent: 80
+
+token_safety:
+  # Known safe tokens (allowed to have freeze/mint authority)
+  freeze_authority_whitelist:
+    - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+    - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+    - "So11111111111111111111111111111111111111112"   # Wrapped SOL
+  mint_authority_whitelist:
+    - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+    - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+    - "So11111111111111111111111111111111111111112"   # Wrapped SOL
+  # Minimum liquidity thresholds (USD)
+  min_liquidity_shield_usd: 10000
+  min_liquidity_spear_usd: 5000
+  # Enable honeypot detection via transaction simulation
+  honeypot_detection_enabled: true
+  # Token cache settings
+  cache_capacity: 1000
+  cache_ttl_seconds: 3600  # 1 hour
