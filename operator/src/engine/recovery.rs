@@ -14,8 +14,11 @@
 //! 5. Log to reconciliation_log
 
 use crate::db::{self, DbPool, PositionRecord};
-use crate::error::AppResult;
-use chrono::{Duration, Utc};
+use crate::error::{AppError, AppResult};
+use crate::handlers::{WsEvent, WsState, PositionUpdateData};
+use chrono::Utc;
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::signature::Signature;
 use std::sync::Arc;
 use tokio::time::interval;
 
@@ -29,28 +32,53 @@ const RECOVERY_CHECK_INTERVAL_SECS: u64 = 30;
 pub struct RecoveryManager {
     /// Database pool
     db: DbPool,
+    /// RPC client for on-chain checks
+    rpc_client: Arc<RpcClient>,
     /// Stuck threshold in seconds
     stuck_threshold_secs: i64,
     /// Whether recovery is enabled
     enabled: bool,
+    /// WebSocket state for broadcasting updates
+    ws_state: Option<Arc<WsState>>,
 }
 
 impl RecoveryManager {
     /// Create a new recovery manager
-    pub fn new(db: DbPool) -> Self {
-        Self {
-            db,
-            stuck_threshold_secs: DEFAULT_STUCK_THRESHOLD_SECS,
-            enabled: true,
-        }
+    pub fn new(db: DbPool, rpc_url: String) -> Self {
+        Self::new_with_ws(db, rpc_url, None)
     }
 
     /// Create with custom threshold
-    pub fn with_threshold(db: DbPool, stuck_threshold_secs: i64) -> Self {
+    pub fn with_threshold(db: DbPool, rpc_url: String, stuck_threshold_secs: i64) -> Self {
+        Self::new_with_ws_and_threshold(db, rpc_url, stuck_threshold_secs, None)
+    }
+
+    /// Create with WebSocket support
+    pub fn new_with_ws(db: DbPool, rpc_url: String, ws_state: Option<Arc<WsState>>) -> Self {
+        let rpc_client = Arc::new(RpcClient::new(rpc_url));
         Self {
             db,
+            rpc_client,
+            stuck_threshold_secs: DEFAULT_STUCK_THRESHOLD_SECS,
+            enabled: true,
+            ws_state,
+        }
+    }
+
+    /// Create with custom threshold and WebSocket support
+    pub fn new_with_ws_and_threshold(
+        db: DbPool,
+        rpc_url: String,
+        stuck_threshold_secs: i64,
+        ws_state: Option<Arc<WsState>>,
+    ) -> Self {
+        let rpc_client = Arc::new(RpcClient::new(rpc_url));
+        Self {
+            db,
+            rpc_client,
             stuck_threshold_secs,
             enabled: true,
+            ws_state,
         }
     }
 
@@ -126,24 +154,45 @@ impl RecoveryManager {
         );
 
         // Check on-chain state
-        // In production, this would query the Solana blockchain
-        let on_chain_state = self.check_on_chain_state(&position.entry_tx_signature).await?;
+        // For EXITING positions, check the exit transaction signature
+        // If no exit signature yet, check entry signature as fallback
+        let tx_signature = position
+            .exit_tx_signature
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or(&position.entry_tx_signature);
+        
+        let on_chain_state = self.check_on_chain_state(tx_signature).await?;
 
         match on_chain_state {
             OnChainState::TransactionConfirmed => {
                 // Transaction confirmed, update to CLOSED
                 db::update_position_state(&self.db, &position.trade_uuid, "CLOSED").await?;
 
+                let tx_sig = position
+                    .exit_tx_signature
+                    .as_ref()
+                    .unwrap_or(&position.entry_tx_signature);
+                
                 db::insert_reconciliation_log(
                     &self.db,
                     &position.trade_uuid,
                     "EXITING",
                     Some("FOUND"),
                     "NONE",
-                    Some(&position.entry_tx_signature),
+                    Some(tx_sig),
                     Some("Auto-recovery: transaction confirmed on-chain"),
                 )
                 .await?;
+
+                // Broadcast position update via WebSocket
+                if let Some(ref ws) = self.ws_state {
+                    ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+                        trade_uuid: position.trade_uuid.clone(),
+                        state: "CLOSED".to_string(),
+                        unrealized_pnl_percent: None, // Would need to fetch from DB
+                    }));
+                }
 
                 Ok(RecoveryAction::MarkedClosed)
             }
@@ -176,6 +225,15 @@ impl RecoveryManager {
                 )
                 .await?;
 
+                // Broadcast position update via WebSocket
+                if let Some(ref ws) = self.ws_state {
+                    ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+                        trade_uuid: position.trade_uuid.clone(),
+                        state: "ACTIVE".to_string(),
+                        unrealized_pnl_percent: None,
+                    }));
+                }
+
                 Ok(RecoveryAction::RevertedToActive)
             }
             OnChainState::Pending => {
@@ -186,34 +244,71 @@ impl RecoveryManager {
     }
 
     /// Check on-chain state for a transaction
-    async fn check_on_chain_state(&self, _tx_signature: &str) -> AppResult<OnChainState> {
-        // TODO: Implement actual on-chain check using Solana RPC
-        // This is a stub that simulates the check
-        //
-        // In production:
-        // 1. Check if transaction signature exists using getTransaction
-        // 2. If not found, check blockhash validity using isBlockhashValid
-        // 3. Return appropriate state
+    async fn check_on_chain_state(&self, tx_signature: &str) -> AppResult<OnChainState> {
+        // Parse transaction signature
+        let signature = tx_signature
+            .parse::<Signature>()
+            .map_err(|e| AppError::Internal(format!("Invalid transaction signature: {}", e)))?;
 
-        // For now, assume transactions not found after threshold are expired
-        // In production, replace with actual RPC calls:
-        //
-        // let client = RpcClient::new(&self.rpc_url);
-        // match client.get_transaction(signature).await {
-        //     Ok(tx) => OnChainState::TransactionConfirmed,
-        //     Err(ClientError { kind: RpcError::ForUser("Transaction not found"), .. }) => {
-        //         // Check blockhash
-        //         OnChainState::TransactionNotFound
-        //     }
-        //     Err(e) => return Err(e.into())
-        // }
-
-        // Simulate: 80% chance of not found, 20% chance of confirmed
-        let random = (chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0) % 100) as u32;
-        if random < 80 {
-            Ok(OnChainState::TransactionNotFound)
-        } else {
-            Ok(OnChainState::TransactionConfirmed)
+        // Check if transaction exists on-chain
+        let config = solana_client::rpc_config::RpcTransactionConfig {
+            max_supported_transaction_version: Some(0),
+            ..Default::default()
+        };
+        
+        match self
+            .rpc_client
+            .get_transaction_with_config(&signature, config)
+            .await
+        {
+            Ok(tx) => {
+                // Transaction found - check if it's confirmed
+                if let Some(meta) = tx.transaction.meta {
+                    if meta.err.is_some() {
+                        // Transaction failed on-chain
+                        tracing::warn!(
+                            signature = %tx_signature,
+                            error = ?meta.err,
+                            "Transaction found but failed on-chain"
+                        );
+                        Ok(OnChainState::TransactionNotFound)
+                    } else {
+                        // Transaction confirmed successfully
+                        tracing::debug!(
+                            signature = %tx_signature,
+                            slot = tx.slot,
+                            "Transaction confirmed on-chain"
+                        );
+                        Ok(OnChainState::TransactionConfirmed)
+                    }
+                } else {
+                    // Metadata missing, assume confirmed
+                    Ok(OnChainState::TransactionConfirmed)
+                }
+            }
+            Err(e) => {
+                // Check if it's a "transaction not found" error
+                let error_str = e.to_string().to_lowercase();
+                if error_str.contains("not found") 
+                    || error_str.contains("transaction not found")
+                    || error_str.contains("-32004")
+                {
+                    // Transaction not found - likely blockhash expired or never submitted
+                    tracing::debug!(
+                        signature = %tx_signature,
+                        "Transaction not found on-chain"
+                    );
+                    Ok(OnChainState::TransactionNotFound)
+                } else {
+                    // Other RPC errors - log and assume pending (don't take action)
+                    tracing::warn!(
+                        signature = %tx_signature,
+                        error = %e,
+                        "RPC error checking transaction, assuming pending"
+                    );
+                    Ok(OnChainState::Pending)
+                }
+            }
         }
     }
 }
@@ -226,6 +321,7 @@ enum OnChainState {
     /// Transaction not found
     TransactionNotFound,
     /// Blockhash expired
+    #[allow(dead_code)] // Reserved for future use
     BlockhashExpired,
     /// Transaction still pending
     Pending,

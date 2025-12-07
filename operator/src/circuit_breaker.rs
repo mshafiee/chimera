@@ -84,11 +84,22 @@ pub struct CircuitBreaker {
     state: Arc<RwLock<InternalState>>,
     /// Check interval
     check_interval: Duration,
+    /// Optional WebSocket state for broadcasting events
+    ws_state: Option<Arc<crate::handlers::WsState>>,
 }
 
 impl CircuitBreaker {
     /// Create a new circuit breaker
     pub fn new(config: CircuitBreakerConfig, db: DbPool) -> Self {
+        Self::new_with_ws(config, db, None)
+    }
+
+    /// Create a new circuit breaker with WebSocket support
+    pub fn new_with_ws(
+        config: CircuitBreakerConfig,
+        db: DbPool,
+        ws_state: Option<Arc<crate::handlers::WsState>>,
+    ) -> Self {
         Self {
             config,
             db,
@@ -99,6 +110,7 @@ impl CircuitBreaker {
                 last_check: None,
             })),
             check_interval: Duration::seconds(30),
+            ws_state,
         }
     }
 
@@ -222,6 +234,17 @@ impl CircuitBreaker {
             Some(&reason_str),
         )
         .await?;
+
+        // Broadcast alert via WebSocket
+        if let Some(ref ws) = self.ws_state {
+            ws.broadcast(crate::handlers::WsEvent::Alert(
+                crate::handlers::AlertData {
+                    severity: "critical".to_string(),
+                    component: "circuit_breaker".to_string(),
+                    message: format!("Circuit breaker tripped: {}", reason_str),
+                },
+            ));
+        }
 
         Ok(())
     }

@@ -58,6 +58,14 @@ pub enum AppError {
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// HTTP request error
+    #[error("HTTP error: {0}")]
+    Http(String),
+
+    /// Parse/deserialization error
+    #[error("Parse error: {0}")]
+    Parse(String),
 }
 
 /// Error response structure for API
@@ -165,6 +173,22 @@ impl IntoResponse for AppError {
                 ErrorResponse {
                     status: "error",
                     reason: "internal_error".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::Http(msg) => (
+                StatusCode::BAD_GATEWAY,
+                ErrorResponse {
+                    status: "error",
+                    reason: "http_error".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::Parse(msg) => (
+                StatusCode::BAD_GATEWAY,
+                ErrorResponse {
+                    status: "error",
+                    reason: "parse_error".to_string(),
                     details: Some(msg.clone()),
                 },
             ),

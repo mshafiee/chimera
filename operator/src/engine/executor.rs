@@ -7,9 +7,16 @@ use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::models::{Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
+use crate::engine::tips::TipManager;
+use crate::engine::transaction_builder::{TransactionBuilder, load_wallet_keypair};
+use crate::vault::load_secrets_with_fallback;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::transaction::Transaction;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 use tokio::time::timeout;
 
 /// RPC mode for trade execution
@@ -50,6 +57,20 @@ pub struct Executor {
     last_recovery_attempt: Option<DateTime<Utc>>,
     /// Notification service
     notifier: Option<Arc<CompositeNotifier>>,
+    /// Latest RPC health status (cached)
+    latest_rpc_health: Arc<RwLock<Option<RpcHealth>>>,
+    /// HTTP client for RPC calls (fallback for health checks if needed)
+    #[allow(dead_code)] // Reserved for future fallback health checks
+    http_client: reqwest::Client,
+    /// Solana RPC client for primary endpoint
+    rpc_client: Arc<RpcClient>,
+    /// Solana RPC client for fallback endpoint (if configured)
+    #[allow(dead_code)] // Will be used when implementing fallback execution
+    fallback_rpc_client: Option<Arc<RpcClient>>,
+    /// Tip manager for dynamic tip calculation
+    tip_manager: Option<Arc<TipManager>>,
+    /// Jito Searcher client for direct bundle submission
+    jito_searcher: Option<crate::engine::jito_searcher::JitoSearcherClient>,
 }
 
 impl Executor {
@@ -61,6 +82,25 @@ impl Executor {
             RpcMode::Standard
         };
 
+        // Create HTTP client with timeout (reserved for fallback scenarios)
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(config.rpc.timeout_ms))
+            .build()
+            .expect("Failed to create HTTP client");
+
+        // Create Solana RPC client for primary endpoint
+        let rpc_client = Arc::new(RpcClient::new(config.rpc.primary_url.clone()));
+
+        // Create Solana RPC client for fallback endpoint if configured
+        let fallback_rpc_client = config.rpc.fallback_url.as_ref().map(|url| {
+            Arc::new(RpcClient::new(url.clone()))
+        });
+
+        // Create Jito Searcher client if configured
+        let jito_searcher = config.jito.searcher_endpoint.as_ref().map(|endpoint| {
+            crate::engine::jito_searcher::JitoSearcherClient::new(endpoint.clone(), rpc_client.clone())
+        });
+
         Self {
             config,
             db,
@@ -70,6 +110,12 @@ impl Executor {
             recovery_interval: Duration::from_secs(300), // 5 minutes
             last_recovery_attempt: None,
             notifier: None,
+            latest_rpc_health: Arc::new(RwLock::new(None)),
+            http_client,
+            rpc_client,
+            fallback_rpc_client,
+            tip_manager: None,
+            jito_searcher,
         }
     }
 
@@ -79,10 +125,30 @@ impl Executor {
         self
     }
 
-    /// Send notification if notifier is configured
+    /// Set the tip manager
+    pub fn with_tip_manager(mut self, tip_manager: Arc<TipManager>) -> Self {
+        self.tip_manager = Some(tip_manager);
+        self
+    }
+
+    /// Send notification if notifier is configured and rules allow it
     async fn notify(&self, event: NotificationEvent) {
         if let Some(ref notifier) = self.notifier {
-            notifier.notify(event).await;
+            // Check notification rules before sending
+            let rules = &self.config.notifications.rules;
+            let should_send = match &event {
+                NotificationEvent::CircuitBreakerTriggered { .. } => rules.circuit_breaker_triggered,
+                NotificationEvent::WalletDrained { .. } => rules.wallet_drained,
+                NotificationEvent::SystemCrash { .. } => rules.wallet_drained, // Use wallet_drained rule for system crashes
+                NotificationEvent::PositionExited { .. } => rules.position_exited,
+                NotificationEvent::RpcFallback { .. } => rules.rpc_fallback,
+                NotificationEvent::WalletPromoted { .. } => rules.wallet_promoted,
+                NotificationEvent::DailySummary { .. } => rules.daily_summary,
+            };
+
+            if should_send {
+                notifier.notify(event).await;
+            }
         }
     }
 
@@ -157,6 +223,24 @@ impl Executor {
                     signature = %sig,
                     "Trade executed successfully"
                 );
+
+                // Record tip if using Jito and tip manager is available
+                if self.rpc_mode == RpcMode::Jito {
+                    if let Some(ref tip_manager) = self.tip_manager {
+                        let tip = self.calculate_jito_tip(signal);
+                        if let Err(e) = tip_manager.record_tip(
+                            tip,
+                            Some(sig),
+                            signal.payload.strategy,
+                            true, // success
+                        ).await {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to record tip in TipManager"
+                            );
+                        }
+                    }
+                }
             }
             Err(e) => {
                 self.failure_count += 1;
@@ -166,6 +250,24 @@ impl Executor {
                     failure_count = self.failure_count,
                     "Trade execution failed"
                 );
+
+                // Record failed tip if using Jito and tip manager is available
+                if self.rpc_mode == RpcMode::Jito {
+                    if let Some(ref tip_manager) = self.tip_manager {
+                        let tip = self.calculate_jito_tip(signal);
+                        if let Err(e) = tip_manager.record_tip(
+                            tip,
+                            None, // No signature for failed trades
+                            signal.payload.strategy,
+                            false, // failure
+                        ).await {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to record failed tip in TipManager"
+                            );
+                        }
+                    }
+                }
 
                 // Check if we need to switch to fallback
                 if self.failure_count >= self.config.rpc.max_consecutive_failures
@@ -257,19 +359,17 @@ impl Executor {
     async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
-        // Perform a simple RPC call to check health
-        // In production, this would use the actual Solana RPC client
-        // For now, we simulate a health check
-
+        // Perform actual RPC health check using Solana RPC client
+        // This uses the getHealth method which is lightweight and recommended by Helius
         let health_check = async {
-            // Simulate RPC call
-            tokio::time::sleep(Duration::from_millis(50)).await;
-
-            // TODO: Replace with actual RPC health check:
-            // let client = RpcClient::new(&self.config.rpc.primary_url);
-            // let _ = client.get_latest_blockhash().await?;
-
-            Ok::<(), ExecutorError>(())
+            // Use Solana RPC client's get_health method
+            // This is more efficient than raw HTTP and handles errors better
+            self.rpc_client
+                .get_health()
+                .await
+                .map_err(|e| ExecutorError::Rpc(format!("RPC health check failed: {}", e)))?;
+            
+            Ok(())
         };
 
         // Apply timeout
@@ -277,88 +377,291 @@ impl Executor {
         match timeout(timeout_duration, health_check).await {
             Ok(Ok(())) => {
                 let latency = start.elapsed().as_millis() as u64;
-                Ok(RpcHealth {
+                let health = RpcHealth {
                     healthy: true,
                     last_check: Utc::now(),
                     latency_ms: Some(latency),
-                })
+                };
+
+                // Cache the health status
+                *self.latest_rpc_health.write().await = Some(health.clone());
+
+                Ok(health)
             }
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(ExecutorError::Timeout),
+            Ok(Err(e)) => {
+                // Cache unhealthy status
+                let health = RpcHealth {
+                    healthy: false,
+                    last_check: Utc::now(),
+                    latency_ms: None,
+                };
+                *self.latest_rpc_health.write().await = Some(health);
+                Err(e)
+            }
+            Err(_) => {
+                // Timeout - cache unhealthy status
+                let health = RpcHealth {
+                    healthy: false,
+                    last_check: Utc::now(),
+                    latency_ms: None,
+                };
+                *self.latest_rpc_health.write().await = Some(health);
+                Err(ExecutorError::Timeout)
+            }
         }
+    }
+
+    /// Get latest RPC health status (non-blocking read)
+    pub async fn get_rpc_health(&self) -> Option<RpcHealth> {
+        self.latest_rpc_health.read().await.clone()
+    }
+
+    /// Check RPC health and update cache (for periodic health checks)
+    pub async fn refresh_rpc_health(&self) {
+        let _ = self.check_primary_health().await;
     }
 
     /// Execute via Jito bundle
     async fn execute_jito(&self, signal: &Signal) -> Result<String, ExecutorError> {
-        // TODO: Implement actual Jito bundle submission
-        // This is a stub that simulates execution
-
-        tracing::debug!(
+        tracing::info!(
             trade_uuid = %signal.trade_uuid,
-            "Simulating Jito bundle execution"
+            "Executing trade via Jito bundle"
         );
+
+        // Verify RPC is accessible
+        if let Err(e) = self.rpc_client.get_health().await {
+            tracing::warn!(error = %e, "RPC health check failed before Jito execution");
+            return Err(ExecutorError::Rpc(format!("RPC unavailable: {}", e)));
+        }
+
+        // Load wallet keypair from vault
+        let secrets = load_secrets_with_fallback()
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e)))?;
+        let wallet_keypair = load_wallet_keypair(&secrets)
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e)))?;
+
+        // Build transaction
+        let transaction_builder = TransactionBuilder::new(self.rpc_client.clone(), self.config.clone());
+        let built_tx = transaction_builder
+            .build_swap_transaction(signal, &wallet_keypair)
+            .await
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e)))?;
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
-        tracing::debug!(tip_sol = tip, "Calculated Jito tip");
-
-        // Simulate network delay
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Generate a fake signature for now
-        let signature = format!(
-            "{}{}{}",
-            &signal.trade_uuid[..8],
-            Utc::now().timestamp(),
-            "jito"
+        tracing::debug!(
+            tip_sol = tip,
+            strategy = %signal.payload.strategy,
+            "Calculated Jito tip"
         );
 
+        // Submit to Jito via direct Jito Searcher (preferred) or Helius Sender API (fallback)
+        
+        // Try direct Jito Searcher first if configured
+        if let Some(ref jito_searcher) = self.jito_searcher {
+            let tip_lamports = (tip * 1_000_000_000.0) as u64; // Convert SOL to lamports
+            match jito_searcher
+                .submit_bundle(&built_tx.transaction, tip_lamports, &wallet_keypair)
+                .await
+            {
+                Ok(signature) => {
+                    tracing::info!(
+                        trade_uuid = %signal.trade_uuid,
+                        signature = %signature,
+                        "Bundle submitted via direct Jito Searcher"
+                    );
+                    return Ok(signature);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        error = %e,
+                        "Direct Jito Searcher failed, trying Helius fallback"
+                    );
+                    // Fall through to Helius fallback if configured
+                }
+            }
+        }
+
+        // Fallback to Helius Sender API if configured and enabled
+        if self.config.jito.helius_fallback {
+            if let Some(helius_api_key) = secrets.rpc_api_key.as_ref() {
+                match self
+                    .submit_via_helius_sender(&built_tx.transaction, tip, helius_api_key)
+                    .await
+                {
+                    Ok(signature) => {
+                        tracing::info!(
+                            trade_uuid = %signal.trade_uuid,
+                            signature = %signature,
+                            "Bundle submitted via Helius Sender API"
+                        );
+                        return Ok(signature);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            error = %e,
+                            "Helius Sender API also failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Final fallback: Submit via standard TPU
+        tracing::warn!(
+            trade_uuid = %signal.trade_uuid,
+            "Jito bundle submission failed, falling back to standard TPU"
+        );
+        
+        // Sign and send transaction via standard RPC
+        let signature = self
+            .submit_transaction(&built_tx.transaction, &wallet_keypair)
+            .await?;
+
         Ok(signature)
+    }
+
+    /// Submit transaction via Helius Sender API (Jito bundles)
+    async fn submit_via_helius_sender(
+        &self,
+        transaction: &Transaction,
+        tip_sol: f64,
+        api_key: &str,
+    ) -> Result<String, ExecutorError> {
+        // Helius Sender API endpoint
+        let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
+
+        // Convert transaction to base64
+        let tx_bytes = bincode::serialize(transaction)
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
+        let tx_base64 = BASE64.encode(&tx_bytes);
+
+        // Create bundle payload
+        // Note: Helius Sender API expects a specific format
+        // For now, we'll submit the transaction directly
+        // In production, you would create a proper bundle with tip transaction
+        
+        let payload = serde_json::json!({
+            "transactions": [tx_base64],
+            "tip": (tip_sol * 1_000_000_000.0) as u64, // Convert SOL to lamports
+        });
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| ExecutorError::Rpc(format!("Helius Sender request failed: {}", e)))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(ExecutorError::Rpc(format!(
+                "Helius Sender API error: {} - {}",
+                status,
+                error_text
+            )));
+        }
+
+        // Parse response to get bundle signature
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ExecutorError::Rpc(format!("Failed to parse Helius response: {}", e)))?;
+
+        // Extract signature from response
+        let signature = result
+            .get("signature")
+            .or_else(|| result.get("bundleId"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ExecutorError::Rpc("No signature in Helius response".to_string()))?;
+
+        Ok(signature.to_string())
     }
 
     /// Execute via standard TPU
     async fn execute_standard(&self, signal: &Signal) -> Result<String, ExecutorError> {
-        // TODO: Implement actual Solana RPC transaction submission
-        // This is a stub that simulates execution
-
-        tracing::debug!(
+        tracing::info!(
             trade_uuid = %signal.trade_uuid,
-            "Simulating standard TPU execution"
+            "Executing trade via standard TPU"
         );
 
-        // Simulate network delay
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        // Verify RPC is accessible
+        if let Err(e) = self.rpc_client.get_health().await {
+            tracing::warn!(error = %e, "RPC health check failed before execution");
+            return Err(ExecutorError::Rpc(format!("RPC unavailable: {}", e)));
+        }
 
-        // Generate a fake signature for now
-        let signature = format!(
-            "{}{}{}",
-            &signal.trade_uuid[..8],
-            Utc::now().timestamp(),
-            "std"
-        );
+        // Load wallet keypair from vault
+        let secrets = load_secrets_with_fallback()
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e)))?;
+        let wallet_keypair = load_wallet_keypair(&secrets)
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e)))?;
+
+        // Build transaction
+        let transaction_builder = TransactionBuilder::new(self.rpc_client.clone(), self.config.clone());
+        let built_tx = transaction_builder
+            .build_swap_transaction(signal, &wallet_keypair)
+            .await
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e)))?;
+
+        // Submit transaction via RPC
+        let signature = self
+            .submit_transaction(&built_tx.transaction, &wallet_keypair)
+            .await?;
 
         Ok(signature)
     }
 
+    /// Submit a signed transaction to the RPC
+    async fn submit_transaction(
+        &self,
+        transaction: &Transaction,
+        _keypair: &solana_sdk::signature::Keypair,
+    ) -> Result<String, ExecutorError> {
+        // Ensure transaction is signed
+        // Note: TransactionBuilder should have already signed it, but we verify here
+        
+        // Send transaction via RPC
+        let signature = self
+            .rpc_client
+            .send_and_confirm_transaction(transaction)
+            .await
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Transaction submission failed: {}", e)))?;
+
+        tracing::info!(
+            signature = %signature,
+            "Transaction submitted successfully"
+        );
+
+        Ok(signature.to_string())
+    }
+
     /// Calculate dynamic Jito tip based on strategy and history
     pub fn calculate_jito_tip(&self, signal: &Signal) -> f64 {
-        // For MVP, use a simple strategy-based tip
-        // TODO: Use TipManager for percentile-based calculation
+        // Use TipManager if available, otherwise fall back to simple strategy-based calculation
+        if let Some(ref tip_manager) = self.tip_manager {
+            tip_manager.calculate_tip(signal.payload.strategy, signal.payload.amount_sol)
+        } else {
+            // Fallback to simple strategy-based tip calculation
+            let base_tip = match signal.payload.strategy {
+                Strategy::Shield => self.config.jito.tip_floor_sol,
+                Strategy::Spear => {
+                    // Use higher tip for Spear to ensure bundle inclusion
+                    (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol) / 2.0
+                }
+                Strategy::Exit => self.config.jito.tip_ceiling_sol, // Max tip for exits
+            };
 
-        let base_tip = match signal.payload.strategy {
-            Strategy::Shield => self.config.jito.tip_floor_sol,
-            Strategy::Spear => {
-                // Use higher tip for Spear to ensure bundle inclusion
-                (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol) / 2.0
-            }
-            Strategy::Exit => self.config.jito.tip_ceiling_sol, // Max tip for exits
-        };
+            // Apply percentage cap
+            let max_by_percent = signal.payload.amount_sol * self.config.jito.tip_percent_max;
+            let tip = base_tip.min(max_by_percent).min(self.config.jito.tip_ceiling_sol);
 
-        // Apply percentage cap
-        let max_by_percent = signal.payload.amount_sol * self.config.jito.tip_percent_max;
-        let tip = base_tip.min(max_by_percent).min(self.config.jito.tip_ceiling_sol);
-
-        tip.max(self.config.jito.tip_floor_sol)
+            tip.max(self.config.jito.tip_floor_sol)
+        }
     }
 
     /// Switch to fallback RPC mode

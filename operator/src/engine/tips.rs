@@ -29,6 +29,7 @@ const COLD_START_MULTIPLIER: f64 = 2.0;
 #[derive(Debug, Clone)]
 struct TipEntry {
     amount_sol: f64,
+    #[allow(dead_code)] // Reserved for future strategy-specific tip tracking
     strategy: Strategy,
 }
 
