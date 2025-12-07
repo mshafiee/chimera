@@ -1,0 +1,26 @@
+# Environment & Secrets
+.env
+config.enc
+*.key
+*.pem
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+database/*.db
+
+# Rust
+target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+venv/
+.pytest_cache/
+
+# OS
+.DS_Store

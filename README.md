@@ -1,117 +1,171 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/user-attachments/assets/e17b622b-2326-444f-8e4d-6169527ecb80" alt="Chimera Logo" width="150"/>
-</p>
-
 <h1 align="center">Project Chimera</h1>
 
 <p align="center">
-  <strong>An Autonomous, Behavioral Copy-Trading Engine for Solana</strong>
+  <strong>High-Frequency, Fault-Tolerant Financial Platform for Solana</strong>
   <br />
-  Built in Rust for bulletproof performance and safety.
+  <em>Barbell Strategy Execution • < 5ms Internal Latency • Institutional Grade Resilience</em>
 </p>
 
 <p align="center">
-    <a href="#"><img src="https://img.shields.io/badge/status-active-success.svg" alt="Status"></a>
-    <a href="#"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
-    <a href="https://github.com/your-username/chimera/actions/workflows/ci.yml"><img src="https://github.com/your-username/chimera/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="#"><img src="https://img.shields.io/badge/version-v7.1_(Engineering_Freeze)-blue" alt="Version"></a>
+    <a href="#"><img src="https://img.shields.io/badge/status-approved-success.svg" alt="Status"></a>
+    <a href="#"><img src="https://img.shields.io/badge/license-MIT-purple.svg" alt="License"></a>
+    <a href="#"><img src="https://img.shields.io/badge/stack-Rust_%7C_Python_%7C_SQLite-orange" alt="Stack"></a>
 </p>
 
 ---
 
-## 🛡️ The Philosophy: Protect the Downside, Uncap the Upside 🗡️
+## ⚠️ Infrastructure Latency Warning
 
-Standard copy-trading bots are one-dimensional. They either copy every trade and get wrecked by scams, or they are too conservative and miss 100x opportunities.
+**Critical:** Chimera is a High-Frequency Trading (HFT) system. Physical location matters.
+*   **Do not run this from Hetzner Falkenstein or Helsinki.** The 100ms roundtrip latency to US-East RPCs defeats the internal optimization.
+*   **Requirement:** Servers must be located in **Ashburn, VA (US-East)** or **Amsterdam**.
+*   **Recommended Providers:** Latitude.sh, Cherry Servers, or Hetzner (Ashburn DC only).
+*   **Verification:** `ping -c 10 <helius-endpoint>` must yield **< 50ms** before deploying the Spear strategy.
 
-**Chimera** is different. It operates with a **hybrid brain**, implementing a "Barbell Strategy" that dynamically switches between two personalities:
+---
 
-1.  **The Shield 🛡️ (Capital Preservation):** A risk-averse engine that focuses on high-probability trades from proven "Alpha Hunter" wallets. It grinds small, consistent profits to pay for operational costs and protect the bankroll.
+## 🛡️ The Philosophy: The Barbell Strategy
 
-2.  **The Spear 🗡️ (Asymmetric Upside):** A high-aggression engine that activates only on high-conviction signals, such as **Coordinated Insider Clusters** buying a new token. It risks small to hunt for massive, 100x returns.
+Chimera is not a simple "copy-bot." It is an automated financial platform that manages risk using a **Barbell Strategy**—balancing extreme safety with extreme upside.
 
-This allows the bot to survive market downturns using its Shield, while capitalizing on explosive opportunities with its Spear.
+1.  **🛡️ The Shield (Capital Preservation):** 
+    *   **Focus:** Low-risk, high-consistency trades.
+    *   **Behavior:** Copies proven "Alpha Hunters" with strict stop-losses and liquidity checks.
+    *   **Goal:** Grind small, consistent profits to cover operational costs (OpEx) and protect the principal.
 
-## ✨ Key Features
+2.  **⚔️ The Spear (Asymmetric Upside):** 
+    *   **Focus:** High-risk, high-reward opportunities.
+    *   **Behavior:** Activates only on high-conviction signals (e.g., Insider Clusters, Momentum Breakouts) using Jito Bundles for guaranteed inclusion.
+    *   **Goal:** Hunt for 50x-100x outliers.
+    *   **Safety:** Automatically disabled if the system detects RPC instability or consecutive losses.
 
--   **🧠 Behavioral Profiling:** Automatically classifies wallets into profiles like "Insider," "Alpha Hunter," or "Sniper Bot" to understand their intent.
--   **🔗 Cluster Analysis:** Detects coordinated buying from linked groups of wallets—a powerful signal that often precedes a major pump.
--   **🛡️ The Shield Engine:** A conservative execution mode with strict safety checks (LP lock, holder concentration) and fixed profit targets.
--   **🗡️ The Spear Engine:** An aggressive execution mode with dynamic bet sizing (Kelly Criterion) and a "Moonbag" exit strategy to ride tokens to their peak.
--   **🤖 State Management via Telegram:** Full command and control of the bot's operational mode (`Turtle`, `Hunter`, `Freeze`) without touching the server.
--   **💥 Automated Circuit Breakers:** The bot automatically disables failing strategies after a losing streak to prevent "tilt" and protect capital.
--   **⛽ Gasless Execution via Jito:** Uses Jito Bundles to ensure trades are atomic. If a trade fails for any reason (slippage, revert), **you pay zero gas**, eliminating the "death by a thousand cuts" that kills budget bots.
--   **🦀 Built in Rust:** Lightweight, incredibly fast, and memory-safe. Runs efficiently on a cheap ~$8/month VPS.
+---
 
-## 🏛️ Architecture
+## 🏗️ System Architecture
 
-Chimera is composed of two primary components: a real-time Rust Operator and an offline Python Scout.
+Chimera v7.1 utilizes a **Hot/Cold** architecture. The Rust Operator handles sub-millisecond execution, while the Python Scout handles heavy data analysis offline.
 
 ```mermaid
-graph TD
-    subgraph "The Operator (Rust - Real-Time)"
-    A[Helius Webhook] --> B(Signal Router)
-    B -->|Class: Hunter| C[Shield Engine]
-    B -->|Class: Insider| D[Spear Engine]
-    C & D --> F[Jito Bundle Builder]
-    F --> G[Solana Network]
+graph LR
+    subgraph "The Hot Path (Rust Operator)"
+    A[Ingress: Axum] -->|HMAC + RateLimit| B(Signal Parser)
+    B --> C{Priority Buffer}
+    C -->|High Priority| D[Shield Engine]
+    C -->|Low Priority| E[Spear Engine]
+    C -->|Queue > 80%| F[Load Shedding]
+    
+    D & E --> G{Executor}
+    G -->|Primary| H[Helius Jito]
+    G -->|Fallback| I[QuickNode TPU]
     end
     
-    subgraph "The Scout (Python - Daily Cron Job)"
-    H[Market Analysis] --> I[Wallet Profiler]
-    I --> J[(SQLite DB)]
-    J -->|Hot Reload| B
+    subgraph "The Cold Path (Python Scout)"
+    J[Daily Cron] --> K[Wallet Profiler]
+    K -->|WQS Scoring| L[(Roster DB)]
     end
 ```
+
+### Key Components
+
+*   **The Ingress (Rust):** Provides DDoS protection, HMAC signature verification, and Replay Attack prevention.
+*   **The Executor (Rust):** Smart routing between Jito Bundles (MEV protection) and standard TPU transactions based on network health. Includes "Stuck State" recovery logic.
+*   **The Scout (Python):** Calculates **Wallet Quality Score (WQS) v2** and runs pre-promotion backtests with historical liquidity validation.
+*   **The Vault:** AES-256 encrypted storage for private keys; secrets are never held in plaintext config files.
+
+---
+
+## ✨ v7.1 Feature Set
+
+### 🔒 Security & Safety
+*   **TokenParser:** Pre-trade analysis to reject **Honeypots**, tokens with **Freeze Authority**, or **Mint Authority**. Implements a Fast/Slow path pattern to minimize latency.
+*   **Circuit Breakers:** Automatic trading halts if `max_loss_24h` or `max_drawdown` thresholds are breached.
+*   **Idempotency:** Deterministic UUID generation prevents double-buying during webhook retries.
+
+### ⚡ Resilience
+*   **Priority Queuing:** Drops "Spear" signals first during high load to preserve "Shield" and "Exit" throughput.
+*   **RPC Failover:** Auto-switches from Helius to QuickNode/Triton if latency exceeds 2s.
+*   **Self-Healing:** Database write-lock mitigation via WAL mode and SQL-level merge strategies.
+
+### 📊 Compliance & Ops
+*   **Reconciliation:** Daily audit processes that compare Database State vs. On-Chain State to detect discrepancies.
+*   **Audit Logs:** Immutable logs for every configuration change (`config_audit`) and failed operation (`dead_letter_queue`).
+*   **Dashboard:** Real-time web interface for monitoring PnL, active positions, and managing the wallet roster.
+
+---
 
 ## 🛠️ Tech Stack
 
--   **Core Logic:** **Rust** (with Tokio & Axum) for performance and safety.
--   **Data Analysis:** **Python** (with Pandas) for offline wallet discovery and profiling.
--   **Data Provider:** **Helius** (Developer Plan) for real-time webhooks and transaction history.
--   **Execution:** **Jupiter API** for quotes and **Jito** for atomic, gasless trade execution.
--   **Database:** **SQLite** for lightweight, persistent state management.
--   **Control:** **Telegram** for remote commands and status updates.
+*   **Core:** Rust (Tokio, Axum, Tower-Governor)
+*   **Database:** SQLite (WAL Mode, SQLx)
+*   **Intelligence:** Python 3.11 (Pandas, Numpy)
+*   **Blockchain:** Solana SDK, Jito Block Engine
+*   **Observability:** Structured JSON Logging, Prometheus Metrics
+
+---
 
 ## 🚀 Getting Started
 
-### Prerequisites
+### 1. Prerequisites
+*   Rust 1.75+ & Cargo
+*   Python 3.11+
+*   Helius API Key (Developer or Pro)
+*   **Server in US-East (Ashburn)**
 
--   A Linux VPS (e.g., Hetzner CPX11) running Ubuntu 22.04.
--   Rust & Cargo installed.
--   A Helius Developer Plan API Key.
--   A Telegram Bot Token and your User ID.
-
-### 1. Clone the Repository
-
+### 2. Installation
 ```bash
-git clone https://github.com/your-username/chimera.git
-cd chimera
+# Clone the repository
+git clone https://github.com/your-org/chimera-platform.git
+cd chimera-platform
+
+# Run the Setup Script (Creates DB, Structure, Configs)
+chmod +x setup_chimera.sh
+./setup_chimera.sh
 ```
 
-### 2. Configuration
-
-1.  Copy the example config: `cp .env.example .env`
-2.  Edit the `.env` file and add your Helius API Key, Telegram credentials, and Solana wallet private key.
-3.  Run the setup script to initialize the database:
-    ```bash
-    sh scripts/setup.sh
-    ```
-
-### 3. Run The Scout (First Time)
-
-Run the Python script to find your first set of wallets to monitor.
-
+### 3. Configuration
+Edit `config/config.enc` (or `.env` for dev) with your secrets:
 ```bash
-pip install -r scout/requirements.txt
-python scout/main.py
+# config/.env
+DATABASE_URL=sqlite:../database/chimera.db
+HELIUS_API_KEY=your_key_here
+HMAC_SECRET=generate_strong_secret_here
+PRIVATE_KEY=[array_of_ints]
 ```
 
-### 4. Launch The Operator (Paper Mode)
-
-**Always start in Paper Mode to verify your setup without risking funds.**
-
+### 4. Initialize Database
 ```bash
-# By default, the bot starts in Paper Mode.
+sqlite3 database/chimera.db < database/schema.sql
+```
+
+### 5. Run the Platform
+**Terminal 1: The Operator (Hot Path)**
+```bash
+cd operator
 cargo run --release
 ```
 
-The bot will now listen for trades from your scouted wallets and log what it *would* have done. Once you are confident, edit the `.env` to switch to live trading.
+**Terminal 2: The Scout (Intelligence)**
+```bash
+# Install requirements
+pip install -r scout/requirements.txt
+
+# Run initial analysis
+python scout/main.py
+```
+
+---
+
+## 📉 Operations & Recovery
+
+*   **Graceful Shutdown:** `CTRL+C` triggers the shutdown hook, persisting the Jito Tip History and flushing WAL logs.
+*   **Panic Recovery:** If the Operator crashes, `systemd` will auto-restart it. The `Stuck State` logic will automatically reconcile pending transactions on startup.
+*   **Emergency Halt:**
+    *   **Via API:** `POST /api/v1/admin/halt`
+    *   **Via CLI:** `touch config/HALT` (File watcher will trigger immediate stop)
+
+---
+
+## 📜 License
+
+Project Chimera is proprietary software. Unauthorized copying or distribution is strictly prohibited.
