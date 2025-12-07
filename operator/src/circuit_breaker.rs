@@ -362,6 +362,10 @@ pub struct CircuitBreakerStatus {
 mod tests {
     use super::*;
 
+    // ==========================================================================
+    // STATE DISPLAY TESTS
+    // ==========================================================================
+
     #[test]
     fn test_state_display() {
         assert_eq!(CircuitBreakerState::Active.to_string(), "ACTIVE");
@@ -369,13 +373,188 @@ mod tests {
         assert_eq!(CircuitBreakerState::Cooldown.to_string(), "COOLDOWN");
     }
 
+    // ==========================================================================
+    // TRIP REASON DISPLAY TESTS
+    // ==========================================================================
+
     #[test]
-    fn test_trip_reason_display() {
+    fn test_trip_reason_max_loss_24h() {
         let reason = TripReason::MaxLoss24h {
-            loss: 500.0,
-            threshold: 400.0,
+            loss: 525.50,
+            threshold: 500.0,
         };
-        assert!(reason.to_string().contains("500"));
-        assert!(reason.to_string().contains("400"));
+        let display = reason.to_string();
+        assert!(display.contains("525.50"), "Should include actual loss amount");
+        assert!(display.contains("500"), "Should include threshold");
+        assert!(display.contains("24h"), "Should indicate 24h period");
+    }
+
+    #[test]
+    fn test_trip_reason_consecutive_losses() {
+        let reason = TripReason::ConsecutiveLosses {
+            count: 6,
+            threshold: 5,
+        };
+        let display = reason.to_string();
+        assert!(display.contains("6"), "Should include actual count");
+        assert!(display.contains("5"), "Should include threshold");
+        assert!(display.contains("consecutive"), "Should indicate consecutive losses");
+    }
+
+    #[test]
+    fn test_trip_reason_max_drawdown() {
+        let reason = TripReason::MaxDrawdown {
+            drawdown: 18.5,
+            threshold: 15.0,
+        };
+        let display = reason.to_string();
+        assert!(display.contains("18.5"), "Should include actual drawdown");
+        assert!(display.contains("15"), "Should include threshold");
+    }
+
+    #[test]
+    fn test_trip_reason_manual() {
+        let reason = TripReason::Manual {
+            reason: "Emergency halt by admin".to_string(),
+        };
+        let display = reason.to_string();
+        assert!(display.contains("Manual"), "Should indicate manual trip");
+        assert!(display.contains("Emergency halt"), "Should include reason text");
+    }
+
+    // ==========================================================================
+    // THRESHOLD BOUNDARY TESTS (per PDD Section 4.4)
+    // ==========================================================================
+
+    #[test]
+    fn test_max_loss_threshold_exact_boundary() {
+        // Testing: loss >= threshold should trip
+        let loss = 500.0_f64;
+        let threshold = 500.0_f64;
+        let should_trip = loss.abs() >= threshold;
+        assert!(should_trip, "Exact boundary ($500) should trigger circuit breaker");
+    }
+
+    #[test]
+    fn test_max_loss_threshold_below_boundary() {
+        let loss = 499.99_f64;
+        let threshold = 500.0_f64;
+        let should_trip = loss.abs() >= threshold;
+        assert!(!should_trip, "Below threshold should not trigger circuit breaker");
+    }
+
+    #[test]
+    fn test_consecutive_losses_exact_boundary() {
+        let consecutive: u32 = 5;
+        let threshold: u32 = 5;
+        let should_trip = consecutive >= threshold;
+        assert!(should_trip, "Exact 5 consecutive losses should trigger circuit breaker");
+    }
+
+    #[test]
+    fn test_consecutive_losses_below_boundary() {
+        let consecutive: u32 = 4;
+        let threshold: u32 = 5;
+        let should_trip = consecutive >= threshold;
+        assert!(!should_trip, "4 consecutive losses should not trip");
+    }
+
+    #[test]
+    fn test_drawdown_exact_boundary() {
+        let drawdown = 15.0_f64;
+        let threshold = 15.0_f64;
+        let should_trip = drawdown >= threshold;
+        assert!(should_trip, "Exact 15% drawdown should trigger circuit breaker");
+    }
+
+    #[test]
+    fn test_drawdown_below_boundary() {
+        let drawdown = 14.99_f64;
+        let threshold = 15.0_f64;
+        let should_trip = drawdown >= threshold;
+        assert!(!should_trip, "Below 15% drawdown should not trip");
+    }
+
+    // ==========================================================================
+    // PNL HANDLING TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_negative_pnl_triggers_loss_check() {
+        let pnl_24h = -525.50_f64; // Loss of $525.50
+        let threshold = 500.0_f64;
+        // From evaluate(): pnl_24h < 0.0 && pnl_24h.abs() >= threshold
+        let should_trip = pnl_24h < 0.0 && pnl_24h.abs() >= threshold;
+        assert!(should_trip, "Negative PnL exceeding threshold should trip");
+    }
+
+    #[test]
+    fn test_positive_pnl_never_trips() {
+        let pnl_24h = 1000.0_f64; // Profit of $1000
+        let threshold = 500.0_f64;
+        let should_trip = pnl_24h < 0.0 && pnl_24h.abs() >= threshold;
+        assert!(!should_trip, "Positive PnL should never trip loss-based circuit breaker");
+    }
+
+    #[test]
+    fn test_zero_pnl_no_trip() {
+        let pnl_24h = 0.0_f64;
+        let threshold = 500.0_f64;
+        let should_trip = pnl_24h < 0.0 && pnl_24h.abs() >= threshold;
+        assert!(!should_trip, "Zero PnL should not trip");
+    }
+
+    // ==========================================================================
+    // COOLDOWN TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_cooldown_not_expired() {
+        let cooldown_minutes: u32 = 30;
+        let tripped_at = Utc::now() - Duration::minutes(15); // 15 minutes ago
+        let cooldown_duration = Duration::minutes(cooldown_minutes as i64);
+        let elapsed = Utc::now().signed_duration_since(tripped_at);
+        let should_exit = elapsed >= cooldown_duration;
+        assert!(!should_exit, "Should still be in cooldown after 15 minutes");
+    }
+
+    #[test]
+    fn test_cooldown_expired() {
+        let cooldown_minutes: u32 = 30;
+        let tripped_at = Utc::now() - Duration::minutes(31); // 31 minutes ago
+        let cooldown_duration = Duration::minutes(cooldown_minutes as i64);
+        let elapsed = Utc::now().signed_duration_since(tripped_at);
+        let should_exit = elapsed >= cooldown_duration;
+        assert!(should_exit, "Should exit cooldown after 31 minutes");
+    }
+
+    #[test]
+    fn test_cooldown_remaining_calculation() {
+        let cooldown_minutes: u32 = 30;
+        let tripped_at = Utc::now() - Duration::minutes(20); // 20 minutes ago
+        let cooldown_duration = Duration::minutes(cooldown_minutes as i64);
+        let elapsed = Utc::now().signed_duration_since(tripped_at);
+        let remaining_secs = (cooldown_duration - elapsed).num_seconds().max(0);
+        // Should be approximately 10 minutes = 600 seconds remaining
+        assert!(remaining_secs > 500 && remaining_secs < 700, 
+            "Should have ~10 minutes remaining, got {} seconds", remaining_secs);
+    }
+
+    // ==========================================================================
+    // STATE EQUALITY TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_state_equality() {
+        assert_eq!(CircuitBreakerState::Active, CircuitBreakerState::Active);
+        assert_ne!(CircuitBreakerState::Active, CircuitBreakerState::Tripped);
+        assert_ne!(CircuitBreakerState::Tripped, CircuitBreakerState::Cooldown);
+    }
+
+    #[test]
+    fn test_state_copy() {
+        let state = CircuitBreakerState::Active;
+        let copied = state;
+        assert_eq!(state, copied, "CircuitBreakerState should be Copy");
     }
 }

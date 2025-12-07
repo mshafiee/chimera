@@ -219,39 +219,289 @@ pub const MAX_RETRY_ATTEMPTS: u32 = 3;
 mod tests {
     use super::*;
 
+    // ==========================================================================
+    // VALID STATE TRANSITIONS (PDD Section 4.5)
+    // ==========================================================================
+
     #[test]
-    fn test_status_transitions() {
-        // Valid transitions
+    fn test_pending_to_queued_valid() {
+        assert!(
+            TradeStatus::Pending.can_transition_to(TradeStatus::Queued),
+            "PENDING -> QUEUED should be valid (validation passed)"
+        );
+    }
+
+    #[test]
+    fn test_queued_to_executing_valid() {
+        assert!(
+            TradeStatus::Queued.can_transition_to(TradeStatus::Executing),
+            "QUEUED -> EXECUTING should be valid (dequeued for execution)"
+        );
+    }
+
+    #[test]
+    fn test_executing_to_active_valid() {
+        assert!(
+            TradeStatus::Executing.can_transition_to(TradeStatus::Active),
+            "EXECUTING -> ACTIVE should be valid (TX confirmed)"
+        );
+    }
+
+    #[test]
+    fn test_executing_to_failed_valid() {
+        assert!(
+            TradeStatus::Executing.can_transition_to(TradeStatus::Failed),
+            "EXECUTING -> FAILED should be valid (TX rejected)"
+        );
+    }
+
+    #[test]
+    fn test_active_to_exiting_valid() {
+        assert!(
+            TradeStatus::Active.can_transition_to(TradeStatus::Exiting),
+            "ACTIVE -> EXITING should be valid (exit signal received)"
+        );
+    }
+
+    #[test]
+    fn test_exiting_to_closed_valid() {
+        assert!(
+            TradeStatus::Exiting.can_transition_to(TradeStatus::Closed),
+            "EXITING -> CLOSED should be valid (exit confirmed)"
+        );
+    }
+
+    // ==========================================================================
+    // RETRY FLOW
+    // ==========================================================================
+
+    #[test]
+    fn test_failed_to_retry_valid() {
+        assert!(
+            TradeStatus::Failed.can_transition_to(TradeStatus::Retry),
+            "FAILED -> RETRY should be valid (auto-retry)"
+        );
+    }
+
+    #[test]
+    fn test_retry_to_executing_valid() {
+        assert!(
+            TradeStatus::Retry.can_transition_to(TradeStatus::Executing),
+            "RETRY -> EXECUTING should be valid (retry attempt)"
+        );
+    }
+
+    #[test]
+    fn test_retry_to_dead_letter_valid() {
+        assert!(
+            TradeStatus::Retry.can_transition_to(TradeStatus::DeadLetter),
+            "RETRY -> DEAD_LETTER should be valid (max retries exceeded)"
+        );
+    }
+
+    // ==========================================================================
+    // RECOVERY FLOWS
+    // ==========================================================================
+
+    #[test]
+    fn test_exiting_to_active_recovery() {
+        assert!(
+            TradeStatus::Exiting.can_transition_to(TradeStatus::Active),
+            "EXITING -> ACTIVE should be valid (stuck state recovery)"
+        );
+    }
+
+    #[test]
+    fn test_executing_to_dead_letter_valid() {
+        assert!(
+            TradeStatus::Executing.can_transition_to(TradeStatus::DeadLetter),
+            "EXECUTING -> DEAD_LETTER should be valid (unrecoverable failure)"
+        );
+    }
+
+    #[test]
+    fn test_pending_to_dead_letter_valid() {
+        assert!(
+            TradeStatus::Pending.can_transition_to(TradeStatus::DeadLetter),
+            "PENDING -> DEAD_LETTER should be valid (validation failure)"
+        );
+    }
+
+    #[test]
+    fn test_queued_to_dead_letter_valid() {
+        assert!(
+            TradeStatus::Queued.can_transition_to(TradeStatus::DeadLetter),
+            "QUEUED -> DEAD_LETTER should be valid (queue timeout)"
+        );
+    }
+
+    // ==========================================================================
+    // INVALID STATE TRANSITIONS
+    // ==========================================================================
+
+    #[test]
+    fn test_pending_to_active_invalid() {
+        assert!(
+            !TradeStatus::Pending.can_transition_to(TradeStatus::Active),
+            "PENDING -> ACTIVE should be invalid (must go through QUEUED, EXECUTING)"
+        );
+    }
+
+    #[test]
+    fn test_active_to_queued_invalid() {
+        assert!(
+            !TradeStatus::Active.can_transition_to(TradeStatus::Queued),
+            "ACTIVE -> QUEUED should be invalid (backwards flow)"
+        );
+    }
+
+    #[test]
+    fn test_closed_to_any_invalid() {
+        assert!(!TradeStatus::Closed.can_transition_to(TradeStatus::Active));
+        assert!(!TradeStatus::Closed.can_transition_to(TradeStatus::Pending));
+        assert!(!TradeStatus::Closed.can_transition_to(TradeStatus::Exiting));
+    }
+
+    #[test]
+    fn test_dead_letter_to_any_invalid() {
+        assert!(!TradeStatus::DeadLetter.can_transition_to(TradeStatus::Pending));
+        assert!(!TradeStatus::DeadLetter.can_transition_to(TradeStatus::Retry));
+        assert!(!TradeStatus::DeadLetter.can_transition_to(TradeStatus::Active));
+    }
+
+    #[test]
+    fn test_active_to_closed_invalid() {
+        assert!(
+            !TradeStatus::Active.can_transition_to(TradeStatus::Closed),
+            "ACTIVE -> CLOSED should be invalid (must go through EXITING)"
+        );
+    }
+
+    // ==========================================================================
+    // TERMINAL STATE TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_closed_is_terminal() {
+        assert!(TradeStatus::Closed.is_terminal(), "CLOSED should be terminal");
+    }
+
+    #[test]
+    fn test_dead_letter_is_terminal() {
+        assert!(TradeStatus::DeadLetter.is_terminal(), "DEAD_LETTER should be terminal");
+    }
+
+    #[test]
+    fn test_active_not_terminal() {
+        assert!(!TradeStatus::Active.is_terminal(), "ACTIVE should not be terminal");
+    }
+
+    #[test]
+    fn test_pending_not_terminal() {
+        assert!(!TradeStatus::Pending.is_terminal(), "PENDING should not be terminal");
+    }
+
+    // ==========================================================================
+    // ACTIVE POSITION TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_active_is_active_position() {
+        assert!(TradeStatus::Active.is_active_position(), "ACTIVE is an active position");
+    }
+
+    #[test]
+    fn test_exiting_is_active_position() {
+        assert!(TradeStatus::Exiting.is_active_position(), "EXITING is an active position (still holding)");
+    }
+
+    #[test]
+    fn test_closed_not_active_position() {
+        assert!(!TradeStatus::Closed.is_active_position(), "CLOSED is not an active position");
+    }
+
+    // ==========================================================================
+    // STRING PARSING TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_status_from_string_uppercase() {
+        assert_eq!("PENDING".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
+        assert_eq!("QUEUED".parse::<TradeStatus>().unwrap(), TradeStatus::Queued);
+        assert_eq!("EXECUTING".parse::<TradeStatus>().unwrap(), TradeStatus::Executing);
+        assert_eq!("ACTIVE".parse::<TradeStatus>().unwrap(), TradeStatus::Active);
+        assert_eq!("EXITING".parse::<TradeStatus>().unwrap(), TradeStatus::Exiting);
+        assert_eq!("CLOSED".parse::<TradeStatus>().unwrap(), TradeStatus::Closed);
+        assert_eq!("FAILED".parse::<TradeStatus>().unwrap(), TradeStatus::Failed);
+        assert_eq!("RETRY".parse::<TradeStatus>().unwrap(), TradeStatus::Retry);
+        assert_eq!("DEAD_LETTER".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
+    }
+
+    #[test]
+    fn test_status_from_string_lowercase() {
+        assert_eq!("pending".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
+        assert_eq!("active".parse::<TradeStatus>().unwrap(), TradeStatus::Active);
+        assert_eq!("dead_letter".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
+    }
+
+    #[test]
+    fn test_status_from_string_invalid() {
+        assert!("INVALID".parse::<TradeStatus>().is_err());
+        assert!("".parse::<TradeStatus>().is_err());
+    }
+
+    // ==========================================================================
+    // RETRY COUNT TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_max_retry_attempts_constant() {
+        assert_eq!(MAX_RETRY_ATTEMPTS, 3, "Max retry attempts should be 3 per PDD");
+    }
+
+    #[test]
+    fn test_max_retries_exceeded() {
+        let retry_count: u32 = 3;
+        assert!(retry_count >= MAX_RETRY_ATTEMPTS, "3 retries should exceed max of 3");
+    }
+
+    #[test]
+    fn test_max_retries_not_exceeded() {
+        let retry_count: u32 = 2;
+        assert!(retry_count < MAX_RETRY_ATTEMPTS, "2 retries should not exceed max");
+    }
+
+    // ==========================================================================
+    // FULL FLOW TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_happy_path_flow() {
+        // PENDING -> QUEUED -> EXECUTING -> ACTIVE -> EXITING -> CLOSED
         assert!(TradeStatus::Pending.can_transition_to(TradeStatus::Queued));
         assert!(TradeStatus::Queued.can_transition_to(TradeStatus::Executing));
         assert!(TradeStatus::Executing.can_transition_to(TradeStatus::Active));
-        assert!(TradeStatus::Executing.can_transition_to(TradeStatus::Failed));
         assert!(TradeStatus::Active.can_transition_to(TradeStatus::Exiting));
         assert!(TradeStatus::Exiting.can_transition_to(TradeStatus::Closed));
+    }
 
-        // Retry flow
+    #[test]
+    fn test_failure_with_retry_flow() {
+        // PENDING -> QUEUED -> EXECUTING -> FAILED -> RETRY -> EXECUTING -> ACTIVE
+        assert!(TradeStatus::Pending.can_transition_to(TradeStatus::Queued));
+        assert!(TradeStatus::Queued.can_transition_to(TradeStatus::Executing));
+        assert!(TradeStatus::Executing.can_transition_to(TradeStatus::Failed));
         assert!(TradeStatus::Failed.can_transition_to(TradeStatus::Retry));
         assert!(TradeStatus::Retry.can_transition_to(TradeStatus::Executing));
-        assert!(TradeStatus::Retry.can_transition_to(TradeStatus::DeadLetter));
-
-        // Invalid transitions
-        assert!(!TradeStatus::Pending.can_transition_to(TradeStatus::Active));
-        assert!(!TradeStatus::Closed.can_transition_to(TradeStatus::Active));
-        assert!(!TradeStatus::DeadLetter.can_transition_to(TradeStatus::Pending));
+        assert!(TradeStatus::Executing.can_transition_to(TradeStatus::Active));
     }
 
     #[test]
-    fn test_terminal_states() {
-        assert!(TradeStatus::Closed.is_terminal());
-        assert!(TradeStatus::DeadLetter.is_terminal());
-        assert!(!TradeStatus::Active.is_terminal());
-        assert!(!TradeStatus::Executing.is_terminal());
-    }
-
-    #[test]
-    fn test_status_parsing() {
-        assert_eq!("PENDING".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
-        assert_eq!("pending".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
-        assert_eq!("DEAD_LETTER".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
+    fn test_stuck_state_recovery_flow() {
+        // ACTIVE -> EXITING -> ACTIVE (recovery) -> EXITING -> CLOSED
+        assert!(TradeStatus::Active.can_transition_to(TradeStatus::Exiting));
+        assert!(TradeStatus::Exiting.can_transition_to(TradeStatus::Active)); // Recovery
+        assert!(TradeStatus::Active.can_transition_to(TradeStatus::Exiting));
+        assert!(TradeStatus::Exiting.can_transition_to(TradeStatus::Closed));
     }
 }

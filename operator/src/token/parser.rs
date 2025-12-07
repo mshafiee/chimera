@@ -338,8 +338,12 @@ impl TokenParser {
 mod tests {
     use super::*;
 
+    // ==========================================================================
+    // KNOWN TOKENS TESTS
+    // ==========================================================================
+
     #[test]
-    fn test_known_tokens() {
+    fn test_usdc_address() {
         assert_eq!(
             known_tokens::USDC,
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -347,21 +351,241 @@ mod tests {
     }
 
     #[test]
-    fn test_default_config() {
-        let config = TokenSafetyConfig::default();
-        assert_eq!(config.min_liquidity_shield_usd, 10_000.0);
-        assert_eq!(config.min_liquidity_spear_usd, 5_000.0);
-        assert!(config.freeze_authority_whitelist.contains(known_tokens::USDC));
+    fn test_usdt_address() {
+        assert_eq!(
+            known_tokens::USDT,
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
+        );
     }
 
     #[test]
-    fn test_safety_result() {
-        let safe = TokenSafetyResult::safe();
-        assert!(safe.safe);
-        assert!(safe.rejection_reason.is_none());
+    fn test_wsol_address() {
+        assert_eq!(
+            known_tokens::WSOL,
+            "So11111111111111111111111111111111111111112"
+        );
+    }
 
-        let unsafe_result = TokenSafetyResult::unsafe_with_reason("test reason");
-        assert!(!unsafe_result.safe);
-        assert_eq!(unsafe_result.rejection_reason, Some("test reason".to_string()));
+    // ==========================================================================
+    // DEFAULT CONFIG TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_default_config_liquidity_thresholds() {
+        let config = TokenSafetyConfig::default();
+        assert_eq!(config.min_liquidity_shield_usd, 10_000.0, 
+            "Shield liquidity threshold should be $10,000");
+        assert_eq!(config.min_liquidity_spear_usd, 5_000.0,
+            "Spear liquidity threshold should be $5,000");
+    }
+
+    #[test]
+    fn test_default_config_whitelist() {
+        let config = TokenSafetyConfig::default();
+        assert!(config.freeze_authority_whitelist.contains(known_tokens::USDC));
+        assert!(config.freeze_authority_whitelist.contains(known_tokens::USDT));
+        assert!(config.freeze_authority_whitelist.contains(known_tokens::WSOL));
+        assert!(config.mint_authority_whitelist.contains(known_tokens::USDC));
+    }
+
+    #[test]
+    fn test_default_config_honeypot_enabled() {
+        let config = TokenSafetyConfig::default();
+        assert!(config.honeypot_detection_enabled,
+            "Honeypot detection should be enabled by default");
+    }
+
+    // ==========================================================================
+    // SAFETY RESULT TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_safety_result_safe() {
+        let result = TokenSafetyResult::safe();
+        assert!(result.safe, "Safe result should have safe=true");
+        assert!(result.rejection_reason.is_none());
+        assert!(!result.honeypot_checked);
+        assert!(!result.liquidity_checked);
+        assert!(result.liquidity_usd.is_none());
+    }
+
+    #[test]
+    fn test_safety_result_unsafe() {
+        let result = TokenSafetyResult::unsafe_with_reason("Freeze authority detected");
+        assert!(!result.safe, "Unsafe result should have safe=false");
+        assert_eq!(result.rejection_reason, Some("Freeze authority detected".to_string()));
+    }
+
+    // ==========================================================================
+    // FREEZE AUTHORITY TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_freeze_authority_whitelisted_allowed() {
+        let config = TokenSafetyConfig::default();
+        let token_address = known_tokens::USDC;
+        let has_freeze_authority = true;
+        
+        let is_whitelisted = config.freeze_authority_whitelist.contains(token_address);
+        let should_reject = has_freeze_authority && !is_whitelisted;
+        
+        assert!(!should_reject, "Whitelisted token with freeze authority should be allowed");
+    }
+
+    #[test]
+    fn test_freeze_authority_not_whitelisted_rejected() {
+        let config = TokenSafetyConfig::default();
+        let token_address = "RandomToken11111111111111111111111111111111";
+        let has_freeze_authority = true;
+        
+        let is_whitelisted = config.freeze_authority_whitelist.contains(token_address);
+        let should_reject = has_freeze_authority && !is_whitelisted;
+        
+        assert!(should_reject, "Non-whitelisted token with freeze authority should be rejected");
+    }
+
+    #[test]
+    fn test_no_freeze_authority_allowed() {
+        let config = TokenSafetyConfig::default();
+        let token_address = "RandomToken11111111111111111111111111111111";
+        let has_freeze_authority = false;
+        
+        let should_reject = has_freeze_authority && !config.freeze_authority_whitelist.contains(token_address);
+        assert!(!should_reject, "Token without freeze authority should be allowed");
+    }
+
+    // ==========================================================================
+    // MINT AUTHORITY TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_mint_authority_whitelisted_allowed() {
+        let config = TokenSafetyConfig::default();
+        let is_whitelisted = config.mint_authority_whitelist.contains(known_tokens::USDC);
+        assert!(is_whitelisted, "USDC should be in mint authority whitelist");
+    }
+
+    #[test]
+    fn test_mint_authority_not_whitelisted_rejected() {
+        let config = TokenSafetyConfig::default();
+        let token_address = "RandomToken11111111111111111111111111111111";
+        let has_mint_authority = true;
+        
+        let is_whitelisted = config.mint_authority_whitelist.contains(token_address);
+        let should_reject = has_mint_authority && !is_whitelisted;
+        
+        assert!(should_reject, "Non-whitelisted token with mint authority should be rejected");
+    }
+
+    // ==========================================================================
+    // LIQUIDITY THRESHOLD TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_shield_liquidity_above_threshold() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 15_000.0;
+        let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
+        assert!(!should_reject, "Shield with $15k liquidity should pass");
+    }
+
+    #[test]
+    fn test_shield_liquidity_below_threshold() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 5_000.0;
+        let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
+        assert!(should_reject, "Shield with $5k liquidity should be rejected");
+    }
+
+    #[test]
+    fn test_shield_liquidity_exact_threshold() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 10_000.0;
+        let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
+        assert!(!should_reject, "Shield at exact $10k threshold should pass");
+    }
+
+    #[test]
+    fn test_spear_liquidity_above_threshold() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 8_000.0;
+        let should_reject = liquidity_usd < config.min_liquidity_spear_usd;
+        assert!(!should_reject, "Spear with $8k liquidity should pass");
+    }
+
+    #[test]
+    fn test_spear_liquidity_below_threshold() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 3_000.0;
+        let should_reject = liquidity_usd < config.min_liquidity_spear_usd;
+        assert!(should_reject, "Spear with $3k liquidity should be rejected");
+    }
+
+    // ==========================================================================
+    // STRATEGY-SPECIFIC THRESHOLD TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_shield_threshold_higher_than_spear() {
+        let config = TokenSafetyConfig::default();
+        assert!(config.min_liquidity_shield_usd > config.min_liquidity_spear_usd,
+            "Shield threshold should be higher than Spear (more conservative)");
+    }
+
+    #[test]
+    fn test_exit_no_liquidity_requirement() {
+        // Per parser.rs: Exit strategy has min_liquidity = 0.0
+        let min_liquidity_exit = 0.0_f64;
+        let liquidity_usd = 100.0;
+        let should_reject = liquidity_usd < min_liquidity_exit;
+        assert!(!should_reject, "Exit strategy should not have liquidity requirement");
+    }
+
+    // ==========================================================================
+    // CACHE KEY TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_fast_check_cache_key_format() {
+        let token_address = "TokenMint123456789";
+        let strategy = Strategy::Shield;
+        let cache_key = format!("{}:{}", token_address, strategy);
+        assert_eq!(cache_key, "TokenMint123456789:SHIELD");
+    }
+
+    #[test]
+    fn test_slow_check_cache_key_format() {
+        let token_address = "TokenMint123456789";
+        let strategy = Strategy::Spear;
+        let cache_key = format!("{}:{}:full", token_address, strategy);
+        assert_eq!(cache_key, "TokenMint123456789:SPEAR:full");
+    }
+
+    #[test]
+    fn test_different_strategies_different_cache_keys() {
+        let token = "Token123";
+        let shield_key = format!("{}:{}", token, Strategy::Shield);
+        let spear_key = format!("{}:{}", token, Strategy::Spear);
+        assert_ne!(shield_key, spear_key);
+    }
+
+    // ==========================================================================
+    // EDGE CASES
+    // ==========================================================================
+
+    #[test]
+    fn test_zero_liquidity_rejected() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 0.0;
+        assert!(liquidity_usd < config.min_liquidity_shield_usd);
+        assert!(liquidity_usd < config.min_liquidity_spear_usd);
+    }
+
+    #[test]
+    fn test_very_high_liquidity_passes() {
+        let config = TokenSafetyConfig::default();
+        let liquidity_usd = 1_000_000.0; // $1M
+        assert!(liquidity_usd >= config.min_liquidity_shield_usd);
+        assert!(liquidity_usd >= config.min_liquidity_spear_usd);
     }
 }

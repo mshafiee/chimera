@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::time::interval;
 
 /// Default stuck threshold in seconds
-const DEFAULT_STUCK_THRESHOLD_SECS: i64 = 60;
+pub const DEFAULT_STUCK_THRESHOLD_SECS: i64 = 60;
 
 /// Recovery check interval in seconds
 const RECOVERY_CHECK_INTERVAL_SECS: u64 = 30;

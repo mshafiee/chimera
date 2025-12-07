@@ -1,0 +1,209 @@
+name: CI - Quality Gates
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ==========================================================================
+  # RUST QUALITY CHECKS
+  # ==========================================================================
+  rust-lint:
+    name: Rust Lint (Clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            operator/target
+          key: \${{ runner.os }}-cargo-\${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            \${{ runner.os }}-cargo-
+      
+      - name: Run clippy
+        working-directory: operator
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      
+      - name: Check formatting
+        working-directory: operator
+        run: cargo fmt --check
+
+  rust-audit:
+    name: Rust Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      
+      - name: Run cargo audit
+        working-directory: operator
+        run: cargo audit --deny warnings
+
+  rust-tests:
+    name: Rust Unit & Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            operator/target
+          key: \${{ runner.os }}-cargo-\${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            \${{ runner.os }}-cargo-
+      
+      - name: Run unit tests
+        working-directory: operator
+        run: cargo test --lib --bins
+      
+      - name: Run integration tests
+        working-directory: operator
+        run: cargo test --test '*'
+
+  # ==========================================================================
+  # PYTHON QUALITY CHECKS
+  # ==========================================================================
+  python-lint:
+    name: Python Lint (Ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install ruff
+        run: pip install ruff
+      
+      - name: Run ruff check
+        working-directory: scout
+        run: ruff check core/ --output-format=github
+
+  python-tests:
+    name: Python Tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        working-directory: scout
+        run: |
+          pip install pytest
+          pip install -r requirements.txt || true
+      
+      - name: Run pytest
+        working-directory: scout
+        run: pytest tests/ -v
+
+  # ==========================================================================
+  # WEB QUALITY CHECKS
+  # ==========================================================================
+  web-lint:
+    name: Web Lint (ESLint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+      
+      - name: Run ESLint
+        working-directory: web
+        run: npm run lint
+
+  web-audit:
+    name: Web Security Audit (npm audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+      
+      - name: Run npm audit
+        working-directory: web
+        run: npm audit --audit-level=moderate
+
+  web-build:
+    name: Web Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+      
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+  # ==========================================================================
+  # TEST SUMMARY
+  # ==========================================================================
+  test-summary:
+    name: Test Summary
+    runs-on: ubuntu-latest
+    needs: [rust-tests, python-tests]
+    if: always()
+    steps:
+      - name: Test Summary
+        run: |
+          echo "## Test Results" >> \$GITHUB_STEP_SUMMARY
+          echo "" >> \$GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> \$GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> \$GITHUB_STEP_SUMMARY
+          echo "| Rust Tests | \${{ needs.rust-tests.result }} |" >> \$GITHUB_STEP_SUMMARY
+          echo "| Python Tests | \${{ needs.python-tests.result }} |" >> \$GITHUB_STEP_SUMMARY

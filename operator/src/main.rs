@@ -3,20 +3,6 @@
 //! This is the main entry point for the Operator service.
 //! It sets up the Axum web server with middleware and routes.
 
-mod circuit_breaker;
-mod config;
-mod db;
-mod engine;
-mod error;
-mod handlers;
-mod middleware;
-mod models;
-mod notifications;
-mod price_cache;
-mod roster;
-mod token;
-mod vault;
-
 use axum::{
     middleware as axum_middleware,
     routing::{get, post},
@@ -34,19 +20,22 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 
-use crate::circuit_breaker::CircuitBreaker;
-use crate::config::AppConfig;
-use crate::engine::{RecoveryManager, TipManager};
-use crate::handlers::{
+use chimera_operator::circuit_breaker::CircuitBreaker;
+use chimera_operator::config::AppConfig;
+use chimera_operator::db;
+use chimera_operator::engine::{self, RecoveryManager, TipManager};
+use chimera_operator::handlers::{
     export_trades, get_config, get_position, get_wallet, health_check, health_simple,
     list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
     roster_validate, update_config, update_wallet, wallet_auth, webhook_handler, ws_handler,
     ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
-use crate::middleware::{bearer_auth, AuthState, HmacState, Role};
-use crate::notifications::{CompositeNotifier, NotificationEvent, TelegramNotifier};
-use crate::price_cache::PriceCache;
-use crate::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
+use chimera_operator::middleware::{self, bearer_auth, AuthState, HmacState, Role};
+use chimera_operator::notifications::{self, CompositeNotifier, NotificationEvent, TelegramNotifier};
+use chimera_operator::price_cache::PriceCache;
+use chimera_operator::roster;
+use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
+use chimera_operator::vault;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
