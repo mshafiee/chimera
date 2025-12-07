@@ -9,6 +9,7 @@ import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adap
 import { clusterApiUrl } from '@solana/web3.js'
 import { useAuthStore } from '../../stores/authStore'
 import { apiClient } from '../../api/client'
+import { toast } from '../ui/Toast'
 
 // Import wallet adapter CSS
 import '@solana/wallet-adapter-react-ui/styles.css'
@@ -72,11 +73,13 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
       // Store auth state
       login({
         identifier: response.data.identifier,
-        role: response.data.role as any,
+        role: response.data.role as 'readonly' | 'operator' | 'admin',
         token: response.data.token,
       })
+      toast.success('Wallet authenticated successfully')
     } catch (error) {
       console.error('Authentication failed:', error)
+      toast.error('Authentication failed. Please try again.')
       // Disconnect wallet on auth failure
       disconnect()
     }

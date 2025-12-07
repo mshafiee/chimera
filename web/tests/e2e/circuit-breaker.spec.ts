@@ -331,3 +331,179 @@ test.describe('Circuit Breaker Configuration', () => {
   });
 });
 
+test.describe('Circuit Breaker Reset Flow', () => {
+  test('should reset circuit breaker and verify trading resumes', async ({ page }) => {
+    // Start with tripped state
+    await page.route('**/api/v1/health', route => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          status: 'degraded',
+          circuit_breaker: {
+            state: 'TRIPPED',
+            reason: 'Test trip',
+          },
+        }),
+      });
+    });
+
+    await page.goto('/config');
+
+    // Find reset button
+    const resetButton = page.getByRole('button', { name: /reset|restore|resume/i }).first();
+    
+    if (await resetButton.isVisible()) {
+      // Mock successful reset
+      await page.route('**/api/v1/config/circuit-breaker/reset', route => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            success: true,
+            message: 'Circuit breaker reset successfully',
+          }),
+        });
+      });
+
+      // Update health endpoint to show ACTIVE after reset
+      await page.route('**/api/v1/health', route => {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            status: 'healthy',
+            circuit_breaker: {
+              state: 'ACTIVE',
+            },
+          }),
+        });
+      });
+
+      await resetButton.click();
+
+      // Wait for reset to complete
+      await page.waitForTimeout(1000);
+
+      // Verify state changed to ACTIVE
+      const activeStatus = page.getByText(/active|healthy|running/i).first();
+      const hasActive = await activeStatus.isVisible().catch(() => false);
+      
+      expect(hasActive).toBe(true);
+    }
+  });
+
+  test('should verify trading resumes after reset', async ({ page }) => {
+    // Mock reset endpoint
+    await page.route('**/api/v1/config/circuit-breaker/reset', route => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true }),
+      });
+    });
+
+    // Mock health showing ACTIVE
+    await page.route('**/api/v1/health', route => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          circuit_breaker: {
+            state: 'ACTIVE',
+            trading_allowed: true,
+          },
+        }),
+      });
+    });
+
+    await page.goto('/');
+
+    // Verify trading is allowed
+    const tradingStatus = page.getByText(/trading.*active|trading.*enabled/i).first();
+    const statusIndicator = page.locator('.status-active, .trading-active').first();
+    
+    const isTradingActive = await tradingStatus.isVisible().catch(() => false) ||
+                            await statusIndicator.isVisible().catch(() => false);
+    
+    expect(isTradingActive).toBe(true);
+  });
+
+  test('should show success message after reset', async ({ page }) => {
+    await page.route('**/api/v1/config/circuit-breaker/reset', route => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          success: true,
+          message: 'Circuit breaker reset successfully',
+        }),
+      });
+    });
+
+    await page.goto('/config');
+
+    const resetButton = page.getByRole('button', { name: /reset/i }).first();
+    
+    if (await resetButton.isVisible()) {
+      await resetButton.click();
+
+      // Look for success message
+      const successMessage = page.getByText(/reset.*success|trading.*resumed/i).first();
+      const toast = page.locator('.toast, .notification').filter({ hasText: /success/i }).first();
+      
+      const hasSuccess = await successMessage.isVisible().catch(() => false) ||
+                         await toast.isVisible().catch(() => false);
+      
+      expect(hasSuccess).toBe(true);
+    }
+  });
+
+  test('should handle reset failure gracefully', async ({ page }) => {
+    // Mock reset failure
+    await page.route('**/api/v1/config/circuit-breaker/reset', route => {
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          error: 'Failed to reset circuit breaker',
+        }),
+      });
+    });
+
+    await page.goto('/config');
+
+    const resetButton = page.getByRole('button', { name: /reset/i }).first();
+    
+    if (await resetButton.isVisible()) {
+      await resetButton.click();
+
+      // Should show error message
+      const errorMessage = page.getByText(/error|failed|try again/i).first();
+      const hasError = await errorMessage.isVisible().catch(() => false);
+      
+      expect(hasError).toBe(true);
+    }
+  });
+
+  test('should require confirmation before reset', async ({ page }) => {
+    await page.goto('/config');
+
+    const resetButton = page.getByRole('button', { name: /reset/i }).first();
+    
+    if (await resetButton.isVisible()) {
+      await resetButton.click();
+
+      // Should show confirmation dialog
+      const confirmDialog = page.locator('.modal, [role="dialog"]').filter({ hasText: /confirm|are you sure/i }).first();
+      const confirmButton = page.getByRole('button', { name: /confirm|yes|proceed/i }).first();
+      
+      const hasConfirmation = await confirmDialog.isVisible().catch(() => false) ||
+                              await confirmButton.isVisible().catch(() => false);
+      
+      // Reset should require confirmation
+      expect(hasConfirmation).toBe(true);
+    }
+  });
+});
+

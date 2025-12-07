@@ -36,12 +36,16 @@ export function useTrades(params: TradesParams = {}) {
   })
 }
 
-export async function exportTrades(params: Omit<TradesParams, 'limit' | 'offset'>): Promise<void> {
+export async function exportTrades(
+  params: Omit<TradesParams, 'limit' | 'offset'>,
+  format: 'csv' | 'json' | 'pdf' = 'csv'
+): Promise<void> {
   const searchParams = new URLSearchParams()
   if (params.from) searchParams.set('from', params.from)
   if (params.to) searchParams.set('to', params.to)
   if (params.status) searchParams.set('status', params.status)
   if (params.strategy) searchParams.set('strategy', params.strategy)
+  searchParams.set('format', format)
 
   const response = await apiClient.get('/trades/export', {
     params: searchParams,
@@ -55,9 +59,11 @@ export async function exportTrades(params: Omit<TradesParams, 'limit' | 'offset'
   
   // Get filename from Content-Disposition header or use default
   const contentDisposition = response.headers['content-disposition']
+  const defaultExtension = format === 'pdf' ? 'pdf' : format === 'json' ? 'json' : 'csv'
+  const defaultFilename = `chimera_trades_${new Date().toISOString().split('T')[0]}.${defaultExtension}`
   const filename = contentDisposition
     ? contentDisposition.split('filename=')[1]?.replace(/"/g, '')
-    : `chimera_trades_${new Date().toISOString().split('T')[0]}.csv`
+    : defaultFilename
   
   link.setAttribute('download', filename)
   document.body.appendChild(link)

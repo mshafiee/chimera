@@ -3,6 +3,7 @@ import { Sidebar, MobileBottomNav } from './Sidebar'
 import { Header } from './Header'
 import { useState, useCallback } from 'react'
 import { Menu, X } from 'lucide-react'
+import { ToastContainer, useToastStore } from '../ui/Toast'
 
 export function Layout() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
@@ -87,6 +88,12 @@ export function Layout() {
 
       {/* Mobile Bottom Navigation */}
       <MobileBottomNav />
+
+      {/* Toast Notifications */}
+      <ToastContainer
+        toasts={useToastStore((state) => state.toasts)}
+        onClose={(id) => useToastStore.getState().removeToast(id)}
+      />
     </div>
   )
 }

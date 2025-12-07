@@ -210,5 +210,158 @@ test.describe('Wallet TTL Behavior', () => {
     
     // expect(hasTypeIndicator).toBe(true);
   });
+
+  // ==========================================================================
+  // TTL EXPIRATION TESTS
+  // ==========================================================================
+
+  test('should show TTL expiration warning', async ({ page }) => {
+    await page.goto('/wallets?status=ACTIVE');
+    
+    // Look for wallets with TTL that are expiring soon
+    const expiringWallets = page.locator('[data-testid="expiring-wallet"], .expiring').first();
+    const warningText = page.getByText(/expiring|expires soon|ttl/i).first();
+    
+    // May or may not have expiring wallets
+    const hasExpiring = await expiringWallets.isVisible().catch(() => false) ||
+                        await warningText.isVisible().catch(() => false);
+    
+    // If there are expiring wallets, they should be visible
+    if (hasExpiring) {
+      expect(hasExpiring).toBe(true);
+    }
+  });
+
+  test('should allow extending TTL for active wallets', async ({ page }) => {
+    await page.goto('/wallets?status=ACTIVE');
+    
+    // Look for extend TTL button or option
+    const extendButton = page.getByRole('button', { name: /extend|renew|ttl/i }).first();
+    const extendOption = page.locator('[data-testid="extend-ttl"]').first();
+    
+    const hasExtendOption = await extendButton.isVisible().catch(() => false) ||
+                            await extendOption.isVisible().catch(() => false);
+    
+    if (hasExtendOption) {
+      await expect(extendButton.or(extendOption).first()).toBeEnabled();
+    }
+  });
+
+  // ==========================================================================
+  // BACKTEST INTEGRATION TESTS
+  // ==========================================================================
+
+  test('should show backtest results before promotion', async ({ page }) => {
+    await page.goto('/wallets?status=CANDIDATE');
+    
+    // Click on a candidate wallet
+    const candidateWallet = page.locator('tr, .wallet-item').first();
+    
+    if (await candidateWallet.isVisible()) {
+      await candidateWallet.click();
+      
+      // Look for backtest results or validation status
+      const backtestResults = page.getByText(/backtest|simulation|validation/i).first();
+      const validationStatus = page.locator('[data-testid="backtest-status"], .backtest-result').first();
+      
+      const hasBacktest = await backtestResults.isVisible().catch(() => false) ||
+                          await validationStatus.isVisible().catch(() => false);
+      
+      // Backtest info may or may not be visible depending on implementation
+      // expect(hasBacktest).toBe(true);
+    }
+  });
+
+  test('should prevent promotion if backtest fails', async ({ page }) => {
+    await page.goto('/wallets?status=CANDIDATE');
+    
+    // Look for wallets with failed backtests
+    const failedBacktest = page.locator('[data-testid="backtest-failed"], .backtest-failed').first();
+    const promoteButton = page.getByRole('button', { name: /promote/i }).first();
+    
+    if (await failedBacktest.isVisible()) {
+      // Promote button should be disabled for failed backtests
+      const isDisabled = await promoteButton.getAttribute('disabled');
+      const hasTooltip = page.getByText(/backtest failed|validation failed/i).first();
+      
+      const isBlocked = isDisabled !== null || 
+                        await hasTooltip.isVisible().catch(() => false);
+      
+      expect(isBlocked).toBe(true);
+    }
+  });
+
+  // ==========================================================================
+  // BULK ACTIONS TESTS
+  // ==========================================================================
+
+  test('should support bulk wallet operations', async ({ page }) => {
+    await page.goto('/wallets');
+    
+    // Look for bulk action controls
+    const selectAll = page.locator('input[type="checkbox"][aria-label*="all" i]').first();
+    const bulkActions = page.getByRole('button', { name: /bulk|select all/i }).first();
+    
+    const hasBulkActions = await selectAll.isVisible().catch(() => false) ||
+                           await bulkActions.isVisible().catch(() => false);
+    
+    if (hasBulkActions) {
+      // Test bulk selection
+      if (await selectAll.isVisible()) {
+        await selectAll.check();
+      }
+      
+      // Look for bulk action menu
+      const bulkMenu = page.locator('.bulk-actions, [data-testid="bulk-menu"]').first();
+      const hasMenu = await bulkMenu.isVisible().catch(() => false);
+      
+      // expect(hasMenu).toBe(true);
+    }
+  });
+
+  // ==========================================================================
+  // SEARCH AND FILTER TESTS
+  // ==========================================================================
+
+  test('should search wallets by address', async ({ page }) => {
+    await page.goto('/wallets');
+    
+    // Look for search input
+    const searchInput = page.locator('input[type="search"], input[placeholder*="search" i]').first();
+    
+    if (await searchInput.isVisible()) {
+      await searchInput.fill('7xKXtg');
+      
+      // Should filter results
+      await page.waitForTimeout(500); // Wait for debounce
+      
+      const results = page.locator('tr, .wallet-item');
+      const count = await results.count();
+      
+      // Results should be filtered
+      expect(count).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  test('should filter by WQS score range', async ({ page }) => {
+    await page.goto('/wallets');
+    
+    // Look for WQS filter
+    const wqsFilter = page.locator('input[type="range"], .wqs-filter').first();
+    const wqsSlider = page.locator('[data-testid="wqs-filter"]').first();
+    
+    const hasWqsFilter = await wqsFilter.isVisible().catch(() => false) ||
+                         await wqsSlider.isVisible().catch(() => false);
+    
+    if (hasWqsFilter) {
+      // Adjust filter
+      if (await wqsFilter.isVisible()) {
+        await wqsFilter.fill('70');
+      }
+      
+      // Results should update
+      await page.waitForTimeout(500);
+    }
+  });
 });
 

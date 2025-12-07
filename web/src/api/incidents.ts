@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { apiClient } from './client'
 import type { Incident, ConfigAudit } from '../types'
 
 interface DeadLetterResponse {
@@ -10,13 +11,8 @@ export function useDeadLetterQueue() {
   return useQuery({
     queryKey: ['dead-letter-queue'],
     queryFn: async () => {
-      // This endpoint would need to be added to the Operator
-      // For now, return mock data
-      const mockData: DeadLetterResponse = {
-        items: [],
-        total: 0,
-      }
-      return mockData
+      const { data } = await apiClient.get<DeadLetterResponse>('/incidents/dead-letter')
+      return data
     },
     refetchInterval: 30000, // Poll every 30 seconds
   })
@@ -27,36 +23,21 @@ interface ConfigAuditResponse {
   total: number
 }
 
-export function useConfigAudit(limit: number = 50) {
+export function useConfigAudit(params?: { limit?: number; offset?: number }) {
+  const limit = params?.limit ?? 50
+  const offset = params?.offset ?? 0
+  
   return useQuery({
-    queryKey: ['config-audit', limit],
+    queryKey: ['config-audit', limit, offset],
     queryFn: async () => {
-      // This endpoint would need to be added to the Operator
-      // For now, return mock data
-      const mockData: ConfigAuditResponse = {
-        items: [
-          {
-            id: 1,
-            key: 'circuit_breakers.max_loss_24h',
-            old_value: '400',
-            new_value: '500',
-            changed_by: 'admin',
-            change_reason: 'Increased loss threshold',
-            changed_at: new Date().toISOString(),
-          },
-          {
-            id: 2,
-            key: 'wallet:7xKXtg...gAsU',
-            old_value: 'CANDIDATE',
-            new_value: 'ACTIVE',
-            changed_by: 'operator',
-            change_reason: 'Promoted via dashboard',
-            changed_at: new Date(Date.now() - 3600000).toISOString(),
-          },
-        ],
-        total: 2,
-      }
-      return mockData
+      const searchParams = new URLSearchParams()
+      if (limit) searchParams.set('limit', limit.toString())
+      if (offset) searchParams.set('offset', offset.toString())
+      
+      const { data } = await apiClient.get<ConfigAuditResponse>(
+        `/incidents/config-audit?${searchParams.toString()}`
+      )
+      return data
     },
   })
 }

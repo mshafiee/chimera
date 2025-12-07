@@ -74,7 +74,7 @@ function DeadLetterTab({
   severityFilter,
   onSeverityChange,
 }: {
-  data: any
+  data: { items: Incident[]; total: number } | undefined
   isLoading: boolean
   severityFilter: SeverityFilter
   onSeverityChange: (filter: SeverityFilter) => void
@@ -95,7 +95,7 @@ function DeadLetterTab({
   const filteredItems =
     severityFilter === 'all'
       ? items
-      : items.filter((item: any) => getSeverity(item.reason) === severityFilter)
+      : items.filter((item: Incident) => getSeverity(item.reason) === severityFilter)
 
   return (
     <div className="space-y-4">
@@ -202,7 +202,13 @@ function DeadLetterTab({
   )
 }
 
-function ConfigAuditTab({ data, isLoading }: { data: any; isLoading: boolean }) {
+function ConfigAuditTab({ 
+  data, 
+  isLoading 
+}: { 
+  data: { items: ConfigAudit[]; total: number } | undefined
+  isLoading: boolean 
+}) {
   const items = data?.items || []
 
   return (
@@ -226,7 +232,7 @@ function ConfigAuditTab({ data, isLoading }: { data: any; isLoading: boolean }) 
             </TableRow>
           </TableHeader>
           <TableBody>
-            {items.map((item: any) => (
+            {items.map((item: ConfigAudit) => (
               <TableRow key={item.id}>
                 <TableCell>
                   <div className="flex items-center gap-2">

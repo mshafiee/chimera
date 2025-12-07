@@ -1,11 +1,13 @@
 import { useState, useEffect } from 'react'
-import { AlertTriangle, Save, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Save, RefreshCw, History, Power, Lock } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
-import { ConfirmModal } from '../components/ui/Modal'
-import { useConfig, useUpdateConfig, useResetCircuitBreaker, useHealth } from '../api'
+import { Modal, ConfirmModal } from '../components/ui/Modal'
+import { useConfig, useUpdateConfig, useResetCircuitBreaker, useHealth, useConfigAudit } from '../api'
 import { useAuthStore } from '../stores/authStore'
+import { toast } from '../components/ui/Toast'
+import type { ConfigAudit, ConfigResponse, HealthResponse } from '../types'
 
 export function Config() {
   const { hasPermission } = useAuthStore()
@@ -25,6 +27,12 @@ export function Config() {
 
   const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
+  const [showHistoryModal, setShowHistoryModal] = useState(false)
+  const [showKillSwitchModal, setShowKillSwitchModal] = useState(false)
+  const [killSwitchPassword, setKillSwitchPassword] = useState('')
+  const [killSwitchConfirm, setKillSwitchConfirm] = useState('')
+
+  const { data: configAudit, isLoading: auditLoading } = useConfigAudit({ limit: 50 })
 
   // Initialize form from config
   useEffect(() => {
@@ -51,29 +59,122 @@ export function Config() {
   }, [config, maxLoss24h, maxConsecutiveLosses, maxDrawdown, cooldownMinutes, shieldPercent])
 
   const handleSaveCircuitBreakers = async () => {
-    await updateConfig.mutateAsync({
-      circuit_breakers: {
-        max_loss_24h: maxLoss24h,
-        max_consecutive_losses: maxConsecutiveLosses,
-        max_drawdown_percent: maxDrawdown,
-        cool_down_minutes: cooldownMinutes,
-      },
-    })
+    try {
+      await updateConfig.mutateAsync({
+        circuit_breakers: {
+          max_loss_24h: maxLoss24h,
+          max_consecutive_losses: maxConsecutiveLosses,
+          max_drawdown_percent: maxDrawdown,
+          cool_down_minutes: cooldownMinutes,
+        },
+      })
+      toast.success('Circuit breaker settings saved')
+    } catch (error) {
+      toast.error('Failed to save circuit breaker settings')
+    }
   }
 
   const handleSaveAllocation = async () => {
-    await updateConfig.mutateAsync({
-      strategy_allocation: {
-        shield_percent: shieldPercent,
-        spear_percent: 100 - shieldPercent,
-      },
-    })
+    try {
+      await updateConfig.mutateAsync({
+        strategy_allocation: {
+          shield_percent: shieldPercent,
+          spear_percent: 100 - shieldPercent,
+        },
+      })
+      toast.success('Strategy allocation saved')
+    } catch (error) {
+      toast.error('Failed to save strategy allocation')
+    }
   }
 
   const handleResetCircuitBreaker = async () => {
-    await resetCircuitBreaker.mutateAsync()
-    setShowResetConfirm(false)
+    try {
+      await resetCircuitBreaker.mutateAsync()
+      setShowResetConfirm(false)
+      toast.success('Circuit breaker reset successfully')
+    } catch (error) {
+      toast.error('Failed to reset circuit breaker')
+    }
   }
+
+  const handleEmergencyKillSwitch = async () => {
+    if (killSwitchPassword !== killSwitchConfirm) {
+      toast.error('Passwords do not match')
+      return
+    }
+
+    if (killSwitchPassword.length < 8) {
+      toast.error('Password must be at least 8 characters')
+      return
+    }
+
+    try {
+      // Set all circuit breakers to extreme values to halt trading
+      await updateConfig.mutateAsync({
+        circuit_breakers: {
+          max_loss_24h: 0.01, // Very low threshold
+          max_consecutive_losses: 1,
+          max_drawdown_percent: 0.1,
+          cool_down_minutes: 999999, // Very long cooldown
+        },
+      })
+      setShowKillSwitchModal(false)
+      setKillSwitchPassword('')
+      setKillSwitchConfirm('')
+      toast.success('Emergency kill switch activated. All trading halted.')
+    } catch (error) {
+      toast.error('Failed to activate kill switch')
+    }
+  }
+
+  // Calculate secret rotation status from config audit
+  const getSecretRotationStatus = () => {
+    if (!configAudit?.items) return null
+
+    const webhookRotations = configAudit.items.filter(
+      (item) => item.key.includes('secret_rotation.webhook')
+    )
+    const rpcRotations = configAudit.items.filter(
+      (item) => item.key.includes('secret_rotation.rpc')
+    )
+
+    const lastWebhookRotation = webhookRotations[0]
+    const lastRpcRotation = rpcRotations[0]
+
+    const getNextRotationDate = (lastDate: string, days: number) => {
+      const date = new Date(lastDate)
+      date.setDate(date.getDate() + days)
+      return date
+    }
+
+    return {
+      webhook: lastWebhookRotation
+        ? {
+            lastRotated: new Date(lastWebhookRotation.changed_at),
+            nextDue: getNextRotationDate(lastWebhookRotation.changed_at, 30),
+            daysUntilDue: Math.ceil(
+              (getNextRotationDate(lastWebhookRotation.changed_at, 30).getTime() -
+                new Date().getTime()) /
+                (1000 * 60 * 60 * 24)
+            ),
+          }
+        : null,
+      rpc: lastRpcRotation
+        ? {
+            lastRotated: new Date(lastRpcRotation.changed_at),
+            nextDue: getNextRotationDate(lastRpcRotation.changed_at, 90),
+            daysUntilDue: Math.ceil(
+              (getNextRotationDate(lastRpcRotation.changed_at, 90).getTime() -
+                new Date().getTime()) /
+                (1000 * 60 * 60 * 24)
+            ),
+          }
+        : null,
+    }
+  }
+
+  const rotationStatus = getSecretRotationStatus()
 
   if (isLoading) {
     return (
@@ -103,16 +204,16 @@ export function Config() {
 
   return (
     <div className="space-y-6">
-      {/* Circuit Breaker Status Alert */}
+      {/* Circuit Breaker Status Alert - Mobile Optimized */}
       {circuitBreakerTripped && (
         <Card className="border-loss">
           <CardContent>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3 text-loss">
-                <AlertTriangle className="w-5 h-5" />
-                <div>
-                  <div className="font-semibold">Circuit Breaker Tripped</div>
-                  <div className="text-sm text-text-muted">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+              <div className="flex items-start gap-3 text-loss">
+                <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <div className="font-semibold text-sm md:text-base">Circuit Breaker Tripped</div>
+                  <div className="text-xs md:text-sm text-text-muted break-words">
                     Trading is halted. Reason: {health?.circuit_breaker.trip_reason || 'Unknown'}
                   </div>
                 </div>
@@ -120,9 +221,11 @@ export function Config() {
               <Button
                 variant="danger"
                 onClick={() => setShowResetConfirm(true)}
+                className="w-full sm:w-auto"
+                size="sm"
               >
                 <RefreshCw className="w-4 h-4 mr-2" />
-                Reset Circuit Breaker
+                <span className="hidden sm:inline">Reset </span>Circuit Breaker
               </Button>
             </div>
           </CardContent>
@@ -278,7 +381,7 @@ export function Config() {
           <CardTitle>RPC Status</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-3 md:gap-4">
             <div>
               <div className="text-sm text-text-muted">Primary</div>
               <div className="font-semibold capitalize">
@@ -338,6 +441,113 @@ export function Config() {
         </CardContent>
       </Card>
 
+      {/* Secret Rotation Status */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Secret Rotation Status</CardTitle>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowHistoryModal(true)}
+          >
+            <History className="w-4 h-4 mr-2" />
+            View History
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 gap-6">
+            <div>
+              <div className="text-sm font-semibold mb-3">Webhook HMAC Key</div>
+              {rotationStatus?.webhook ? (
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-text-muted">Last Rotated:</span>
+                    <span>{rotationStatus.webhook.lastRotated.toLocaleDateString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-text-muted">Next Due:</span>
+                    <span>{rotationStatus.webhook.nextDue.toLocaleDateString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-text-muted">Days Until Due:</span>
+                    <Badge
+                      variant={
+                        rotationStatus.webhook.daysUntilDue <= 7
+                          ? 'warning'
+                          : rotationStatus.webhook.daysUntilDue <= 0
+                          ? 'danger'
+                          : 'success'
+                      }
+                    >
+                      {rotationStatus.webhook.daysUntilDue} days
+                    </Badge>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-text-muted">No rotation history</div>
+              )}
+            </div>
+            <div>
+              <div className="text-sm font-semibold mb-3">RPC API Keys</div>
+              {rotationStatus?.rpc ? (
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-text-muted">Last Rotated:</span>
+                    <span>{rotationStatus.rpc.lastRotated.toLocaleDateString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-text-muted">Next Due:</span>
+                    <span>{rotationStatus.rpc.nextDue.toLocaleDateString()}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-text-muted">Days Until Due:</span>
+                    <Badge
+                      variant={
+                        rotationStatus.rpc.daysUntilDue <= 14
+                          ? 'warning'
+                          : rotationStatus.rpc.daysUntilDue <= 0
+                          ? 'danger'
+                          : 'success'
+                      }
+                    >
+                      {rotationStatus.rpc.daysUntilDue} days
+                    </Badge>
+                  </div>
+                </div>
+              ) : (
+                <div className="text-sm text-text-muted">No rotation history</div>
+              )}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Emergency Kill Switch */}
+      <Card className="border-loss">
+        <CardHeader>
+          <CardTitle className="text-loss">Emergency Kill Switch</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="font-semibold text-loss mb-1 text-sm md:text-base">Halt All Trading</div>
+              <div className="text-xs md:text-sm text-text-muted">
+                Immediately stop all trading activity. Requires password confirmation.
+              </div>
+            </div>
+            <Button
+              variant="danger"
+              onClick={() => setShowKillSwitchModal(true)}
+              className="w-full sm:w-auto"
+              size="sm"
+            >
+              <Power className="w-4 h-4 mr-2" />
+              <span className="hidden sm:inline">Activate </span>Kill Switch
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Reset Confirmation Modal */}
       <ConfirmModal
         isOpen={showResetConfirm}
@@ -349,12 +559,136 @@ export function Config() {
         variant="danger"
         loading={resetCircuitBreaker.isPending}
       />
+
+      {/* Change History Modal */}
+      <Modal
+        isOpen={showHistoryModal}
+        onClose={() => setShowHistoryModal(false)}
+        title="Configuration Change History"
+        size="lg"
+      >
+        {auditLoading ? (
+          <div className="p-8 text-center text-text-muted">Loading history...</div>
+        ) : configAudit?.items && configAudit.items.length > 0 ? (
+          <div className="max-h-96 overflow-y-auto">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-surface border-b border-border">
+                <tr>
+                  <th className="text-left p-2 font-semibold">Key</th>
+                  <th className="text-left p-2 font-semibold">Changed By</th>
+                  <th className="text-left p-2 font-semibold">Date</th>
+                  <th className="text-left p-2 font-semibold">Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {configAudit.items.map((item: ConfigAudit) => (
+                  <tr key={item.id} className="border-b border-border hover:bg-surface-light">
+                    <td className="p-2 font-mono text-xs">{item.key}</td>
+                    <td className="p-2">
+                      <Badge variant="secondary" size="sm">
+                        {item.changed_by}
+                      </Badge>
+                    </td>
+                    <td className="p-2 text-text-muted">
+                      {new Date(item.changed_at).toLocaleString()}
+                    </td>
+                    <td className="p-2 text-text-muted text-xs">
+                      {item.change_reason || '-'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-8 text-center text-text-muted">No change history found</div>
+        )}
+      </Modal>
+
+      {/* Emergency Kill Switch Modal */}
+      <Modal
+        isOpen={showKillSwitchModal}
+        onClose={() => {
+          setShowKillSwitchModal(false)
+          setKillSwitchPassword('')
+          setKillSwitchConfirm('')
+        }}
+        title="Emergency Kill Switch"
+        size="sm"
+      >
+        <div className="space-y-4">
+          <div className="flex items-center gap-3 text-loss">
+            <AlertTriangle className="w-5 h-5" />
+            <div>
+              <div className="font-semibold">Warning: This will halt all trading</div>
+              <div className="text-sm text-text-muted">
+                All circuit breakers will be set to extreme values to immediately stop trading.
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text mb-2">
+              <Lock className="w-4 h-4 inline mr-1" />
+              Enter Password to Confirm
+            </label>
+            <input
+              type="password"
+              value={killSwitchPassword}
+              onChange={(e) => setKillSwitchPassword(e.target.value)}
+              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-loss"
+              placeholder="Password"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-text mb-2">
+              Confirm Password
+            </label>
+            <input
+              type="password"
+              value={killSwitchConfirm}
+              onChange={(e) => setKillSwitchConfirm(e.target.value)}
+              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-loss"
+              placeholder="Confirm password"
+            />
+          </div>
+
+          <div className="flex gap-3 justify-end">
+            <Button
+              variant="secondary"
+              onClick={() => {
+                setShowKillSwitchModal(false)
+                setKillSwitchPassword('')
+                setKillSwitchConfirm('')
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="danger"
+              onClick={handleEmergencyKillSwitch}
+              loading={updateConfig.isPending}
+              disabled={!killSwitchPassword || !killSwitchConfirm || killSwitchPassword !== killSwitchConfirm}
+            >
+              <Power className="w-4 h-4 mr-2" />
+              Activate Kill Switch
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }
 
 // Read-only view for non-admin users
-function ConfigReadOnly({ config, health }: { config: any; health: any }) {
+function ConfigReadOnly({ 
+  config, 
+  health 
+}: { 
+  config: ConfigResponse | null
+  health: HealthResponse | null
+}) {
   if (!config) return null
 
   return (

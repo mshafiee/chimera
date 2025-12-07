@@ -54,5 +54,8 @@ export function useUpdateWallet() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['wallets'] })
     },
+    onError: (error) => {
+      console.error('Failed to update wallet:', error)
+    },
   })
 }
