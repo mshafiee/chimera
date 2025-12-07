@@ -115,35 +115,54 @@ graph LR
 ### 2. Installation
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/chimera-platform.git
-cd chimera-platform
+git clone https://github.com/mshafiee/chimera.git
+cd chimera
 
-# Run the Setup Script (Creates DB, Structure, Configs)
-chmod +x setup_chimera.sh
-./setup_chimera.sh
+# Build the Operator
+cd operator
+cargo build --release
 ```
 
 ### 3. Configuration
-Edit `config/config.enc` (or `.env` for dev) with your secrets:
+
+Create your environment file:
 ```bash
-# config/.env
-DATABASE_URL=sqlite:../database/chimera.db
-HELIUS_API_KEY=your_key_here
-HMAC_SECRET=generate_strong_secret_here
-PRIVATE_KEY=[array_of_ints]
+cd operator
+cp .env.example .env
+```
+
+Edit `.env` with your secrets:
+```bash
+# Required: Generate with `openssl rand -hex 32`
+CHIMERA_SECURITY__WEBHOOK_SECRET=your-64-char-hex-secret
+
+# Required: Your Helius RPC endpoint
+CHIMERA_RPC__PRIMARY_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_API_KEY
+
+# Optional: Fallback RPC
+CHIMERA_RPC__FALLBACK_URL=https://your-quicknode-endpoint.com
+
+# Development mode (skips validation)
+CHIMERA_DEV_MODE=1
 ```
 
 ### 4. Initialize Database
+The database is automatically initialized on first run. To manually apply the schema:
 ```bash
-sqlite3 database/chimera.db < database/schema.sql
+sqlite3 data/chimera.db < ../database/schema.sql
 ```
 
 ### 5. Run the Platform
+
 **Terminal 1: The Operator (Hot Path)**
 ```bash
 cd operator
 cargo run --release
+# Or for development with debug logging:
+RUST_LOG=chimera_operator=debug cargo run
 ```
+
+The Operator will start on `http://0.0.0.0:8080` by default.
 
 **Terminal 2: The Scout (Intelligence)**
 ```bash
@@ -152,6 +171,28 @@ pip install -r scout/requirements.txt
 
 # Run initial analysis
 python scout/main.py
+```
+
+### 6. Testing the Webhook
+
+Send a test signal (requires valid HMAC signature):
+```bash
+# Generate signature
+TIMESTAMP=$(date +%s)
+PAYLOAD='{"strategy":"SHIELD","token":"BONK","action":"BUY","amount_sol":0.1,"wallet_address":"7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"}'
+SIGNATURE=$(echo -n "${TIMESTAMP}${PAYLOAD}" | openssl dgst -sha256 -hmac "your-secret" | cut -d' ' -f2)
+
+# Send request
+curl -X POST http://localhost:8080/api/v1/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-Signature: ${SIGNATURE}" \
+  -H "X-Timestamp: ${TIMESTAMP}" \
+  -d "${PAYLOAD}"
+```
+
+### 7. Health Check
+```bash
+curl http://localhost:8080/api/v1/health
 ```
 
 ---

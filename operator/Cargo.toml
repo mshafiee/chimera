@@ -5,34 +5,41 @@ edition = "2021"
 
 [dependencies]
 # Core Async Runtime
-tokio = { version = "1.48", features = ["full"] }
+tokio = { version = "1.42", features = ["full", "sync"] }
 
 # Web Framework (Ingress)
-axum = "0.8"
+axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "request-id"] }
 
 # Security & Rate Limiting
 hmac = "0.12"
 sha2 = "0.10"
-tower_governor = "0.8" # DDoS protection
+hex = "0.4"
 
 # Solana Interaction
-solana-client = "3.1"
-solana-sdk = "3.0"
-solana-transaction-status = "3.1"
+solana-client = "2.1"
+solana-sdk = "2.1"
+solana-transaction-status = "2.1"
 # Note: You will need the specific Jito searcher crate or build from their SDK
 # jito-searcher-client = { git = "..." } 
 
 # Database (SQLite + WAL)
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
 
+# Configuration
+config = "0.14"
+
 # Utilities
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 chrono = { version = "0.4", features = ["serde"] }
-dotenv = "0.15"
+dotenvy = "0.15"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1.0"
 thiserror = "2.0"
+uuid = { version = "1.11", features = ["v4"] }
+async-trait = "0.1"
+once_cell = "1.20"
+parking_lot = "0.12"

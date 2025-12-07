@@ -1,0 +1,51 @@
+# Chimera Operator Configuration
+# v7.1
+
+server:
+  host: "0.0.0.0"
+  port: 8080
+  request_timeout_ms: 30000
+
+rpc:
+  primary_provider: "helius"
+  # Set via environment: CHIMERA_RPC__PRIMARY_URL
+  primary_url: ""
+  # Optional fallback (QuickNode/Triton)
+  fallback_url: ""
+  rate_limit_per_second: 40
+  timeout_ms: 2000
+  max_consecutive_failures: 3
+
+database:
+  path: "data/chimera.db"
+  max_connections: 5
+
+security:
+  # CRITICAL: Set via environment variable CHIMERA_SECURITY__WEBHOOK_SECRET
+  webhook_secret: ""
+  max_timestamp_drift_secs: 60
+  webhook_rate_limit: 100
+  webhook_burst_size: 150
+
+circuit_breakers:
+  max_loss_24h_usd: 500
+  max_consecutive_losses: 5
+  max_drawdown_percent: 15
+  cooldown_minutes: 30
+
+strategy:
+  shield_percent: 70
+  spear_percent: 30
+  max_position_sol: 1.0
+  min_position_sol: 0.01
+
+jito:
+  enabled: true
+  tip_floor_sol: 0.001
+  tip_ceiling_sol: 0.01
+  tip_percentile: 50
+  tip_percent_max: 0.10
+
+queue:
+  capacity: 1000
+  load_shed_threshold_percent: 80
