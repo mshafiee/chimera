@@ -12,11 +12,11 @@ In production, this would connect to:
 Current implementation: Stub with sample data for testing
 """
 
-import random
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 from .wqs import WalletMetrics
+from .models import HistoricalTrade, TradeAction
 
 
 class WalletAnalyzer:
@@ -120,6 +120,58 @@ class WalletAnalyzer:
                 win_streak_consistency=0.50,
             ),
         }
+        
+        # Sample historical trades for backtesting
+        self._trades_cache = self._generate_sample_trades()
+    
+    def _generate_sample_trades(self) -> dict:
+        """Generate sample historical trades for each wallet."""
+        trades_cache = {}
+        
+        # Known tokens for sample trades
+        tokens = [
+            ("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "BONK"),
+            ("EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm", "WIF"),
+            ("7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr", "POPCAT"),
+        ]
+        
+        for wallet in self._candidate_wallets:
+            trades = []
+            metrics = self._metrics_cache.get(wallet)
+            if not metrics:
+                continue
+            
+            # Generate trades based on metrics
+            num_trades = min(metrics.trade_count_30d or 10, 30)  # Cap at 30 for sample
+            
+            for i in range(num_trades):
+                token_addr, token_symbol = tokens[i % len(tokens)]
+                days_ago = (i * 30) // num_trades  # Spread across 30 days
+                
+                # Alternate buy/sell
+                action = TradeAction.BUY if i % 2 == 0 else TradeAction.SELL
+                
+                # Calculate PnL based on win rate
+                import random
+                is_win = random.random() < (metrics.win_rate or 0.5)
+                pnl = random.uniform(0.01, 0.1) if is_win else random.uniform(-0.05, 0)
+                
+                trade = HistoricalTrade(
+                    token_address=token_addr,
+                    token_symbol=token_symbol,
+                    action=action,
+                    amount_sol=metrics.avg_trade_size_sol or 0.5,
+                    price_at_trade=random.uniform(0.00001, 10.0),
+                    timestamp=datetime.utcnow() - timedelta(days=days_ago, hours=random.randint(0, 23)),
+                    tx_signature=f"{wallet[:8]}_{i}",
+                    pnl_sol=pnl if action == TradeAction.SELL else 0,
+                    liquidity_at_trade_usd=random.uniform(50000, 500000),
+                )
+                trades.append(trade)
+            
+            trades_cache[wallet] = sorted(trades, key=lambda t: t.timestamp, reverse=True)
+        
+        return trades_cache
     
     def get_candidate_wallets(self) -> List[str]:
         """
@@ -152,9 +204,38 @@ class WalletAnalyzer:
         """
         return self._metrics_cache.get(address)
     
+    def get_historical_trades(
+        self,
+        address: str,
+        days: int = 30,
+    ) -> List[HistoricalTrade]:
+        """
+        Get historical trades for a wallet.
+        
+        This method is used by the backtester to simulate trades
+        under current market conditions.
+        
+        In production, this would:
+        1. Query Helius API for transaction history
+        2. Parse swap transactions
+        3. Return structured trade data
+        
+        Args:
+            address: Wallet address
+            days: Number of days to look back (default 30)
+            
+        Returns:
+            List of HistoricalTrade objects
+        """
+        trades = self._trades_cache.get(address, [])
+        
+        # Filter by date
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        return [t for t in trades if t.timestamp >= cutoff]
+    
     def fetch_recent_trades(self, address: str, days: int = 30) -> List[dict]:
         """
-        Fetch recent trades for a wallet.
+        Fetch recent trades for a wallet (legacy method).
         
         In production, this would query Helius API for transaction history.
         
@@ -165,9 +246,21 @@ class WalletAnalyzer:
         Returns:
             List of trade dictionaries
         """
-        # Stub: Return empty list
-        # In production: Query Helius API
-        return []
+        # Convert to dict format for backwards compatibility
+        trades = self.get_historical_trades(address, days)
+        return [
+            {
+                "token_address": t.token_address,
+                "token_symbol": t.token_symbol,
+                "action": t.action.value,
+                "amount_sol": t.amount_sol,
+                "price": t.price_at_trade,
+                "timestamp": t.timestamp.isoformat(),
+                "tx_signature": t.tx_signature,
+                "pnl_sol": t.pnl_sol,
+            }
+            for t in trades
+        ]
     
     def calculate_roi(self, trades: List[dict]) -> float:
         """
@@ -179,16 +272,16 @@ class WalletAnalyzer:
         Returns:
             ROI as percentage
         """
-        # Stub implementation
         if not trades:
             return 0.0
         
-        # In production: Calculate from actual trade data
-        # total_profit = sum(trade['pnl_sol'] for trade in trades)
-        # total_cost = sum(trade['cost_sol'] for trade in trades)
-        # return (total_profit / total_cost) * 100 if total_cost > 0 else 0.0
+        total_pnl = sum(t.get("pnl_sol", 0) or 0 for t in trades)
+        total_cost = sum(t.get("amount_sol", 0) for t in trades if t.get("action") == "BUY")
         
-        return 0.0
+        if total_cost <= 0:
+            return 0.0
+        
+        return (total_pnl / total_cost) * 100
     
     def calculate_drawdown(self, trades: List[dict]) -> float:
         """
@@ -200,22 +293,26 @@ class WalletAnalyzer:
         Returns:
             Maximum drawdown as percentage
         """
-        # Stub implementation
         if not trades:
             return 0.0
         
-        # In production: Calculate from cumulative PnL curve
-        # peak = 0
-        # max_drawdown = 0
-        # running_pnl = 0
-        # for trade in sorted(trades, key=lambda t: t['timestamp']):
-        #     running_pnl += trade['pnl_sol']
-        #     peak = max(peak, running_pnl)
-        #     drawdown = (peak - running_pnl) / peak if peak > 0 else 0
-        #     max_drawdown = max(max_drawdown, drawdown)
-        # return max_drawdown * 100
+        # Sort by timestamp
+        sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", ""))
         
-        return 0.0
+        peak = 0.0
+        max_drawdown = 0.0
+        running_pnl = 0.0
+        
+        for trade in sorted_trades:
+            pnl = trade.get("pnl_sol", 0) or 0
+            running_pnl += pnl
+            peak = max(peak, running_pnl)
+            
+            if peak > 0:
+                drawdown = (peak - running_pnl) / peak
+                max_drawdown = max(max_drawdown, drawdown)
+        
+        return max_drawdown * 100
 
 
 # Example usage
@@ -232,4 +329,5 @@ if __name__ == "__main__":
         if metrics:
             wqs = calculate_wqs(metrics)
             status = classify_wallet(wqs)
-            print(f"{address[:8]}... | WQS: {wqs:5.1f} | Status: {status}")
+            trades = analyzer.get_historical_trades(address)
+            print(f"{address[:8]}... | WQS: {wqs:5.1f} | Status: {status} | Trades: {len(trades)}")
