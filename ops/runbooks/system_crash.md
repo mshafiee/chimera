@@ -277,3 +277,75 @@ VALUES ('incident', 'none', 'system_crash', 'ONCALL_ENGINEER',
 - [ ] RPC fallback configured and tested
 - [ ] Log rotation preventing disk fill
 - [ ] Circuit breakers configured
+
+---
+
+## 8. Post-Mortem Template
+
+### Incident Report
+```markdown
+# System Crash Incident Report
+
+## Incident Summary
+- **Date:** [YYYY-MM-DD]
+- **Duration:** [X] minutes
+- **Root Cause:** [Brief description]
+- **Impact:** Trading halted for [X] minutes
+
+## Timeline
+- [Time] - Service crashed
+- [Time] - Alert received
+- [Time] - Investigation started
+- [Time] - Root cause identified
+- [Time] - Service restored
+
+## Root Cause
+[Detailed explanation]
+
+## Resolution Steps
+1. [Step 1]
+2. [Step 2]
+...
+
+## Impact Assessment
+- **Active Positions:** [X] positions affected
+- **Trades Lost:** [X] trades not processed
+- **Data Loss:** [None / Minimal / Significant]
+
+## Prevention Measures
+- [ ] [Measure 1]
+- [ ] [Measure 2]
+...
+
+## Follow-up Actions
+- [ ] [Action 1]
+- [ ] [Action 2]
+...
+```
+
+### Recovery Verification
+```bash
+# After service is restored, verify:
+# 1. All positions are correctly tracked
+sqlite3 /opt/chimera/data/chimera.db "
+SELECT COUNT(*) as active_positions
+FROM positions
+WHERE state = 'ACTIVE';"
+
+# 2. No stuck positions
+sqlite3 /opt/chimera/data/chimera.db "
+SELECT COUNT(*) as stuck_positions
+FROM positions
+WHERE state IN ('EXECUTING', 'EXITING')
+AND last_updated < datetime('now', '-10 minutes');"
+
+# 3. Recent trades are processing
+sqlite3 /opt/chimera/data/chimera.db "
+SELECT COUNT(*) as recent_trades
+FROM trades
+WHERE created_at > datetime('now', '-10 minutes')
+AND status IN ('ACTIVE', 'CLOSED');"
+
+# 4. Run reconciliation to check for discrepancies
+/opt/chimera/ops/reconcile.sh
+```

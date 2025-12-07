@@ -1,0 +1,158 @@
+# Prometheus alert rules for Chimera
+# Matches PDD Section 6.2 Critical Alerts
+
+groups:
+  - name: chimera_critical
+    interval: 30s
+    rules:
+      # Queue Backpressure (PDD Section 6.2)
+      - alert: QueueBackpressure
+        expr: chimera_queue_depth > 800
+        for: 2m
+        labels:
+          severity: warning
+          component: queue
+        annotations:
+          summary: "Queue depth exceeds 80% capacity"
+          description: "Queue depth is {{ $value }}/1000. Load shedding may be active."
+          
+      # Trade Latency (PDD Section 6.2)
+      - alert: TradeLatency
+        expr: histogram_quantile(0.99, rate(chimera_trade_latency_ms_bucket[5m])) > 2000
+        for: 5m
+        labels:
+          severity: critical
+          component: executor
+        annotations:
+          summary: "Trade latency p99 exceeds 2 seconds"
+          description: "p99 trade latency is {{ $value }}ms. Check RPC health."
+          
+      # Webhook Rejections (PDD Section 6.2)
+      - alert: WebhookRejections
+        expr: rate(chimera_webhook_rejections_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          component: ingress
+        annotations:
+          summary: "High rate of webhook rejections detected"
+          description: "{{ $value }} rejections/sec. Potential attack or HMAC misconfiguration."
+          
+      # Memory Pressure (PDD Section 6.2)
+      - alert: MemoryPressure
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.85
+        for: 5m
+        labels:
+          severity: critical
+          component: system
+        annotations:
+          summary: "Memory usage exceeds 85%"
+          description: "Memory usage is {{ $value | humanizePercentage }}. Restart may be imminent."
+          
+  - name: chimera_warnings
+    interval: 1m
+    rules:
+      # Disk Space (PDD Section 6.2)
+      - alert: DiskSpace
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          component: system
+        annotations:
+          summary: "Disk space below 10%"
+          description: "Free disk space is {{ $value | humanizePercentage }}. Prune logs/backups."
+          
+      # Circuit Breaker Tripped
+      - alert: CircuitBreakerTripped
+        expr: chimera_circuit_breaker_state == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: circuit_breaker
+        annotations:
+          summary: "Circuit breaker has tripped"
+          description: "Trading is halted. Check circuit breaker status and recent losses."
+          
+      # RPC Unhealthy
+      - alert: RpcUnhealthy
+        expr: chimera_rpc_health == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: rpc
+        annotations:
+          summary: "RPC endpoint is unhealthy"
+          description: "Primary RPC may have failed over to fallback."
+          
+      # Reconciliation Discrepancies (PDD Section 8.1)
+      - alert: ReconciliationDiscrepancies
+        expr: chimera_reconciliation_unresolved_total > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: reconciliation
+        annotations:
+          summary: "Unresolved reconciliation discrepancies detected"
+          description: "{{ $value }} unresolved discrepancies in the last 24h. Manual review required."
+          
+      # Reconciliation Discrepancy Spike
+      - alert: ReconciliationDiscrepancySpike
+        expr: rate(chimera_reconciliation_discrepancies_total[1h]) > 10
+        for: 10m
+        labels:
+          severity: critical
+          component: reconciliation
+        annotations:
+          summary: "Rapid increase in reconciliation discrepancies"
+          description: "Discrepancy rate is {{ $value }}/hour. System may have data integrity issues."
+          
+  - name: chimera_reconciliation
+    interval: 5m
+    rules:
+      # High Discrepancy Rate
+      - alert: HighDiscrepancyRate
+        expr: rate(chimera_reconciliation_discrepancies_total[24h]) > 20
+        for: 1h
+        labels:
+          severity: warning
+          component: reconciliation
+        annotations:
+          summary: "High reconciliation discrepancy rate"
+          description: "{{ $value }} discrepancies detected in the last 24 hours."
+          
+  - name: chimera_secret_rotation
+    interval: 1h
+    rules:
+      # Secret Rotation Overdue
+      - alert: SecretRotationOverdue
+        expr: chimera_secret_rotation_days_until_due < 0
+        for: 1h
+        labels:
+          severity: warning
+          component: security
+        annotations:
+          summary: "Secret rotation is overdue"
+          description: "Secret rotation is {{ $value }} days overdue. Rotate immediately."
+          
+      # Secret Rotation Due Soon
+      - alert: SecretRotationDueSoon
+        expr: chimera_secret_rotation_days_until_due > 0 and chimera_secret_rotation_days_until_due <= 3
+        for: 24h
+        labels:
+          severity: info
+          component: security
+        annotations:
+          summary: "Secret rotation due soon"
+          description: "Secret rotation is due in {{ $value }} days."
+          
+      # Secret Rotation Failure
+      - alert: SecretRotationFailure
+        expr: (time() - chimera_secret_rotation_last_success_timestamp) > 2592000
+        for: 1h
+        labels:
+          severity: critical
+          component: security
+        annotations:
+          summary: "Secret rotation has not succeeded in 30 days"
+          description: "Last successful rotation was {{ $value }} seconds ago. Check rotation script."

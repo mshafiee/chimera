@@ -85,6 +85,8 @@ install_crons() {
     chmod +x "$OPS_DIR/reconcile.sh"
     chmod +x "$OPS_DIR/rotate-secrets.sh" 2>/dev/null || true
     chmod +x "$OPS_DIR/preflight-check.sh" 2>/dev/null || true
+    chmod +x "$OPS_DIR/generate-reports.sh" 2>/dev/null || true
+    chmod +x "$OPS_DIR/update-metrics.sh" 2>/dev/null || true
     
     # Copy scripts to /opt/chimera/ops
     mkdir -p "$CHIMERA_HOME/ops"
@@ -92,6 +94,8 @@ install_crons() {
     cp "$OPS_DIR/reconcile.sh" "$CHIMERA_HOME/ops/"
     [[ -f "$OPS_DIR/rotate-secrets.sh" ]] && cp "$OPS_DIR/rotate-secrets.sh" "$CHIMERA_HOME/ops/"
     [[ -f "$OPS_DIR/preflight-check.sh" ]] && cp "$OPS_DIR/preflight-check.sh" "$CHIMERA_HOME/ops/"
+    [[ -f "$OPS_DIR/generate-reports.sh" ]] && cp "$OPS_DIR/generate-reports.sh" "$CHIMERA_HOME/ops/"
+    [[ -f "$OPS_DIR/update-metrics.sh" ]] && cp "$OPS_DIR/update-metrics.sh" "$CHIMERA_HOME/ops/"
     chown -R "$CHIMERA_USER:$CHIMERA_GROUP" "$CHIMERA_HOME/ops"
     
     # Create crontab entries
@@ -112,6 +116,9 @@ MAILTO=""
 # Daily reconciliation at 4:00 AM
 0 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/reconcile.sh >> /var/log/chimera/reconcile.log 2>&1
 
+# Daily metrics update at 4:30 AM (after reconciliation)
+30 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/update-metrics.sh >> /var/log/chimera/metrics-update.log 2>&1
+
 # Weekly Scout run (update wallet roster) - Sundays at 2:00 AM
 0 2 * * 0 $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1
 
@@ -123,6 +130,15 @@ MAILTO=""
 
 # Secret rotation check (webhook: every 30 days, RPC: every 90 days) - daily at 5:00 AM
 0 5 * * * $CHIMERA_USER $CHIMERA_HOME/ops/rotate-secrets.sh >> /var/log/chimera/secret-rotation.log 2>&1
+
+# Daily PnL summary report - daily at 8:00 PM UTC (20:00)
+0 20 * * * $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=1d --type=pnl >> /var/log/chimera/reports.log 2>&1
+
+# Weekly full compliance report - Sundays at 6:00 AM UTC
+0 6 * * 0 $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=7d --type=full >> /var/log/chimera/reports.log 2>&1
+
+# Monthly compliance package - 1st of month at 7:00 AM UTC
+0 7 1 * * $CHIMERA_USER $CHIMERA_HOME/ops/generate-reports.sh --format=csv --period=30d --type=full --package >> /var/log/chimera/reports.log 2>&1
 EOF
     
     chmod 644 "$cron_file"

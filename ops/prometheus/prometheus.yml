@@ -1,0 +1,35 @@
+# Prometheus configuration for Chimera
+# Scrapes metrics from the Operator service
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'chimera'
+    environment: 'production'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'localhost:9093'  # Alertmanager default port
+
+# Load alert rules
+rule_files:
+  - 'alerts.yml'
+
+# Scrape configurations
+scrape_configs:
+  # Chimera Operator metrics
+  - job_name: 'chimera-operator'
+    static_configs:
+      - targets: ['localhost:8080']  # Operator HTTP server
+    metrics_path: '/metrics'
+    scrape_interval: 5s  # High frequency for real-time monitoring
+    
+  # Optional: Node exporter for system metrics
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+    scrape_interval: 15s

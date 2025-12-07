@@ -18,6 +18,7 @@ set -euo pipefail
 # Configuration
 CHIMERA_HOME="${CHIMERA_HOME:-/opt/chimera}"
 DB_PATH="${CHIMERA_HOME}/data/chimera.db"
+CONFIG_FILE="${CHIMERA_HOME}/config/.env"
 RPC_URL="${HELIUS_RPC_URL:-https://api.mainnet-beta.solana.com}"
 LATENCY_THRESHOLD_MS=50
 SKIP_CIRCUIT_BREAKER="${SKIP_CIRCUIT_BREAKER:-false}"
@@ -122,7 +123,50 @@ check_time_sync() {
     log_info "Checking clock drift..."
     local system_time
     system_time=$(date +%s)
-    # Note: In production, compare with a reliable time server
+    
+    # Try to get time from a reliable NTP server to compare
+    if command -v ntpdate &> /dev/null; then
+        # Use ntpdate to check drift (dry-run, doesn't adjust)
+        local ntp_server="pool.ntp.org"
+        local drift_output
+        drift_output=$(timeout 5 ntpdate -q "$ntp_server" 2>&1 | grep "offset" | head -1 || echo "")
+        
+        if [[ -n "$drift_output" ]]; then
+            # Extract offset in seconds (ntpdate shows offset in seconds)
+            local offset_sec
+            offset_sec=$(echo "$drift_output" | grep -oP 'offset\s+[+-]?[0-9]+\.[0-9]+' | awk '{print $2}' | cut -d. -f1 || echo "0")
+            local abs_offset=${offset_sec#-}  # Remove negative sign
+            
+            if [[ -n "$abs_offset" ]] && [[ "$abs_offset" -lt 1 ]]; then
+                log_pass "Clock drift is acceptable (< 1 second: ${abs_offset}s)"
+            elif [[ -n "$abs_offset" ]]; then
+                log_fail "Clock drift exceeds threshold: ${abs_offset}s (must be < 1 second)"
+                log_info "Clock drift will cause HMAC replay protection to reject valid signals"
+                return 1
+            fi
+        fi
+    elif command -v timedatectl &> /dev/null; then
+        # Use timedatectl timesync-status to get offset
+        local offset_str
+        offset_str=$(timedatectl timesync-status 2>/dev/null | grep -i "offset" || echo "")
+        
+        if [[ -n "$offset_str" ]]; then
+            log_info "Time sync status: $offset_str"
+            # Extract numeric offset (format: "Offset: +0.123456s" or "Offset: -0.123456s")
+            local offset_value
+            offset_value=$(echo "$offset_str" | grep -oP '[+-]?[0-9]+\.[0-9]+' | head -1 || echo "0")
+            local abs_offset=${offset_value#-}  # Remove negative sign
+            local abs_offset_int
+            abs_offset_int=$(echo "$abs_offset" | cut -d. -f1)
+            
+            if [[ -n "$abs_offset_int" ]] && [[ "$abs_offset_int" -lt 1 ]]; then
+                log_pass "Clock drift is acceptable (< 1 second)"
+            elif [[ -n "$abs_offset_int" ]]; then
+                log_warn "Clock drift may be high: ${offset_value}s (verify < 1 second)"
+            fi
+        fi
+    fi
+    
     log_info "System time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
     
     return 0
@@ -134,15 +178,18 @@ check_time_sync() {
 
 check_rpc_latency() {
     echo ""
-    echo "=== Check 2: RPC Latency ==="
+    echo "=== Check 2: RPC Latency (Helius Jito Endpoint) ==="
     
-    if [[ -z "$RPC_URL" ]]; then
-        log_fail "RPC_URL not set"
-        log_info "Set HELIUS_RPC_URL environment variable"
+    # Prefer HELIUS_JITO_URL if set, otherwise use HELIUS_RPC_URL
+    local jito_url="${HELIUS_JITO_URL:-${RPC_URL:-}}"
+    
+    if [[ -z "$jito_url" ]]; then
+        log_fail "Helius Jito endpoint URL not set"
+        log_info "Set HELIUS_JITO_URL or HELIUS_RPC_URL environment variable"
         return 1
     fi
     
-    log_info "Testing latency to: $RPC_URL"
+    log_info "Testing latency to Helius Jito endpoint: $jito_url"
     
     # Perform 10 ping-like requests to measure latency
     local latencies=()
@@ -154,7 +201,7 @@ check_rpc_latency() {
         
         # Simple RPC call (getHealth or getSlot)
         local response
-        response=$(curl -s -X POST "$RPC_URL" \
+        response=$(curl -s -X POST "$jito_url" \
             -H "Content-Type: application/json" \
             -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' \
             --max-time 5 2>/dev/null || echo "")
@@ -202,10 +249,13 @@ check_rpc_latency() {
     
     if [[ $avg_latency -lt $LATENCY_THRESHOLD_MS ]]; then
         log_pass "Average latency (${avg_latency}ms) is below threshold (${LATENCY_THRESHOLD_MS}ms)"
+        log_info "Latency is acceptable for high-frequency trading"
     else
         log_fail "Average latency (${avg_latency}ms) exceeds threshold (${LATENCY_THRESHOLD_MS}ms)"
-        log_info "Consider relocating VPS or using alternative provider"
+        log_info "⚠️  WARNING: Spear strategy should be DISABLED with latency > 50ms"
         log_info "High latency will cause blockhash expiration and failed trades"
+        log_info "Consider relocating VPS to US-East (Ashburn, VA) or Amsterdam"
+        log_info "Alternative providers: Latitude.sh, Cherry Servers (bare metal in US-East)"
         return 1
     fi
     
@@ -306,6 +356,34 @@ EOF
     
     if [[ "$cb_status" == "false" ]] || [[ "$cb_status" == "0" ]]; then
         log_pass "Circuit breaker correctly tripped (trading_allowed: false)"
+        
+        # Test that webhook is rejected when circuit breaker is tripped
+        log_info "Testing webhook rejection with tripped circuit breaker..."
+        local webhook_secret
+        webhook_secret=$(grep "^CHIMERA_SECURITY__WEBHOOK_SECRET=" "$CONFIG_FILE" 2>/dev/null | cut -d= -f2 || echo "")
+        
+        if [[ -n "$webhook_secret" ]]; then
+            local test_timestamp
+            test_timestamp=$(date +%s)
+            local test_payload='{"strategy":"SHIELD","token":"TEST","action":"BUY","amount_sol":0.1,"wallet_address":"TestWallet"}'
+            local test_signature
+            test_signature=$(echo -n "${test_timestamp}${test_payload}" | openssl dgst -sha256 -hmac "$webhook_secret" | cut -d' ' -f2)
+            
+            local webhook_response
+            webhook_response=$(curl -s -X POST http://localhost:8080/api/v1/webhook \
+                -H "Content-Type: application/json" \
+                -H "X-Signature: $test_signature" \
+                -H "X-Timestamp: $test_timestamp" \
+                -d "$test_payload" 2>&1)
+            
+            if echo "$webhook_response" | grep -q '"status":"rejected".*"circuit_breaker"'; then
+                log_pass "Webhook correctly rejected due to circuit breaker"
+            else
+                log_warn "Webhook rejection test inconclusive (response: $webhook_response)"
+            fi
+        else
+            log_warn "Cannot test webhook rejection (webhook secret not found)"
+        fi
         
         # Reset circuit breaker for next test
         log_info "Resetting circuit breaker..."

@@ -1,0 +1,114 @@
+# Alertmanager configuration for Chimera
+# Matches PDD Section 6.2 Critical Alerts
+
+global:
+  resolve_timeout: 5m
+  telegram_api_url: 'https://api.telegram.org'
+  
+# Route tree for alerts
+route:
+  receiver: 'default'
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  
+  routes:
+    # Critical alerts - immediate notification
+    - match:
+        severity: critical
+      receiver: 'critical'
+      continue: true
+      
+    # Warning alerts - grouped
+    - match:
+        severity: warning
+      receiver: 'warning'
+      group_wait: 30s
+      group_interval: 5m
+      
+    # Queue backpressure - critical
+    - match:
+        alertname: QueueBackpressure
+      receiver: 'critical'
+      repeat_interval: 1h
+      
+    # Trade latency - critical
+    - match:
+        alertname: TradeLatency
+      receiver: 'critical'
+      repeat_interval: 30m
+      
+    # Webhook rejections - critical (potential attack)
+    - match:
+        alertname: WebhookRejections
+      receiver: 'critical'
+      repeat_interval: 15m
+      
+    # Memory pressure - critical
+    - match:
+        alertname: MemoryPressure
+      receiver: 'critical'
+      repeat_interval: 30m
+      
+    # Disk space - warning
+    - match:
+        alertname: DiskSpace
+      receiver: 'warning'
+      repeat_interval: 6h
+
+# Receivers
+receivers:
+  - name: 'default'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          <b>Chimera Alert</b>
+          {{ range .Alerts }}
+          <b>Alert:</b> {{ .Annotations.summary }}
+          <b>Status:</b> {{ .Status }}
+          <b>Description:</b> {{ .Annotations.description }}
+          {{ end }}
+  
+  - name: 'critical'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          🚨 <b>CRITICAL ALERT</b> 🚨
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          <b>Status:</b> {{ .Status }}
+          <b>Description:</b> {{ .Annotations.description }}
+          <b>Time:</b> {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+    # In production, add additional channels:
+    # - webhook_configs:
+    #     - url: 'https://hooks.slack.com/services/...'
+    # - email_configs:
+    #     - to: 'ops@example.com'
+  
+  - name: 'warning'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          ⚠️ <b>Warning Alert</b>
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          <b>Description:</b> {{ .Annotations.description }}
+          {{ end }}
+
+# Inhibition rules (suppress alerts when others are firing)
+inhibit_rules:
+  # If system is down, don't alert on individual component failures
+  - source_match:
+      severity: 'critical'
+      alertname: 'SystemDown'
+    target_match:
+      severity: 'warning'
+    equal: ['instance']

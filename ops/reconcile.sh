@@ -189,6 +189,28 @@ reconcile() {
     # Summary
     log "INFO" "Reconciliation complete: checked=$total_checked, discrepancies=$discrepancies_found, auto_resolved=$auto_resolved, unresolved=$unresolved_count"
     
+    # Update metrics via API
+    if [[ -n "${API_URL:-}" ]] && [[ -n "${API_KEY:-}" ]]; then
+        log "INFO" "Updating reconciliation metrics via API..."
+        local metrics_response
+        metrics_response=$(curl -s -X POST "${API_URL}/api/v1/metrics/reconciliation" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -d "{
+                \"checked\": ${total_checked},
+                \"discrepancies\": ${discrepancies_found},
+                \"unresolved\": ${unresolved_count}
+            }" 2>&1)
+        
+        if echo "$metrics_response" | grep -q '"status":"updated"'; then
+            log "INFO" "Metrics updated successfully"
+        else
+            log "WARN" "Failed to update metrics: $metrics_response"
+        fi
+    else
+        log "INFO" "Skipping metrics update (API_URL or API_KEY not set)"
+    fi
+    
     # Send alert if there are unresolved discrepancies
     if [[ "$unresolved_count" -gt 0 ]]; then
         notify "WARNING" "Found $unresolved_count unresolved discrepancies in the last 24h. Manual review required."

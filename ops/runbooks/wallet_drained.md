@@ -330,6 +330,83 @@ Incident Commander: [name]
 
 ---
 
+## 10. Recovery Verification
+
+### Verify New Wallet is Operational
+```bash
+# Check new wallet balance
+solana balance NEW_WALLET_ADDRESS
+
+# Verify service is using new wallet
+grep "wallet" /opt/chimera/config/.env
+
+# Test a small trade (if safe to do so)
+# Monitor closely for first few trades
+```
+
+### Verify Credentials Rotated
+```bash
+# Check webhook secret was updated
+grep "WEBHOOK_SECRET" /opt/chimera/config/.env
+
+# Verify old secret is in PREVIOUS field (grace period)
+grep "WEBHOOK_SECRET_PREVIOUS" /opt/chimera/config/.env
+
+# Check config audit for rotation
+sqlite3 /opt/chimera/data/chimera.db "
+SELECT * FROM config_audit
+WHERE key LIKE '%secret%'
+ORDER BY changed_at DESC
+LIMIT 5;"
+```
+
+### Post-Mortem Template
+```markdown
+# Wallet Drain Incident Post-Mortem
+
+## Incident Summary
+- **Date:** [YYYY-MM-DD]
+- **Duration:** [X] minutes/hours
+- **Amount Lost:** [X] SOL (~$[Y] USD)
+- **Root Cause:** [Brief description]
+
+## Timeline
+- [Time] - Alert triggered
+- [Time] - Trading halted
+- [Time] - Funds transferred
+- [Time] - Root cause identified
+- [Time] - Credentials rotated
+- [Time] - Service restored
+
+## Root Cause Analysis
+[Detailed analysis of what went wrong]
+
+## Impact
+- Financial: [X] SOL lost
+- Operational: [X] hours downtime
+- Reputation: [if applicable]
+
+## Actions Taken
+1. [Action 1]
+2. [Action 2]
+...
+
+## Prevention Measures Implemented
+1. [Measure 1]
+2. [Measure 2]
+...
+
+## Lessons Learned
+[Key takeaways]
+
+## Follow-up Actions
+- [ ] [Action item 1]
+- [ ] [Action item 2]
+...
+```
+
+---
+
 ## 10. Prevention Measures
 
 ### Implement After Recovery

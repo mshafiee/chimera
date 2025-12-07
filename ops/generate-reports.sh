@@ -7,7 +7,7 @@
 # - Wallet roster changes (CSV)
 # - Configuration audit trail (CSV)
 #
-# Usage: ./generate-reports.sh [--format=csv|pdf] [--period=30d|90d|all]
+# Usage: ./generate-reports.sh [--format=csv|pdf] [--period=1d|7d|30d|90d|all] [--type=pnl|full] [--package]
 
 set -euo pipefail
 
@@ -17,6 +17,8 @@ DB_PATH="${CHIMERA_HOME}/data/chimera.db"
 REPORTS_DIR="${CHIMERA_HOME}/reports"
 PERIOD="${PERIOD:-30d}"
 FORMAT="${FORMAT:-csv}"
+REPORT_TYPE="${REPORT_TYPE:-full}"  # pnl or full
+PACKAGE_MODE="${PACKAGE_MODE:-false}"  # true to create compliance package
 
 # Colors
 GREEN='\033[0;32m'
@@ -34,6 +36,16 @@ get_date_range() {
     end_date=$(date -u '+%Y-%m-%d')
     
     case "$period" in
+        1d)
+            local start_date
+            start_date=$(date -u -d '1 day ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-1d '+%Y-%m-%d')
+            echo "$start_date|$end_date"
+            ;;
+        7d)
+            local start_date
+            start_date=$(date -u -d '7 days ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-7d '+%Y-%m-%d')
+            echo "$start_date|$end_date"
+            ;;
         30d)
             local start_date
             start_date=$(date -u -d '30 days ago' '+%Y-%m-%d' 2>/dev/null || date -u -v-30d '+%Y-%m-%d')
@@ -288,34 +300,78 @@ main() {
     
     mkdir -p "$REPORTS_DIR"
     
-    log "Generating compliance reports (period: $PERIOD, format: $FORMAT)"
+    log "Generating compliance reports (period: $PERIOD, format: $FORMAT, type: $REPORT_TYPE)"
     
-    # Generate all reports
-    generate_trade_history "${REPORTS_DIR}/trade_history_${PERIOD}_${timestamp}.csv" "$date_range"
-    generate_pnl_summary "${REPORTS_DIR}/pnl_summary_${PERIOD}_${timestamp}.csv" "$date_range"
-    generate_wallet_changes "${REPORTS_DIR}/wallet_changes_${PERIOD}_${timestamp}.csv" "$date_range"
-    generate_config_audit "${REPORTS_DIR}/config_audit_${PERIOD}_${timestamp}.csv" "$date_range"
-    generate_reconciliation_report "${REPORTS_DIR}/reconciliation_discrepancies_${timestamp}.csv"
+    local report_files=()
     
-    log "All reports generated in: $REPORTS_DIR"
+    # Generate reports based on type
+    if [[ "$REPORT_TYPE" == "pnl" ]]; then
+        # Daily PnL summary only
+        generate_pnl_summary "${REPORTS_DIR}/pnl_summary_${PERIOD}_${timestamp}.csv" "$date_range"
+        report_files+=("pnl_summary_${PERIOD}_${timestamp}.csv")
+    else
+        # Full compliance report
+        generate_trade_history "${REPORTS_DIR}/trade_history_${PERIOD}_${timestamp}.csv" "$date_range"
+        generate_pnl_summary "${REPORTS_DIR}/pnl_summary_${PERIOD}_${timestamp}.csv" "$date_range"
+        generate_wallet_changes "${REPORTS_DIR}/wallet_changes_${PERIOD}_${timestamp}.csv" "$date_range"
+        generate_config_audit "${REPORTS_DIR}/config_audit_${PERIOD}_${timestamp}.csv" "$date_range"
+        generate_reconciliation_report "${REPORTS_DIR}/reconciliation_discrepancies_${timestamp}.csv"
+        
+        report_files+=("trade_history_${PERIOD}_${timestamp}.csv")
+        report_files+=("pnl_summary_${PERIOD}_${timestamp}.csv")
+        report_files+=("wallet_changes_${PERIOD}_${timestamp}.csv")
+        report_files+=("config_audit_${PERIOD}_${timestamp}.csv")
+        report_files+=("reconciliation_discrepancies_${timestamp}.csv")
+    fi
     
-    # Create summary
-    local summary_file="${REPORTS_DIR}/report_summary_${timestamp}.txt"
-    cat > "$summary_file" << EOF
+    log "Reports generated in: $REPORTS_DIR"
+    
+    # Create compliance package if requested
+    if [[ "$PACKAGE_MODE" == "true" ]]; then
+        local package_dir="${REPORTS_DIR}/compliance_package_${timestamp}"
+        mkdir -p "$package_dir"
+        
+        # Move all reports to package directory
+        for file in "${report_files[@]}"; do
+            if [[ -f "${REPORTS_DIR}/${file}" ]]; then
+                mv "${REPORTS_DIR}/${file}" "$package_dir/"
+            fi
+        done
+        
+        # Create package manifest
+        cat > "${package_dir}/MANIFEST.txt" << EOF
+Chimera Compliance Package
+Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+Period: $PERIOD
+Format: $FORMAT
+
+Contents:
+$(ls -lh "$package_dir" | grep -v MANIFEST | awk '{print $9, "(" $5 ")"}')
+
+This package contains all compliance reports for the specified period.
+Suitable for audit and tax reporting purposes.
+
+EOF
+        
+        # Create compressed archive
+        local package_archive="${REPORTS_DIR}/compliance_package_${PERIOD}_${timestamp}.tar.gz"
+        tar -czf "$package_archive" -C "$REPORTS_DIR" "compliance_package_${timestamp}"
+        log "Compliance package created: $package_archive"
+    else
+        # Create summary
+        local summary_file="${REPORTS_DIR}/report_summary_${timestamp}.txt"
+        cat > "$summary_file" << EOF
 Chimera Compliance Report Summary
 Generated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 Period: $PERIOD
+Type: $REPORT_TYPE
 
 Reports Generated:
-- Trade History: trade_history_${PERIOD}_${timestamp}.csv
-- PnL Summary: pnl_summary_${PERIOD}_${timestamp}.csv
-- Wallet Changes: wallet_changes_${PERIOD}_${timestamp}.csv
-- Config Audit: config_audit_${PERIOD}_${timestamp}.csv
-- Reconciliation: reconciliation_discrepancies_${timestamp}.csv
+$(for file in "${report_files[@]}"; do echo "- $file"; done)
 
 EOF
-    
-    log "Summary saved to: $summary_file"
+        log "Summary saved to: $summary_file"
+    fi
 }
 
 # Parse arguments
@@ -329,9 +385,17 @@ while [[ $# -gt 0 ]]; do
             FORMAT="${1#*=}"
             shift
             ;;
+        --type=*)
+            REPORT_TYPE="${1#*=}"
+            shift
+            ;;
+        --package)
+            PACKAGE_MODE=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--period=30d|90d|all] [--format=csv|pdf]"
+            echo "Usage: $0 [--period=1d|7d|30d|90d|all] [--format=csv|pdf] [--type=pnl|full] [--package]"
             exit 1
             ;;
     esac

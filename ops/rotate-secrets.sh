@@ -135,6 +135,31 @@ rotate_webhook_secret() {
     log "INFO" "Webhook secret rotated successfully"
     log "INFO" "Grace period active: old and new secrets accepted for ${GRACE_PERIOD_HOURS} hours"
     
+    # Update metrics via API
+    if [[ -n "${API_URL:-}" ]] && [[ -n "${API_KEY:-}" ]]; then
+        local current_timestamp
+        current_timestamp=$(date +%s)
+        local days_until_due=30  # Next rotation in 30 days
+        
+        log "INFO" "Updating secret rotation metrics via API..."
+        local metrics_response
+        metrics_response=$(curl -s -X POST "${API_URL}/api/v1/metrics/secret-rotation" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -d "{
+                \"last_success_timestamp\": ${current_timestamp},
+                \"days_until_due\": ${days_until_due}
+            }" 2>&1)
+        
+        if echo "$metrics_response" | grep -q '"status":"updated"'; then
+            log "INFO" "Metrics updated successfully"
+        else
+            log "WARN" "Failed to update metrics: $metrics_response"
+        fi
+    else
+        log "INFO" "Skipping metrics update (API_URL or API_KEY not set)"
+    fi
+    
     send_notification "Webhook HMAC secret rotated. Grace period: ${GRACE_PERIOD_HOURS}h"
     
     return 0
