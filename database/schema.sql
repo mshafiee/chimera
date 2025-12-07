@@ -195,6 +195,25 @@ CREATE TABLE IF NOT EXISTS backups (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Historical liquidity data for backtesting and validation
+CREATE TABLE IF NOT EXISTS historical_liquidity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    liquidity_usd REAL NOT NULL,
+    price_usd REAL,
+    volume_24h_usd REAL,
+    timestamp TIMESTAMP NOT NULL,
+    source TEXT, -- 'birdeye', 'calculated', 'jupiter', etc.
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(token_address, timestamp)
+);
+
+-- Index for efficient historical queries
+CREATE INDEX IF NOT EXISTS idx_historical_liquidity_token_time 
+    ON historical_liquidity(token_address, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_historical_liquidity_timestamp 
+    ON historical_liquidity(timestamp DESC);
+
 -- =============================================================================
 -- TRIGGERS
 -- =============================================================================

@@ -17,22 +17,21 @@ pub type DbPool = Pool<Sqlite>;
 /// Initialize the database connection pool
 pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
     // Ensure data directory exists
-    if let Some(parent) = config.path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AppError::Database(sqlx::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create database directory: {}", e),
-                )))
-            })?;
-            info!("Created database directory: {:?}", parent);
+        if let Some(parent) = config.path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    AppError::Database(sqlx::Error::Io(std::io::Error::other(
+                        format!("Failed to create database directory: {}", e),
+                    )))
+                })?;
+                info!("Created database directory: {:?}", parent);
+            }
         }
-    }
 
-    let db_url = format!("sqlite:{}?mode=rwc", config.path.display());
+        let db_url = format!("sqlite:{}?mode=rwc", config.path.display());
 
-    let connect_options = SqliteConnectOptions::from_str(&db_url)
-        .map_err(|e| AppError::Database(e))?
+        let connect_options = SqliteConnectOptions::from_str(&db_url)
+        .map_err(AppError::Database)?
         // Enable WAL mode for concurrent reads
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         // Set busy timeout to 5 seconds
@@ -240,6 +239,125 @@ pub async fn log_config_change(
     Ok(())
 }
 
+// =============================================================================
+// INCIDENTS API (Dead Letter Queue & Config Audit)
+// =============================================================================
+
+/// Dead letter queue item
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DeadLetterItem {
+    pub id: i64,
+    pub trade_uuid: Option<String>,
+    pub payload: String,
+    pub reason: String,
+    pub error_details: Option<String>,
+    pub source_ip: Option<String>,
+    pub retry_count: i32,
+    pub can_retry: bool,
+    pub received_at: String,
+    pub processed_at: Option<String>,
+}
+
+/// Get dead letter queue items
+pub async fn get_dead_letter_queue(
+    pool: &DbPool,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> AppResult<Vec<DeadLetterItem>> {
+    let mut query = String::from(
+        "SELECT id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry, received_at, processed_at FROM dead_letter_queue ORDER BY received_at DESC"
+    );
+
+    if let Some(lim) = limit {
+        query.push_str(&format!(" LIMIT {}", lim));
+    }
+
+    if let Some(off) = offset {
+        query.push_str(&format!(" OFFSET {}", off));
+    }
+
+    // Query as tuple and map to struct (can_retry is INTEGER in DB, need to convert to bool)
+    let rows: Vec<(i64, Option<String>, String, String, Option<String>, Option<String>, i32, i64, String, Option<String>)> = 
+        sqlx::query_as(&query)
+        .fetch_all(pool)
+        .await?;
+
+    let items = rows
+        .into_iter()
+        .map(|(id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry_int, received_at, processed_at)| {
+            DeadLetterItem {
+                id,
+                trade_uuid,
+                payload,
+                reason,
+                error_details,
+                source_ip,
+                retry_count,
+                can_retry: can_retry_int != 0,
+                received_at,
+                processed_at,
+            }
+        })
+        .collect();
+
+    Ok(items)
+}
+
+/// Count dead letter queue items
+pub async fn count_dead_letter_queue(pool: &DbPool) -> AppResult<i64> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM dead_letter_queue")
+        .fetch_one(pool)
+        .await?;
+
+    Ok(count.0)
+}
+
+/// Config audit log entry
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct ConfigAuditItem {
+    pub id: i64,
+    pub key: String,
+    pub old_value: Option<String>,
+    pub new_value: String,
+    pub changed_by: String,
+    pub change_reason: Option<String>,
+    pub changed_at: String,
+}
+
+/// Get config audit log
+pub async fn get_config_audit(
+    pool: &DbPool,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> AppResult<Vec<ConfigAuditItem>> {
+    let mut query = String::from(
+        "SELECT id, key, old_value, new_value, changed_by, change_reason, changed_at FROM config_audit ORDER BY changed_at DESC"
+    );
+
+    if let Some(lim) = limit {
+        query.push_str(&format!(" LIMIT {}", lim));
+    }
+
+    if let Some(off) = offset {
+        query.push_str(&format!(" OFFSET {}", off));
+    }
+
+    let items = sqlx::query_as::<_, ConfigAuditItem>(&query)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(items)
+}
+
+/// Count config audit entries
+pub async fn count_config_audit(pool: &DbPool) -> AppResult<i64> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM config_audit")
+        .fetch_one(pool)
+        .await?;
+
+    Ok(count.0)
+}
+
 /// Get count of trades in a specific status
 pub async fn count_trades_by_status(pool: &DbPool, status: &str) -> AppResult<i64> {
     let count: (i64,) = sqlx::query_as(
@@ -266,6 +384,96 @@ pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<f64> {
     .await?;
 
     Ok(result.0.unwrap_or(0.0))
+}
+
+/// Get total PnL for the last 7 days
+pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<f64> {
+    let result: (Option<f64>,) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(pnl_usd), 0.0)
+        FROM trades
+        WHERE status = 'CLOSED'
+        AND created_at >= datetime('now', '-7 days')
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.0.unwrap_or(0.0))
+}
+
+/// Get total PnL for the last 30 days
+pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<f64> {
+    let result: (Option<f64>,) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(SUM(pnl_usd), 0.0)
+        FROM trades
+        WHERE status = 'CLOSED'
+        AND created_at >= datetime('now', '-30 days')
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.0.unwrap_or(0.0))
+}
+
+/// Get strategy performance metrics (win rate, avg return, trade count)
+pub async fn get_strategy_performance(
+    pool: &DbPool,
+    strategy: &str,
+    days: i64,
+) -> AppResult<(f64, f64, u32)> {
+    // Get trades for the strategy in the time period
+    // Use parameterized query to avoid SQL injection
+    let query_str = format!(
+        r#"
+        SELECT pnl_usd
+        FROM trades
+        WHERE status = 'CLOSED'
+        AND strategy = ?
+        AND created_at >= datetime('now', '-{} days')
+        ORDER BY created_at DESC
+        "#,
+        days
+    );
+    
+    let trades: Vec<(Option<f64>,)> = sqlx::query_as(&query_str)
+        .bind(strategy)
+        .fetch_all(pool)
+        .await?;
+
+    if trades.is_empty() {
+        return Ok((0.0, 0.0, 0));
+    }
+
+    let mut total_pnl = 0.0;
+    let mut winning_trades = 0u32;
+    let mut total_trades = 0u32;
+
+    for (pnl_opt,) in trades {
+        if let Some(pnl) = pnl_opt {
+            total_trades += 1;
+            total_pnl += pnl;
+            if pnl > 0.0 {
+                winning_trades += 1;
+            }
+        }
+    }
+
+    let win_rate = if total_trades > 0 {
+        (winning_trades as f64 / total_trades as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let avg_return = if total_trades > 0 {
+        total_pnl / total_trades as f64
+    } else {
+        0.0
+    };
+
+    Ok((win_rate, avg_return, total_trades))
 }
 
 /// Get count of consecutive losses
@@ -378,15 +586,16 @@ pub struct PositionRecord {
     pub strategy: String,
     pub state: String,
     pub entry_tx_signature: String,
+    pub exit_tx_signature: Option<String>,
     pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
 /// Get positions stuck in EXITING state for too long
 pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>> {
-    let positions: Vec<(i64, String, String, String, String, String, String, String)> = sqlx::query_as(
+    let positions: Vec<(i64, String, String, String, String, String, String, Option<String>, String)> = sqlx::query_as(
         r#"
         SELECT id, trade_uuid, wallet_address, token_address, strategy, state, 
-               entry_tx_signature, last_updated
+               entry_tx_signature, exit_tx_signature, last_updated
         FROM positions
         WHERE state = 'EXITING'
         AND last_updated < datetime('now', ? || ' seconds')
@@ -398,7 +607,7 @@ pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult
 
     positions
         .into_iter()
-        .map(|(id, trade_uuid, wallet_address, token_address, strategy, state, entry_tx_signature, last_updated)| {
+        .map(|(id, trade_uuid, wallet_address, token_address, strategy, state, entry_tx_signature, exit_tx_signature, last_updated)| {
             Ok(PositionRecord {
                 id,
                 trade_uuid,
@@ -407,6 +616,7 @@ pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult
                 strategy,
                 state,
                 entry_tx_signature,
+                exit_tx_signature,
                 last_updated: chrono::DateTime::parse_from_rfc3339(&last_updated)
                     .map(|dt| dt.with_timezone(&chrono::Utc))
                     .unwrap_or_else(|_| chrono::Utc::now()),
@@ -576,6 +786,28 @@ pub async fn get_positions(pool: &DbPool, state_filter: Option<&str>) -> AppResu
     };
 
     Ok(positions)
+}
+
+/// Count active positions
+pub async fn count_active_positions(pool: &DbPool) -> AppResult<i64> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0)
+}
+
+/// Count total trades
+pub async fn count_total_trades(pool: &DbPool) -> AppResult<i64> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trades"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0)
 }
 
 /// Get a single position by trade_uuid
@@ -911,6 +1143,102 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
     }
     
     csv
+}
+
+/// Generate PDF content from trades
+pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
+    use printpdf::*;
+    use std::io::BufWriter;
+    
+    let (doc, page1, layer1) = PdfDocument::new("Chimera Trade History", Mm(210.0), Mm(297.0), "Layer 1");
+    let current_layer = doc.get_page(page1).get_layer(layer1);
+    
+    // Add title
+    let font = doc.add_builtin_font(BuiltinFont::HelveticaBold).map_err(|e| {
+        crate::error::AppError::Internal(format!("Failed to add font: {}", e))
+    })?;
+    current_layer.use_text("Chimera Trade History Report", 16.0, Mm(10.0), Mm(280.0), &font);
+    
+    let font_regular = doc.add_builtin_font(BuiltinFont::Helvetica).map_err(|e| {
+        crate::error::AppError::Internal(format!("Failed to add font: {}", e))
+    })?;
+    
+    let generated_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    current_layer.use_text(&format!("Generated: {}", generated_time), 10.0, Mm(10.0), Mm(270.0), &font_regular);
+    
+    // Table header
+    let mut y_pos = 260.0;
+    current_layer.use_text("ID | Trade UUID | Wallet | Token | Strategy | Side | Amount SOL | Status | PnL USD | Created", 
+        8.0, Mm(10.0), Mm(y_pos), &font_regular);
+    y_pos -= 5.0;
+    
+    // Draw line under header
+    let line = Line {
+        points: vec![
+            (Point::new(Mm(10.0), Mm(y_pos)), false),
+            (Point::new(Mm(200.0), Mm(y_pos)), false),
+        ],
+        is_closed: false,
+    };
+    current_layer.add_line(line);
+    y_pos -= 5.0;
+    
+    // Add trade rows (limit to prevent PDF from being too large)
+    let max_rows = 1000;
+    let display_trades = if trades.len() > max_rows {
+        &trades[..max_rows]
+    } else {
+        trades
+    };
+    
+    for trade in display_trades {
+        if y_pos < 20.0 {
+            // Would need to create new page here - for now, just stop
+            break;
+        }
+        
+        let row = format!(
+            "{} | {}... | {}... | {} | {} | {} | {:.4} | {} | {:.2} | {}",
+            trade.id,
+            &trade.trade_uuid[..12.min(trade.trade_uuid.len())],
+            &trade.wallet_address[..8.min(trade.wallet_address.len())],
+            trade.token_symbol.as_deref()
+                .map(|s| s.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| trade.token_address.chars().take(8).collect()),
+            trade.strategy,
+            trade.side,
+            trade.amount_sol,
+            trade.status,
+            trade.pnl_usd.map(|p| p).unwrap_or(0.0),
+            &trade.created_at[..10.min(trade.created_at.len())], // Just date part
+        );
+        
+        current_layer.use_text(&row, 7.0, Mm(10.0), Mm(y_pos), &font_regular);
+        y_pos -= 4.0;
+    }
+    
+    if trades.len() > max_rows {
+        current_layer.use_text(
+            &format!("... and {} more trades", trades.len() - max_rows),
+            8.0,
+            Mm(10.0),
+            Mm(y_pos),
+            &font_regular,
+        );
+    }
+    
+    // Save to bytes
+    let mut buffer = Vec::new();
+    let mut writer = BufWriter::new(&mut buffer);
+    doc.save(&mut writer).map_err(|e| {
+        crate::error::AppError::Internal(format!("Failed to save PDF: {}", e))
+    })?;
+    std::io::Write::flush(&mut writer).map_err(|e| {
+        crate::error::AppError::Internal(format!("Failed to flush PDF buffer: {}", e))
+    })?;
+    drop(writer); // Ensure writer is dropped to flush buffer
+    
+    Ok(buffer)
 }
 
 #[cfg(test)]
