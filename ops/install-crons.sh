@@ -83,11 +83,15 @@ install_crons() {
     # Make scripts executable
     chmod +x "$OPS_DIR/backup.sh"
     chmod +x "$OPS_DIR/reconcile.sh"
+    chmod +x "$OPS_DIR/rotate-secrets.sh" 2>/dev/null || true
+    chmod +x "$OPS_DIR/preflight-check.sh" 2>/dev/null || true
     
     # Copy scripts to /opt/chimera/ops
     mkdir -p "$CHIMERA_HOME/ops"
     cp "$OPS_DIR/backup.sh" "$CHIMERA_HOME/ops/"
     cp "$OPS_DIR/reconcile.sh" "$CHIMERA_HOME/ops/"
+    [[ -f "$OPS_DIR/rotate-secrets.sh" ]] && cp "$OPS_DIR/rotate-secrets.sh" "$CHIMERA_HOME/ops/"
+    [[ -f "$OPS_DIR/preflight-check.sh" ]] && cp "$OPS_DIR/preflight-check.sh" "$CHIMERA_HOME/ops/"
     chown -R "$CHIMERA_USER:$CHIMERA_GROUP" "$CHIMERA_HOME/ops"
     
     # Create crontab entries
@@ -116,6 +120,9 @@ MAILTO=""
 
 # Prune old dead letter queue entries (keep 30 days) - daily at 3:35 AM
 35 3 * * * $CHIMERA_USER sqlite3 $CHIMERA_HOME/data/chimera.db "DELETE FROM dead_letter_queue WHERE received_at < datetime('now', '-30 days');" 2>/dev/null
+
+# Secret rotation check (webhook: every 30 days, RPC: every 90 days) - daily at 5:00 AM
+0 5 * * * $CHIMERA_USER $CHIMERA_HOME/ops/rotate-secrets.sh >> /var/log/chimera/secret-rotation.log 2>&1
 EOF
     
     chmod 644 "$cron_file"

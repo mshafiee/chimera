@@ -1,2 +1,1 @@
-# Scout Tests Package
-
+# Scout test suite
