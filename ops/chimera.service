@@ -1,0 +1,49 @@
+[Unit]
+Description=Chimera Operator - High-frequency copy-trading system for Solana
+Documentation=https://github.com/mshafiee/chimera
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chimera
+Group=chimera
+WorkingDirectory=/opt/chimera
+
+# Main executable
+ExecStart=/opt/chimera/operator/target/release/chimera_operator
+
+# Restart configuration
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60
+StartLimitBurst=3
+
+# Environment
+Environment=RUST_LOG=chimera_operator=info,tower_http=info
+Environment=CHIMERA_DEV_MODE=false
+EnvironmentFile=-/opt/chimera/config/.env
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/chimera/data /var/log/chimera
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=2G
+CPUQuota=80%
+
+# Logging
+StandardOutput=append:/var/log/chimera/operator.log
+StandardError=append:/var/log/chimera/operator.log
+
+# Graceful shutdown (allow time for position cleanup)
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
