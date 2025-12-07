@@ -8,8 +8,10 @@
 //! - Wallet promoted
 //! - Daily summary
 
+pub mod discord;
 pub mod telegram;
 
+pub use discord::DiscordNotifier;
 pub use telegram::TelegramNotifier;
 
 use serde::{Deserialize, Serialize};
