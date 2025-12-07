@@ -37,10 +37,12 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::engine::{RecoveryManager, TipManager};
 use crate::handlers::{
-    health_check, health_simple, roster_merge, roster_validate, webhook_handler, AppState,
+    export_trades, get_config, get_position, get_wallet, health_check, health_simple,
+    list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
+    roster_validate, update_config, update_wallet, webhook_handler, ApiState, AppState,
     RosterState, WebhookState,
 };
-use crate::middleware::HmacState;
+use crate::middleware::{bearer_auth, AuthState, HmacState, Role};
 use crate::price_cache::PriceCache;
 use crate::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 
@@ -244,6 +246,70 @@ async fn main() -> anyhow::Result<()> {
         default_roster_path: roster_path,
     });
 
+    // Create API state with shared config
+    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
+    let api_state = Arc::new(ApiState {
+        db: db_pool.clone(),
+        circuit_breaker: circuit_breaker.clone(),
+        config: shared_config.clone(),
+    });
+
+    // Create auth state with API keys from config
+    let mut api_keys_map = std::collections::HashMap::new();
+    for key_config in &config.security.api_keys {
+        if let Ok(role) = key_config.role.parse::<Role>() {
+            api_keys_map.insert(key_config.key.clone(), role);
+            tracing::debug!(role = %role, "API key configured");
+        } else {
+            tracing::warn!(role = %key_config.role, "Invalid role in API key config");
+        }
+    }
+    let auth_state = Arc::new(AuthState::with_api_keys(db_pool.clone(), api_keys_map));
+    tracing::info!(
+        api_key_count = config.security.api_keys.len(),
+        "Auth state initialized"
+    );
+
+    // Spawn TTL expiration background task
+    let db_pool_ttl = db_pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            match db::get_expired_ttl_wallets(&db_pool_ttl).await {
+                Ok(expired_wallets) => {
+                    for address in expired_wallets {
+                        tracing::info!(wallet = %address, "Demoting wallet due to TTL expiration");
+                        if let Err(e) = db::demote_wallet(
+                            &db_pool_ttl,
+                            &address,
+                            "Auto-demoted: TTL expired",
+                        )
+                        .await
+                        {
+                            tracing::error!(wallet = %address, error = %e, "Failed to demote wallet");
+                        } else {
+                            // Log to config_audit
+                            let _ = db::log_config_change(
+                                &db_pool_ttl,
+                                &format!("wallet:{}", address),
+                                Some("ACTIVE"),
+                                "CANDIDATE",
+                                "SYSTEM_TTL",
+                                Some("TTL expired"),
+                            )
+                            .await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to check TTL expirations");
+                }
+            }
+        }
+    });
+    tracing::info!("Wallet TTL expiration task started");
+
     // Create HMAC state with rotation support
     let hmac_secrets = build_hmac_secrets(&secrets, &config);
     let hmac_state = HmacState::with_rotation(hmac_secrets, config.security.max_timestamp_drift_secs);
@@ -291,6 +357,39 @@ async fn main() -> anyhow::Result<()> {
         .route("/roster/validate", get(roster_validate))
         .with_state(roster_state);
 
+    // API routes (require Bearer token auth)
+    // Readonly routes (readonly+ role)
+    let readonly_api_routes = Router::new()
+        .route("/positions", get(list_positions))
+        .route("/positions/:trade_uuid", get(get_position))
+        .route("/wallets", get(list_wallets))
+        .route("/wallets/:address", get(get_wallet))
+        .route("/trades", get(list_trades))
+        .route("/trades/export", get(export_trades))
+        .with_state(api_state.clone());
+
+    // Operator routes (operator+ role) - wallet updates
+    let operator_api_routes = Router::new()
+        .route("/wallets/:address", axum::routing::put(update_wallet))
+        .with_state(api_state.clone());
+
+    // Admin routes (admin role) - config management
+    let admin_api_routes = Router::new()
+        .route("/config", get(get_config))
+        .route("/config", axum::routing::put(update_config))
+        .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
+        .with_state(api_state.clone());
+
+    // Apply bearer auth to API routes
+    let authenticated_api_routes = Router::new()
+        .merge(readonly_api_routes)
+        .merge(operator_api_routes)
+        .merge(admin_api_routes)
+        .layer(axum_middleware::from_fn_with_state(
+            auth_state,
+            bearer_auth,
+        ));
+
     // Simple health check for load balancers
     let root_routes = Router::new().route("/health", get(health_simple));
 
@@ -298,7 +397,8 @@ async fn main() -> anyhow::Result<()> {
     let api_routes = Router::new()
         .merge(webhook_routes)
         .merge(health_routes)
-        .merge(roster_routes);
+        .merge(roster_routes)
+        .merge(authenticated_api_routes);
 
     // Build final router
     let app = Router::new()

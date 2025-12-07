@@ -509,6 +509,410 @@ pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
     Ok(count.0 as u32)
 }
 
+// =============================================================================
+// POSITIONS API
+// =============================================================================
+
+/// Position with full details for API response
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct PositionDetail {
+    pub id: i64,
+    pub trade_uuid: String,
+    pub wallet_address: String,
+    pub token_address: String,
+    pub token_symbol: Option<String>,
+    pub strategy: String,
+    pub entry_amount_sol: f64,
+    pub entry_price: f64,
+    pub entry_tx_signature: String,
+    pub current_price: Option<f64>,
+    pub unrealized_pnl_sol: Option<f64>,
+    pub unrealized_pnl_percent: Option<f64>,
+    pub state: String,
+    pub exit_price: Option<f64>,
+    pub exit_tx_signature: Option<String>,
+    pub realized_pnl_sol: Option<f64>,
+    pub realized_pnl_usd: Option<f64>,
+    pub opened_at: String,
+    pub last_updated: String,
+    pub closed_at: Option<String>,
+}
+
+/// Get all positions with optional state filter
+pub async fn get_positions(pool: &DbPool, state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>> {
+    let positions = match state_filter {
+        Some(state) => {
+            sqlx::query_as::<_, PositionDetail>(
+                r#"
+                SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+                       entry_amount_sol, entry_price, entry_tx_signature, current_price,
+                       unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
+                       exit_tx_signature, realized_pnl_sol, realized_pnl_usd,
+                       opened_at, last_updated, closed_at
+                FROM positions
+                WHERE state = ?
+                ORDER BY last_updated DESC
+                "#
+            )
+            .bind(state)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, PositionDetail>(
+                r#"
+                SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+                       entry_amount_sol, entry_price, entry_tx_signature, current_price,
+                       unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
+                       exit_tx_signature, realized_pnl_sol, realized_pnl_usd,
+                       opened_at, last_updated, closed_at
+                FROM positions
+                ORDER BY last_updated DESC
+                "#
+            )
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok(positions)
+}
+
+/// Get a single position by trade_uuid
+pub async fn get_position_by_uuid(pool: &DbPool, trade_uuid: &str) -> AppResult<Option<PositionDetail>> {
+    let position = sqlx::query_as::<_, PositionDetail>(
+        r#"
+        SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+               entry_amount_sol, entry_price, entry_tx_signature, current_price,
+               unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
+               exit_tx_signature, realized_pnl_sol, realized_pnl_usd,
+               opened_at, last_updated, closed_at
+        FROM positions
+        WHERE trade_uuid = ?
+        "#
+    )
+    .bind(trade_uuid)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(position)
+}
+
+// =============================================================================
+// WALLETS API
+// =============================================================================
+
+/// Wallet with full details for API response
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct WalletDetail {
+    pub id: i64,
+    pub address: String,
+    pub status: String,
+    pub wqs_score: Option<f64>,
+    pub roi_7d: Option<f64>,
+    pub roi_30d: Option<f64>,
+    pub trade_count_30d: Option<i32>,
+    pub win_rate: Option<f64>,
+    pub max_drawdown_30d: Option<f64>,
+    pub avg_trade_size_sol: Option<f64>,
+    pub last_trade_at: Option<String>,
+    pub promoted_at: Option<String>,
+    pub ttl_expires_at: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Get all wallets with optional status filter
+pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>> {
+    let wallets = match status_filter {
+        Some(status) => {
+            sqlx::query_as::<_, WalletDetail>(
+                r#"
+                SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
+                       win_rate, max_drawdown_30d, avg_trade_size_sol, last_trade_at,
+                       promoted_at, ttl_expires_at, notes, created_at, updated_at
+                FROM wallets
+                WHERE status = ?
+                ORDER BY wqs_score DESC NULLS LAST
+                "#
+            )
+            .bind(status)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, WalletDetail>(
+                r#"
+                SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
+                       win_rate, max_drawdown_30d, avg_trade_size_sol, last_trade_at,
+                       promoted_at, ttl_expires_at, notes, created_at, updated_at
+                FROM wallets
+                ORDER BY wqs_score DESC NULLS LAST
+                "#
+            )
+            .fetch_all(pool)
+            .await?
+        }
+    };
+
+    Ok(wallets)
+}
+
+/// Get a single wallet by address
+pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Option<WalletDetail>> {
+    let wallet = sqlx::query_as::<_, WalletDetail>(
+        r#"
+        SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
+               win_rate, max_drawdown_30d, avg_trade_size_sol, last_trade_at,
+               promoted_at, ttl_expires_at, notes, created_at, updated_at
+        FROM wallets
+        WHERE address = ?
+        "#
+    )
+    .bind(address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(wallet)
+}
+
+/// Update wallet status with optional TTL
+pub async fn update_wallet_status(
+    pool: &DbPool,
+    address: &str,
+    status: &str,
+    ttl_hours: Option<i64>,
+    reason: Option<&str>,
+) -> AppResult<bool> {
+    let ttl_expires_at = ttl_hours.map(|hours| {
+        chrono::Utc::now() + chrono::Duration::hours(hours)
+    });
+
+    let promoted_at = if status == "ACTIVE" {
+        Some(chrono::Utc::now().to_rfc3339())
+    } else {
+        None
+    };
+
+    let result = sqlx::query(
+        r#"
+        UPDATE wallets
+        SET status = ?,
+            promoted_at = COALESCE(?, promoted_at),
+            ttl_expires_at = ?,
+            notes = COALESCE(?, notes)
+        WHERE address = ?
+        "#
+    )
+    .bind(status)
+    .bind(promoted_at)
+    .bind(ttl_expires_at.map(|dt| dt.to_rfc3339()))
+    .bind(reason)
+    .bind(address)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Get wallets with expired TTL that need to be demoted
+pub async fn get_expired_ttl_wallets(pool: &DbPool) -> AppResult<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        r#"
+        SELECT address FROM wallets
+        WHERE status = 'ACTIVE'
+        AND ttl_expires_at IS NOT NULL
+        AND ttl_expires_at < datetime('now')
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|(addr,)| addr).collect())
+}
+
+/// Demote a wallet from ACTIVE to CANDIDATE (for TTL expiration)
+pub async fn demote_wallet(pool: &DbPool, address: &str, reason: &str) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE wallets
+        SET status = 'CANDIDATE',
+            ttl_expires_at = NULL,
+            notes = ?
+        WHERE address = ?
+        "#
+    )
+    .bind(reason)
+    .bind(address)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+// =============================================================================
+// TRADES API / EXPORT
+// =============================================================================
+
+/// Trade record for API response
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct TradeDetail {
+    pub id: i64,
+    pub trade_uuid: String,
+    pub wallet_address: String,
+    pub token_address: String,
+    pub token_symbol: Option<String>,
+    pub strategy: String,
+    pub side: String,
+    pub amount_sol: f64,
+    pub price_at_signal: Option<f64>,
+    pub tx_signature: Option<String>,
+    pub status: String,
+    pub retry_count: i32,
+    pub error_message: Option<String>,
+    pub pnl_sol: Option<f64>,
+    pub pnl_usd: Option<f64>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Get trades with optional filters for API and export
+pub async fn get_trades(
+    pool: &DbPool,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+    status_filter: Option<&str>,
+    strategy_filter: Option<&str>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> AppResult<Vec<TradeDetail>> {
+    // Build query dynamically based on filters
+    let mut query = String::from(
+        r#"
+        SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+               side, amount_sol, price_at_signal, tx_signature, status, retry_count,
+               error_message, pnl_sol, pnl_usd, created_at, updated_at
+        FROM trades
+        WHERE 1=1
+        "#
+    );
+
+    let mut bindings: Vec<String> = Vec::new();
+
+    if let Some(from) = from_date {
+        query.push_str(" AND created_at >= ?");
+        bindings.push(from.to_string());
+    }
+
+    if let Some(to) = to_date {
+        query.push_str(" AND created_at <= ?");
+        bindings.push(to.to_string());
+    }
+
+    if let Some(status) = status_filter {
+        query.push_str(" AND status = ?");
+        bindings.push(status.to_string());
+    }
+
+    if let Some(strategy) = strategy_filter {
+        query.push_str(" AND strategy = ?");
+        bindings.push(strategy.to_string());
+    }
+
+    query.push_str(" ORDER BY created_at DESC");
+
+    if let Some(lim) = limit {
+        query.push_str(&format!(" LIMIT {}", lim));
+    }
+
+    if let Some(off) = offset {
+        query.push_str(&format!(" OFFSET {}", off));
+    }
+
+    // Execute with bindings
+    let mut q = sqlx::query_as::<_, TradeDetail>(&query);
+
+    for binding in bindings {
+        q = q.bind(binding);
+    }
+
+    let trades = q.fetch_all(pool).await?;
+    Ok(trades)
+}
+
+/// Count total trades (for pagination)
+pub async fn count_trades(
+    pool: &DbPool,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+    status_filter: Option<&str>,
+    strategy_filter: Option<&str>,
+) -> AppResult<i64> {
+    let mut query = String::from("SELECT COUNT(*) FROM trades WHERE 1=1");
+    let mut bindings: Vec<String> = Vec::new();
+
+    if let Some(from) = from_date {
+        query.push_str(" AND created_at >= ?");
+        bindings.push(from.to_string());
+    }
+
+    if let Some(to) = to_date {
+        query.push_str(" AND created_at <= ?");
+        bindings.push(to.to_string());
+    }
+
+    if let Some(status) = status_filter {
+        query.push_str(" AND status = ?");
+        bindings.push(status.to_string());
+    }
+
+    if let Some(strategy) = strategy_filter {
+        query.push_str(" AND strategy = ?");
+        bindings.push(strategy.to_string());
+    }
+
+    let mut q = sqlx::query_as::<_, (i64,)>(&query);
+
+    for binding in bindings {
+        q = q.bind(binding);
+    }
+
+    let (count,) = q.fetch_one(pool).await?;
+    Ok(count)
+}
+
+/// Generate CSV content from trades
+pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
+    let mut csv = String::new();
+    
+    // Header
+    csv.push_str("id,trade_uuid,wallet_address,token_address,token_symbol,strategy,side,amount_sol,price_at_signal,tx_signature,status,pnl_sol,pnl_usd,created_at\n");
+    
+    // Data rows
+    for trade in trades {
+        csv.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            trade.id,
+            trade.trade_uuid,
+            trade.wallet_address,
+            trade.token_address,
+            trade.token_symbol.as_deref().unwrap_or(""),
+            trade.strategy,
+            trade.side,
+            trade.amount_sol,
+            trade.price_at_signal.map(|p| p.to_string()).unwrap_or_default(),
+            trade.tx_signature.as_deref().unwrap_or(""),
+            trade.status,
+            trade.pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade.pnl_usd.map(|p| p.to_string()).unwrap_or_default(),
+            trade.created_at,
+        ));
+    }
+    
+    csv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

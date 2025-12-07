@@ -27,6 +27,14 @@ pub enum AppError {
     #[error("Authentication failed: {0}")]
     Auth(String),
 
+    /// Authorization error (authenticated but insufficient permissions)
+    #[error("Authorization failed: {0}")]
+    Forbidden(String),
+
+    /// Not found error
+    #[error("Not found: {0}")]
+    NotFound(String),
+
     /// Signal processing error
     #[error("Signal error: {0}")]
     Signal(String),
@@ -93,6 +101,22 @@ impl IntoResponse for AppError {
                 ErrorResponse {
                     status: "rejected",
                     reason: "authentication_failed".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::Forbidden(msg) => (
+                StatusCode::FORBIDDEN,
+                ErrorResponse {
+                    status: "rejected",
+                    reason: "authorization_failed".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::NotFound(msg) => (
+                StatusCode::NOT_FOUND,
+                ErrorResponse {
+                    status: "rejected",
+                    reason: "not_found".to_string(),
                     details: Some(msg.clone()),
                 },
             ),

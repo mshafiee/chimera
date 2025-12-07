@@ -131,6 +131,18 @@ pub struct SecurityConfig {
     /// Rate limit: burst size
     #[serde(default = "default_webhook_burst")]
     pub webhook_burst_size: u32,
+    /// API keys for management endpoints (format: "key:role")
+    #[serde(default)]
+    pub api_keys: Vec<ApiKeyConfig>,
+}
+
+/// API key configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyConfig {
+    /// The API key value
+    pub key: String,
+    /// The role: admin, operator, readonly
+    pub role: String,
 }
 
 impl SecurityConfig {
