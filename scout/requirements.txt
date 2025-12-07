@@ -3,3 +3,4 @@ numpy==1.26.0
 solana==0.30.0
 requests==2.31.0
 sqlite3-binary
+hypothesis>=6.0.0

@@ -7,6 +7,8 @@ Provides wallet analysis, WQS calculation, backtesting, and database output func
 from .analyzer import WalletAnalyzer
 from .backtester import BacktestSimulator
 from .db_writer import RosterWriter, WalletRecord, write_roster_atomic
+from .birdeye_client import BirdeyeClient
+from .liquidity_collector import LiquidityCollector
 from .liquidity import LiquidityProvider, LiquidityData
 from .models import (
     BacktestConfig,
@@ -48,4 +50,7 @@ __all__ = [
     "WalletMetrics",
     "calculate_wqs",
     "classify_wallet",
+    # Historical Liquidity (optional)
+    "BirdeyeClient",
+    "LiquidityCollector",
 ]

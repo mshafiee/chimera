@@ -15,10 +15,19 @@ In production, connect to actual APIs.
 """
 
 import math
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 import random
+
+# Import Birdeye client if available
+try:
+    from scout.core.birdeye_client import BirdeyeClient
+    BIRDEYE_AVAILABLE = True
+except ImportError:
+    BIRDEYE_AVAILABLE = False
+    BirdeyeClient = None
 
 
 @dataclass
@@ -38,6 +47,8 @@ class LiquidityProvider:
     
     In production, this connects to:
     - Jupiter Price API (https://price.jup.ag)
+    - Birdeye API (historical data)
+    - Historical liquidity database
     - Birdeye API for historical data
     - DexScreener as fallback
     
@@ -61,6 +72,7 @@ class LiquidityProvider:
         jupiter_api_url: str = "https://price.jup.ag/v6",
         birdeye_api_key: Optional[str] = None,
         cache_ttl_seconds: int = 60,
+        db_path: Optional[str] = None,
     ):
         """
         Initialize the liquidity provider.
@@ -69,10 +81,17 @@ class LiquidityProvider:
             jupiter_api_url: Jupiter Price API URL
             birdeye_api_key: Birdeye API key for historical data
             cache_ttl_seconds: Cache TTL in seconds
+            db_path: Path to SQLite database for historical liquidity storage
         """
         self.jupiter_api_url = jupiter_api_url
-        self.birdeye_api_key = birdeye_api_key
+        self.birdeye_api_key = birdeye_api_key or os.getenv("BIRDEYE_API_KEY")
         self.cache_ttl = cache_ttl_seconds
+        self.db_path = db_path or os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
+        
+        # Initialize Birdeye client if API key is available
+        self.birdeye_client = None
+        if self.birdeye_api_key and BIRDEYE_AVAILABLE:
+            self.birdeye_client = BirdeyeClient(self.birdeye_api_key)
         
         # In-memory cache
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
@@ -119,15 +138,98 @@ class LiquidityProvider:
         Returns:
             LiquidityData or None if not available
         """
-        # In production: Query Birdeye API or historical database
-        # response = requests.get(
-        #     f"https://public-api.birdeye.so/defi/history_price",
-        #     params={"address": token_address, "time_from": timestamp.timestamp()},
-        #     headers={"X-API-KEY": self.birdeye_api_key}
-        # )
-        
-        # Simulate historical liquidity
+        # Try database first (fastest)
+        db_data = self._get_from_database(token_address, timestamp)
+        if db_data:
+            return db_data
+
+        # Try Birdeye API if available
+        if hasattr(self, 'birdeye_client') and self.birdeye_client:
+            birdeye_data = self.birdeye_client.get_historical_liquidity(token_address, timestamp)
+            if birdeye_data:
+                # Store in database for future use
+                self._store_in_database(birdeye_data)
+                return birdeye_data
+
+        # Fallback to simulation
         return self._simulate_historical_liquidity(token_address, timestamp)
+
+    def _get_from_database(
+        self, token_address: str, timestamp: datetime
+    ) -> Optional[LiquidityData]:
+        """Get historical liquidity from database."""
+        if not hasattr(self, 'db_path') or not self.db_path:
+            return None
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Query for data within 1 hour of requested timestamp
+            time_start = timestamp - timedelta(hours=1)
+            time_end = timestamp + timedelta(hours=1)
+
+            cursor.execute(
+                """
+                SELECT liquidity_usd, price_usd, volume_24h_usd, timestamp, source
+                FROM historical_liquidity
+                WHERE token_address = ? AND timestamp BETWEEN ? AND ?
+                ORDER BY ABS(julianday(timestamp) - julianday(?))
+                LIMIT 1
+                """,
+                (token_address, time_start, time_end, timestamp),
+            )
+
+            row = cursor.fetchone()
+            conn.close()
+
+            if row:
+                return LiquidityData(
+                    token_address=token_address,
+                    liquidity_usd=row[0],
+                    price_usd=row[1],
+                    volume_24h_usd=row[2],
+                    timestamp=datetime.fromisoformat(row[3]) if isinstance(row[3], str) else row[3],
+                    source=row[4] or "database",
+                )
+        except Exception as e:
+            print(f"Failed to query historical liquidity from database: {e}")
+
+        return None
+
+    def _store_in_database(self, liquidity_data: LiquidityData) -> bool:
+        """Store liquidity data in database."""
+        if not hasattr(self, 'db_path') or not self.db_path:
+            return False
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO historical_liquidity 
+                (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    liquidity_data.token_address,
+                    liquidity_data.liquidity_usd,
+                    liquidity_data.price_usd,
+                    liquidity_data.volume_24h_usd,
+                    liquidity_data.timestamp,
+                    liquidity_data.source,
+                ),
+            )
+
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Failed to store liquidity data in database: {e}")
+            return False
     
     def estimate_slippage(
         self,
