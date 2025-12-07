@@ -29,6 +29,9 @@ pub struct AppConfig {
     /// Token safety configuration
     #[serde(default)]
     pub token_safety: TokenSafetyConfig,
+    /// Notification configuration
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 }
 
 /// HTTP server configuration
@@ -362,6 +365,130 @@ impl Default for TokenSafetyConfig {
             honeypot_detection_enabled: default_honeypot_detection(),
             cache_capacity: default_token_cache_capacity(),
             cache_ttl_seconds: default_token_cache_ttl(),
+        }
+    }
+}
+
+/// Notification configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationsConfig {
+    /// Telegram notification settings
+    #[serde(default)]
+    pub telegram: TelegramNotificationConfig,
+    /// Notification rules for different events
+    #[serde(default)]
+    pub rules: NotificationRulesConfig,
+    /// Daily summary settings
+    #[serde(default)]
+    pub daily_summary: DailySummaryConfig,
+}
+
+/// Telegram-specific notification configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramNotificationConfig {
+    /// Whether Telegram notifications are enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bot token (from environment: TELEGRAM_BOT_TOKEN)
+    #[serde(default)]
+    pub bot_token: String,
+    /// Chat ID to send notifications to (from environment: TELEGRAM_CHAT_ID)
+    #[serde(default)]
+    pub chat_id: String,
+    /// Rate limit in seconds between similar notifications
+    #[serde(default = "default_notification_rate_limit")]
+    pub rate_limit_seconds: u64,
+}
+
+fn default_notification_rate_limit() -> u64 {
+    60 // 1 minute
+}
+
+impl Default for TelegramNotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bot_token: String::new(),
+            chat_id: String::new(),
+            rate_limit_seconds: default_notification_rate_limit(),
+        }
+    }
+}
+
+/// Notification rules configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationRulesConfig {
+    /// Send notification when circuit breaker trips
+    #[serde(default = "default_true")]
+    pub circuit_breaker_triggered: bool,
+    /// Send notification when wallet balance drops significantly
+    #[serde(default = "default_true")]
+    pub wallet_drained: bool,
+    /// Send notification when a position is exited
+    #[serde(default = "default_true")]
+    pub position_exited: bool,
+    /// Send notification when a wallet is promoted
+    #[serde(default = "default_true")]
+    pub wallet_promoted: bool,
+    /// Send daily trading summary
+    #[serde(default = "default_true")]
+    pub daily_summary: bool,
+    /// Send notification on RPC fallback
+    #[serde(default = "default_true")]
+    pub rpc_fallback: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NotificationRulesConfig {
+    fn default() -> Self {
+        Self {
+            circuit_breaker_triggered: true,
+            wallet_drained: true,
+            position_exited: true,
+            wallet_promoted: true,
+            daily_summary: true,
+            rpc_fallback: true,
+        }
+    }
+}
+
+/// Daily summary notification configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct DailySummaryConfig {
+    /// Whether daily summary is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Hour of day to send summary (24h format, UTC)
+    #[serde(default = "default_summary_hour")]
+    pub hour_utc: u8,
+    /// Minute of hour to send summary
+    #[serde(default)]
+    pub minute: u8,
+}
+
+fn default_summary_hour() -> u8 {
+    20 // 8 PM UTC
+}
+
+impl Default for DailySummaryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hour_utc: default_summary_hour(),
+            minute: 0,
+        }
+    }
+}
+
+impl Default for NotificationsConfig {
+    fn default() -> Self {
+        Self {
+            telegram: TelegramNotificationConfig::default(),
+            rules: NotificationRulesConfig::default(),
+            daily_summary: DailySummaryConfig::default(),
         }
     }
 }

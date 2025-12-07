@@ -20,6 +20,7 @@ use crate::config::AppConfig;
 use crate::db::{self, DbPool, PositionDetail, TradeDetail, WalletDetail};
 use crate::error::{AppError, AppResult};
 use crate::middleware::{AuthExtension, Role};
+use crate::notifications::{CompositeNotifier, NotificationEvent};
 
 // =============================================================================
 // API STATE
@@ -30,6 +31,7 @@ pub struct ApiState {
     pub db: DbPool,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
+    pub notifier: Arc<CompositeNotifier>,
 }
 
 // =============================================================================
@@ -211,6 +213,23 @@ pub async fn update_wallet(
         Some(&change_description),
     )
     .await?;
+
+    // Send notification if wallet was promoted to ACTIVE
+    let was_promoted = body.status == "ACTIVE"
+        && existing.as_ref().map(|w| w.status.as_str()) != Some("ACTIVE");
+
+    if was_promoted {
+        // Get WQS score from existing wallet or default to 0
+        let wqs_score = existing.as_ref().and_then(|w| w.wqs_score).unwrap_or(0.0);
+
+        state
+            .notifier
+            .notify(NotificationEvent::WalletPromoted {
+                address: address.clone(),
+                wqs_score,
+            })
+            .await;
+    }
 
     // Fetch updated wallet
     let wallet = db::get_wallet_by_address(&state.db, &address).await?;

@@ -11,6 +11,7 @@ mod error;
 mod handlers;
 mod middleware;
 mod models;
+mod notifications;
 mod price_cache;
 mod roster;
 mod token;
@@ -43,6 +44,7 @@ use crate::handlers::{
     ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use crate::middleware::{bearer_auth, AuthState, HmacState, Role};
+use crate::notifications::{CompositeNotifier, NotificationEvent, TelegramNotifier};
 use crate::price_cache::PriceCache;
 use crate::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 
@@ -132,6 +134,35 @@ async fn main() -> anyhow::Result<()> {
     ));
     tracing::info!("Token parser initialized");
 
+    // Initialize notification service
+    let notifier = {
+        let mut composite = CompositeNotifier::new();
+
+        // Add Telegram notifier if configured
+        if config.notifications.telegram.enabled {
+            let telegram_config = notifications::telegram::TelegramConfig {
+                bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
+                    .unwrap_or_else(|_| config.notifications.telegram.bot_token.clone()),
+                chat_id: std::env::var("TELEGRAM_CHAT_ID")
+                    .unwrap_or_else(|_| config.notifications.telegram.chat_id.clone()),
+                enabled: true,
+                rate_limit_seconds: config.notifications.telegram.rate_limit_seconds,
+            };
+
+            if !telegram_config.bot_token.is_empty() && !telegram_config.chat_id.is_empty() {
+                composite.add_service(Arc::new(TelegramNotifier::new(telegram_config)));
+                tracing::info!("Telegram notifications enabled");
+            } else {
+                tracing::warn!(
+                    "Telegram notifications enabled in config but bot_token/chat_id not set"
+                );
+            }
+        }
+
+        Arc::new(composite)
+    };
+    tracing::info!("Notification service initialized");
+
     // Initialize stuck-state recovery manager
     let recovery_manager = Arc::new(RecoveryManager::new(db_pool.clone()));
 
@@ -149,18 +180,101 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Price cache updater started");
 
-    // Spawn circuit breaker evaluation task
+    // Spawn circuit breaker evaluation task with notification support
     let circuit_breaker_clone = circuit_breaker.clone();
+    let notifier_cb = notifier.clone();
+    let notify_rules = config.notifications.rules.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut was_tripped = false;
+
         loop {
             interval.tick().await;
+            let was_active = circuit_breaker_clone.is_trading_allowed();
+
             if let Err(e) = circuit_breaker_clone.evaluate().await {
                 tracing::error!(error = %e, "Circuit breaker evaluation failed");
+            }
+
+            // Check if circuit breaker just tripped
+            let is_active = circuit_breaker_clone.is_trading_allowed();
+            if was_active && !is_active && !was_tripped {
+                was_tripped = true;
+                if notify_rules.circuit_breaker_triggered {
+                    let reason = circuit_breaker_clone
+                        .trip_reason()
+                        .map(|r| r.to_string())
+                        .unwrap_or_else(|| "Unknown reason".to_string());
+
+                    notifier_cb
+                        .notify(NotificationEvent::CircuitBreakerTriggered { reason })
+                        .await;
+                }
+            } else if is_active {
+                was_tripped = false;
             }
         }
     });
     tracing::info!("Circuit breaker evaluation task started");
+
+    // Spawn daily summary notification task
+    let notifier_daily = notifier.clone();
+    let db_pool_daily = db_pool.clone();
+    let daily_config = config.notifications.daily_summary.clone();
+    let notify_daily_enabled = config.notifications.rules.daily_summary;
+    tokio::spawn(async move {
+        if !daily_config.enabled || !notify_daily_enabled {
+            tracing::info!("Daily summary notifications disabled");
+            return;
+        }
+
+        tracing::info!(
+            hour = daily_config.hour_utc,
+            minute = daily_config.minute,
+            "Daily summary task started"
+        );
+
+        loop {
+            // Calculate time until next summary
+            let now = Utc::now();
+            let target_hour = daily_config.hour_utc as u32;
+            let target_minute = daily_config.minute as u32;
+
+            let mut next_run = now
+                .date_naive()
+                .and_hms_opt(target_hour, target_minute, 0)
+                .unwrap()
+                .and_utc();
+
+            if next_run <= now {
+                next_run = next_run + chrono::Duration::days(1);
+            }
+
+            let sleep_duration = (next_run - now).to_std().unwrap_or(std::time::Duration::from_secs(3600));
+            tracing::debug!(
+                sleep_seconds = sleep_duration.as_secs(),
+                "Sleeping until next daily summary"
+            );
+            tokio::time::sleep(sleep_duration).await;
+
+            // Generate and send daily summary
+            match generate_daily_summary(&db_pool_daily).await {
+                Ok((pnl_usd, trade_count, win_rate)) => {
+                    notifier_daily
+                        .notify(NotificationEvent::DailySummary {
+                            pnl_usd,
+                            trade_count,
+                            win_rate,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to generate daily summary");
+                }
+            }
+        }
+    });
+    tracing::info!("Daily summary notification task started");
 
     // Spawn SIGHUP handler for roster merge (Unix only)
     #[cfg(unix)]
@@ -208,8 +322,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("SIGHUP roster merge handler started");
     }
 
-    // Create engine
-    let (engine, engine_handle) = engine::Engine::new(config.clone(), db_pool.clone());
+    // Create engine with notification support
+    let (engine, engine_handle) =
+        engine::Engine::new_with_notifier(config.clone(), db_pool.clone(), notifier.clone());
 
     // Spawn engine processing loop
     tokio::spawn(async move {
@@ -252,6 +367,7 @@ async fn main() -> anyhow::Result<()> {
         db: db_pool.clone(),
         circuit_breaker: circuit_breaker.clone(),
         config: shared_config.clone(),
+        notifier: notifier.clone(),
     });
 
     // Create WebSocket state for real-time updates
@@ -502,6 +618,56 @@ fn load_config() -> anyhow::Result<AppConfig> {
     }
 
     Ok(config)
+}
+
+/// Generate daily trading summary from database
+async fn generate_daily_summary(db: &db::DbPool) -> anyhow::Result<(f64, u32, f64)> {
+    // Get yesterday's date range
+    let now = Utc::now();
+    let yesterday_start = (now - chrono::Duration::days(1))
+        .format("%Y-%m-%dT00:00:00Z")
+        .to_string();
+    let yesterday_end = (now - chrono::Duration::days(1))
+        .format("%Y-%m-%dT23:59:59Z")
+        .to_string();
+
+    // Query trades from yesterday
+    let trades = db::get_trades(
+        db,
+        Some(&yesterday_start),
+        Some(&yesterday_end),
+        Some("CLOSED"),
+        None,
+        None,
+        None,
+    )
+    .await?;
+
+    if trades.is_empty() {
+        return Ok((0.0, 0, 0.0));
+    }
+
+    let trade_count = trades.len() as u32;
+    let mut total_pnl_usd = 0.0;
+    let mut winning_trades = 0u32;
+
+    for trade in &trades {
+        if let Some(pnl) = trade.pnl_sol {
+            // Convert SOL to USD (using approximate rate, should use price cache in production)
+            total_pnl_usd += pnl * 100.0; // Approximate SOL price
+            if pnl > 0.0 {
+                winning_trades += 1;
+            }
+        }
+    }
+
+    let win_rate = if trade_count > 0 {
+        (winning_trades as f64 / trade_count as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    Ok((total_pnl_usd, trade_count, win_rate))
 }
 
 #[cfg(test)]

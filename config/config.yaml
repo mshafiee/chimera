@@ -68,3 +68,24 @@ token_safety:
   # Token cache settings
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
+
+# Notification settings
+notifications:
+  telegram:
+    enabled: true
+    # Set via environment: TELEGRAM_BOT_TOKEN
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    # Set via environment: TELEGRAM_CHAT_ID  
+    chat_id: "${TELEGRAM_CHAT_ID}"
+    rate_limit_seconds: 60
+  rules:
+    circuit_breaker_triggered: true
+    wallet_drained: true
+    position_exited: true
+    wallet_promoted: true
+    daily_summary: true
+    rpc_fallback: true
+  daily_summary:
+    enabled: true
+    hour_utc: 20  # 8 PM UTC
+    minute: 0

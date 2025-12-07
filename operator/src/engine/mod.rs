@@ -15,6 +15,7 @@ pub use tips::TipManager;
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::models::Signal;
+use crate::notifications::CompositeNotifier;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -51,6 +52,8 @@ pub struct Engine {
     executor: Executor,
     /// Channel receiver for signals
     rx: mpsc::Receiver<Signal>,
+    /// Notification service
+    notifier: Option<Arc<CompositeNotifier>>,
 }
 
 impl Engine {
@@ -77,6 +80,40 @@ impl Engine {
             queue,
             executor,
             rx,
+            notifier: None,
+        };
+
+        (engine, handle)
+    }
+
+    /// Create a new engine instance with notification support
+    pub fn new_with_notifier(
+        config: AppConfig,
+        db: DbPool,
+        notifier: Arc<CompositeNotifier>,
+    ) -> (Self, EngineHandle) {
+        let config = Arc::new(config);
+        let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
+
+        let queue = Arc::new(PriorityQueue::new(
+            config.queue.capacity,
+            config.queue.load_shed_threshold_percent,
+        ));
+
+        let executor = Executor::new(config.clone(), db.clone()).with_notifier(notifier.clone());
+
+        let handle = EngineHandle {
+            tx,
+            queue: queue.clone(),
+        };
+
+        let engine = Self {
+            config,
+            db,
+            queue,
+            executor,
+            rx,
+            notifier: Some(notifier),
         };
 
         (engine, handle)

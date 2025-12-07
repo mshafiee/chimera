@@ -76,4 +76,30 @@
   .glow-spear {
     box-shadow: 0 0 20px rgba(255, 136, 0, 0.3);
   }
+
+  /* Safe area for mobile bottom navigation (notch handling) */
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Hide scrollbar but allow scrolling */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Touch-friendly tap targets */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+
+  /* Mobile card shadow */
+  .card-shadow-mobile {
+    @apply shadow-lg md:shadow-none;
+  }
 }

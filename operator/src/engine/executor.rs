@@ -6,6 +6,7 @@
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::models::{Signal, Strategy};
+use crate::notifications::{CompositeNotifier, NotificationEvent};
 use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,6 +48,8 @@ pub struct Executor {
     recovery_interval: Duration,
     /// Last recovery attempt
     last_recovery_attempt: Option<DateTime<Utc>>,
+    /// Notification service
+    notifier: Option<Arc<CompositeNotifier>>,
 }
 
 impl Executor {
@@ -66,7 +69,38 @@ impl Executor {
             fallback_since: None,
             recovery_interval: Duration::from_secs(300), // 5 minutes
             last_recovery_attempt: None,
+            notifier: None,
         }
+    }
+
+    /// Set the notification service
+    pub fn with_notifier(mut self, notifier: Arc<CompositeNotifier>) -> Self {
+        self.notifier = Some(notifier);
+        self
+    }
+
+    /// Send notification if notifier is configured
+    async fn notify(&self, event: NotificationEvent) {
+        if let Some(ref notifier) = self.notifier {
+            notifier.notify(event).await;
+        }
+    }
+
+    /// Send position exit notification
+    pub async fn notify_position_exit(
+        &self,
+        token: &str,
+        strategy: &str,
+        pnl_percent: f64,
+        pnl_sol: f64,
+    ) {
+        self.notify(NotificationEvent::PositionExited {
+            token: token.to_string(),
+            strategy: strategy.to_string(),
+            pnl_percent,
+            pnl_sol,
+        })
+        .await;
     }
 
     /// Execute a trade signal
@@ -330,6 +364,11 @@ impl Executor {
     /// Switch to fallback RPC mode
     async fn switch_to_fallback(&mut self) {
         if self.config.rpc.fallback_url.is_some() {
+            let reason = format!(
+                "Consecutive RPC failures ({}) exceeded threshold",
+                self.failure_count
+            );
+
             tracing::warn!(
                 previous_mode = ?self.rpc_mode,
                 failure_count = self.failure_count,
@@ -340,6 +379,12 @@ impl Executor {
             self.fallback_since = Some(Utc::now());
             self.failure_count = 0;
 
+            // Send notification
+            self.notify(NotificationEvent::RpcFallback {
+                reason: reason.clone(),
+            })
+            .await;
+
             // Log to config audit
             if let Err(e) = crate::db::log_config_change(
                 &self.db,
@@ -347,7 +392,7 @@ impl Executor {
                 Some("JITO"),
                 "STANDARD",
                 "SYSTEM_FAILOVER",
-                Some("Consecutive RPC failures exceeded threshold"),
+                Some(&reason),
             )
             .await
             {

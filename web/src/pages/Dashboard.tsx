@@ -29,8 +29,8 @@ export function Dashboard() {
     <div className="space-y-6">
       {/* System Status Bar */}
       <Card padding="sm">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-6">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex flex-wrap items-center gap-4 md:gap-6">
             {/* System Health */}
             <div className="flex items-center gap-2">
               <span
@@ -60,10 +60,11 @@ export function Dashboard() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4 text-sm">
+          <div className="flex flex-wrap items-center gap-3 md:gap-4 text-sm">
             {/* Circuit Breaker Status */}
             <div className="flex items-center gap-2">
-              <span className="text-text-muted">Circuit Breaker:</span>
+              <span className="text-text-muted hidden sm:inline">Circuit Breaker:</span>
+              <span className="text-text-muted sm:hidden">CB:</span>
               <Badge
                 variant={health?.circuit_breaker.trading_allowed ? 'success' : 'danger'}
               >
@@ -94,7 +95,7 @@ export function Dashboard() {
           <CardTitle>Performance</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-3 gap-4 mb-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
             <MetricCard
               label="24h"
               value="+$127.50"
@@ -119,28 +120,28 @@ export function Dashboard() {
       </Card>
 
       {/* Strategy Breakdown */}
-      <div className="grid grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 md:gap-6">
         <Card variant="shield">
           <CardHeader>
             <CardTitle>🛡️ Shield Strategy</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-3 gap-4 mb-4">
+            <div className="grid grid-cols-3 gap-2 md:gap-4 mb-4">
               <div>
-                <div className="text-sm text-text-muted">Win Rate</div>
-                <div className="text-2xl font-semibold font-mono-numbers text-shield">
+                <div className="text-xs md:text-sm text-text-muted">Win Rate</div>
+                <div className="text-xl md:text-2xl font-semibold font-mono-numbers text-shield">
                   72%
                 </div>
               </div>
               <div>
-                <div className="text-sm text-text-muted">Avg Return</div>
-                <div className="text-2xl font-semibold font-mono-numbers text-profit">
+                <div className="text-xs md:text-sm text-text-muted">Avg Return</div>
+                <div className="text-xl md:text-2xl font-semibold font-mono-numbers text-profit">
                   +8%
                 </div>
               </div>
               <div>
-                <div className="text-sm text-text-muted">Positions</div>
-                <div className="text-2xl font-semibold font-mono-numbers">
+                <div className="text-xs md:text-sm text-text-muted">Positions</div>
+                <div className="text-xl md:text-2xl font-semibold font-mono-numbers">
                   {activePositions.filter((p) => p.strategy === 'SHIELD').length}
                 </div>
               </div>
@@ -162,22 +163,22 @@ export function Dashboard() {
             <CardTitle>⚔️ Spear Strategy</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="grid grid-cols-3 gap-4 mb-4">
+            <div className="grid grid-cols-3 gap-2 md:gap-4 mb-4">
               <div>
-                <div className="text-sm text-text-muted">Win Rate</div>
-                <div className="text-2xl font-semibold font-mono-numbers text-spear">
+                <div className="text-xs md:text-sm text-text-muted">Win Rate</div>
+                <div className="text-xl md:text-2xl font-semibold font-mono-numbers text-spear">
                   61%
                 </div>
               </div>
               <div>
-                <div className="text-sm text-text-muted">Avg Return</div>
-                <div className="text-2xl font-semibold font-mono-numbers text-profit">
+                <div className="text-xs md:text-sm text-text-muted">Avg Return</div>
+                <div className="text-xl md:text-2xl font-semibold font-mono-numbers text-profit">
                   +23%
                 </div>
               </div>
               <div>
-                <div className="text-sm text-text-muted">Positions</div>
-                <div className="text-2xl font-semibold font-mono-numbers">
+                <div className="text-xs md:text-sm text-text-muted">Positions</div>
+                <div className="text-xl md:text-2xl font-semibold font-mono-numbers">
                   {activePositions.filter((p) => p.strategy === 'SPEAR').length}
                 </div>
               </div>
@@ -201,7 +202,7 @@ export function Dashboard() {
           <CardTitle>System Health</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <HealthIndicator
               name="Database"
               status={health?.database.status || 'unknown'}
@@ -232,6 +233,7 @@ export function Dashboard() {
         ) : positions.length === 0 ? (
           <div className="p-8 text-center text-text-muted">No active positions</div>
         ) : (
+          <div className="overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow hoverable={false}>
@@ -303,6 +305,7 @@ export function Dashboard() {
               ))}
             </TableBody>
           </Table>
+          </div>
         )}
       </Card>
     </div>

@@ -16,7 +16,19 @@ const navigation = [
   { name: 'Incidents', href: '/incidents', icon: AlertTriangle },
 ]
 
-export function Sidebar() {
+// Mobile bottom navigation - only show key items
+const mobileNavigation = [
+  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+  { name: 'Wallets', href: '/wallets', icon: Wallet },
+  { name: 'Trades', href: '/trades', icon: ArrowLeftRight },
+  { name: 'Config', href: '/config', icon: Settings },
+]
+
+interface SidebarProps {
+  onNavigate?: () => void
+}
+
+export function Sidebar({ onNavigate }: SidebarProps) {
   return (
     <aside className="fixed inset-y-0 left-0 w-64 bg-surface border-r border-border flex flex-col">
       {/* Logo */}
@@ -35,6 +47,7 @@ export function Sidebar() {
           <NavLink
             key={item.name}
             to={item.href}
+            onClick={onNavigate}
             className={({ isActive }) =>
               clsx(
                 'flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all',
@@ -58,5 +71,32 @@ export function Sidebar() {
         </div>
       </div>
     </aside>
+  )
+}
+
+/** Mobile bottom navigation bar */
+export function MobileBottomNav() {
+  return (
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 z-30 bg-surface border-t border-border safe-area-bottom">
+      <div className="flex justify-around items-center h-16">
+        {mobileNavigation.map((item) => (
+          <NavLink
+            key={item.name}
+            to={item.href}
+            className={({ isActive }) =>
+              clsx(
+                'flex flex-col items-center justify-center flex-1 h-full gap-1 text-xs font-medium transition-colors',
+                isActive
+                  ? 'text-shield'
+                  : 'text-text-muted hover:text-text'
+              )
+            }
+          >
+            <item.icon className="w-5 h-5" />
+            <span>{item.name}</span>
+          </NavLink>
+        ))}
+      </div>
+    </nav>
   )
 }
