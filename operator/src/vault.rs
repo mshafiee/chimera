@@ -183,7 +183,7 @@ impl Vault {
 /// Generate random bytes using getrandom (cryptographically secure)
 fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes).expect("Failed to generate random bytes");
+    getrandom::fill(&mut bytes).expect("Failed to generate random bytes");
     bytes
 }
 

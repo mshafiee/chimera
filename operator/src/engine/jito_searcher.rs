@@ -6,13 +6,12 @@
 use crate::engine::executor::ExecutorError;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use solana_client::nonblocking::rpc_client::RpcClient;
-#[allow(deprecated)] // system_instruction is deprecated but still works in solana-sdk 2.1
 use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, Signer},
-    system_instruction,
     transaction::Transaction,
 };
+use solana_system_interface::instruction as system_instruction;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -61,11 +60,11 @@ impl JitoSearcherClient {
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to create tip transaction: {}", e)))?;
 
         // Build bundle: tip transaction first, then swap transaction
-        let tip_tx_bytes = bincode::serialize(&tip_transaction)
+        let tip_tx_bytes = bincode::serde::encode_to_vec(&tip_transaction, bincode::config::standard())
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e)))?;
         let tip_tx_base64 = BASE64.encode(&tip_tx_bytes);
 
-        let swap_tx_bytes = bincode::serialize(swap_transaction)
+        let swap_tx_bytes = bincode::serde::encode_to_vec(swap_transaction, bincode::config::standard())
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize swap tx: {}", e)))?;
         let swap_tx_base64 = BASE64.encode(&swap_tx_bytes);
 

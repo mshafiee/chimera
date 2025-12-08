@@ -1148,39 +1148,90 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
 /// Generate PDF content from trades
 pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
     use printpdf::*;
-    use std::io::BufWriter;
     
-    let (doc, page1, layer1) = PdfDocument::new("Chimera Trade History", Mm(210.0), Mm(297.0), "Layer 1");
-    let current_layer = doc.get_page(page1).get_layer(layer1);
+    let mut doc = PdfDocument::new("Chimera Trade History");
     
-    // Add title
-    let font = doc.add_builtin_font(BuiltinFont::HelveticaBold).map_err(|e| {
-        crate::error::AppError::Internal(format!("Failed to add font: {}", e))
-    })?;
-    current_layer.use_text("Chimera Trade History Report", 16.0, Mm(10.0), Mm(280.0), &font);
+    // Build PDF operations
+    let mut ops = Vec::new();
     
-    let font_regular = doc.add_builtin_font(BuiltinFont::Helvetica).map_err(|e| {
-        crate::error::AppError::Internal(format!("Failed to add font: {}", e))
-    })?;
+    // Title
+    ops.extend_from_slice(&[
+        Op::StartTextSection,
+        Op::SetTextCursor {
+            pos: Point::new(Mm(10.0), Mm(280.0)),
+        },
+        Op::SetFontSizeBuiltinFont {
+            font: BuiltinFont::HelveticaBold,
+            size: Pt(16.0),
+        },
+        Op::SetLineHeight { lh: Pt(16.0) },
+        Op::WriteTextBuiltinFont {
+            font: BuiltinFont::HelveticaBold,
+            items: vec![TextItem::Text("Chimera Trade History Report".to_string())],
+        },
+        Op::EndTextSection,
+    ]);
     
+    // Generated time
     let generated_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
-    current_layer.use_text(&format!("Generated: {}", generated_time), 10.0, Mm(10.0), Mm(270.0), &font_regular);
+    ops.extend_from_slice(&[
+        Op::StartTextSection,
+        Op::SetTextCursor {
+            pos: Point::new(Mm(10.0), Mm(270.0)),
+        },
+        Op::SetFontSizeBuiltinFont {
+            font: BuiltinFont::Helvetica,
+            size: Pt(10.0),
+        },
+        Op::SetLineHeight { lh: Pt(10.0) },
+        Op::WriteTextBuiltinFont {
+            font: BuiltinFont::Helvetica,
+            items: vec![TextItem::Text(format!("Generated: {}", generated_time))],
+        },
+        Op::EndTextSection,
+    ]);
     
     // Table header
     let mut y_pos = 260.0;
-    current_layer.use_text("ID | Trade UUID | Wallet | Token | Strategy | Side | Amount SOL | Status | PnL USD | Created", 
-        8.0, Mm(10.0), Mm(y_pos), &font_regular);
-    y_pos -= 5.0;
+    ops.extend_from_slice(&[
+        Op::StartTextSection,
+        Op::SetTextCursor {
+            pos: Point::new(Mm(10.0), Mm(y_pos)),
+        },
+        Op::SetFontSizeBuiltinFont {
+            font: BuiltinFont::Helvetica,
+            size: Pt(8.0),
+        },
+        Op::SetLineHeight { lh: Pt(8.0) },
+        Op::WriteTextBuiltinFont {
+            font: BuiltinFont::Helvetica,
+            items: vec![TextItem::Text("ID | Trade UUID | Wallet | Token | Strategy | Side | Amount SOL | Status | PnL USD | Created".to_string())],
+        },
+        Op::EndTextSection,
+    ]);
     
     // Draw line under header
-    let line = Line {
-        points: vec![
-            (Point::new(Mm(10.0), Mm(y_pos)), false),
-            (Point::new(Mm(200.0), Mm(y_pos)), false),
-        ],
-        is_closed: false,
-    };
-    current_layer.add_line(line);
+    y_pos -= 5.0;
+    let line_y = y_pos;
+    ops.push(Op::DrawPolygon {
+        polygon: Polygon {
+            rings: vec![PolygonRing {
+                points: vec![
+                    LinePoint {
+                        p: Point::new(Mm(10.0), Mm(line_y)),
+                        bezier: false,
+                    },
+                    LinePoint {
+                        p: Point::new(Mm(200.0), Mm(line_y)),
+                        bezier: false,
+                    },
+                ],
+            }],
+            mode: PaintMode::Stroke,
+            winding_order: WindingOrder::NonZero,
+        },
+    });
+    
     y_pos -= 5.0;
     
     // Add trade rows (limit to prevent PDF from being too large)
@@ -1213,32 +1264,53 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
             &trade.created_at[..10.min(trade.created_at.len())], // Just date part
         );
         
-        current_layer.use_text(&row, 7.0, Mm(10.0), Mm(y_pos), &font_regular);
+        ops.extend_from_slice(&[
+            Op::StartTextSection,
+            Op::SetTextCursor {
+                pos: Point::new(Mm(10.0), Mm(y_pos)),
+            },
+            Op::SetFontSizeBuiltinFont {
+                font: BuiltinFont::Helvetica,
+                size: Pt(7.0),
+            },
+            Op::SetLineHeight { lh: Pt(7.0) },
+            Op::WriteTextBuiltinFont {
+                font: BuiltinFont::Helvetica,
+                items: vec![TextItem::Text(row)],
+            },
+            Op::EndTextSection,
+        ]);
+        
         y_pos -= 4.0;
     }
     
     if trades.len() > max_rows {
-        current_layer.use_text(
-            &format!("... and {} more trades", trades.len() - max_rows),
-            8.0,
-            Mm(10.0),
-            Mm(y_pos),
-            &font_regular,
-        );
+        ops.extend_from_slice(&[
+            Op::StartTextSection,
+            Op::SetTextCursor {
+                pos: Point::new(Mm(10.0), Mm(y_pos)),
+            },
+            Op::SetFontSizeBuiltinFont {
+                font: BuiltinFont::Helvetica,
+                size: Pt(8.0),
+            },
+            Op::SetLineHeight { lh: Pt(8.0) },
+            Op::WriteTextBuiltinFont {
+                font: BuiltinFont::Helvetica,
+                items: vec![TextItem::Text(format!("... and {} more trades", trades.len() - max_rows))],
+            },
+            Op::EndTextSection,
+        ]);
     }
     
-    // Save to bytes
-    let mut buffer = Vec::new();
-    let mut writer = BufWriter::new(&mut buffer);
-    doc.save(&mut writer).map_err(|e| {
-        crate::error::AppError::Internal(format!("Failed to save PDF: {}", e))
-    })?;
-    std::io::Write::flush(&mut writer).map_err(|e| {
-        crate::error::AppError::Internal(format!("Failed to flush PDF buffer: {}", e))
-    })?;
-    drop(writer); // Ensure writer is dropped to flush buffer
+    // Create page with operations
+    let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
     
-    Ok(buffer)
+    // Add page to document and save
+    let mut warnings = Vec::new();
+    let bytes = doc.with_pages(vec![page]).save(&PdfSaveOptions::default(), &mut warnings);
+    
+    Ok(bytes)
 }
 
 #[cfg(test)]

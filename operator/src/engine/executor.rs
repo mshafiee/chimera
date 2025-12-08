@@ -534,7 +534,7 @@ impl Executor {
         let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
 
         // Convert transaction to base64
-        let tx_bytes = bincode::serialize(transaction)
+        let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::standard())
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
         let tx_base64 = BASE64.encode(&tx_bytes);
 

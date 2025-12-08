@@ -422,8 +422,9 @@ impl TokenMetadataFetcher {
         // Run simulation in blocking task
         let result = tokio::task::spawn_blocking(move || {
             // Deserialize transaction
-            let transaction: solana_sdk::transaction::Transaction = bincode::deserialize(&tx_bytes_clone)
-                .map_err(|e| AppError::Parse(format!("Failed to deserialize transaction: {}", e)))?;
+            let transaction: solana_sdk::transaction::Transaction = bincode::serde::decode_from_slice(&tx_bytes_clone, bincode::config::standard())
+                .map_err(|e| AppError::Parse(format!("Failed to deserialize transaction: {}", e)))?
+                .0;
             
             // Use Solana RPC client's simulate_transaction method
             rpc_client

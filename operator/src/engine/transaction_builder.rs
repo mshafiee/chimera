@@ -86,8 +86,9 @@ impl TransactionBuilder {
             .map_err(|e| crate::error::AppError::Parse(format!("Failed to decode transaction: {}", e)))?;
 
         // Deserialize transaction
-        let mut transaction: Transaction = bincode::deserialize(&tx_bytes)
-            .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize transaction: {}", e)))?;
+        let mut transaction: Transaction = bincode::serde::decode_from_slice(&tx_bytes, bincode::config::standard())
+            .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize transaction: {}", e)))?
+            .0;
 
         // Get recent blockhash (Jupiter transaction may have stale blockhash)
         let blockhash = self
