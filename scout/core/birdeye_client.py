@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Optional, Dict, Any
 import requests
-from scout.core.models import LiquidityData
+from core.models import LiquidityData
 
 
 class BirdeyeClient:

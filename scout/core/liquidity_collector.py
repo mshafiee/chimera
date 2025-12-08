@@ -4,8 +4,8 @@ import os
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional
-from scout.core.birdeye_client import BirdeyeClient
-from scout.core.liquidity import LiquidityProvider
+from core.birdeye_client import BirdeyeClient
+from core.liquidity import LiquidityProvider
 
 
 class LiquidityCollector:

@@ -9,8 +9,9 @@ from .backtester import BacktestSimulator
 from .db_writer import RosterWriter, WalletRecord, write_roster_atomic
 from .birdeye_client import BirdeyeClient
 from .liquidity_collector import LiquidityCollector
-from .liquidity import LiquidityProvider, LiquidityData
+from .liquidity import LiquidityProvider
 from .models import (
+    LiquidityData,
     BacktestConfig,
     HistoricalTrade,
     SimulatedResult,

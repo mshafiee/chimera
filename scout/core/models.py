@@ -17,6 +17,17 @@ class TradeAction(Enum):
     SELL = "SELL"
 
 
+@dataclass
+class LiquidityData:
+    """Liquidity data for a token at a specific point in time."""
+    token_address: str
+    liquidity_usd: float
+    price_usd: float
+    volume_24h_usd: float
+    timestamp: datetime
+    source: str  # 'jupiter', 'birdeye', 'dexscreener', 'simulated'
+
+
 class ValidationStatus(Enum):
     """Pre-promotion validation status."""
     PASSED = "PASSED"

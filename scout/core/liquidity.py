@@ -16,29 +16,27 @@ In production, connect to actual APIs.
 
 import math
 import os
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 import random
 
-# Import Birdeye client if available
-try:
-    from scout.core.birdeye_client import BirdeyeClient
-    BIRDEYE_AVAILABLE = True
-except ImportError:
-    BIRDEYE_AVAILABLE = False
-    BirdeyeClient = None
+from core.models import LiquidityData
 
+# Import Birdeye client if available (lazy import to avoid circular imports)
+BIRDEYE_AVAILABLE = False
+BirdeyeClient = None
 
-@dataclass
-class LiquidityData:
-    """Liquidity data for a token at a specific point in time."""
-    token_address: str
-    liquidity_usd: float
-    price_usd: float
-    volume_24h_usd: float
-    timestamp: datetime
-    source: str  # 'jupiter', 'birdeye', 'dexscreener', 'simulated'
+def _get_birdeye_client():
+    """Lazy load BirdeyeClient to avoid circular imports."""
+    global BIRDEYE_AVAILABLE, BirdeyeClient
+    if BirdeyeClient is None:
+        try:
+            from core.birdeye_client import BirdeyeClient as _BirdeyeClient
+            BirdeyeClient = _BirdeyeClient
+            BIRDEYE_AVAILABLE = True
+        except ImportError:
+            BIRDEYE_AVAILABLE = False
+    return BirdeyeClient
 
 
 class LiquidityProvider:
