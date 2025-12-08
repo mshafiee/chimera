@@ -7,6 +7,8 @@
 //! - RPC rate limit handling with exponential backoff
 
 use crate::error::AppResult;
+#[cfg(target_os = "linux")]
+use crate::error::AppError;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -147,13 +149,13 @@ pub fn is_memory_pressure_high() -> bool {
 }
 
 /// Check disk space and return free space percentage
-pub async fn check_disk_space(_path: &std::path::Path) -> AppResult<f64> {
+pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
     #[cfg(target_os = "linux")]
     {
         use std::fs;
         
         // Get filesystem stats
-        let stat = fs::metadata(path)
+        let _stat = fs::metadata(path)
             .map_err(|e| AppError::Internal(format!("Failed to get disk stats: {}", e)))?;
         
         // For Linux, we'd need to use statvfs or similar

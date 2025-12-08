@@ -5,6 +5,7 @@ import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { useDeadLetterQueue, useConfigAudit } from '../api'
+import type { Incident, ConfigAudit } from '../types'
 
 type TabType = 'dead-letter' | 'config-audit'
 type SeverityFilter = 'all' | 'critical' | 'warning' | 'info'

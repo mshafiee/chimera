@@ -120,17 +120,17 @@ export function Dashboard() {
             <div className="flex items-center justify-between border-t border-border pt-3">
               <span className="text-xs text-text-muted">Circuit Breaker</span>
               <Badge
-                variant={health?.circuit_breaker.trading_allowed ? 'success' : 'danger'}
+                variant={health?.circuit_breaker?.trading_allowed ? 'success' : 'danger'}
                 size="sm"
               >
-                {health?.circuit_breaker.trading_allowed ? 'Active' : 'Tripped'}
+                {health?.circuit_breaker?.trading_allowed ? 'Active' : 'Tripped'}
               </Badge>
             </div>
           </div>
         </Card>
         
         {/* Quick Actions - Emergency Halt */}
-        {!health?.circuit_breaker.trading_allowed && (
+        {!health?.circuit_breaker?.trading_allowed && (
           <Card padding="sm" className="bg-danger/10 border-danger/20">
             <div className="text-xs text-center text-text-muted">
               Trading is currently halted
@@ -186,10 +186,10 @@ export function Dashboard() {
               <span className="text-text-muted hidden sm:inline">Circuit Breaker:</span>
               <span className="text-text-muted sm:hidden">CB:</span>
               <Badge
-                variant={health?.circuit_breaker.trading_allowed ? 'success' : 'danger'}
+                variant={health?.circuit_breaker?.trading_allowed ? 'success' : 'danger'}
                 size="sm"
               >
-                {health?.circuit_breaker.trading_allowed ? 'Active' : 'Tripped'}
+                {health?.circuit_breaker?.trading_allowed ? 'Active' : 'Tripped'}
               </Badge>
             </div>
 
@@ -227,7 +227,7 @@ export function Dashboard() {
                   : '$0.00'
               }
               change={
-                performanceMetrics?.pnl_24h_change_percent
+                performanceMetrics?.pnl_24h_change_percent !== undefined && performanceMetrics.pnl_24h_change_percent !== null
                   ? `${performanceMetrics.pnl_24h_change_percent >= 0 ? '+' : ''}${performanceMetrics.pnl_24h_change_percent.toFixed(1)}%`
                   : undefined
               }
@@ -243,7 +243,7 @@ export function Dashboard() {
                   : '$0.00'
               }
               change={
-                performanceMetrics?.pnl_7d_change_percent
+                performanceMetrics?.pnl_7d_change_percent !== undefined && performanceMetrics.pnl_7d_change_percent !== null
                   ? `${performanceMetrics.pnl_7d_change_percent >= 0 ? '+' : ''}${performanceMetrics.pnl_7d_change_percent.toFixed(1)}%`
                   : undefined
               }
@@ -259,7 +259,7 @@ export function Dashboard() {
                   : '$0.00'
               }
               change={
-                performanceMetrics?.pnl_30d_change_percent
+                performanceMetrics?.pnl_30d_change_percent !== undefined && performanceMetrics.pnl_30d_change_percent !== null
                   ? `${performanceMetrics.pnl_30d_change_percent >= 0 ? '+' : ''}${performanceMetrics.pnl_30d_change_percent.toFixed(1)}%`
                   : undefined
               }
@@ -427,7 +427,7 @@ export function Dashboard() {
                     </div>
                     {/* Show strategy on mobile in token cell */}
                     <div className="sm:hidden mt-1">
-                      <StrategyBadge strategy={position.strategy} size="sm" />
+                      <StrategyBadge strategy={position.strategy} />
                     </div>
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">
@@ -459,7 +459,7 @@ export function Dashboard() {
                     )}
                   </TableCell>
                   <TableCell className="hidden sm:table-cell">
-                    <StatusBadge status={position.state} size="sm" />
+                    <StatusBadge status={position.state} />
                   </TableCell>
                   <TableCell className="text-xs md:text-sm">
                     {position.entry_tx_signature && (
@@ -478,6 +478,7 @@ export function Dashboard() {
             </TableBody>
           </Table>
           </div>
+          </div>
         )}
       </Card>
     </div>
@@ -493,20 +494,22 @@ function MetricCard({
 }: {
   label: string
   value: string
-  change: string
+  change?: string
   positive: boolean
 }) {
   return (
     <div className="bg-surface-light rounded-lg p-4">
       <div className="text-sm text-text-muted mb-1">{label}</div>
       <div className="text-2xl font-semibold font-mono-numbers">{value}</div>
-      <div
-        className={`text-sm font-mono-numbers ${
-          positive ? 'text-profit' : 'text-loss'
-        }`}
-      >
-        {change}
-      </div>
+      {change && (
+        <div
+          className={`text-sm font-mono-numbers ${
+            positive ? 'text-profit' : 'text-loss'
+          }`}
+        >
+          {change}
+        </div>
+      )}
     </div>
   )
 }

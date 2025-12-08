@@ -75,3 +75,4 @@ async fn test_wallet_promotion() {
     
     assert!(true, "Wallet promotion test placeholder");
 }
+

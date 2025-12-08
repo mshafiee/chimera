@@ -231,6 +231,7 @@ export function Trades() {
             <span className="hidden sm:inline">Export </span>PDF
           </Button>
         </div>
+        </div>
       </div>
 
       {/* Status Filter Chips */}

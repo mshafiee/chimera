@@ -560,20 +560,20 @@ async fn main() -> anyhow::Result<()> {
     // Readonly routes (readonly+ role)
     let readonly_api_routes = Router::new()
         .route("/positions", get(list_positions))
-        .route("/positions/:trade_uuid", get(get_position))
+        .route("/positions/{trade_uuid}", get(get_position))
         .route("/wallets", get(list_wallets))
-        .route("/wallets/:address", get(get_wallet))
+        .route("/wallets/{address}", get(get_wallet))
         .route("/trades", get(list_trades))
         .route("/trades/export", get(export_trades))
         .route("/metrics/performance", get(get_performance_metrics))
-        .route("/metrics/strategy/:strategy", get(get_strategy_performance))
+        .route("/metrics/strategy/{strategy}", get(get_strategy_performance))
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
         .with_state(api_state.clone());
 
     // Operator routes (operator+ role) - wallet updates and metrics
     let operator_api_routes = Router::new()
-        .route("/wallets/:address", axum::routing::put(update_wallet))
+        .route("/wallets/{address}", axum::routing::put(update_wallet))
         .route("/metrics/reconciliation", axum::routing::post(update_reconciliation_metrics))
         .route("/metrics/secret-rotation", axum::routing::post(update_secret_rotation_metrics))
         .with_state(api_state.clone());

@@ -195,12 +195,12 @@ export function Config() {
         </Card>
 
         {/* Read-only view */}
-        <ConfigReadOnly config={config} health={health} />
+        <ConfigReadOnly config={config || null} health={health || null} />
       </div>
     )
   }
 
-  const circuitBreakerTripped = !health?.circuit_breaker.trading_allowed
+  const circuitBreakerTripped = !health?.circuit_breaker?.trading_allowed
 
   return (
     <div className="space-y-6">
@@ -214,7 +214,7 @@ export function Config() {
                 <div className="min-w-0">
                   <div className="font-semibold text-sm md:text-base">Circuit Breaker Tripped</div>
                   <div className="text-xs md:text-sm text-text-muted break-words">
-                    Trading is halted. Reason: {health?.circuit_breaker.trip_reason || 'Unknown'}
+                    Trading is halted. Reason: {health?.circuit_breaker?.trip_reason || 'Unknown'}
                   </div>
                 </div>
               </div>
@@ -585,7 +585,7 @@ export function Config() {
                   <tr key={item.id} className="border-b border-border hover:bg-surface-light">
                     <td className="p-2 font-mono text-xs">{item.key}</td>
                     <td className="p-2">
-                      <Badge variant="secondary" size="sm">
+                      <Badge variant="default" size="sm">
                         {item.changed_by}
                       </Badge>
                     </td>
@@ -697,9 +697,9 @@ function ConfigReadOnly({
         <CardHeader>
           <CardTitle>Circuit Breakers</CardTitle>
           <Badge
-            variant={health?.circuit_breaker.trading_allowed ? 'success' : 'danger'}
+            variant={health?.circuit_breaker?.trading_allowed ? 'success' : 'danger'}
           >
-            {health?.circuit_breaker.trading_allowed ? 'Active' : 'Tripped'}
+            {health?.circuit_breaker?.trading_allowed ? 'Active' : 'Tripped'}
           </Badge>
         </CardHeader>
         <CardContent>

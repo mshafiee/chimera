@@ -1,14 +1,17 @@
 # Multi-stage build for Chimera Web Dashboard
 FROM node:18-alpine as builder
 
+# Install build dependencies for native modules
+RUN apk add --no-cache python3 make g++ libusb-dev linux-headers
+
 # Set working directory
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install --legacy-peer-deps
+# Install dependencies (ignore scripts for optional native modules if they fail)
+RUN npm install --legacy-peer-deps || (npm install --legacy-peer-deps --ignore-scripts && echo "Installed with --ignore-scripts due to native module issues")
 
 # Copy source code
 COPY . .

@@ -126,7 +126,9 @@ services:
       - "3001:3000"
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./ops/grafana/dashboard.json:/etc/grafana/provisioning/dashboards/chimera.json:ro
+      - ./ops/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
@@ -148,11 +150,13 @@ services:
     ports:
       - "9093:9093"
     volumes:
-      - ./ops/alertmanager/config.yml:/etc/alertmanager/config.yml:ro
+      - ./ops/alertmanager/config.yml:/etc/alertmanager/config.yml.template:ro
+      - ./ops/alertmanager/entrypoint.sh:/entrypoint.sh:ro
       - alertmanager-data:/alertmanager
-    command:
-      - '--config.file=/etc/alertmanager/config.yml'
-      - '--storage.path=/alertmanager'
+    env_file:
+      - docker/env.${COMPOSE_PROFILE:-devnet}
+      - docker/env.${COMPOSE_PROFILE:-devnet}.local
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     networks:
       - chimera-network
     profiles:

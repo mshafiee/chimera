@@ -8,7 +8,6 @@ import { Modal, ConfirmModal } from '../components/ui/Modal'
 import { useWallets, useUpdateWallet, useTrades } from '../api'
 import { useAuthStore } from '../stores/authStore'
 import { toast } from '../components/ui/Toast'
-import { apiClient } from '../api/client'
 import type { Wallet } from '../types'
 
 type WalletStatus = 'ALL' | 'ACTIVE' | 'CANDIDATE' | 'REJECTED'
@@ -377,7 +376,6 @@ export function Wallets() {
             </span>
           </div>
         </div>
-      </div>
 
       {/* Wallets Table */}
       <Card padding="none">
