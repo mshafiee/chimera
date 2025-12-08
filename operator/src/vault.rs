@@ -217,10 +217,19 @@ pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
     let webhook_secret_previous =
         std::env::var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS").ok();
 
+    // Load wallet private key from environment variable (hex-encoded 64 bytes)
+    let wallet_private_key = std::env::var("CHIMERA_WALLET__PRIVATE_KEY")
+        .ok()
+        .and_then(|hex_str| {
+            hex::decode(hex_str.trim())
+                .ok()
+                .filter(|bytes| bytes.len() == 64)
+        });
+
     Ok(VaultSecrets {
         webhook_secret,
         webhook_secret_previous,
-        wallet_private_key: None,
+        wallet_private_key,
         rpc_api_key: std::env::var("CHIMERA_RPC__API_KEY").ok(),
         fallback_rpc_api_key: std::env::var("CHIMERA_RPC__FALLBACK_API_KEY").ok(),
     })

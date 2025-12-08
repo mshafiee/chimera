@@ -259,6 +259,7 @@ pub struct ConfigResponse {
     pub circuit_breakers: CircuitBreakerConfig,
     pub strategy_allocation: StrategyAllocation,
     pub jito_tip_strategy: JitoTipConfig,
+    pub jito_enabled: bool,
     pub rpc_status: RpcStatus,
 }
 
@@ -350,6 +351,7 @@ pub async fn get_config(
             tip_percentile: config.jito.tip_percentile,
             tip_percent_max: config.jito.tip_percent_max,
         },
+        jito_enabled: config.jito.enabled,
         rpc_status: RpcStatus {
             primary: "helius".to_string(),
             active: {
@@ -357,11 +359,15 @@ pub async fn get_config(
                 if let Some(ref engine) = state.engine {
                     use crate::engine::executor::RpcMode;
                     match engine.rpc_mode() {
-                        RpcMode::Jito => "helius".to_string(),
-                        RpcMode::Standard => "quicknode".to_string(),
+                        RpcMode::Jito => "jito".to_string(),
+                        RpcMode::Standard => "helius".to_string(),
                     }
                 } else {
-                    state.config.read().await.rpc.primary_url.clone()
+                    if config.jito.enabled {
+                        "jito".to_string()
+                    } else {
+                        "helius".to_string()
+                    }
                 }
             },
             fallback_triggered: {
