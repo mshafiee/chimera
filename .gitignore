@@ -1,28 +1,41 @@
-# Environment & Secrets
+# Environment files (local overrides)
 .env
-config.enc
-*.key
-*.pem
+.env.*
+!.env.example
+docker/env.*.local
 
-# Database
+# Docker volumes and data
+data/
 *.db
 *.db-shm
 *.db-wal
-*.sqlite
-database/*.db
 
-# Rust
+# Build artifacts
 target/
-**/*.rs.bk
-
-# Python
+dist/
+node_modules/
 __pycache__/
-*.py[cod]
-*.class
-venv/
-.pytest_cache/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # OS
 .DS_Store
-/web/node_modules
-/web/dist
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

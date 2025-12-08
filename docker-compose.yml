@@ -1,0 +1,175 @@
+services:
+  # Chimera Operator - Core trading engine
+  operator:
+    build:
+      context: ./operator
+      dockerfile: Dockerfile
+    container_name: chimera-operator
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    environment:
+      - CHIMERA_SERVER__HOST=0.0.0.0
+      - CHIMERA_SERVER__PORT=8080
+      - CHIMERA_DATABASE__PATH=/app/data/chimera.db
+    env_file:
+      - docker/env.${COMPOSE_PROFILE:-devnet}
+      - docker/env.${COMPOSE_PROFILE:-devnet}.local
+    depends_on:
+      - prometheus
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+
+  # Chimera Scout - Wallet intelligence layer
+  scout:
+    build:
+      context: ./scout
+      dockerfile: Dockerfile
+    container_name: chimera-scout
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - scout-data:/app/scout-data
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - docker/env.${COMPOSE_PROFILE:-devnet}
+      - docker/env.${COMPOSE_PROFILE:-devnet}.local
+      - docker/env.${COMPOSE_PROFILE:-devnet}.local
+    depends_on:
+      - operator
+    networks:
+      - chimera-network
+    # Run scout on a schedule (daily at 2 AM UTC)
+    command: >
+      sh -c "
+        while true; do
+          python main.py --output /app/data/roster_new.db || true;
+          sleep 86400;
+        done
+      "
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+
+  # Web Dashboard
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: chimera-web
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:8080
+      - VITE_SOLANA_RPC=${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+    depends_on:
+      - operator
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: chimera-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./ops/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    networks:
+      - chimera-network
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+
+  # Grafana - Metrics visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: chimera-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./ops/grafana/dashboard.json:/etc/grafana/provisioning/dashboards/chimera.json:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    networks:
+      - chimera-network
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+
+  # Alertmanager - Alert routing
+  alertmanager:
+    image: prom/alertmanager:latest
+    container_name: chimera-alertmanager
+    restart: unless-stopped
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./ops/alertmanager/config.yml:/etc/alertmanager/config.yml:ro
+      - alertmanager-data:/alertmanager
+    command:
+      - '--config.file=/etc/alertmanager/config.yml'
+      - '--storage.path=/alertmanager'
+    networks:
+      - chimera-network
+    profiles:
+      - devnet
+      - mainnet-paper
+      - mainnet-prod
+
+volumes:
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
+  alertmanager-data:
+    driver: local
+  scout-data:
+    driver: local
+
+networks:
+  chimera-network:
+    driver: bridge
