@@ -372,9 +372,9 @@ pub async fn count_trades_by_status(pool: &DbPool, status: &str) -> AppResult<i6
 
 /// Get total PnL for the last 24 hours
 pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<f64> {
-    let result: (Option<f64>,) = sqlx::query_as(
+    let result: (f64,) = sqlx::query_as(
         r#"
-        SELECT COALESCE(SUM(pnl_usd), 0.0)
+        SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
         FROM trades
         WHERE status = 'CLOSED'
         AND created_at >= datetime('now', '-24 hours')
@@ -383,14 +383,14 @@ pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<f64> {
     .fetch_one(pool)
     .await?;
 
-    Ok(result.0.unwrap_or(0.0))
+    Ok(result.0)
 }
 
 /// Get total PnL for the last 7 days
 pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<f64> {
-    let result: (Option<f64>,) = sqlx::query_as(
+    let result: (f64,) = sqlx::query_as(
         r#"
-        SELECT COALESCE(SUM(pnl_usd), 0.0)
+        SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
         FROM trades
         WHERE status = 'CLOSED'
         AND created_at >= datetime('now', '-7 days')
@@ -399,14 +399,14 @@ pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<f64> {
     .fetch_one(pool)
     .await?;
 
-    Ok(result.0.unwrap_or(0.0))
+    Ok(result.0)
 }
 
 /// Get total PnL for the last 30 days
 pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<f64> {
-    let result: (Option<f64>,) = sqlx::query_as(
+    let result: (f64,) = sqlx::query_as(
         r#"
-        SELECT COALESCE(SUM(pnl_usd), 0.0)
+        SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
         FROM trades
         WHERE status = 'CLOSED'
         AND created_at >= datetime('now', '-30 days')
@@ -415,7 +415,7 @@ pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<f64> {
     .fetch_one(pool)
     .await?;
 
-    Ok(result.0.unwrap_or(0.0))
+    Ok(result.0)
 }
 
 /// Get strategy performance metrics (win rate, avg return, trade count)
@@ -481,7 +481,7 @@ pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
     // Get the most recent trades and count consecutive losses
     let trades: Vec<(f64,)> = sqlx::query_as(
         r#"
-        SELECT COALESCE(pnl_usd, 0.0)
+        SELECT CAST(COALESCE(pnl_usd, 0) AS REAL)
         FROM trades
         WHERE status = 'CLOSED'
         ORDER BY created_at DESC
@@ -679,33 +679,34 @@ pub async fn insert_reconciliation_log(
 /// Get maximum drawdown from peak (for circuit breaker)
 pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<f64> {
     // Calculate drawdown from highest cumulative PnL to current
-    let result: (Option<f64>,) = sqlx::query_as(
+    let result: (f64,) = sqlx::query_as(
         r#"
         WITH cumulative_pnl AS (
             SELECT 
                 created_at,
-                SUM(COALESCE(pnl_usd, 0)) OVER (ORDER BY created_at) as running_pnl
+                CAST(SUM(COALESCE(pnl_usd, 0)) OVER (ORDER BY created_at) AS REAL) as running_pnl
             FROM trades
             WHERE status = 'CLOSED'
         ),
         peaks AS (
             SELECT 
-                MAX(running_pnl) as peak_pnl,
-                (SELECT running_pnl FROM cumulative_pnl ORDER BY created_at DESC LIMIT 1) as current_pnl
+                COALESCE(MAX(running_pnl), 0.0) as peak_pnl,
+                COALESCE((SELECT running_pnl FROM cumulative_pnl ORDER BY created_at DESC LIMIT 1), 0.0) as current_pnl
             FROM cumulative_pnl
         )
         SELECT 
-            CASE 
-                WHEN peak_pnl > 0 THEN ((peak_pnl - current_pnl) / peak_pnl) * 100
-                ELSE 0
-            END as drawdown_percent
+            CAST(CASE 
+                WHEN peak_pnl > 0 THEN ((peak_pnl - current_pnl) / peak_pnl) * 100.0
+                ELSE 0.0
+            END AS REAL) as drawdown_percent
         FROM peaks
         "#,
     )
     .fetch_one(pool)
-    .await?;
+    .await
+    .unwrap_or((0.0,));
 
-    Ok(result.0.unwrap_or(0.0).max(0.0))
+    Ok(result.0.max(0.0))
 }
 
 /// Get active positions count
