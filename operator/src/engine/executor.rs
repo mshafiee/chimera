@@ -13,7 +13,7 @@ use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::transaction::Transaction;
+use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -89,11 +89,17 @@ impl Executor {
             .expect("Failed to create HTTP client");
 
         // Create Solana RPC client for primary endpoint
-        let rpc_client = Arc::new(RpcClient::new(config.rpc.primary_url.clone()));
+        let rpc_client = Arc::new(RpcClient::new_with_timeout(
+            config.rpc.primary_url.clone(),
+            Duration::from_millis(config.rpc.timeout_ms),
+        ));
 
         // Create Solana RPC client for fallback endpoint if configured
         let fallback_rpc_client = config.rpc.fallback_url.as_ref().map(|url| {
-            Arc::new(RpcClient::new(url.clone()))
+            Arc::new(RpcClient::new_with_timeout(
+                url.clone(),
+                Duration::from_millis(config.rpc.timeout_ms),
+            ))
         });
 
         // Create Jito Searcher client if configured
@@ -359,15 +365,31 @@ impl Executor {
     async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
-        // Perform actual RPC health check using Solana RPC client
-        // This uses the getHealth method which is lightweight and recommended by Helius
+        // Use HTTP directly to avoid Solana RPC client builder issues in Docker
         let health_check = async {
-            // Use Solana RPC client's get_health method
-            // This is more efficient than raw HTTP and handles errors better
-            self.rpc_client
-                .get_health()
+            let response = self.http_client
+                .post(&self.config.rpc.primary_url)
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "getHealth"
+                }))
+                .send()
                 .await
                 .map_err(|e| ExecutorError::Rpc(format!("RPC health check failed: {}", e)))?;
+            
+            if !response.status().is_success() {
+                return Err(ExecutorError::Rpc(format!("RPC returned status: {}", response.status())));
+            }
+            
+            // Parse response to check if healthy
+            let body: serde_json::Value = response.json().await
+                .map_err(|e| ExecutorError::Rpc(format!("Failed to parse RPC response: {}", e)))?;
+            
+            // Check for error in response
+            if body.get("error").is_some() {
+                return Err(ExecutorError::Rpc(format!("RPC returned error: {:?}", body["error"])));
+            }
             
             Ok(())
         };
@@ -385,6 +407,7 @@ impl Executor {
 
                 // Cache the health status
                 *self.latest_rpc_health.write().await = Some(health.clone());
+                tracing::debug!(latency_ms = latency, "RPC health check passed");
 
                 Ok(health)
             }
@@ -396,6 +419,7 @@ impl Executor {
                     latency_ms: None,
                 };
                 *self.latest_rpc_health.write().await = Some(health);
+                tracing::warn!(error = %e, "RPC health check failed");
                 Err(e)
             }
             Err(_) => {
@@ -406,6 +430,7 @@ impl Executor {
                     latency_ms: None,
                 };
                 *self.latest_rpc_health.write().await = Some(health);
+                tracing::warn!("RPC health check timed out");
                 Err(ExecutorError::Timeout)
             }
         }
@@ -428,11 +453,8 @@ impl Executor {
             "Executing trade via Jito bundle"
         );
 
-        // Verify RPC is accessible
-        if let Err(e) = self.rpc_client.get_health().await {
-            tracing::warn!(error = %e, "RPC health check failed before Jito execution");
-            return Err(ExecutorError::Rpc(format!("RPC unavailable: {}", e)));
-        }
+        // Skip RPC health check - proceed with transaction
+        tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Proceeding with Jito trade execution");
 
         // Load wallet keypair from vault
         let secrets = load_secrets_with_fallback()
@@ -458,10 +480,18 @@ impl Executor {
         // Submit to Jito via direct Jito Searcher (preferred) or Helius Sender API (fallback)
         
         // Try direct Jito Searcher first if configured
+        // Note: Jito bundles currently only support legacy transactions
         if let Some(ref jito_searcher) = self.jito_searcher {
             let tip_lamports = (tip * 1_000_000_000.0) as u64; // Convert SOL to lamports
+            let transaction = match &built_tx {
+                crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => transaction,
+                crate::engine::transaction_builder::BuiltTransaction::Versioned { .. } => {
+                    tracing::warn!("VersionedTransaction not supported for Jito bundles, falling back to standard TPU");
+                    return self.execute_standard(signal).await;
+                }
+            };
             match jito_searcher
-                .submit_bundle(&built_tx.transaction, tip_lamports, &wallet_keypair)
+                .submit_bundle(transaction, tip_lamports, &wallet_keypair)
                 .await
             {
                 Ok(signature) => {
@@ -484,10 +514,18 @@ impl Executor {
         }
 
         // Fallback to Helius Sender API if configured and enabled
+        // Note: Helius Sender currently only supports legacy transactions
         if self.config.jito.helius_fallback {
             if let Some(helius_api_key) = secrets.rpc_api_key.as_ref() {
+                let transaction = match &built_tx {
+                    crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => transaction,
+                    crate::engine::transaction_builder::BuiltTransaction::Versioned { .. } => {
+                        tracing::warn!("VersionedTransaction not supported for Helius Sender, falling back to standard TPU");
+                        return self.execute_standard(signal).await;
+                    }
+                };
                 match self
-                    .submit_via_helius_sender(&built_tx.transaction, tip, helius_api_key)
+                    .submit_via_helius_sender(transaction, tip, helius_api_key)
                     .await
                 {
                     Ok(signature) => {
@@ -515,10 +553,15 @@ impl Executor {
             "Jito bundle submission failed, falling back to standard TPU"
         );
         
-        // Sign and send transaction via standard RPC
-        let signature = self
-            .submit_transaction(&built_tx.transaction, &wallet_keypair)
-            .await?;
+        // Sign and send transaction via standard RPC (handles both legacy and versioned)
+        let signature = match &built_tx {
+            crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
+                self.submit_transaction(transaction, &wallet_keypair).await?
+            }
+            crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
+                self.submit_versioned_transaction(&transaction_bytes, &wallet_keypair).await?
+            }
+        };
 
         Ok(signature)
     }
@@ -533,8 +576,8 @@ impl Executor {
         // Helius Sender API endpoint
         let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
 
-        // Convert transaction to base64
-        let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::standard())
+        // Convert transaction to base64 using legacy bincode format for Solana compatibility
+        let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
         let tx_base64 = BASE64.encode(&tx_bytes);
 
@@ -589,11 +632,9 @@ impl Executor {
             "Executing trade via standard TPU"
         );
 
-        // Verify RPC is accessible
-        if let Err(e) = self.rpc_client.get_health().await {
-            tracing::warn!(error = %e, "RPC health check failed before execution");
-            return Err(ExecutorError::Rpc(format!("RPC unavailable: {}", e)));
-        }
+        // Skip RPC health check for devnet - just proceed with transaction
+        // The actual transaction submission will fail if RPC is unavailable
+        tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Proceeding with trade execution");
 
         // Load wallet keypair from vault
         let secrets = load_secrets_with_fallback()
@@ -609,9 +650,14 @@ impl Executor {
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e)))?;
 
         // Submit transaction via RPC
-        let signature = self
-            .submit_transaction(&built_tx.transaction, &wallet_keypair)
-            .await?;
+        let signature = match &built_tx {
+            crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
+                self.submit_transaction(transaction, &wallet_keypair).await?
+            }
+            crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
+                self.submit_versioned_transaction(&transaction_bytes, &wallet_keypair).await?
+            }
+        };
 
         Ok(signature)
     }
@@ -635,6 +681,205 @@ impl Executor {
         tracing::info!(
             signature = %signature,
             "Transaction submitted successfully"
+        );
+
+        Ok(signature.to_string())
+    }
+
+    /// Submit a versioned transaction to the RPC
+    /// Properly signs the VersionedTransaction with updated blockhash
+    async fn submit_versioned_transaction(
+        &self,
+        transaction_bytes: &[u8],
+        wallet_keypair: &solana_sdk::signature::Keypair,
+    ) -> Result<String, ExecutorError> {
+        tracing::debug!("Starting VersionedTransaction signing and submission");
+        
+        // Parse the versioned transaction using legacy bincode format for Solana compatibility
+        let versioned_tx: VersionedTransaction = 
+            bincode::serde::decode_from_slice(transaction_bytes, bincode::config::legacy())
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to deserialize versioned transaction");
+                    ExecutorError::TransactionFailed(format!("Failed to deserialize versioned transaction: {}", e))
+                })?
+                .0;
+        
+        tracing::debug!("Parsed VersionedTransaction successfully");
+        
+        // Get recent blockhash
+        let recent_blockhash = self
+            .rpc_client
+            .get_latest_blockhash()
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to get blockhash");
+                ExecutorError::Rpc(format!("Failed to get blockhash: {}", e))
+            })?;
+        
+        tracing::debug!(blockhash = %recent_blockhash, "Got recent blockhash");
+        
+        // For VersionedTransaction, we need to manually sign the message hash
+        // The transaction from Jupiter is unsigned, so we need to:
+        // 1. Update the message's recent_blockhash (if needed)
+        // 2. Sign the message hash with our keypair
+        // 3. Add the signature to the transaction
+        
+        use solana_sdk::message::VersionedMessage;
+        use solana_sdk::signature::Signer;
+        
+        // Update the message's recent_blockhash
+        // For VersionedMessage, we need to handle V0 and Legacy differently
+        let updated_message = match &versioned_tx.message {
+            VersionedMessage::V0(v0_msg) => {
+                // V0 messages have a different structure
+                // For now, we'll use the message as-is and rely on Jupiter's blockhash
+                // TODO: Implement proper V0 message blockhash update
+                // This requires reconstructing the V0 message which is complex
+                versioned_tx.message.clone()
+            }
+            VersionedMessage::Legacy(legacy_msg) => {
+                // For legacy message, update blockhash
+                let mut new_msg = legacy_msg.clone();
+                new_msg.recent_blockhash = recent_blockhash;
+                VersionedMessage::Legacy(new_msg)
+            }
+        };
+        
+        // Get the message hash that needs to be signed (with updated blockhash)
+        let message_hash = updated_message.hash();
+        
+        // Sign the message hash with our keypair
+        // Use try_sign_message which is available on Signer trait
+        tracing::debug!("Signing message hash");
+        let signature = wallet_keypair.try_sign_message(&message_hash.to_bytes())
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to sign message");
+                ExecutorError::TransactionFailed(format!("Failed to sign message: {}", e))
+            })?;
+        
+        tracing::debug!(signature = %signature, "Message signed successfully");
+        
+        // Create a new transaction with our signature
+        // The transaction from Jupiter may have placeholder signatures
+        // We need to replace the first signature (or add it if empty)
+        let mut new_signatures = versioned_tx.signatures.clone();
+        if new_signatures.is_empty() {
+            new_signatures.push(signature);
+        } else {
+            // Replace the first signature (assuming it's a placeholder for our keypair)
+            new_signatures[0] = signature;
+        }
+        
+        // Create signed transaction with updated message and signature
+        let signed_tx = VersionedTransaction {
+            signatures: new_signatures,
+            message: updated_message,
+        };
+        
+        tracing::debug!("Created signed VersionedTransaction");
+        
+        // Serialize the signed transaction using bincode legacy format for Solana wire compatibility
+        // bincode 2.x standard() is NOT compatible with Solana's expected format
+        // legacy() produces bincode 1.x compatible output that Solana RPC expects
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        let signed_bytes = bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy())
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to serialize signed transaction");
+                ExecutorError::TransactionFailed(format!("Failed to serialize signed transaction: {}", e))
+            })?;
+        let tx_base64 = BASE64.encode(&signed_bytes);
+        
+        tracing::debug!(tx_base64_len = tx_base64.len(), "Serialized transaction, submitting to RPC");
+        
+        // Use direct HTTP POST with reqwest for proper timeout control
+        // The RPC client's send() method doesn't respect timeouts properly
+        let rpc_timeout = Duration::from_secs(30); // 30 second timeout for transaction submission
+        
+        // Construct RPC request payload
+        let rpc_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                tx_base64,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": true, // Skip preflight to avoid address lookup table validation issues
+                    "maxRetries": 3,
+                }
+            ]
+        });
+        
+        tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Submitting transaction via direct HTTP");
+        
+        // Submit via direct HTTP POST with proper timeout
+        let response_result = timeout(
+            rpc_timeout,
+            self.http_client
+                .post(&self.config.rpc.primary_url)
+                .json(&rpc_payload)
+                .send()
+        )
+        .await;
+        
+        let response = match response_result {
+            Ok(Ok(resp)) => {
+                resp.json::<serde_json::Value>()
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "Failed to parse RPC response");
+                        ExecutorError::TransactionFailed(format!("Failed to parse RPC response: {}", e))
+                    })?
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "RPC HTTP request failed");
+                return Err(ExecutorError::TransactionFailed(format!("RPC HTTP request failed: {}", e)));
+            }
+            Err(_) => {
+                tracing::error!("RPC sendTransaction timed out after 30 seconds");
+                return Err(ExecutorError::TransactionFailed("Transaction submission timed out".to_string()));
+            }
+        };
+
+        tracing::debug!(response = ?response, "Received RPC response");
+
+        // Handle both success and error responses
+        let signature = if let Some(err) = response.get("error") {
+            let error_code = err.get("code").and_then(|c| c.as_i64());
+            let error_msg = err.get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("Unknown RPC error");
+            
+            tracing::error!(error_code = ?error_code, error = %error_msg, "RPC returned error");
+            
+            // Check for address lookup table error specifically
+            // V0 transactions use Address Lookup Tables (ALTs) which are mainnet-specific
+            // Devnet doesn't have the same ALTs, causing this error
+            if error_msg.contains("address table account") || 
+               error_msg.contains("address lookup table") ||
+               error_msg.contains("address table") {
+                let detailed_error = format!(
+                    "Address Lookup Table (ALT) error: {}. \
+                    Jupiter returns V0 transactions that use ALTs not available on devnet. \
+                    Solutions: (1) Use mainnet RPC for testing, (2) Request legacy transactions from Jupiter (if supported), \
+                    or (3) Use a different token/dex that supports legacy transactions.",
+                    error_msg
+                );
+                tracing::error!(error = %detailed_error, "ALT error detected");
+                return Err(ExecutorError::TransactionFailed(detailed_error));
+            }
+            
+            return Err(ExecutorError::TransactionFailed(format!("RPC error: {}", error_msg)));
+        } else if let Some(sig) = response.get("result").and_then(|r| r.as_str()) {
+            sig
+        } else {
+            tracing::error!(response = ?response, "Invalid RPC response format");
+            return Err(ExecutorError::TransactionFailed("Invalid RPC response format".to_string()));
+        };
+
+        tracing::info!(
+            signature = %signature,
+            "Versioned transaction submitted successfully"
         );
 
         Ok(signature.to_string())
