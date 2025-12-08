@@ -6,7 +6,7 @@
 //! - Recovery threshold configuration
 
 use chimera_operator::engine::recovery::{RecoveryAction, DEFAULT_STUCK_THRESHOLD_SECS};
-use chrono::{Duration, Utc};
+use chrono::Utc;
 
 #[test]
 fn test_recovery_action_display() {

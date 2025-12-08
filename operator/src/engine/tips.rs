@@ -258,6 +258,8 @@ mod tests {
             tip_ceiling_sol: 0.01,
             tip_percentile: 50,
             tip_percent_max: 0.10,
+            helius_fallback: false,
+            searcher_endpoint: None,
         }
     }
 

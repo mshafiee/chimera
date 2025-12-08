@@ -9,7 +9,7 @@ use chimera_operator::{
     vault::VaultSecrets,
 };
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::signature::Keypair;
+use solana_sdk::signature::{Keypair, Signer};
 use std::sync::Arc;
 
 /// Test transaction builder initialization

@@ -3,9 +3,10 @@
 //! Tests fast/slow path validation, cache behavior, and honeypot detection
 
 use chimera_operator::{
-    config::{AppConfig, TokenSafetyConfig},
+    config::AppConfig,
     token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyResult},
     models::Strategy,
+    TokenSafetyConfig,
 };
 use solana_client::rpc_client::RpcClient;
 use std::sync::Arc;

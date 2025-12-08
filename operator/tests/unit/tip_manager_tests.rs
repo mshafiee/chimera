@@ -24,6 +24,8 @@ fn test_cold_start_tip_calculation() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10,
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     let cold_tip = config.tip_floor_sol * COLD_START_MULTIPLIER;
@@ -38,6 +40,8 @@ fn test_cold_start_shield_tip() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10,
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     // Shield uses floor * 2
@@ -53,6 +57,8 @@ fn test_cold_start_spear_tip() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10,
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     // Spear uses floor * 2 * 1.5
@@ -68,6 +74,8 @@ fn test_cold_start_exit_tip() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10,
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     // Exit uses ceiling during cold start
@@ -132,6 +140,8 @@ fn test_tip_ceiling_cap() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10,
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     let calculated_tip: f64 = 0.015; // Above ceiling
@@ -148,6 +158,8 @@ fn test_tip_floor_minimum() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10,
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     let calculated_tip: f64 = 0.0005; // Below floor
@@ -164,6 +176,8 @@ fn test_tip_percent_max_cap() {
         tip_ceiling_sol: 0.01,
         tip_percentile: 50,
         tip_percent_max: 0.10, // 10%
+        helius_fallback: false,
+        searcher_endpoint: None,
     };
     
     let trade_amount_sol: f64 = 1.0;
