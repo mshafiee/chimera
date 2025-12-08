@@ -1,1 +1,1 @@
-export { PnLChart, generateSamplePnLData } from './PnLChart'
+export { PnLChart } from './PnLChart'

@@ -1,11 +1,13 @@
-import { useEffect } from 'react'
+import { useEffect, useMemo } from 'react'
 import { ExternalLink } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge, StrategyBadge, StatusBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
-import { PnLChart, generateSamplePnLData } from '../components/charts/PnLChart'
+import { PnLChart } from '../components/charts/PnLChart'
 import { useHealth, usePositions } from '../api'
 import { usePerformanceMetrics, useStrategyPerformance } from '../api/metrics'
+import { useTrades } from '../api/trades'
+import { useConfig } from '../api/config'
 import { useLayoutContext } from '../components/layout/Layout'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/ui/Toast'
@@ -17,6 +19,15 @@ export function Dashboard() {
   const { data: performanceMetrics, isLoading: metricsLoading } = usePerformanceMetrics()
   const { data: shieldPerformance } = useStrategyPerformance('SHIELD', 30)
   const { data: spearPerformance } = useStrategyPerformance('SPEAR', 30)
+  const { data: configData } = useConfig()
+  
+  // Fetch trades for PnL chart (last 30 days)
+  const thirtyDaysAgo = useMemo(() => {
+    const d = new Date()
+    d.setDate(d.getDate() - 30)
+    return d.toISOString()
+  }, [])
+  const { data: tradesData } = useTrades({ from: thirtyDaysAgo, status: 'CLOSED', limit: 1000 })
   
   // WebSocket for real-time updates
   const { isConnected, lastMessage } = useWebSocket()
@@ -59,8 +70,33 @@ export function Dashboard() {
   const positions = positionsData?.positions || []
   const activePositions = positions.filter((p) => p.state === 'ACTIVE')
 
-  // Sample PnL data - in production this would come from API
-  const pnlData = generateSamplePnLData(30)
+  // Compute PnL data from actual trades
+  const pnlData = useMemo(() => {
+    if (!tradesData?.trades || tradesData.trades.length === 0) {
+      // Return empty data - no sample data
+      return []
+    }
+    
+    // Group trades by date and compute cumulative PnL
+    const pnlByDate = new Map<string, number>()
+    let cumPnl = 0
+    
+    // Sort trades by date
+    const sortedTrades = [...tradesData.trades].sort((a, b) => 
+      new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    )
+    
+    for (const trade of sortedTrades) {
+      const dateStr = new Date(trade.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      cumPnl += trade.pnl_usd || 0
+      pnlByDate.set(dateStr, cumPnl)
+    }
+    
+    return Array.from(pnlByDate.entries()).map(([date, pnl]) => ({
+      date,
+      pnl: Math.round(pnl * 100) / 100
+    }))
+  }, [tradesData])
 
   return (
     <div className="space-y-6">
@@ -167,16 +203,16 @@ export function Dashboard() {
               />
             </div>
 
-            {/* Balance - hidden on very small screens */}
+            {/* Balance - shows when wallet is connected */}
             <div className="hidden xs:flex items-center gap-2 text-xs md:text-sm">
               <span className="text-text-muted">Balance:</span>
-              <span className="font-mono-numbers font-semibold">◎ 12.45 SOL</span>
+              <span className="font-mono-numbers font-semibold text-text-muted">—</span>
             </div>
 
-            {/* NAV - hidden on small screens */}
+            {/* NAV - computed from positions */}
             <div className="hidden sm:flex items-center gap-2 text-xs md:text-sm">
               <span className="text-text-muted">NAV:</span>
-              <span className="font-mono-numbers font-semibold">$1,234.56</span>
+              <span className="font-mono-numbers font-semibold text-text-muted">—</span>
             </div>
           </div>
 
@@ -266,7 +302,13 @@ export function Dashboard() {
               positive={performanceMetrics ? performanceMetrics.pnl_30d >= 0 : true}
             />
           </div>
-          <PnLChart data={pnlData} />
+          {pnlData.length > 0 ? (
+            <PnLChart data={pnlData} />
+          ) : (
+            <div className="h-[200px] flex items-center justify-center text-text-muted text-sm">
+              No trade history available
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -308,10 +350,15 @@ export function Dashboard() {
             <div className="mt-4">
               <div className="flex justify-between text-sm mb-1">
                 <span className="text-text-muted">Allocation</span>
-                <span className="font-mono-numbers">70%</span>
+                <span className="font-mono-numbers">
+                  {configData?.strategy_allocation?.shield_percent ?? '—'}%
+                </span>
               </div>
               <div className="h-2 bg-background rounded-full overflow-hidden">
-                <div className="h-full bg-shield w-[70%]" />
+                <div 
+                  className="h-full bg-shield transition-all duration-300" 
+                  style={{ width: `${configData?.strategy_allocation?.shield_percent ?? 0}%` }}
+                />
               </div>
             </div>
           </CardContent>
@@ -353,10 +400,15 @@ export function Dashboard() {
             <div className="mt-4">
               <div className="flex justify-between text-sm mb-1">
                 <span className="text-text-muted">Allocation</span>
-                <span className="font-mono-numbers">30%</span>
+                <span className="font-mono-numbers">
+                  {configData?.strategy_allocation?.spear_percent ?? '—'}%
+                </span>
               </div>
               <div className="h-2 bg-background rounded-full overflow-hidden">
-                <div className="h-full bg-spear w-[30%]" />
+                <div 
+                  className="h-full bg-spear transition-all duration-300" 
+                  style={{ width: `${configData?.strategy_allocation?.spear_percent ?? 0}%` }}
+                />
               </div>
             </div>
           </CardContent>
@@ -380,11 +432,21 @@ export function Dashboard() {
             />
             <HealthIndicator
               name="Helius"
-              status="healthy"
+              status={
+                configData?.rpc_status?.primary === 'helius' 
+                  ? (configData?.rpc_status?.fallback_triggered ? 'degraded' : 'healthy')
+                  : 'unknown'
+              }
             />
             <HealthIndicator
               name="Jito"
-              status="healthy"
+              status={
+                !configData?.jito_enabled
+                  ? 'unknown' // Disabled - show as unknown/white
+                  : configData?.rpc_status?.active === 'jito'
+                  ? 'healthy'
+                  : (configData?.rpc_status?.fallback_triggered ? 'degraded' : 'unknown')
+              }
             />
           </div>
         </CardContent>

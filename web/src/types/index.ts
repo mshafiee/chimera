@@ -105,6 +105,7 @@ export interface ConfigResponse {
     tip_percentile: number
     tip_percent_max: number
   }
+  jito_enabled: boolean
   rpc_status: {
     primary: string
     active: string

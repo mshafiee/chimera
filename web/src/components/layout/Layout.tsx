@@ -4,10 +4,11 @@ import { Header } from './Header'
 import { useState, useCallback } from 'react'
 import { Menu, X } from 'lucide-react'
 import { ToastContainer, useToastStore } from '../ui/Toast'
+import { useWebSocket } from '../../hooks/useWebSocket'
 
 export function Layout() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
-  const [isConnected] = useState(false) // Will be set by WebSocket hook
+  const { isConnected } = useWebSocket() // Get actual WebSocket connection status
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
 
   const handleRefresh = useCallback(() => {
