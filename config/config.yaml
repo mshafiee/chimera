@@ -8,10 +8,10 @@ server:
 
 rpc:
   primary_provider: "helius"
-  # Set via environment: CHIMERA_RPC__PRIMARY_URL
-  primary_url: ""
-  # Optional fallback (QuickNode/Triton)
-  fallback_url: ""
+  # Override via CHIMERA_RPC__PRIMARY_URL env var
+  primary_url: "https://api.devnet.solana.com"
+  # Override via CHIMERA_RPC__FALLBACK_URL env var
+  fallback_url: "https://api.devnet.solana.com"
   rate_limit_per_second: 40
   timeout_ms: 2000
   max_consecutive_failures: 3
@@ -21,8 +21,8 @@ database:
   max_connections: 5
 
 security:
-  # CRITICAL: Set via environment variable CHIMERA_SECURITY__WEBHOOK_SECRET
-  webhook_secret: ""
+  # Overridden by CHIMERA_SECURITY__WEBHOOK_SECRET
+  webhook_secret: "dev-secret-placeholder"
   max_timestamp_drift_secs: 60
   webhook_rate_limit: 100
   webhook_burst_size: 150
@@ -40,7 +40,7 @@ strategy:
   min_position_sol: 0.01
 
 jito:
-  enabled: true
+  enabled: false
   tip_floor_sol: 0.001
   tip_ceiling_sol: 0.01
   tip_percentile: 50
