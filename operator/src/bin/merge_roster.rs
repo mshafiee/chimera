@@ -1,6 +1,7 @@
 //! Simple binary to trigger roster merge
 //! Usage: cargo run --bin merge_roster [--roster-path /path/to/roster_new.db] [--db-path /path/to/chimera.db]
 
+use chimera_operator::config;
 use chimera_operator::db;
 use chimera_operator::roster;
 use std::path::PathBuf;
@@ -66,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize database pool
-    let db_config = db::DatabaseConfig {
+    let db_config = config::DatabaseConfig {
         path: db_path.clone(),
         max_connections: 5,
     };
