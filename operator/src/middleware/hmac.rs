@@ -90,7 +90,7 @@ enum VerificationResult {
 ///
 /// During secret rotation, tries all configured secrets and logs which one matched.
 pub async fn hmac_verify(
-    State(state): State<HmacState>,
+    State(state): State<Arc<HmacState>>,
     headers: HeaderMap,
     request: Request,
     next: Next,

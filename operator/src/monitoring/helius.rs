@@ -4,17 +4,30 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+use parking_lot::RwLock;
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
 use anyhow::{Context, Result};
 use reqwest::Client;
 use tokio::time::{sleep, Duration};
 
+/// Cache entry for token creation time
+struct TokenAgeCacheEntry {
+    creation_timestamp: i64,
+    cached_at: SystemTime,
+}
+
 /// Helius API client
 pub struct HeliusClient {
     api_key: String,
     client: Client,
     base_url: String,
+    /// Cache for token creation times (mint_address -> cache entry)
+    token_age_cache: Arc<RwLock<HashMap<String, TokenAgeCacheEntry>>>,
+    /// Cache TTL in seconds (default: 1 hour)
+    token_age_cache_ttl: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +103,106 @@ impl HeliusClient {
             api_key,
             client: Client::new(),
             base_url: "https://api.helius.xyz/v0".to_string(),
+            token_age_cache: Arc::new(RwLock::new(HashMap::new())),
+            token_age_cache_ttl: 3600, // 1 hour
         })
+    }
+
+    /// Get token creation time in hours since creation
+    ///
+    /// Returns None if:
+    /// - API call fails
+    /// - No transactions found for the mint address
+    /// - Token is older than cache TTL (will re-fetch)
+    pub async fn get_token_age_hours(&self, mint_address: &str) -> Result<Option<f64>> {
+        // Check cache first
+        {
+            let cache = self.token_age_cache.read();
+            if let Some(entry) = cache.get(mint_address) {
+                // Check if cache is still valid
+                if let Ok(elapsed) = entry.cached_at.elapsed() {
+                    if elapsed.as_secs() < self.token_age_cache_ttl {
+                        // Calculate age in hours
+                        let current_timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs() as i64;
+                        let age_seconds = current_timestamp - entry.creation_timestamp;
+                        let age_hours = age_seconds as f64 / 3600.0;
+                        return Ok(Some(age_hours));
+                    }
+                }
+            }
+        }
+
+        // Fetch from API
+        let creation_timestamp = self.get_token_creation_time(mint_address).await?;
+        
+        if let Some(timestamp) = creation_timestamp {
+            // Cache the result
+            {
+                let mut cache = self.token_age_cache.write();
+                cache.insert(
+                    mint_address.to_string(),
+                    TokenAgeCacheEntry {
+                        creation_timestamp: timestamp,
+                        cached_at: SystemTime::now(),
+                    },
+                );
+            }
+
+            // Calculate age in hours
+            let current_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let age_seconds = current_timestamp - timestamp;
+            let age_hours = age_seconds as f64 / 3600.0;
+            Ok(Some(age_hours))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get token creation timestamp from Helius API
+    ///
+    /// Returns the timestamp of the first (oldest) transaction for the mint address
+    async fn get_token_creation_time(&self, mint_address: &str) -> Result<Option<i64>> {
+        let url = format!(
+            "{}/addresses/{}/transactions?api-key={}&limit=1&order=asc",
+            self.base_url, mint_address, self.api_key
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .context("Failed to fetch token transactions")?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                mint = mint_address,
+                error = error_text,
+                "Failed to fetch token creation time"
+            );
+            return Ok(None);
+        }
+
+        let transactions: Vec<serde_json::Value> = response
+            .json()
+            .await
+            .context("Failed to parse transactions response")?;
+
+        // Get timestamp from first transaction
+        if let Some(first_tx) = transactions.first() {
+            if let Some(timestamp) = first_tx.get("timestamp").and_then(|t| t.as_i64()) {
+                return Ok(Some(timestamp));
+            }
+        }
+
+        Ok(None)
     }
 
     /// Register webhook for a batch of wallets
@@ -135,7 +247,7 @@ impl HeliusClient {
     }
 
     /// Register a single webhook for multiple wallets
-    async fn register_webhook(
+    pub async fn register_webhook(
         &self,
         wallets: &[String],
         webhook_url: &str,

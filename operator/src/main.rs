@@ -5,6 +5,7 @@
 
 use axum::{
     extract::{Request, State},
+    http::HeaderMap,
     middleware::{self as axum_middleware, Next},
     routing::{get, post, put},
     Router,
@@ -31,7 +32,7 @@ use chimera_operator::handlers::{
     list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
     roster_validate, update_config, update_wallet, update_reconciliation_metrics,
     update_secret_rotation_metrics, wallet_auth, webhook_handler, ws_handler,
-    helius_webhook_handler, get_monitoring_status, enable_wallet_monitoring, disable_wallet_monitoring,
+    get_monitoring_status, enable_wallet_monitoring, disable_wallet_monitoring, helius_webhook_handler,
     ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::middleware::{self, bearer_auth, AuthState, HmacState, Role};
@@ -249,10 +250,41 @@ async fn main() -> anyhow::Result<()> {
         default_roster_path: roster_path,
     });
     
-    // Build webhook routes
+    // Build HMAC secrets for webhook verification
+    let mut hmac_secrets = Vec::new();
+    if !config.security.webhook_secret.is_empty() {
+        hmac_secrets.push(config.security.webhook_secret.clone());
+    }
+    // Try to load from vault if available
+    if let Ok(secrets) = vault::load_secrets_with_fallback() {
+        if !secrets.webhook_secret.is_empty() {
+            hmac_secrets.push(secrets.webhook_secret.clone());
+        }
+        if let Some(prev) = &secrets.webhook_secret_previous {
+            if !prev.is_empty() {
+                hmac_secrets.push(prev.clone());
+            }
+        }
+    }
+    // Add previous secret from config if available
+    if let Some(prev) = &config.security.webhook_secret_previous {
+        if !prev.is_empty() && !hmac_secrets.contains(prev) {
+            hmac_secrets.push(prev.clone());
+        }
+    }
+    let hmac_state = Arc::new(middleware::HmacState::with_rotation(
+        hmac_secrets,
+        config.security.max_timestamp_drift_secs,
+    ));
+    
+    // Build webhook routes with HMAC middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(webhook_handler))
-        .with_state(webhook_state.clone());
+        .with_state(webhook_state.clone())
+        .layer(axum_middleware::from_fn_with_state(
+            hmac_state.clone(),
+            middleware::hmac_verify,
+        ));
     
     // Build roster routes
     // In devnet, allow roster merge without auth for easier testing
@@ -296,9 +328,10 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
     
-    // Monitoring will be enabled in a future update
-    // For now, focus on core trading functionality
-    tracing::info!("Monitoring features will be enabled in next update");
+    // Build monitoring routes
+    // Note: Monitoring routes require MonitoringState which needs proper initialization
+    // The handlers are implemented but routes will be added when monitoring is fully integrated
+    // Core functionality (webhook, positions, etc.) is working
     let monitoring_routes = Router::new();
 
     // Create full router with all routes and middleware
@@ -866,12 +899,14 @@ async fn main_full() -> anyhow::Result<()> {
             bearer_auth,
         ));
 
-    // Build webhook routes
-    // Note: HMAC verification is handled in the webhook handler itself for now
-    // TODO: Add proper HMAC middleware once the server is working
+    // Build webhook routes with HMAC middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(webhook_handler))
-        .with_state(webhook_state.clone());
+        .with_state(webhook_state.clone())
+        .layer(axum_middleware::from_fn_with_state(
+            hmac_state.clone(),
+            middleware::hmac_verify,
+        ));
 
     // Build roster routes
     // In devnet, allow roster merge without auth for easier testing

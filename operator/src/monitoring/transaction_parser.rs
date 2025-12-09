@@ -169,24 +169,124 @@ fn parse_pumpfun_swap(_tx_json: &Value, _wallet_address: &str) -> Result<ParsedS
 fn parse_balance_changes(
     pre_balances: Option<&Vec<Value>>,
     post_balances: Option<&Vec<Value>>,
-    wallet_address: &str,
+    _wallet_address: &str,
 ) -> Result<(String, String, f64, f64, SwapDirection)> {
-    // This is a simplified parser
-    // In production, would need to:
-    // 1. Match pre/post balances by account
-    // 2. Calculate differences
-    // 3. Determine which token is SOL (native)
-    // 4. Determine direction based on SOL flow
-
-    // For now, return placeholder
-    // TODO: Implement full balance change parsing
-    Ok((
-        "So11111111111111111111111111111111111111112".to_string(), // SOL
-        "".to_string(),
-        0.0,
-        0.0,
-        SwapDirection::Buy,
-    ))
+    // Parse token balance changes from pre/post balances
+    // Structure: Each balance entry has:
+    // - accountIndex: index into accounts array
+    // - mint: token mint address
+    // - uiTokenAmount: { uiAmount, decimals, amount }
+    
+    // Use empty vectors as defaults to avoid lifetime issues
+    let empty_pre: Vec<Value> = Vec::new();
+    let empty_post: Vec<Value> = Vec::new();
+    let pre_balances = pre_balances.unwrap_or(&empty_pre);
+    let post_balances = post_balances.unwrap_or(&empty_post);
+    
+    // Create maps of account index -> balance for easier matching
+    let mut pre_map: std::collections::HashMap<usize, (String, f64)> = std::collections::HashMap::new();
+    let mut post_map: std::collections::HashMap<usize, (String, f64)> = std::collections::HashMap::new();
+    
+    // Parse pre balances
+    for balance in pre_balances {
+        if let (Some(account_idx), Some(mint), Some(ui_amount)) = (
+            balance.get("accountIndex").and_then(|v| v.as_u64()).map(|v| v as usize),
+            balance.get("mint").and_then(|v| v.as_str()),
+            balance.get("uiTokenAmount")
+                .and_then(|v| v.get("uiAmount"))
+                .and_then(|v| v.as_f64()),
+        ) {
+            pre_map.insert(account_idx, (mint.to_string(), ui_amount));
+        }
+    }
+    
+    // Parse post balances
+    for balance in post_balances {
+        if let (Some(account_idx), Some(mint), Some(ui_amount)) = (
+            balance.get("accountIndex").and_then(|v| v.as_u64()).map(|v| v as usize),
+            balance.get("mint").and_then(|v| v.as_str()),
+            balance.get("uiTokenAmount")
+                .and_then(|v| v.get("uiAmount"))
+                .and_then(|v| v.as_f64()),
+        ) {
+            post_map.insert(account_idx, (mint.to_string(), ui_amount));
+        }
+    }
+    
+    // Calculate balance changes
+    let mut token_changes: Vec<(String, f64)> = Vec::new();
+    let sol_mint = "So11111111111111111111111111111111111111112";
+    
+    // Check all accounts that appear in either pre or post
+    let all_accounts: std::collections::HashSet<usize> = pre_map.keys()
+        .chain(post_map.keys())
+        .cloned()
+        .collect();
+    
+    for account_idx in all_accounts {
+        let pre_balance = pre_map.get(&account_idx).map(|(_, amt)| *amt).unwrap_or(0.0);
+        let post_balance = post_map.get(&account_idx).map(|(_, amt)| *amt).unwrap_or(0.0);
+        let change = post_balance - pre_balance;
+        
+        if change.abs() > 0.0001 { // Significant change (avoid floating point noise)
+            let mint = post_map.get(&account_idx)
+                .or_else(|| pre_map.get(&account_idx))
+                .map(|(m, _)| m.clone())
+                .unwrap_or_default();
+            token_changes.push((mint, change));
+        }
+    }
+    
+    // Determine swap direction and amounts
+    // Find SOL change and token change
+    let mut sol_change = 0.0;
+    let mut token_change: Option<(String, f64)> = None;
+    
+    for (mint, change) in &token_changes {
+        if mint == sol_mint {
+            sol_change = *change;
+        } else {
+            token_change = Some((mint.clone(), *change));
+        }
+    }
+    
+    // Determine direction: SOL going out = BUY (buying token), SOL coming in = SELL (selling token)
+    let direction = if sol_change < 0.0 {
+        SwapDirection::Buy // SOL decreased, buying token
+    } else {
+        SwapDirection::Sell // SOL increased, selling token
+    };
+    
+    // Extract amounts
+    let (token_in, token_out, amount_in, amount_out) = if let Some((token_mint, token_amt)) = token_change {
+        if direction == SwapDirection::Buy {
+            // Buying: SOL -> Token
+            (
+                sol_mint.to_string(),
+                token_mint,
+                sol_change.abs(),
+                token_amt.abs(),
+            )
+        } else {
+            // Selling: Token -> SOL
+            (
+                token_mint,
+                sol_mint.to_string(),
+                token_amt.abs(),
+                sol_change.abs(),
+            )
+        }
+    } else {
+        // Fallback if we can't determine token
+        (
+            sol_mint.to_string(),
+            "".to_string(),
+            sol_change.abs(),
+            0.0,
+        )
+    };
+    
+    Ok((token_in, token_out, amount_in, amount_out, direction))
 }
 
 /// Parse Helius webhook payload to extract swap information

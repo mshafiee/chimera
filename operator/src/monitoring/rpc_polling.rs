@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
+use crate::db::DbPool;
 use anyhow::{Context, Result};
 use solana_client::rpc_client::RpcClient;
 
@@ -84,11 +85,13 @@ impl RpcPollingState {
 /// * `wallet_address` - Wallet to poll
 /// * `last_signature` - Last known signature (to get new transactions)
 /// * `rate_limiter` - Rate limiter
+/// * `db` - Database pool (optional, for updating last signature)
 pub async fn poll_wallet_transactions(
     rpc_client: &RpcClient,
     wallet_address: &str,
     last_signature: Option<&str>,
     rate_limiter: Arc<RateLimiter>,
+    db: Option<&DbPool>,
 ) -> Result<Vec<WalletTransaction>> {
     // Rate limit before polling
     rate_limiter.acquire(RequestPriority::Polling).await;
@@ -124,6 +127,8 @@ pub async fn poll_wallet_transactions(
 
     // Parse transactions (limited to save credits)
     let mut transactions = Vec::new();
+    let mut latest_signature: Option<String> = None;
+    
     for sig_str in new_signatures.iter().take(5) {
         // Limit to 5 transactions per poll
         rate_limiter.acquire(RequestPriority::Polling).await;
@@ -144,7 +149,29 @@ pub async fn poll_wallet_transactions(
                     amount_sol: None,
                     timestamp: tx.block_time.unwrap_or(0),
                 });
+                
+                // Track latest signature for database update
+                if latest_signature.is_none() {
+                    latest_signature = Some(sig_str.clone());
+                }
             }
+        }
+    }
+
+    // Update last signature in database if we have new transactions and database access
+    if let (Some(latest_sig), Some(db_pool)) = (latest_signature, db) {
+        if let Err(e) = crate::db::update_wallet_monitoring_signature(
+            db_pool,
+            wallet_address,
+            &latest_sig,
+        )
+        .await
+        {
+            tracing::warn!(
+                wallet = wallet_address,
+                error = %e,
+                "Failed to update last transaction signature in database"
+            );
         }
     }
 
@@ -159,6 +186,7 @@ pub async fn poll_wallets_batch(
     batch_size: usize,
     rate_limiter: Arc<RateLimiter>,
     polling_state: Arc<RpcPollingState>,
+    db: Option<&DbPool>,
 ) -> Result<Vec<WalletTransaction>> {
     let mut all_transactions = Vec::new();
 
@@ -171,12 +199,25 @@ pub async fn poll_wallets_batch(
                 continue;
             }
 
+            // Get last signature from database if available
+            // Store in a variable to extend lifetime
+            let last_sig_opt = if let Some(db_pool) = db {
+                match crate::db::get_wallet_monitoring(db_pool, wallet).await {
+                    Ok(Some(monitoring)) => monitoring.last_transaction_signature.clone(),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let last_signature = last_sig_opt.as_deref();
+
             // Poll wallet
             if let Ok(txs) = poll_wallet_transactions(
                 rpc_client,
                 wallet,
-                None, // TODO: Get last signature from DB
+                last_signature,
                 rate_limiter.clone(),
+                db,
             )
             .await
             {

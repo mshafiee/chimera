@@ -984,6 +984,166 @@ pub async fn demote_wallet(pool: &DbPool, address: &str, reason: &str) -> AppRes
     Ok(())
 }
 
+/// Get wallet copy performance metrics
+pub async fn get_wallet_copy_performance(
+    pool: &DbPool,
+    wallet_address: &str,
+) -> AppResult<Option<WalletCopyPerformance>> {
+    let result = sqlx::query_as::<_, WalletCopyPerformance>(
+        r#"
+        SELECT 
+            wallet_address,
+            copy_pnl_7d,
+            copy_pnl_30d,
+            signal_success_rate,
+            avg_return_per_trade,
+            total_trades,
+            winning_trades,
+            last_updated
+        FROM wallet_copy_performance
+        WHERE wallet_address = ?
+        "#
+    )
+    .bind(wallet_address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Wallet copy performance metrics from database
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct WalletCopyPerformance {
+    pub wallet_address: String,
+    pub copy_pnl_7d: f64,
+    pub copy_pnl_30d: f64,
+    pub signal_success_rate: f64,
+    pub avg_return_per_trade: f64,
+    pub total_trades: i32,
+    pub winning_trades: i32,
+    pub last_updated: String,
+}
+
+/// Get wallet monitoring information
+pub async fn get_wallet_monitoring(
+    pool: &DbPool,
+    wallet_address: &str,
+) -> AppResult<Option<WalletMonitoring>> {
+    let result = sqlx::query_as::<_, WalletMonitoring>(
+        r#"
+        SELECT 
+            wallet_address,
+            helius_webhook_id,
+            rpc_polling_active,
+            last_transaction_signature,
+            last_monitored_at,
+            monitoring_enabled,
+            created_at,
+            updated_at
+        FROM wallet_monitoring
+        WHERE wallet_address = ?
+        "#
+    )
+    .bind(wallet_address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Wallet monitoring information from database
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct WalletMonitoring {
+    pub wallet_address: String,
+    pub helius_webhook_id: Option<String>,
+    pub rpc_polling_active: i32,
+    pub last_transaction_signature: Option<String>,
+    pub last_monitored_at: Option<String>,
+    pub monitoring_enabled: i32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Update wallet monitoring last transaction signature
+pub async fn update_wallet_monitoring_signature(
+    pool: &DbPool,
+    wallet_address: &str,
+    signature: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE wallet_monitoring
+        SET last_transaction_signature = ?,
+            last_monitored_at = CURRENT_TIMESTAMP
+        WHERE wallet_address = ?
+        "#
+    )
+    .bind(signature)
+    .bind(wallet_address)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Insert or update wallet monitoring record
+pub async fn upsert_wallet_monitoring(
+    pool: &DbPool,
+    wallet_address: &str,
+    helius_webhook_id: Option<&str>,
+    monitoring_enabled: bool,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO wallet_monitoring (
+            wallet_address, helius_webhook_id, monitoring_enabled, last_monitored_at
+        )
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(wallet_address) DO UPDATE SET
+            helius_webhook_id = COALESCE(?, helius_webhook_id),
+            monitoring_enabled = ?,
+            last_monitored_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        "#
+    )
+    .bind(wallet_address)
+    .bind(helius_webhook_id)
+    .bind(if monitoring_enabled { 1 } else { 0 })
+    .bind(helius_webhook_id)
+    .bind(if monitoring_enabled { 1 } else { 0 })
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get wallet monitoring by address
+pub async fn get_wallet_monitoring_by_address(
+    pool: &DbPool,
+    wallet_address: &str,
+) -> AppResult<Option<WalletMonitoring>> {
+    let result = sqlx::query_as::<_, WalletMonitoring>(
+        r#"
+        SELECT 
+            wallet_address,
+            helius_webhook_id,
+            rpc_polling_active,
+            last_transaction_signature,
+            last_monitored_at,
+            monitoring_enabled,
+            created_at,
+            updated_at
+        FROM wallet_monitoring
+        WHERE wallet_address = ?
+        "#
+    )
+    .bind(wallet_address)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result)
+}
+
 // =============================================================================
 // TRADES API / EXPORT
 // =============================================================================

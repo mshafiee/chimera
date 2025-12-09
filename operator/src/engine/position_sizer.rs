@@ -100,11 +100,20 @@ impl PositionSizer {
     }
 
     /// Get sizing factors for a wallet
+    ///
+    /// # Arguments
+    /// * `wallet_address` - Wallet address to get factors for
+    /// * `is_consensus` - Whether this is a consensus signal
+    /// * `estimated_slippage` - Estimated slippage percentage
+    /// * `token_address` - Optional token address for age calculation
+    /// * `helius_client` - Optional Helius client for token age fetching
     pub async fn get_sizing_factors(
         &self,
         wallet_address: &str,
         is_consensus: bool,
         estimated_slippage: f64,
+        token_address: Option<&str>,
+        helius_client: Option<&crate::monitoring::HeliusClient>,
     ) -> SizingFactors {
         // Get wallet from database
         let wallet_opt = crate::db::get_wallet_by_address(&self.db, wallet_address).await;
@@ -113,15 +122,34 @@ impl PositionSizer {
             _ => 50.0,
         };
 
-        // Get wallet performance metrics (would need to implement)
-        // For now, use default success rate
-        let success_rate = 0.5; // TODO: Get from wallet_performance tracker
+        // Get wallet performance metrics from database
+        let success_rate = match crate::db::get_wallet_copy_performance(&self.db, wallet_address).await {
+            Ok(Some(metrics)) => metrics.signal_success_rate / 100.0,
+            _ => 0.5, // Default fallback if no performance data exists
+        };
+
+        // Get token age if token address and Helius client are provided
+        let token_age_hours = if let (Some(token_addr), Some(helius)) = (token_address, helius_client) {
+            match helius.get_token_age_hours(token_addr).await {
+                Ok(age) => age,
+                Err(e) => {
+                    tracing::warn!(
+                        token = token_addr,
+                        error = %e,
+                        "Failed to fetch token age, using None"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         SizingFactors {
             is_consensus,
             wallet_wqs: wqs,
             wallet_success_rate: success_rate,
-            token_age_hours: None, // TODO: Fetch token age
+            token_age_hours,
             estimated_slippage,
         }
     }

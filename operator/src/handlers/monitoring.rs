@@ -6,11 +6,10 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
-    Router,
 };
 use serde::Serialize;
 use std::sync::Arc;
+use sqlx;
 use crate::monitoring::HeliusWebhookPayload;
 use crate::monitoring::MonitoringState;
 use crate::monitoring::transaction_parser::parse_helius_webhook;
@@ -114,7 +113,21 @@ pub async fn get_monitoring_status(
         rpc_rate,
         webhook_credits,
         rpc_credits,
-        active_wallets: 0, // TODO: Query from database
+        active_wallets: {
+            // Query active wallets count from database
+            match sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM wallet_monitoring WHERE monitoring_enabled = 1"
+            )
+            .fetch_one(&state.db)
+            .await
+            {
+                Ok(count) => count as usize,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to query active wallets count, returning 0");
+                    0
+                }
+            }
+        },
     })
 }
 
@@ -130,20 +143,155 @@ struct MonitoringStatus {
 
 /// Enable monitoring for a wallet
 pub async fn enable_wallet_monitoring(
-    State(_state): State<Arc<MonitoringState>>,
+    State(state): State<Arc<MonitoringState>>,
     Path(wallet_address): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    // TODO: Implement wallet monitoring enable
     tracing::info!(wallet = %wallet_address, "Enable monitoring requested");
+
+    // Check if wallet exists and is ACTIVE
+    let wallet = match crate::db::get_wallet_by_address(&state.db, &wallet_address).await {
+        Ok(Some(w)) => w,
+        Ok(None) => {
+            tracing::warn!(wallet = %wallet_address, "Wallet not found");
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Err(e) => {
+            tracing::error!(wallet = %wallet_address, error = %e, "Failed to query wallet");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    if wallet.status != "ACTIVE" {
+        tracing::warn!(
+            wallet = %wallet_address,
+            status = %wallet.status,
+            "Wallet is not ACTIVE, cannot enable monitoring"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Get webhook URL from config
+    let webhook_url = match &state.config.monitoring {
+        Some(m) => m.helius_webhook_url.as_ref(),
+        None => {
+            tracing::error!("Monitoring config not available");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    let webhook_url = match webhook_url {
+        Some(url) => url,
+        None => {
+            tracing::error!("Helius webhook URL not configured");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Register Helius webhook for this wallet
+    let wallets = vec![wallet_address.clone()];
+    let webhook_id = match state.helius_client
+        .register_webhook(&wallets, webhook_url)
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!(
+                wallet = %wallet_address,
+                error = %e,
+                "Failed to register Helius webhook"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Update database
+    if let Err(e) = crate::db::upsert_wallet_monitoring(
+        &state.db,
+        &wallet_address,
+        Some(&webhook_id),
+        true,
+    )
+    .await
+    {
+        tracing::error!(
+            wallet = %wallet_address,
+            error = %e,
+            "Failed to update wallet_monitoring in database"
+        );
+        // Try to clean up webhook registration
+        let _ = state.helius_client.delete_webhook(&webhook_id).await;
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    tracing::info!(
+        wallet = %wallet_address,
+        webhook_id = %webhook_id,
+        "Wallet monitoring enabled successfully"
+    );
+
     Ok(StatusCode::OK)
 }
 
 /// Disable monitoring for a wallet
 pub async fn disable_wallet_monitoring(
-    State(_state): State<Arc<MonitoringState>>,
+    State(state): State<Arc<MonitoringState>>,
     Path(wallet_address): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    // TODO: Implement wallet monitoring disable
     tracing::info!(wallet = %wallet_address, "Disable monitoring requested");
+
+    // Get current monitoring record
+    let monitoring = match crate::db::get_wallet_monitoring_by_address(&state.db, &wallet_address).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            tracing::warn!(wallet = %wallet_address, "Wallet monitoring not found");
+            return Err(StatusCode::NOT_FOUND);
+        }
+        Err(e) => {
+            tracing::error!(wallet = %wallet_address, error = %e, "Failed to query wallet monitoring");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Delete Helius webhook if it exists
+    if let Some(webhook_id) = &monitoring.helius_webhook_id {
+        if let Err(e) = state.helius_client.delete_webhook(webhook_id).await {
+            tracing::warn!(
+                wallet = %wallet_address,
+                webhook_id = %webhook_id,
+                error = %e,
+                "Failed to delete Helius webhook (continuing with database update)"
+            );
+            // Continue with database update even if webhook deletion fails
+        } else {
+            tracing::info!(
+                wallet = %wallet_address,
+                webhook_id = %webhook_id,
+                "Helius webhook deleted successfully"
+            );
+        }
+    }
+
+    // Update database to disable monitoring
+    if let Err(e) = crate::db::upsert_wallet_monitoring(
+        &state.db,
+        &wallet_address,
+        None, // Clear webhook_id
+        false, // Disable monitoring
+    )
+    .await
+    {
+        tracing::error!(
+            wallet = %wallet_address,
+            error = %e,
+            "Failed to update wallet_monitoring in database"
+        );
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    tracing::info!(
+        wallet = %wallet_address,
+        "Wallet monitoring disabled successfully"
+    );
+
     Ok(StatusCode::OK)
 }

@@ -781,11 +781,21 @@ impl Executor {
         // Update the message's recent_blockhash
         // For VersionedMessage, we need to handle V0 and Legacy differently
         let updated_message = match &versioned_tx.message {
-            VersionedMessage::V0(v0_msg) => {
-                // V0 messages have a different structure
-                // For now, we'll use the message as-is and rely on Jupiter's blockhash
-                // TODO: Implement proper V0 message blockhash update
-                // This requires reconstructing the V0 message which is complex
+            VersionedMessage::V0(_v0_msg) => {
+                // V0 messages use Address Lookup Tables (ALTs) and have a complex structure.
+                // Properly updating the blockhash in a V0 message requires reconstructing
+                // the entire message with new header, which is non-trivial.
+                // 
+                // Strategy: Jupiter should provide recent blockhashes in their responses.
+                // We use the V0 message as-is, trusting Jupiter's blockhash is recent.
+                // If the blockhash is stale and the transaction fails, the error handling
+                // will catch it and we can retry or fall back.
+                //
+                // Future improvement: Implement proper V0 message reconstruction with
+                // updated blockhash, or use Solana SDK's built-in methods if available.
+                tracing::debug!(
+                    "V0 transaction detected: Using message as-is with Jupiter's blockhash. If transaction fails due to stale blockhash, consider implementing V0-to-Legacy conversion."
+                );
                 versioned_tx.message.clone()
             }
             VersionedMessage::Legacy(legacy_msg) => {
