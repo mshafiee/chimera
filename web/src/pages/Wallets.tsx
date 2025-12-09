@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Search, ChevronDown, ChevronUp, Download, CheckSquare, Square } from 'lucide-react'
+import { Search, ChevronDown, ChevronUp, Download, CheckSquare, Square, ExternalLink } from 'lucide-react'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Badge, StatusBadge } from '../components/ui/Badge'
@@ -11,6 +11,24 @@ import { toast } from '../components/ui/Toast'
 import type { Wallet } from '../types'
 
 type WalletStatus = 'ALL' | 'ACTIVE' | 'CANDIDATE' | 'REJECTED'
+
+// Helper to get Solana Explorer URL for wallet address
+const getWalletExplorerUrl = (address: string) => {
+  // Detect network from RPC URL
+  const rpcUrl = import.meta.env.VITE_SOLANA_RPC || ''
+  const isDevnet = rpcUrl.includes('devnet') || rpcUrl.includes('testnet')
+  const cluster = isDevnet ? 'devnet' : 'mainnet-beta'
+  return `https://explorer.solana.com/address/${address}?cluster=${cluster}`
+}
+
+// Helper to get Solscan URL for wallet address
+const getWalletSolscanUrl = (address: string) => {
+  // Detect network from RPC URL
+  const rpcUrl = import.meta.env.VITE_SOLANA_RPC || ''
+  const isDevnet = rpcUrl.includes('devnet') || rpcUrl.includes('testnet')
+  const network = isDevnet ? '?cluster=devnet' : ''
+  return `https://solscan.io/account/${address}${network}`
+}
 
 export function Wallets() {
   const [statusFilter, setStatusFilter] = useState<WalletStatus>('ALL')
@@ -205,7 +223,7 @@ export function Wallets() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 overflow-x-hidden">
       {/* Header with filters - Mobile Optimized */}
       <div className="space-y-3 md:space-y-4">
         <div className="flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3 md:gap-4">
@@ -378,40 +396,41 @@ export function Wallets() {
         </div>
 
       {/* Wallets Table */}
-      <Card padding="none">
+      <Card padding="none" className="overflow-x-hidden">
         {isLoading ? (
           <div className="p-8 text-center text-text-muted">Loading wallets...</div>
         ) : filteredWallets.length === 0 ? (
           <div className="p-8 text-center text-text-muted">No wallets found</div>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow hoverable={false}>
-                {canModify && (
-                  <TableHead>
-                    <button
-                      onClick={toggleAllWallets}
-                      className="p-1 hover:bg-surface-light rounded"
-                    >
-                      {selectedWallets.size === filteredWallets.length ? (
-                        <CheckSquare className="w-4 h-4" />
-                      ) : (
-                        <Square className="w-4 h-4" />
-                      )}
-                    </button>
-                  </TableHead>
-                )}
-                <TableHead>Address</TableHead>
-                <TableHead sortable>WQS</TableHead>
-                <TableHead sortable>ROI 30d</TableHead>
-                <TableHead sortable>Trades</TableHead>
-                <TableHead sortable>Win Rate</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead>TTL</TableHead>
-                {canModify && <TableHead>Actions</TableHead>}
-                <TableHead></TableHead>
-              </TableRow>
-            </TableHeader>
+          <div className="w-full overflow-x-auto">
+            <Table className="w-full">
+              <TableHeader>
+                <TableRow hoverable={false}>
+                  {canModify && (
+                    <TableHead>
+                      <button
+                        onClick={toggleAllWallets}
+                        className="p-1 hover:bg-surface-light rounded"
+                      >
+                        {selectedWallets.size === filteredWallets.length ? (
+                          <CheckSquare className="w-4 h-4" />
+                        ) : (
+                          <Square className="w-4 h-4" />
+                        )}
+                      </button>
+                    </TableHead>
+                  )}
+                  <TableHead>Address</TableHead>
+                  <TableHead sortable>WQS</TableHead>
+                  <TableHead sortable className="hidden md:table-cell">ROI 30d</TableHead>
+                  <TableHead sortable className="hidden sm:table-cell">Trades</TableHead>
+                  <TableHead sortable className="hidden lg:table-cell">Win Rate</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="hidden xl:table-cell">TTL</TableHead>
+                  {canModify && <TableHead className="hidden lg:table-cell">Actions</TableHead>}
+                  <TableHead className="w-8"></TableHead>
+                </TableRow>
+              </TableHeader>
             <TableBody>
               {filteredWallets.map((wallet) => (
                 <>
@@ -441,45 +460,65 @@ export function Wallets() {
                       </TableCell>
                     )}
                     <TableCell>
-                      <div className="font-mono text-sm">
-                        {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
-                      </div>
-                    </TableCell>
-                    <TableCell mono>
                       <div className="flex items-center gap-2">
-                        {/* WQS Score with Progress Bar */}
-                        <div className="flex-1 min-w-[60px]">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span
-                              className={`text-sm font-semibold ${
-                                (wallet.wqs_score || 0) >= 70
-                                  ? 'text-profit'
-                                  : (wallet.wqs_score || 0) >= 40
-                                  ? 'text-spear'
-                                  : 'text-loss'
-                              }`}
-                            >
-                              {wallet.wqs_score?.toFixed(1) || '-'}
-                            </span>
-                          </div>
-                          {wallet.wqs_score !== null && (
-                            <div className="h-1.5 bg-background rounded-full overflow-hidden">
-                              <div
-                                className={`h-full ${
-                                  wallet.wqs_score >= 70
-                                    ? 'bg-profit'
-                                    : wallet.wqs_score >= 40
-                                    ? 'bg-spear'
-                                    : 'bg-loss'
-                                }`}
-                                style={{ width: `${Math.min(wallet.wqs_score, 100)}%` }}
-                              />
-                            </div>
-                          )}
+                        <span className="font-mono text-xs sm:text-sm">
+                          <span className="sm:hidden">{wallet.address.slice(0, 4)}...{wallet.address.slice(-4)}</span>
+                          <span className="hidden sm:inline">{wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}</span>
+                        </span>
+                        <div className="flex items-center gap-1 ml-1">
+                          <a
+                            href={getWalletSolscanUrl(wallet.address)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center justify-center w-4 h-4 sm:w-5 sm:h-5 text-shield hover:text-shield-dark transition-colors hover:scale-110"
+                            title="View wallet on Solscan"
+                          >
+                            <ExternalLink className="w-3 h-3 sm:w-4 sm:h-4" />
+                          </a>
+                          <a
+                            href={getWalletExplorerUrl(wallet.address)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            onClick={(e) => e.stopPropagation()}
+                            className="inline-flex items-center justify-center w-4 h-4 sm:w-5 sm:h-5 text-text-muted hover:text-text transition-colors hover:scale-110"
+                            title="View wallet on Solana Explorer"
+                          >
+                            <ExternalLink className="w-3 h-3 sm:w-4 sm:h-4" />
+                          </a>
                         </div>
                       </div>
                     </TableCell>
                     <TableCell mono>
+                      <div className="flex flex-col">
+                        <span
+                          className={`text-xs sm:text-sm font-semibold ${
+                            (wallet.wqs_score || 0) >= 70
+                              ? 'text-profit'
+                              : (wallet.wqs_score || 0) >= 40
+                              ? 'text-spear'
+                              : 'text-loss'
+                          }`}
+                        >
+                          {wallet.wqs_score?.toFixed(1) || '-'}
+                        </span>
+                        {wallet.wqs_score !== null && (
+                          <div className="h-1.5 bg-background rounded-full overflow-hidden mt-1 w-full sm:max-w-[60px]">
+                            <div
+                              className={`h-full ${
+                                wallet.wqs_score >= 70
+                                  ? 'bg-profit'
+                                  : wallet.wqs_score >= 40
+                                  ? 'bg-spear'
+                                  : 'bg-loss'
+                              }`}
+                              style={{ width: `${Math.min(wallet.wqs_score, 100)}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </TableCell>
+                    <TableCell mono className="hidden md:table-cell">
                       {wallet.roi_30d !== null ? (
                         <span
                           className={wallet.roi_30d >= 0 ? 'text-profit' : 'text-loss'}
@@ -491,8 +530,8 @@ export function Wallets() {
                         '-'
                       )}
                     </TableCell>
-                    <TableCell mono>{wallet.trade_count_30d || '-'}</TableCell>
-                    <TableCell mono>
+                    <TableCell mono className="hidden sm:table-cell">{wallet.trade_count_30d || '-'}</TableCell>
+                    <TableCell mono className="hidden lg:table-cell">
                       {wallet.win_rate !== null
                         ? `${(wallet.win_rate * 100).toFixed(0)}%`
                         : '-'}
@@ -500,7 +539,7 @@ export function Wallets() {
                     <TableCell>
                       <StatusBadge status={wallet.status} />
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden xl:table-cell">
                       {wallet.ttl_expires_at ? (
                         <Badge variant="warning" size="sm">
                           {formatTTL(wallet.ttl_expires_at)}
@@ -510,7 +549,7 @@ export function Wallets() {
                       )}
                     </TableCell>
                     {canModify && (
-                      <TableCell>
+                      <TableCell className="hidden lg:table-cell">
                         <div className="flex gap-2">
                           {wallet.status === 'CANDIDATE' && (
                             <Button
@@ -551,8 +590,10 @@ export function Wallets() {
                   {/* Expanded Row */}
                   {expandedWallet === wallet.address && (
                     <tr className="bg-surface-light">
-                      <td colSpan={canModify ? 10 : 9} className="px-4 py-4">
-                        <WalletDetails wallet={wallet} />
+                      <td colSpan={canModify ? 10 : 9} className="px-2 sm:px-4 py-4 w-full">
+                        <div className="w-full max-w-full overflow-x-hidden">
+                          <WalletDetails wallet={wallet} />
+                        </div>
                       </td>
                     </tr>
                   )}
@@ -560,6 +601,7 @@ export function Wallets() {
               ))}
             </TableBody>
           </Table>
+          </div>
         )}
       </Card>
 
@@ -642,23 +684,56 @@ export function Wallets() {
 function WalletDetails({ wallet }: { wallet: Wallet }) {
   // Fetch trade history for this wallet
   const { data: tradesData, isLoading: tradesLoading } = useTrades({
+    wallet_address: wallet.address,
     limit: 20, // Show last 20 trades
   })
 
-  const walletTrades = tradesData?.trades.filter(t => t.wallet_address === wallet.address) || []
+  const walletTrades = tradesData?.trades || []
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4 sm:space-y-6 w-full max-w-full overflow-x-hidden">
+      {/* Wallet Address with Explorer Links */}
+      <div className="pb-3 sm:pb-4 border-b border-border">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+          <div className="flex-1 min-w-0">
+            <h3 className="text-xs sm:text-sm font-semibold text-text-muted uppercase mb-1">Wallet Address</h3>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-mono text-xs sm:text-sm break-all">{wallet.address}</span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <a
+                  href={getWalletSolscanUrl(wallet.address)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center w-5 h-5 text-shield hover:text-shield-dark transition-colors hover:scale-110"
+                  title="View wallet on Solscan"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+                <a
+                  href={getWalletExplorerUrl(wallet.address)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center w-5 h-5 text-text-muted hover:text-text transition-colors hover:scale-110"
+                  title="View wallet on Solana Explorer"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       {/* Performance Metrics Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-        <div>
-          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+        <div className="bg-surface-light rounded-lg p-3 sm:p-4">
+          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2 sm:mb-3">
             Performance
           </h4>
-          <div className="space-y-1 text-sm">
-            <div className="flex justify-between">
+          <div className="space-y-1.5 sm:space-y-2 text-xs sm:text-sm">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">ROI 7d:</span>
-              <span className={`font-mono-numbers ${
+              <span className={`font-mono-numbers text-xs sm:text-sm ${
                 wallet.roi_7d !== null && wallet.roi_7d >= 0 ? 'text-profit' : 'text-loss'
               }`}>
                 {wallet.roi_7d !== null
@@ -666,9 +741,9 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
                   : '-'}
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">ROI 30d:</span>
-              <span className={`font-mono-numbers ${
+              <span className={`font-mono-numbers text-xs sm:text-sm ${
                 wallet.roi_30d !== null && wallet.roi_30d >= 0 ? 'text-profit' : 'text-loss'
               }`}>
                 {wallet.roi_30d !== null
@@ -676,17 +751,17 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
                   : '-'}
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Max Drawdown:</span>
-              <span className="font-mono-numbers text-loss">
+              <span className="font-mono-numbers text-xs sm:text-sm text-loss">
                 {wallet.max_drawdown_30d !== null
                   ? `-${wallet.max_drawdown_30d.toFixed(1)}%`
                   : '-'}
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Avg Trade:</span>
-              <span className="font-mono-numbers">
+              <span className="font-mono-numbers text-xs sm:text-sm">
                 {wallet.avg_trade_size_sol !== null
                   ? `${wallet.avg_trade_size_sol.toFixed(3)} SOL`
                   : '-'}
@@ -695,70 +770,70 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
           </div>
         </div>
 
-        <div>
-          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2">
+        <div className="bg-surface-light rounded-lg p-3 sm:p-4">
+          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2 sm:mb-3">
             Activity
           </h4>
-          <div className="space-y-1 text-sm">
-            <div className="flex justify-between">
+          <div className="space-y-1.5 sm:space-y-2 text-xs sm:text-sm">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Trade Count:</span>
-              <span className="font-mono-numbers">
+              <span className="font-mono-numbers text-xs sm:text-sm">
                 {wallet.trade_count_30d || 0}
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Win Rate:</span>
-              <span className="font-mono-numbers">
+              <span className="font-mono-numbers text-xs sm:text-sm">
                 {wallet.win_rate !== null
                   ? `${(wallet.win_rate * 100).toFixed(1)}%`
                   : '-'}
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Last Trade:</span>
-              <span>{wallet.last_trade_at ? formatDate(wallet.last_trade_at) : '-'}</span>
+              <span className="text-xs sm:text-sm">{wallet.last_trade_at ? formatDate(wallet.last_trade_at) : '-'}</span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Created:</span>
-              <span>{formatDate(wallet.created_at)}</span>
+              <span className="text-xs sm:text-sm">{formatDate(wallet.created_at)}</span>
             </div>
           </div>
         </div>
 
-        <div>
-          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2">
+        <div className="bg-surface-light rounded-lg p-3 sm:p-4">
+          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2 sm:mb-3">
             Promotion
           </h4>
-          <div className="space-y-1 text-sm">
-            <div className="flex justify-between">
+          <div className="space-y-1.5 sm:space-y-2 text-xs sm:text-sm">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Status:</span>
               <StatusBadge status={wallet.status} />
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Promoted:</span>
-              <span>{wallet.promoted_at ? formatDate(wallet.promoted_at) : '-'}</span>
+              <span className="text-xs sm:text-sm">{wallet.promoted_at ? formatDate(wallet.promoted_at) : '-'}</span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">TTL Expires:</span>
-              <span>
+              <span className="text-xs sm:text-sm">
                 {wallet.ttl_expires_at ? formatDate(wallet.ttl_expires_at) : 'Never'}
               </span>
             </div>
-            <div className="flex justify-between">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Updated:</span>
-              <span>{formatDate(wallet.updated_at)}</span>
+              <span className="text-xs sm:text-sm">{formatDate(wallet.updated_at)}</span>
             </div>
           </div>
         </div>
 
-        <div>
-          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2">
+        <div className="bg-surface-light rounded-lg p-3 sm:p-4">
+          <h4 className="text-xs font-semibold text-text-muted uppercase mb-2 sm:mb-3">
             WQS Breakdown
           </h4>
-          <div className="space-y-1 text-sm">
-            <div className="flex justify-between">
+          <div className="space-y-2 text-xs sm:text-sm">
+            <div className="flex justify-between items-center">
               <span className="text-text-muted">Score:</span>
-              <span className={`font-mono-numbers font-semibold ${
+              <span className={`font-mono-numbers font-semibold text-xs sm:text-sm ${
                 (wallet.wqs_score || 0) >= 70
                   ? 'text-profit'
                   : (wallet.wqs_score || 0) >= 40
@@ -770,7 +845,7 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
             </div>
             {wallet.wqs_score !== null && (
               <div className="mt-2">
-                <div className="h-2 bg-background rounded-full overflow-hidden">
+                <div className="h-1.5 bg-background rounded-full overflow-hidden w-full sm:max-w-[120px]">
                   <div
                     className={`h-full ${
                       wallet.wqs_score >= 70
@@ -784,7 +859,7 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
                 </div>
               </div>
             )}
-            <div className="mt-2 text-xs text-text-muted">
+            <div className="mt-2 text-xs text-text-muted break-words">
               {wallet.notes || 'No notes'}
             </div>
           </div>
@@ -793,81 +868,83 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
 
       {/* Trade History */}
       <div>
-        <h4 className="text-xs font-semibold text-text-muted uppercase mb-3">
+        <h4 className="text-xs font-semibold text-text-muted uppercase mb-2 sm:mb-3">
           Recent Trade History
         </h4>
         {tradesLoading ? (
-          <div className="text-sm text-text-muted">Loading trades...</div>
+          <div className="text-xs sm:text-sm text-text-muted">Loading trades...</div>
         ) : walletTrades.length === 0 ? (
-          <div className="text-sm text-text-muted">No trades found for this wallet</div>
+          <div className="text-xs sm:text-sm text-text-muted">No trades found for this wallet</div>
         ) : (
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow hoverable={false}>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Token</TableHead>
-                  <TableHead>Strategy</TableHead>
-                  <TableHead>Side</TableHead>
-                  <TableHead>Amount</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>PnL</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {walletTrades.slice(0, 10).map((trade) => (
-                  <TableRow key={trade.trade_uuid}>
-                    <TableCell>
-                      <div className="text-xs">
-                        {formatDate(trade.created_at)}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="font-semibold text-sm">
-                        {trade.token_symbol || 'Unknown'}
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant={trade.strategy === 'SHIELD' ? 'shield' : 'spear'} size="sm">
-                        {trade.strategy}
-                      </Badge>
-                    </TableCell>
-                    <TableCell>
-                      <span className={`text-sm ${
-                        trade.side === 'BUY' ? 'text-profit' : 'text-loss'
-                      }`}>
-                        {trade.side}
-                      </span>
-                    </TableCell>
-                    <TableCell mono>
-                      {trade.amount_sol.toFixed(4)} SOL
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={trade.status} />
-                    </TableCell>
-                    <TableCell mono>
-                      {trade.pnl_usd !== null ? (
-                        <span className={trade.pnl_usd >= 0 ? 'text-profit' : 'text-loss'}>
-                          {trade.pnl_usd >= 0 ? '+' : ''}${trade.pnl_usd.toFixed(2)}
-                        </span>
-                      ) : (
-                        '-'
-                      )}
-                    </TableCell>
+          <div className="overflow-x-auto -mx-4 sm:mx-0 w-full">
+            <div className="inline-block min-w-full align-middle px-4 sm:px-0 w-full">
+              <Table className="w-full">
+                <TableHeader>
+                  <TableRow hoverable={false}>
+                    <TableHead className="text-xs">Date</TableHead>
+                    <TableHead className="text-xs">Token</TableHead>
+                    <TableHead className="text-xs hidden sm:table-cell">Strategy</TableHead>
+                    <TableHead className="text-xs">Side</TableHead>
+                    <TableHead className="text-xs">Amount</TableHead>
+                    <TableHead className="text-xs hidden md:table-cell">Status</TableHead>
+                    <TableHead className="text-xs">PnL</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {walletTrades.slice(0, 10).map((trade) => (
+                    <TableRow key={trade.trade_uuid}>
+                      <TableCell className="text-xs">
+                        <div className="whitespace-nowrap">
+                          {formatDate(trade.created_at)}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="font-semibold text-xs sm:text-sm">
+                          {trade.token_symbol || 'Unknown'}
+                        </div>
+                      </TableCell>
+                      <TableCell className="hidden sm:table-cell">
+                        <Badge variant={trade.strategy === 'SHIELD' ? 'shield' : 'spear'} size="sm">
+                          {trade.strategy}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <span className={`text-xs sm:text-sm ${
+                          trade.side === 'BUY' ? 'text-profit' : 'text-loss'
+                        }`}>
+                          {trade.side}
+                        </span>
+                      </TableCell>
+                      <TableCell mono className="text-xs">
+                        {trade.amount_sol.toFixed(4)} SOL
+                      </TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        <StatusBadge status={trade.status} />
+                      </TableCell>
+                      <TableCell mono className="text-xs">
+                        {trade.pnl_usd !== null ? (
+                          <span className={trade.pnl_usd >= 0 ? 'text-profit' : 'text-loss'}>
+                            {trade.pnl_usd >= 0 ? '+' : ''}${trade.pnl_usd.toFixed(2)}
+                          </span>
+                        ) : (
+                          '-'
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           </div>
         )}
       </div>
 
       {/* Backtest Results Placeholder */}
       <div>
-        <h4 className="text-xs font-semibold text-text-muted uppercase mb-3">
+        <h4 className="text-xs font-semibold text-text-muted uppercase mb-2 sm:mb-3">
           Backtest Results
         </h4>
-        <div className="bg-surface-light rounded-lg p-4 text-sm text-text-muted">
+        <div className="bg-surface-light rounded-lg p-3 sm:p-4 text-xs sm:text-sm text-text-muted">
           <p>Backtest results are generated during wallet promotion validation.</p>
           <p className="mt-2 text-xs">
             Results include: simulated PnL, win rate, max drawdown, and liquidity checks.
