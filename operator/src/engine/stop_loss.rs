@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::config::ProfitManagementConfig;
 use crate::db::{DbPool, get_wallet_by_address};
 use crate::price_cache::PriceCache;
+use sqlx;
 
 /// Stop-loss manager
 pub struct StopLossManager {
@@ -100,15 +101,58 @@ impl StopLossManager {
 
     /// Check portfolio-level stop (pause all trading if daily loss >5%)
     pub async fn check_portfolio_stop(&self) -> StopLossAction {
-        // Get daily PnL from database
-        // This would need to be implemented in db.rs
-        // For now, return None (would need to query trades table)
-        
-        // TODO: Implement daily PnL calculation
-        // let daily_pnl = get_daily_pnl(&self.db).await?;
-        // if daily_pnl < -5.0 {
-        //     return StopLossAction::PauseAll;
-        // }
+        // Get daily realized PnL
+        let daily_pnl: f64 = match sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
+            FROM positions
+            WHERE DATE(closed_at) = DATE('now')
+            "#
+        )
+        .fetch_one(&self.db)
+        .await
+        {
+            Ok(pnl) => pnl,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query daily PnL, skipping portfolio stop check");
+                return StopLossAction::None;
+            }
+        };
+
+        // Get total exposure from active positions
+        // Note: For accurate calculation, you'd need total capital including available balance
+        let total_exposure: f64 = match sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
+            FROM positions
+            WHERE state = 'ACTIVE'
+            "#
+        )
+        .fetch_one(&self.db)
+        .await
+        {
+            Ok(exposure) => exposure,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query total exposure, skipping portfolio stop check");
+                return StopLossAction::None;
+            }
+        };
+
+        // Calculate daily loss percentage
+        // Only check if we have meaningful exposure (>0.1 SOL)
+        if total_exposure > 0.1 {
+            let daily_loss_percent = (daily_pnl / total_exposure) * 100.0;
+            
+            if daily_loss_percent < -5.0 {
+                tracing::warn!(
+                    daily_loss_percent = daily_loss_percent,
+                    daily_pnl = daily_pnl,
+                    total_exposure = total_exposure,
+                    "Portfolio-level stop triggered: daily loss exceeds 5%"
+                );
+                return StopLossAction::PauseAll;
+            }
+        }
 
         StopLossAction::None
     }

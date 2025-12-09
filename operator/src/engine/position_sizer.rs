@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use crate::config::PositionSizingConfig;
 use crate::db::DbPool;
+use sqlx;
 
 /// Position sizer
 pub struct PositionSizer {
@@ -127,8 +128,21 @@ impl PositionSizer {
 
     /// Check if we can open a new position (portfolio limits)
     pub async fn can_open_position(&self) -> bool {
-        // TODO: Query database for current position count
-        // For now, assume we can open
-        true
+        // Query database for current active position count
+        let active_count: i64 = match sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'"
+        )
+        .fetch_one(&self.db)
+        .await
+        {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query active positions, allowing trade");
+                // On error, allow trade but log warning
+                return true;
+            }
+        };
+        
+        active_count < self.config.max_concurrent_positions as i64
     }
 }
