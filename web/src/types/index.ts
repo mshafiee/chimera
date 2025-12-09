@@ -99,6 +99,10 @@ export interface ConfigResponse {
     shield_percent: number
     spear_percent: number
   }
+  strategy: {
+    max_position_sol: number
+    min_position_sol: number
+  }
   jito_tip_strategy: {
     tip_floor: number
     tip_ceiling: number
@@ -111,6 +115,84 @@ export interface ConfigResponse {
     active: string
     fallback_triggered: boolean
   }
+  monitoring?: MonitoringConfig
+  profit_management: ProfitManagementConfig
+  position_sizing: PositionSizingConfig
+  mev_protection: MevProtectionConfig
+  token_safety: TokenSafetyConfig
+  notifications: NotificationsConfig
+  queue: QueueConfig
+}
+
+export interface MonitoringConfig {
+  enabled: boolean
+  webhook_registration_batch_size: number
+  webhook_registration_delay_ms: number
+  webhook_processing_rate_limit: number
+  rpc_polling_enabled: boolean
+  rpc_poll_interval_secs: number
+  rpc_poll_batch_size: number
+  rpc_poll_rate_limit: number
+  max_active_wallets: number
+}
+
+export interface ProfitManagementConfig {
+  targets: number[]
+  tiered_exit_percent: number
+  trailing_stop_activation: number
+  trailing_stop_distance: number
+  hard_stop_loss: number
+  time_exit_hours: number
+}
+
+export interface PositionSizingConfig {
+  base_size_sol: number
+  max_size_sol: number
+  min_size_sol: number
+  consensus_multiplier: number
+  max_concurrent_positions: number
+}
+
+export interface MevProtectionConfig {
+  always_use_jito: boolean
+  exit_tip_sol: number
+  consensus_tip_sol: number
+  standard_tip_sol: number
+}
+
+export interface TokenSafetyConfig {
+  min_liquidity_shield_usd: number
+  min_liquidity_spear_usd: number
+  honeypot_detection_enabled: boolean
+  cache_capacity: number
+  cache_ttl_seconds: number
+  freeze_authority_whitelist: string[]
+  mint_authority_whitelist: string[]
+}
+
+export interface NotificationsConfig {
+  telegram: {
+    enabled: boolean
+    rate_limit_seconds: number
+  }
+  rules: {
+    circuit_breaker_triggered: boolean
+    wallet_drained: boolean
+    position_exited: boolean
+    wallet_promoted: boolean
+    daily_summary: boolean
+    rpc_fallback: boolean
+  }
+  daily_summary: {
+    enabled: boolean
+    hour_utc: number
+    minute: number
+  }
+}
+
+export interface QueueConfig {
+  capacity: number
+  load_shed_threshold_percent: number
 }
 
 export interface Incident {

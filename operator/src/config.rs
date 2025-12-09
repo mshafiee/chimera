@@ -82,6 +82,7 @@ pub struct RpcConfig {
     #[serde(default = "default_primary_provider")]
     pub primary_provider: String,
     /// Primary RPC endpoint URL
+    #[serde(default = "default_primary_url")]
     pub primary_url: String,
     /// Fallback RPC endpoint URL (QuickNode/Triton)
     pub fallback_url: Option<String>,
@@ -98,6 +99,10 @@ pub struct RpcConfig {
 
 fn default_primary_provider() -> String {
     "helius".to_string()
+}
+
+fn default_primary_url() -> String {
+    "https://api.mainnet-beta.solana.com".to_string()
 }
 
 fn default_rate_limit() -> u32 {
@@ -788,6 +793,11 @@ impl AppConfig {
             .set_default("security.webhook_burst_size", 150)?
             .set_default("queue.capacity", 1000)?
             .set_default("queue.load_shed_threshold_percent", 80)?
+            .set_default("rpc.primary_provider", "helius")?
+            .set_default("rpc.primary_url", "https://api.mainnet-beta.solana.com")?
+            .set_default("rpc.rate_limit_per_second", 40)?
+            .set_default("rpc.timeout_ms", 2000)?
+            .set_default("rpc.max_consecutive_failures", 3)?
             // Load from config files (lower priority)
             .add_source(File::with_name("config").required(false))
             .add_source(File::with_name("config/config").required(false))

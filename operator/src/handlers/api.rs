@@ -258,9 +258,17 @@ pub async fn update_wallet(
 pub struct ConfigResponse {
     pub circuit_breakers: CircuitBreakerConfig,
     pub strategy_allocation: StrategyAllocation,
+    pub strategy: StrategyConfigResponse,
     pub jito_tip_strategy: JitoTipConfig,
     pub jito_enabled: bool,
     pub rpc_status: RpcStatus,
+    pub monitoring: Option<MonitoringConfigResponse>,
+    pub profit_management: ProfitManagementConfigResponse,
+    pub position_sizing: PositionSizingConfigResponse,
+    pub mev_protection: MevProtectionConfigResponse,
+    pub token_safety: TokenSafetyConfigResponse,
+    pub notifications: NotificationsConfigResponse,
+    pub queue: QueueConfigResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -292,12 +300,113 @@ pub struct RpcStatus {
     pub fallback_triggered: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct StrategyConfigResponse {
+    pub max_position_sol: f64,
+    pub min_position_sol: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MonitoringConfigResponse {
+    pub enabled: bool,
+    pub webhook_registration_batch_size: usize,
+    pub webhook_registration_delay_ms: u64,
+    pub webhook_processing_rate_limit: u32,
+    pub rpc_polling_enabled: bool,
+    pub rpc_poll_interval_secs: u64,
+    pub rpc_poll_batch_size: usize,
+    pub rpc_poll_rate_limit: u32,
+    pub max_active_wallets: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfitManagementConfigResponse {
+    pub targets: Vec<f64>,
+    pub tiered_exit_percent: f64,
+    pub trailing_stop_activation: f64,
+    pub trailing_stop_distance: f64,
+    pub hard_stop_loss: f64,
+    pub time_exit_hours: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PositionSizingConfigResponse {
+    pub base_size_sol: f64,
+    pub max_size_sol: f64,
+    pub min_size_sol: f64,
+    pub consensus_multiplier: f64,
+    pub max_concurrent_positions: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MevProtectionConfigResponse {
+    pub always_use_jito: bool,
+    pub exit_tip_sol: f64,
+    pub consensus_tip_sol: f64,
+    pub standard_tip_sol: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenSafetyConfigResponse {
+    pub min_liquidity_shield_usd: f64,
+    pub min_liquidity_spear_usd: f64,
+    pub honeypot_detection_enabled: bool,
+    pub cache_capacity: usize,
+    pub cache_ttl_seconds: i64,
+    pub freeze_authority_whitelist: Vec<String>,
+    pub mint_authority_whitelist: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotificationsConfigResponse {
+    pub telegram: TelegramConfigResponse,
+    pub rules: NotificationRulesConfigResponse,
+    pub daily_summary: DailySummaryConfigResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TelegramConfigResponse {
+    pub enabled: bool,
+    pub rate_limit_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotificationRulesConfigResponse {
+    pub circuit_breaker_triggered: bool,
+    pub wallet_drained: bool,
+    pub position_exited: bool,
+    pub wallet_promoted: bool,
+    pub daily_summary: bool,
+    pub rpc_fallback: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DailySummaryConfigResponse {
+    pub enabled: bool,
+    pub hour_utc: u8,
+    pub minute: u8,
+}
+
+#[derive(Debug, Serialize)]
+pub struct QueueConfigResponse {
+    pub capacity: usize,
+    pub load_shed_threshold_percent: u32,
+}
+
 /// Request body for config update
 #[derive(Debug, Deserialize)]
 pub struct UpdateConfigRequest {
     pub circuit_breakers: Option<UpdateCircuitBreakerConfig>,
     pub strategy_allocation: Option<UpdateStrategyAllocation>,
+    pub strategy: Option<UpdateStrategyConfig>,
     pub notification_rules: Option<UpdateNotificationRulesConfig>,
+    pub monitoring: Option<UpdateMonitoringConfig>,
+    pub profit_management: Option<UpdateProfitManagementConfig>,
+    pub position_sizing: Option<UpdatePositionSizingConfig>,
+    pub mev_protection: Option<UpdateMevProtectionConfig>,
+    pub token_safety: Option<UpdateTokenSafetyConfig>,
+    pub notifications: Option<UpdateNotificationsConfig>,
+    pub queue: Option<UpdateQueueConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -325,6 +434,87 @@ pub struct UpdateNotificationRulesConfig {
     pub rpc_fallback: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateStrategyConfig {
+    pub max_position_sol: Option<f64>,
+    pub min_position_sol: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMonitoringConfig {
+    pub enabled: Option<bool>,
+    pub webhook_registration_batch_size: Option<usize>,
+    pub webhook_registration_delay_ms: Option<u64>,
+    pub webhook_processing_rate_limit: Option<u32>,
+    pub rpc_polling_enabled: Option<bool>,
+    pub rpc_poll_interval_secs: Option<u64>,
+    pub rpc_poll_batch_size: Option<usize>,
+    pub rpc_poll_rate_limit: Option<u32>,
+    pub max_active_wallets: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProfitManagementConfig {
+    pub targets: Option<Vec<f64>>,
+    pub tiered_exit_percent: Option<f64>,
+    pub trailing_stop_activation: Option<f64>,
+    pub trailing_stop_distance: Option<f64>,
+    pub hard_stop_loss: Option<f64>,
+    pub time_exit_hours: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePositionSizingConfig {
+    pub base_size_sol: Option<f64>,
+    pub max_size_sol: Option<f64>,
+    pub min_size_sol: Option<f64>,
+    pub consensus_multiplier: Option<f64>,
+    pub max_concurrent_positions: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMevProtectionConfig {
+    pub always_use_jito: Option<bool>,
+    pub exit_tip_sol: Option<f64>,
+    pub consensus_tip_sol: Option<f64>,
+    pub standard_tip_sol: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTokenSafetyConfig {
+    pub min_liquidity_shield_usd: Option<f64>,
+    pub min_liquidity_spear_usd: Option<f64>,
+    pub honeypot_detection_enabled: Option<bool>,
+    pub cache_capacity: Option<usize>,
+    pub cache_ttl_seconds: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateNotificationsConfig {
+    pub telegram: Option<UpdateTelegramConfig>,
+    pub rules: Option<UpdateNotificationRulesConfig>,
+    pub daily_summary: Option<UpdateDailySummaryConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateTelegramConfig {
+    pub enabled: Option<bool>,
+    pub rate_limit_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateDailySummaryConfig {
+    pub enabled: Option<bool>,
+    pub hour_utc: Option<u8>,
+    pub minute: Option<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateQueueConfig {
+    pub capacity: Option<usize>,
+    pub load_shed_threshold_percent: Option<u32>,
+}
+
 /// Get current configuration
 ///
 /// GET /api/v1/config
@@ -344,6 +534,10 @@ pub async fn get_config(
         strategy_allocation: StrategyAllocation {
             shield_percent: config.strategy.shield_percent,
             spear_percent: config.strategy.spear_percent,
+        },
+        strategy: StrategyConfigResponse {
+            max_position_sol: config.strategy.max_position_sol,
+            min_position_sol: config.strategy.min_position_sol,
         },
         jito_tip_strategy: JitoTipConfig {
             tip_floor: config.jito.tip_floor_sol,
@@ -378,6 +572,70 @@ pub async fn get_config(
                     false
                 }
             },
+        },
+        monitoring: config.monitoring.as_ref().map(|m| MonitoringConfigResponse {
+            enabled: m.enabled,
+            webhook_registration_batch_size: m.webhook_registration_batch_size,
+            webhook_registration_delay_ms: m.webhook_registration_delay_ms,
+            webhook_processing_rate_limit: m.webhook_processing_rate_limit,
+            rpc_polling_enabled: m.rpc_polling_enabled,
+            rpc_poll_interval_secs: m.rpc_poll_interval_secs,
+            rpc_poll_batch_size: m.rpc_poll_batch_size,
+            rpc_poll_rate_limit: m.rpc_poll_rate_limit,
+            max_active_wallets: m.max_active_wallets,
+        }),
+        profit_management: ProfitManagementConfigResponse {
+            targets: config.profit_management.targets.clone(),
+            tiered_exit_percent: config.profit_management.tiered_exit_percent,
+            trailing_stop_activation: config.profit_management.trailing_stop_activation,
+            trailing_stop_distance: config.profit_management.trailing_stop_distance,
+            hard_stop_loss: config.profit_management.hard_stop_loss,
+            time_exit_hours: config.profit_management.time_exit_hours,
+        },
+        position_sizing: PositionSizingConfigResponse {
+            base_size_sol: config.position_sizing.base_size_sol,
+            max_size_sol: config.position_sizing.max_size_sol,
+            min_size_sol: config.position_sizing.min_size_sol,
+            consensus_multiplier: config.position_sizing.consensus_multiplier,
+            max_concurrent_positions: config.position_sizing.max_concurrent_positions,
+        },
+        mev_protection: MevProtectionConfigResponse {
+            always_use_jito: config.mev_protection.always_use_jito,
+            exit_tip_sol: config.mev_protection.exit_tip_sol,
+            consensus_tip_sol: config.mev_protection.consensus_tip_sol,
+            standard_tip_sol: config.mev_protection.standard_tip_sol,
+        },
+        token_safety: TokenSafetyConfigResponse {
+            min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+            min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+            honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
+            cache_capacity: config.token_safety.cache_capacity,
+            cache_ttl_seconds: config.token_safety.cache_ttl_seconds,
+            freeze_authority_whitelist: config.token_safety.freeze_authority_whitelist.clone(),
+            mint_authority_whitelist: config.token_safety.mint_authority_whitelist.clone(),
+        },
+        notifications: NotificationsConfigResponse {
+            telegram: TelegramConfigResponse {
+                enabled: config.notifications.telegram.enabled,
+                rate_limit_seconds: config.notifications.telegram.rate_limit_seconds,
+            },
+            rules: NotificationRulesConfigResponse {
+                circuit_breaker_triggered: config.notifications.rules.circuit_breaker_triggered,
+                wallet_drained: config.notifications.rules.wallet_drained,
+                position_exited: config.notifications.rules.position_exited,
+                wallet_promoted: config.notifications.rules.wallet_promoted,
+                daily_summary: config.notifications.rules.daily_summary,
+                rpc_fallback: config.notifications.rules.rpc_fallback,
+            },
+            daily_summary: DailySummaryConfigResponse {
+                enabled: config.notifications.daily_summary.enabled,
+                hour_utc: config.notifications.daily_summary.hour_utc,
+                minute: config.notifications.daily_summary.minute,
+            },
+        },
+        queue: QueueConfigResponse {
+            capacity: config.queue.capacity,
+            load_shed_threshold_percent: config.queue.load_shed_threshold_percent,
         },
     }))
 }
@@ -467,6 +725,689 @@ pub async fn update_config(
                 "strategy.allocation",
                 Some(&format!("shield:{}/spear:{}", old_shield, old_spear)),
                 &format!("shield:{}/spear:{}", shield, spear),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Update strategy position limits if provided
+    if let Some(s) = body.strategy {
+        if let Some(v) = s.max_position_sol {
+            let old = config.strategy.max_position_sol;
+            config.strategy.max_position_sol = v;
+            db::log_config_change(
+                &state.db,
+                "strategy.max_position_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = s.min_position_sol {
+            let old = config.strategy.min_position_sol;
+            config.strategy.min_position_sol = v;
+            db::log_config_change(
+                &state.db,
+                "strategy.min_position_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Update monitoring if provided
+    if let Some(m) = body.monitoring {
+        if config.monitoring.is_none() {
+            config.monitoring = Some(crate::config::MonitoringConfig::default());
+        }
+        if let Some(ref mut mon) = config.monitoring {
+            if let Some(v) = m.enabled {
+                let old = mon.enabled;
+                mon.enabled = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.enabled",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.webhook_registration_batch_size {
+                let old = mon.webhook_registration_batch_size;
+                mon.webhook_registration_batch_size = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.webhook_registration_batch_size",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.webhook_registration_delay_ms {
+                let old = mon.webhook_registration_delay_ms;
+                mon.webhook_registration_delay_ms = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.webhook_registration_delay_ms",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.webhook_processing_rate_limit {
+                if v > 50 {
+                    return Err(AppError::Validation(
+                        "Webhook rate limit cannot exceed 50 req/sec (Helius limit)".to_string(),
+                    ));
+                }
+                let old = mon.webhook_processing_rate_limit;
+                mon.webhook_processing_rate_limit = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.webhook_processing_rate_limit",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.rpc_polling_enabled {
+                let old = mon.rpc_polling_enabled;
+                mon.rpc_polling_enabled = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.rpc_polling_enabled",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.rpc_poll_interval_secs {
+                let old = mon.rpc_poll_interval_secs;
+                mon.rpc_poll_interval_secs = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.rpc_poll_interval_secs",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.rpc_poll_batch_size {
+                let old = mon.rpc_poll_batch_size;
+                mon.rpc_poll_batch_size = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.rpc_poll_batch_size",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.rpc_poll_rate_limit {
+                if v > 50 {
+                    return Err(AppError::Validation(
+                        "RPC poll rate limit cannot exceed 50 req/sec (Helius limit)".to_string(),
+                    ));
+                }
+                let old = mon.rpc_poll_rate_limit;
+                mon.rpc_poll_rate_limit = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.rpc_poll_rate_limit",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = m.max_active_wallets {
+                let old = mon.max_active_wallets;
+                mon.max_active_wallets = v;
+                db::log_config_change(
+                    &state.db,
+                    "monitoring.max_active_wallets",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+        }
+    }
+
+    // Update profit management if provided
+    if let Some(pm) = body.profit_management {
+        if let Some(v) = pm.targets {
+            // Validate targets are positive and ascending
+            let mut prev = 0.0;
+            for target in &v {
+                if *target <= prev {
+                    return Err(AppError::Validation(
+                        "Profit targets must be positive and in ascending order".to_string(),
+                    ));
+                }
+                prev = *target;
+            }
+            let old = format!("{:?}", config.profit_management.targets);
+            config.profit_management.targets = v.clone();
+            db::log_config_change(
+                &state.db,
+                "profit_management.targets",
+                Some(&old),
+                &format!("{:?}", v),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = pm.tiered_exit_percent {
+            if v < 0.0 || v > 100.0 {
+                return Err(AppError::Validation(
+                    "Tiered exit percent must be between 0 and 100".to_string(),
+                ));
+            }
+            let old = config.profit_management.tiered_exit_percent;
+            config.profit_management.tiered_exit_percent = v;
+            db::log_config_change(
+                &state.db,
+                "profit_management.tiered_exit_percent",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = pm.trailing_stop_activation {
+            let old = config.profit_management.trailing_stop_activation;
+            config.profit_management.trailing_stop_activation = v;
+            db::log_config_change(
+                &state.db,
+                "profit_management.trailing_stop_activation",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = pm.trailing_stop_distance {
+            let old = config.profit_management.trailing_stop_distance;
+            config.profit_management.trailing_stop_distance = v;
+            db::log_config_change(
+                &state.db,
+                "profit_management.trailing_stop_distance",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = pm.hard_stop_loss {
+            if v < 0.0 || v > 100.0 {
+                return Err(AppError::Validation(
+                    "Hard stop loss must be between 0 and 100".to_string(),
+                ));
+            }
+            let old = config.profit_management.hard_stop_loss;
+            config.profit_management.hard_stop_loss = v;
+            db::log_config_change(
+                &state.db,
+                "profit_management.hard_stop_loss",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = pm.time_exit_hours {
+            let old = config.profit_management.time_exit_hours;
+            config.profit_management.time_exit_hours = v;
+            db::log_config_change(
+                &state.db,
+                "profit_management.time_exit_hours",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Update position sizing if provided
+    if let Some(ps) = body.position_sizing {
+        if let Some(v) = ps.base_size_sol {
+            if v < config.position_sizing.min_size_sol || v > config.position_sizing.max_size_sol {
+                return Err(AppError::Validation(
+                    format!(
+                        "Base size must be between {} and {} SOL",
+                        config.position_sizing.min_size_sol, config.position_sizing.max_size_sol
+                    ),
+                ));
+            }
+            let old = config.position_sizing.base_size_sol;
+            config.position_sizing.base_size_sol = v;
+            db::log_config_change(
+                &state.db,
+                "position_sizing.base_size_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ps.max_size_sol {
+            if v < config.position_sizing.base_size_sol {
+                return Err(AppError::Validation(
+                    "Max size must be >= base size".to_string(),
+                ));
+            }
+            let old = config.position_sizing.max_size_sol;
+            config.position_sizing.max_size_sol = v;
+            db::log_config_change(
+                &state.db,
+                "position_sizing.max_size_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ps.min_size_sol {
+            if v > config.position_sizing.base_size_sol {
+                return Err(AppError::Validation(
+                    "Min size must be <= base size".to_string(),
+                ));
+            }
+            let old = config.position_sizing.min_size_sol;
+            config.position_sizing.min_size_sol = v;
+            db::log_config_change(
+                &state.db,
+                "position_sizing.min_size_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ps.consensus_multiplier {
+            if v < 1.0 || v > 5.0 {
+                return Err(AppError::Validation(
+                    "Consensus multiplier must be between 1.0 and 5.0".to_string(),
+                ));
+            }
+            let old = config.position_sizing.consensus_multiplier;
+            config.position_sizing.consensus_multiplier = v;
+            db::log_config_change(
+                &state.db,
+                "position_sizing.consensus_multiplier",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ps.max_concurrent_positions {
+            let old = config.position_sizing.max_concurrent_positions;
+            config.position_sizing.max_concurrent_positions = v;
+            db::log_config_change(
+                &state.db,
+                "position_sizing.max_concurrent_positions",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Update MEV protection if provided
+    if let Some(mp) = body.mev_protection {
+        if let Some(v) = mp.always_use_jito {
+            let old = config.mev_protection.always_use_jito;
+            config.mev_protection.always_use_jito = v;
+            db::log_config_change(
+                &state.db,
+                "mev_protection.always_use_jito",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = mp.exit_tip_sol {
+            let old = config.mev_protection.exit_tip_sol;
+            config.mev_protection.exit_tip_sol = v;
+            db::log_config_change(
+                &state.db,
+                "mev_protection.exit_tip_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = mp.consensus_tip_sol {
+            let old = config.mev_protection.consensus_tip_sol;
+            config.mev_protection.consensus_tip_sol = v;
+            db::log_config_change(
+                &state.db,
+                "mev_protection.consensus_tip_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = mp.standard_tip_sol {
+            let old = config.mev_protection.standard_tip_sol;
+            config.mev_protection.standard_tip_sol = v;
+            db::log_config_change(
+                &state.db,
+                "mev_protection.standard_tip_sol",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Update token safety if provided
+    if let Some(ts) = body.token_safety {
+        if let Some(v) = ts.min_liquidity_shield_usd {
+            let old = config.token_safety.min_liquidity_shield_usd;
+            config.token_safety.min_liquidity_shield_usd = v;
+            db::log_config_change(
+                &state.db,
+                "token_safety.min_liquidity_shield_usd",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ts.min_liquidity_spear_usd {
+            let old = config.token_safety.min_liquidity_spear_usd;
+            config.token_safety.min_liquidity_spear_usd = v;
+            db::log_config_change(
+                &state.db,
+                "token_safety.min_liquidity_spear_usd",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ts.honeypot_detection_enabled {
+            let old = config.token_safety.honeypot_detection_enabled;
+            config.token_safety.honeypot_detection_enabled = v;
+            db::log_config_change(
+                &state.db,
+                "token_safety.honeypot_detection_enabled",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ts.cache_capacity {
+            let old = config.token_safety.cache_capacity;
+            config.token_safety.cache_capacity = v;
+            db::log_config_change(
+                &state.db,
+                "token_safety.cache_capacity",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = ts.cache_ttl_seconds {
+            let old = config.token_safety.cache_ttl_seconds;
+            config.token_safety.cache_ttl_seconds = v;
+            db::log_config_change(
+                &state.db,
+                "token_safety.cache_ttl_seconds",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+    }
+
+    // Update notifications if provided
+    if let Some(n) = body.notifications {
+        if let Some(t) = n.telegram {
+            if let Some(v) = t.enabled {
+                let old = config.notifications.telegram.enabled;
+                config.notifications.telegram.enabled = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.telegram.enabled",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = t.rate_limit_seconds {
+                let old = config.notifications.telegram.rate_limit_seconds;
+                config.notifications.telegram.rate_limit_seconds = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.telegram.rate_limit_seconds",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+        }
+        if let Some(r) = n.rules {
+            if let Some(v) = r.circuit_breaker_triggered {
+                let old = config.notifications.rules.circuit_breaker_triggered;
+                config.notifications.rules.circuit_breaker_triggered = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.rules.circuit_breaker_triggered",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = r.wallet_drained {
+                let old = config.notifications.rules.wallet_drained;
+                config.notifications.rules.wallet_drained = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.rules.wallet_drained",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = r.position_exited {
+                let old = config.notifications.rules.position_exited;
+                config.notifications.rules.position_exited = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.rules.position_exited",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = r.wallet_promoted {
+                let old = config.notifications.rules.wallet_promoted;
+                config.notifications.rules.wallet_promoted = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.rules.wallet_promoted",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = r.daily_summary {
+                let old = config.notifications.rules.daily_summary;
+                config.notifications.rules.daily_summary = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.rules.daily_summary",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = r.rpc_fallback {
+                let old = config.notifications.rules.rpc_fallback;
+                config.notifications.rules.rpc_fallback = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.rules.rpc_fallback",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+        }
+        if let Some(ds) = n.daily_summary {
+            if let Some(v) = ds.enabled {
+                let old = config.notifications.daily_summary.enabled;
+                config.notifications.daily_summary.enabled = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.daily_summary.enabled",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = ds.hour_utc {
+                if v > 23 {
+                    return Err(AppError::Validation(
+                        "Hour must be between 0 and 23".to_string(),
+                    ));
+                }
+                let old = config.notifications.daily_summary.hour_utc;
+                config.notifications.daily_summary.hour_utc = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.daily_summary.hour_utc",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+            if let Some(v) = ds.minute {
+                if v > 59 {
+                    return Err(AppError::Validation(
+                        "Minute must be between 0 and 59".to_string(),
+                    ));
+                }
+                let old = config.notifications.daily_summary.minute;
+                config.notifications.daily_summary.minute = v;
+                db::log_config_change(
+                    &state.db,
+                    "notifications.daily_summary.minute",
+                    Some(&old.to_string()),
+                    &v.to_string(),
+                    &auth.0.identifier,
+                    None,
+                )
+                .await?;
+            }
+        }
+    }
+
+    // Update queue if provided
+    if let Some(q) = body.queue {
+        if let Some(v) = q.capacity {
+            let old = config.queue.capacity;
+            config.queue.capacity = v;
+            db::log_config_change(
+                &state.db,
+                "queue.capacity",
+                Some(&old.to_string()),
+                &v.to_string(),
+                &auth.0.identifier,
+                None,
+            )
+            .await?;
+        }
+        if let Some(v) = q.load_shed_threshold_percent {
+            if v > 100 {
+                return Err(AppError::Validation(
+                    "Load shed threshold must be <= 100%".to_string(),
+                ));
+            }
+            let old = config.queue.load_shed_threshold_percent;
+            config.queue.load_shed_threshold_percent = v;
+            db::log_config_change(
+                &state.db,
+                "queue.load_shed_threshold_percent",
+                Some(&old.to_string()),
+                &v.to_string(),
                 &auth.0.identifier,
                 None,
             )
