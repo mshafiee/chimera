@@ -74,8 +74,31 @@ impl StopLossManager {
             _ => 50.0,
         };
 
+        // Check if this is a consensus signal (multiple wallets buying same token)
+        let is_consensus = {
+            // Query signal_aggregation table for recent consensus signals on this token
+            let consensus_count: Result<i64, _> = sqlx::query_scalar(
+                r#"
+                SELECT COUNT(DISTINCT wallet_address)
+                FROM signal_aggregation
+                WHERE token_address = ?
+                  AND direction = 'BUY'
+                  AND created_at > datetime('now', '-5 minutes')
+                "#
+            )
+            .bind(token_address)
+            .fetch_one(&self.db)
+            .await;
+            
+            match consensus_count {
+                Ok(count) => count >= 2, // 2+ wallets = consensus
+                Err(_) => false, // On error, assume not consensus
+            }
+        };
+
         // Calculate dynamic stop-loss threshold
-        let stop_loss_threshold: f64 = if wqs >= 70.0 {
+        // For consensus signals, use wider stops (lower risk of false signal)
+        let mut stop_loss_threshold: f64 = if wqs >= 70.0 {
             // High WQS: wider stop (-20%)
             -20.0
         } else if wqs >= 40.0 {
@@ -85,6 +108,18 @@ impl StopLossManager {
             // Low WQS: tighter stop (-10%)
             -10.0
         };
+        
+        // Widen stop-loss by 5% for consensus signals
+        if is_consensus {
+            stop_loss_threshold -= 5.0; // Make it wider (e.g., -15% -> -20%)
+            tracing::debug!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                original_threshold = stop_loss_threshold + 5.0,
+                consensus_threshold = stop_loss_threshold,
+                "Consensus signal detected, widening stop-loss by 5%"
+            );
+        }
 
         // Check if stop-loss hit
         if loss_percent >= stop_loss_threshold.abs() {

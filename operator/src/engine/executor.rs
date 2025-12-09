@@ -9,9 +9,10 @@ use crate::models::{Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use crate::engine::tips::TipManager;
 use crate::engine::transaction_builder::{TransactionBuilder, load_wallet_keypair};
+use crate::price_cache::PriceCache;
 use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
@@ -78,6 +79,8 @@ pub struct Executor {
     tip_manager: Option<Arc<TipManager>>,
     /// Jito Searcher client for direct bundle submission
     jito_searcher: Option<crate::engine::jito_searcher::JitoSearcherClient>,
+    /// Price cache for volatility calculation
+    price_cache: Option<Arc<PriceCache>>,
 }
 
 impl Executor {
@@ -129,6 +132,7 @@ impl Executor {
             fallback_rpc_client,
             tip_manager: None,
             jito_searcher,
+            price_cache: None,
         }
     }
 
@@ -141,6 +145,12 @@ impl Executor {
     /// Set the tip manager
     pub fn with_tip_manager(mut self, tip_manager: Arc<TipManager>) -> Self {
         self.tip_manager = Some(tip_manager);
+        self
+    }
+
+    /// Set the price cache for volatility calculation
+    pub fn with_price_cache(mut self, price_cache: Arc<PriceCache>) -> Self {
+        self.price_cache = Some(price_cache);
         self
     }
 
@@ -206,6 +216,16 @@ impl Executor {
             return Err(ExecutorError::SpearDisabled);
         }
 
+        // Check market conditions before executing
+        if let Err(e) = self.check_market_conditions().await {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                error = %e,
+                "Trade rejected due to market conditions"
+            );
+            return Err(ExecutorError::MarketConditionsUnfavorable(e.to_string()));
+        }
+
         // Validate amount bounds
         if signal.payload.amount_sol < self.config.strategy.min_position_sol {
             return Err(ExecutorError::AmountTooSmall(
@@ -238,9 +258,9 @@ impl Executor {
                 );
 
                 // Record tip if using Jito and tip manager is available
-                if self.rpc_mode == RpcMode::Jito {
+                let jito_tip = if self.rpc_mode == RpcMode::Jito {
+                    let tip = self.calculate_jito_tip(signal);
                     if let Some(ref tip_manager) = self.tip_manager {
-                        let tip = self.calculate_jito_tip(signal);
                         if let Err(e) = tip_manager.record_tip(
                             tip,
                             Some(sig),
@@ -253,6 +273,43 @@ impl Executor {
                             );
                         }
                     }
+                    tip
+                } else {
+                    0.0
+                };
+
+                // Track costs: Jito tip, DEX fee, slippage
+                let dex_fee_sol = signal.payload.amount_sol * 0.003; // 0.3% DEX fee
+                // Estimate slippage (conservative estimate: 0.5% for small trades, 1% for larger)
+                let slippage_percent = if signal.payload.amount_sol < 0.5 {
+                    0.005 // 0.5% for trades < 0.5 SOL
+                } else {
+                    0.01 // 1% for larger trades
+                };
+                let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
+
+                // Update trade costs in database
+                if let Err(e) = crate::db::update_trade_costs(
+                    &self.db,
+                    &signal.trade_uuid,
+                    jito_tip,
+                    dex_fee_sol,
+                    slippage_cost_sol,
+                ).await {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        error = %e,
+                        "Failed to update trade costs"
+                    );
+                } else {
+                    tracing::debug!(
+                        trade_uuid = %signal.trade_uuid,
+                        jito_tip = jito_tip,
+                        dex_fee = dex_fee_sol,
+                        slippage = slippage_cost_sol,
+                        total_cost = jito_tip + dex_fee_sol + slippage_cost_sol,
+                        "Trade costs recorded"
+                    );
                 }
             }
             Err(e) => {
@@ -292,6 +349,74 @@ impl Executor {
         }
 
         result
+    }
+
+    /// Check market conditions before executing trades
+    /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
+    async fn check_market_conditions(&self) -> Result<(), String> {
+        // Check 1: SOL price crash (>10% drop in last hour)
+        // This requires price history - check if we have sufficient data
+        if let Some(ref price_cache) = self.price_cache {
+            // Get SOL price history to check for crash
+            let sol_mint = "So11111111111111111111111111111111111111112";
+            let history = price_cache.price_history.read();
+            if let Some(sol_history) = history.get(sol_mint) {
+                if sol_history.len() >= 2 {
+                    let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+                    // Find price from 1 hour ago (or closest)
+                    let mut price_1h_ago = None;
+                    let mut current_price = None;
+                    
+                    for (timestamp, price) in sol_history.iter().rev() {
+                        if current_price.is_none() {
+                            current_price = Some(*price);
+                        }
+                        if *timestamp <= one_hour_ago && price_1h_ago.is_none() {
+                            price_1h_ago = Some(*price);
+                            break;
+                        }
+                    }
+                    
+                    if let (Some(old_price), Some(new_price)) = (price_1h_ago, current_price) {
+                        if old_price > 0.0 {
+                            let drop_percent = ((old_price - new_price) / old_price) * 100.0;
+                            if drop_percent > 10.0 {
+                                return Err(format!(
+                                    "SOL price crash detected: {:.2}% drop in last hour ({} -> {})",
+                                    drop_percent, old_price, new_price
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Check 2: High volatility (>30% daily volatility)
+        if let Some(ref price_cache) = self.price_cache {
+            if let Some(volatility) = price_cache.get_sol_volatility() {
+                if volatility > 30.0 {
+                    return Err(format!(
+                        "High market volatility detected: {:.2}% (threshold: 30%)",
+                        volatility
+                    ));
+                }
+            }
+        }
+        
+        // Check 3: Low liquidity period (off-hours)
+        // Skip trades during low-activity hours (2 AM - 6 AM UTC)
+        let now = Utc::now();
+        let hour_utc = now.time().hour();
+        if hour_utc >= 2 && hour_utc < 6 {
+            return Err(format!(
+                "Low liquidity period: {}:00 UTC (off-hours 2-6 AM)",
+                hour_utc
+            ));
+        }
+
+        // All checks passed
+        Ok(())
     }
 
     /// Check if we should attempt recovery to primary RPC
@@ -1068,6 +1193,10 @@ pub enum ExecutorError {
     /// Transaction size exceeds Solana limits
     #[error("Transaction too large: {actual} bytes (max: {max} bytes)")]
     TransactionTooLarge { actual: usize, max: usize },
+
+    /// Market conditions unfavorable for trading
+    #[error("Market conditions unfavorable: {0}")]
+    MarketConditionsUnfavorable(String),
 }
 
 #[cfg(test)]

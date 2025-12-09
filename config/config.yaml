@@ -64,9 +64,9 @@ token_safety:
     - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
-  # Minimum liquidity thresholds (USD)
-  min_liquidity_shield_usd: 10000
-  min_liquidity_spear_usd: 5000
+  # Minimum liquidity thresholds (USD) - with 20% buffer for safety
+  min_liquidity_shield_usd: 12000  # 20% buffer over 10k base
+  min_liquidity_spear_usd: 6000    # 20% buffer over 5k base
   # Enable honeypot detection via transaction simulation
   honeypot_detection_enabled: true
   # Token cache settings
@@ -107,6 +107,7 @@ monitoring:
   rpc_poll_batch_size: 6
   rpc_poll_rate_limit: 40
   max_active_wallets: 20
+  auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
 
 # Profit management configuration
 profit_management:
@@ -122,12 +123,13 @@ position_sizing:
   base_size_sol: 0.1
   max_size_sol: 2.0
   min_size_sol: 0.02
-  consensus_multiplier: 1.5
+  consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
   max_concurrent_positions: 5
+  use_kelly_sizing: false  # Enable Kelly Criterion sizing (Phase 2)
 
 # MEV protection configuration
 mev_protection:
   always_use_jito: true
-  exit_tip_sol: 0.007
-  consensus_tip_sol: 0.003
-  standard_tip_sol: 0.0015
+  exit_tip_sol: 0.0055  # Reduced by 20% from 0.007
+  consensus_tip_sol: 0.0024  # Reduced by 20% from 0.003
+  standard_tip_sol: 0.0012  # Reduced by 20% from 0.0015

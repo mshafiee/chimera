@@ -25,6 +25,10 @@ pub struct SizingFactors {
     pub wallet_success_rate: f64,
     pub token_age_hours: Option<f64>,
     pub estimated_slippage: f64,
+    /// Signal quality score (0.0-1.0)
+    pub signal_quality: Option<f64>,
+    /// Token 24h volatility percentage (None if unknown)
+    pub token_volatility_24h: Option<f64>,
 }
 
 impl PositionSizer {
@@ -85,12 +89,44 @@ impl PositionSizer {
             1.0
         };
 
+        // Signal quality multiplier
+        // High quality (>0.9): 1.3x
+        // Medium quality (0.7-0.9): 1.0x
+        // Low quality (<0.7): 0.7x (shouldn't reach here due to filter)
+        let quality_mult = if let Some(quality) = factors.signal_quality {
+            if quality >= 0.9 {
+                1.3
+            } else if quality >= 0.7 {
+                1.0
+            } else {
+                0.7
+            }
+        } else {
+            1.0  // Default if quality not provided
+        };
+
+        // Volatility multiplier (reduce size for high volatility)
+        // If volatility > 30%, reduce size proportionally
+        let volatility_mult = if let Some(volatility) = factors.token_volatility_24h {
+            if volatility > 30.0 {
+                // Reduce by 30% for every 10% above 30%
+                let reduction = ((volatility - 30.0) / 10.0) * 0.3;
+                (1.0 - reduction).max(0.5) // Minimum 50% of base size
+            } else {
+                1.0
+            }
+        } else {
+            1.0  // Default if volatility unknown
+        };
+
         // Apply all multipliers
         size *= confidence_mult;
         size *= wqs_mult;
         size *= performance_mult;
         size *= token_age_mult;
         size *= slippage_mult;
+        size *= quality_mult;
+        size *= volatility_mult;
 
         // Apply min/max bounds
         size = size.max(self.config.min_size_sol);
@@ -151,6 +187,8 @@ impl PositionSizer {
             wallet_success_rate: success_rate,
             token_age_hours,
             estimated_slippage,
+            signal_quality: None,  // Will be set by caller if available
+            token_volatility_24h: None,  // Will be set by caller if available
         }
     }
 

@@ -30,6 +30,11 @@ CREATE TABLE IF NOT EXISTS trades (
     error_message TEXT,
     pnl_sol REAL,
     pnl_usd REAL,
+    jito_tip_sol REAL DEFAULT 0,
+    dex_fee_sol REAL DEFAULT 0,
+    slippage_cost_sol REAL DEFAULT 0,
+    total_cost_sol REAL DEFAULT 0,
+    net_pnl_sol REAL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -40,6 +45,8 @@ CREATE INDEX IF NOT EXISTS idx_trades_status_queued ON trades(status) WHERE stat
 CREATE INDEX IF NOT EXISTS idx_trades_wallet ON trades(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_trades_token ON trades(token_address);
 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_costs ON trades(total_cost_sol) WHERE total_cost_sol > 0;
+CREATE INDEX IF NOT EXISTS idx_trades_net_pnl ON trades(net_pnl_sol) WHERE net_pnl_sol IS NOT NULL;
 
 -- Positions table: Active positions being tracked
 CREATE TABLE IF NOT EXISTS positions (

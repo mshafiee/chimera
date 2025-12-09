@@ -154,6 +154,58 @@ impl TipManager {
         }
     }
 
+    /// Get success rate for a given tip amount range
+    /// Returns success rate (0.0-1.0) for tips within ±10% of the given amount
+    pub async fn get_tip_success_rate(&self, tip_amount_sol: f64) -> AppResult<f64> {
+        let min_tip = tip_amount_sol * 0.9;
+        let max_tip = tip_amount_sol * 1.1;
+
+        let stats: Vec<(i64,)> = sqlx::query_as(
+            r#"
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful
+            FROM jito_tip_history
+            WHERE tip_amount_sol >= ? AND tip_amount_sol <= ?
+            AND created_at >= datetime('now', '-7 days')
+            "#,
+        )
+        .bind(min_tip)
+        .bind(max_tip)
+        .fetch_all(&self.db)
+        .await?;
+
+        if let Some((total,)) = stats.first() {
+            if *total > 0 {
+                // Query for successful count
+                let success_count: Vec<(i64,)> = sqlx::query_as(
+                    r#"
+                    SELECT COUNT(*)
+                    FROM jito_tip_history
+                    WHERE tip_amount_sol >= ? AND tip_amount_sol <= ?
+                    AND success = 1
+                    AND created_at >= datetime('now', '-7 days')
+                    "#,
+                )
+                .bind(min_tip)
+                .bind(max_tip)
+                .fetch_all(&self.db)
+                .await?;
+
+                let success = success_count.first().map(|(s,)| *s).unwrap_or(0);
+                return Ok(success as f64 / *total as f64);
+            }
+        }
+
+        Ok(1.0) // Default to 100% if no data
+    }
+
+    /// Check if tip success rate is acceptable (>= 90%)
+    pub async fn is_tip_success_rate_acceptable(&self, tip_amount_sol: f64) -> AppResult<bool> {
+        let rate = self.get_tip_success_rate(tip_amount_sol).await?;
+        Ok(rate >= 0.9)
+    }
+
     /// Record a tip (after successful bundle)
     pub async fn record_tip(
         &self,

@@ -68,7 +68,13 @@ impl MonitoringState {
         let signal_aggregator = Arc::new(SignalAggregator::new(db.clone()));
         let pre_validator = Arc::new(PreValidator::new(config.clone()));
         let exit_detector = Arc::new(ExitDetector::new());
-        let wallet_performance = Arc::new(WalletPerformanceTracker::new(db.clone()));
+        let auto_demote_enabled = config.monitoring.as_ref()
+            .map(|m| m.auto_demote_wallets)
+            .unwrap_or(false);
+        let wallet_performance = Arc::new(WalletPerformanceTracker::with_auto_demotion(
+            db.clone(),
+            auto_demote_enabled,
+        ));
 
         Ok(Self {
             db,

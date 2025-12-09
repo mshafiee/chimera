@@ -90,8 +90,8 @@ impl Default for TokenSafetyConfig {
         Self {
             freeze_authority_whitelist: freeze_whitelist,
             mint_authority_whitelist: mint_whitelist,
-            min_liquidity_shield_usd: 10_000.0,
-            min_liquidity_spear_usd: 5_000.0,
+            min_liquidity_shield_usd: 12_000.0,  // 20% buffer over 10k
+            min_liquidity_spear_usd: 6_000.0,    // 20% buffer over 5k
             honeypot_detection_enabled: true,
         }
     }

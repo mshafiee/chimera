@@ -5,7 +5,7 @@ import { Badge, StrategyBadge, StatusBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { PnLChart } from '../components/charts/PnLChart'
 import { useHealth, usePositions } from '../api'
-import { usePerformanceMetrics, useStrategyPerformance } from '../api/metrics'
+import { useCostMetrics, usePerformanceMetrics, useStrategyPerformance } from '../api/metrics'
 import { useTrades } from '../api/trades'
 import { useConfig } from '../api/config'
 import { useLayoutContext } from '../components/layout/Layout'
@@ -17,6 +17,7 @@ export function Dashboard() {
   const { data: health, refetch: refetchHealth } = useHealth()
   const { data: positionsData, isLoading: positionsLoading, refetch: refetchPositions } = usePositions()
   const { data: performanceMetrics, isLoading: metricsLoading } = usePerformanceMetrics()
+  const { data: costMetrics, isLoading: costMetricsLoading } = useCostMetrics()
   const { data: shieldPerformance } = useStrategyPerformance('SHIELD', 30)
   const { data: spearPerformance } = useStrategyPerformance('SPEAR', 30)
   const { data: configData } = useConfig()
@@ -308,6 +309,71 @@ export function Dashboard() {
             <div className="h-[200px] flex items-center justify-center text-text-muted text-sm">
               No trade history available
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Cost Breakdown */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Cost Analysis (30d)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {costMetricsLoading ? (
+            <div className="text-center text-text-muted py-8">Loading cost metrics...</div>
+          ) : costMetrics ? (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                <div>
+                  <div className="text-xs md:text-sm text-text-muted mb-1">Avg Jito Tip</div>
+                  <div className="text-lg md:text-xl font-semibold font-mono-numbers">
+                    {costMetrics.avg_jito_tip_sol.toFixed(4)} SOL
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs md:text-sm text-text-muted mb-1">Avg DEX Fee</div>
+                  <div className="text-lg md:text-xl font-semibold font-mono-numbers">
+                    {costMetrics.avg_dex_fee_sol.toFixed(4)} SOL
+                  </div>
+                </div>
+                <div>
+                  <div className="text-xs md:text-sm text-text-muted mb-1">Avg Slippage</div>
+                  <div className="text-lg md:text-xl font-semibold font-mono-numbers">
+                    {costMetrics.avg_slippage_cost_sol.toFixed(4)} SOL
+                  </div>
+                </div>
+              </div>
+              <div className="border-t border-border pt-4">
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                  <div>
+                    <div className="text-xs md:text-sm text-text-muted mb-1">Total Costs (30d)</div>
+                    <div className="text-lg md:text-xl font-semibold font-mono-numbers text-text-muted">
+                      {costMetrics.total_costs_30d_sol.toFixed(4)} SOL
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs md:text-sm text-text-muted mb-1">Net Profit (30d)</div>
+                    <div className={`text-lg md:text-xl font-semibold font-mono-numbers ${
+                      costMetrics.net_profit_30d_sol >= 0 ? 'text-profit' : 'text-loss'
+                    }`}>
+                      {costMetrics.net_profit_30d_sol >= 0 ? '+' : ''}
+                      {costMetrics.net_profit_30d_sol.toFixed(4)} SOL
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-xs md:text-sm text-text-muted mb-1">ROI %</div>
+                    <div className={`text-lg md:text-xl font-semibold font-mono-numbers ${
+                      costMetrics.roi_percent >= 0 ? 'text-profit' : 'text-loss'
+                    }`}>
+                      {costMetrics.roi_percent >= 0 ? '+' : ''}
+                      {costMetrics.roi_percent.toFixed(1)}%
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="text-center text-text-muted py-8">No cost data available</div>
           )}
         </CardContent>
       </Card>

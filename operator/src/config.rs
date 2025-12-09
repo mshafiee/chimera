@@ -564,6 +564,9 @@ pub struct MonitoringConfig {
     /// Maximum active wallets to monitor
     #[serde(default = "default_max_active_wallets")]
     pub max_active_wallets: usize,
+    /// Enable automatic wallet demotion based on copy performance
+    #[serde(default = "default_auto_demote_wallets")]
+    pub auto_demote_wallets: bool,
 }
 
 fn default_true() -> bool {
@@ -598,6 +601,10 @@ fn default_max_active_wallets() -> usize {
     20
 }
 
+fn default_auto_demote_wallets() -> bool {
+    false
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         Self {
@@ -612,6 +619,7 @@ impl Default for MonitoringConfig {
             rpc_poll_batch_size: default_rpc_poll_batch(),
             rpc_poll_rate_limit: default_rpc_poll_rate_limit(),
             max_active_wallets: default_max_active_wallets(),
+            auto_demote_wallets: default_auto_demote_wallets(),
         }
     }
 }
@@ -694,6 +702,9 @@ pub struct PositionSizingConfig {
     /// Maximum concurrent positions
     #[serde(default = "default_max_concurrent_positions")]
     pub max_concurrent_positions: usize,
+    /// Enable Kelly Criterion sizing
+    #[serde(default = "default_use_kelly_sizing")]
+    pub use_kelly_sizing: bool,
 }
 
 fn default_base_size_sol() -> f64 {
@@ -716,6 +727,10 @@ fn default_max_concurrent_positions() -> usize {
     5
 }
 
+fn default_use_kelly_sizing() -> bool {
+    false
+}
+
 impl Default for PositionSizingConfig {
     fn default() -> Self {
         Self {
@@ -724,6 +739,7 @@ impl Default for PositionSizingConfig {
             min_size_sol: default_min_size_sol(),
             consensus_multiplier: default_consensus_multiplier(),
             max_concurrent_positions: default_max_concurrent_positions(),
+            use_kelly_sizing: default_use_kelly_sizing(),
         }
     }
 }

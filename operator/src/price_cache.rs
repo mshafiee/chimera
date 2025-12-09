@@ -10,7 +10,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::time::interval;
 
@@ -62,6 +62,10 @@ pub struct PriceCache {
     active_tokens: Arc<RwLock<Vec<String>>>,
     /// Whether the updater is running
     updater_running: Arc<RwLock<bool>>,
+    /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
+    pub price_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, f64)>>>>,
+    /// SOL mint address (for market condition filtering)
+    sol_mint: String,
 }
 
 impl PriceCache {
@@ -72,6 +76,8 @@ impl PriceCache {
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             updater_running: Arc::new(RwLock::new(false)),
+            price_history: Arc::new(RwLock::new(HashMap::new())),
+            sol_mint: "So11111111111111111111111111111111111111112".to_string(),
         }
     }
 
@@ -82,6 +88,8 @@ impl PriceCache {
             ttl: Duration::seconds(ttl_secs),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             updater_running: Arc::new(RwLock::new(false)),
+            price_history: Arc::new(RwLock::new(HashMap::new())),
+            sol_mint: "So11111111111111111111111111111111111111112".to_string(),
         }
     }
 
@@ -106,15 +114,75 @@ impl PriceCache {
 
     /// Set price for a token
     pub fn set_price(&self, token_address: &str, price_usd: f64, source: PriceSource) {
+        let now = Utc::now();
         let mut prices = self.prices.write();
         prices.insert(
             token_address.to_string(),
             PriceEntry {
                 price_usd,
-                fetched_at: Utc::now(),
+                fetched_at: now,
                 source,
             },
         );
+        
+        // Update price history for volatility calculation (keep last 24 hours)
+        let mut history = self.price_history.write();
+        let token_history = history.entry(token_address.to_string()).or_insert_with(VecDeque::new);
+        token_history.push_back((now, price_usd));
+        
+        // Keep only last 24 hours (assuming updates every 5 seconds = ~17,280 entries max)
+        let cutoff = now - Duration::hours(24);
+        while let Some(front) = token_history.front() {
+            if front.0 < cutoff {
+                token_history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+    
+    /// Calculate volatility for a token (24h window)
+    ///
+    /// Returns volatility as percentage (0.0-100.0)
+    /// Returns None if insufficient data (< 2 price points)
+    pub fn calculate_volatility(&self, token_address: &str) -> Option<f64> {
+        let history = self.price_history.read();
+        let token_history = history.get(token_address)?;
+        
+        if token_history.len() < 2 {
+            return None;
+        }
+        
+        // Calculate price changes
+        let prices: Vec<f64> = token_history.iter().map(|(_, price)| *price).collect();
+        let mut price_changes = Vec::new();
+        
+        for i in 1..prices.len() {
+            let change = ((prices[i] - prices[i - 1]) / prices[i - 1]) * 100.0;
+            price_changes.push(change);
+        }
+        
+        if price_changes.is_empty() {
+            return None;
+        }
+        
+        // Calculate mean
+        let mean: f64 = price_changes.iter().sum::<f64>() / price_changes.len() as f64;
+        
+        // Calculate standard deviation
+        let variance: f64 = price_changes
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / price_changes.len() as f64;
+        let std_dev = variance.sqrt();
+        
+        // Return absolute volatility (as percentage)
+        Some(std_dev.abs())
+    }
+    
+    /// Get SOL price volatility (for market condition filtering)
+    pub fn get_sol_volatility(&self) -> Option<f64> {
+        self.calculate_volatility(&self.sol_mint)
     }
 
     /// Add token to active tracking

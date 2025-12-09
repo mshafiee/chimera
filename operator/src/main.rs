@@ -27,7 +27,7 @@ use chimera_operator::config::AppConfig;
 use chimera_operator::db;
 use chimera_operator::engine::{self, RecoveryManager, TipManager};
 use chimera_operator::handlers::{
-    export_trades, get_config, get_performance_metrics, get_position, get_strategy_performance,
+    export_trades, get_config, get_cost_metrics, get_performance_metrics, get_position, get_strategy_performance,
     get_wallet, health_check, health_simple, list_config_audit, list_dead_letter_queue,
     list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
     roster_validate, update_config, update_wallet, update_reconciliation_metrics,
@@ -40,6 +40,7 @@ use chimera_operator::metrics::{MetricsState, metrics_router};
 use chimera_operator::notifications::{self, CompositeNotifier, DiscordNotifier, NotificationEvent, TelegramNotifier};
 use chimera_operator::price_cache::PriceCache;
 use chimera_operator::roster;
+use chimera_operator::monitoring::{HeliusClient, SignalAggregator};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 
@@ -92,6 +93,8 @@ async fn main() -> anyhow::Result<()> {
     
     // Initialize price cache
     let price_cache = Arc::new(PriceCache::new());
+    // Track SOL for volatility calculation
+    price_cache.track_token("So11111111111111111111111111111111111111112");
     
     // Initialize tip manager
     let tip_manager = Arc::new(TipManager::new(config.jito.clone(), db_pool.clone()));
@@ -101,13 +104,14 @@ async fn main() -> anyhow::Result<()> {
     let notifier = Arc::new(notifications::CompositeNotifier::new());
     
     // Create engine
-    let (engine, _engine_handle) = engine::Engine::new_with_extras_and_tip_manager(
+    let (engine, _engine_handle) = engine::Engine::new_with_extras_tip_manager_and_price_cache(
         config.clone(),
         db_pool.clone(),
         notifier.clone(),
         None,
         Some(ws_state.clone()),
         Some(tip_manager.clone()),
+        Some(price_cache.clone()),
     );
     tracing::info!("Engine created");
     
@@ -199,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/trades", get(list_trades))
         .route("/trades/export", get(export_trades))
         .route("/metrics/performance", get(get_performance_metrics))
+        .route("/metrics/costs", get(get_cost_metrics))
         .route("/metrics/strategy/{strategy}", get(get_strategy_performance))
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
@@ -234,11 +239,29 @@ async fn main() -> anyhow::Result<()> {
     };
     let token_parser = Arc::new(TokenParser::new(token_safety_config, token_cache.clone(), token_fetcher));
     
+    // Create SignalAggregator and HeliusClient for signal quality enhancements
+    let signal_aggregator = Arc::new(SignalAggregator::new(db_pool.clone()));
+    let helius_client = Arc::new(
+        HeliusClient::new(
+            config.monitoring.as_ref()
+                .and_then(|m| m.helius_api_key.clone())
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to create HeliusClient, signal quality will be limited");
+            // Create a dummy client with empty API key (will fail gracefully)
+            HeliusClient::new(String::new()).unwrap()
+        })
+    );
+    
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: _engine_handle.clone(),
         token_parser,
         circuit_breaker: circuit_breaker.clone(),
+        portfolio_heat: None, // Optional - can be enabled later
+        signal_aggregator: Some(signal_aggregator.clone()),
+        helius_client: Some(helius_client.clone()),
     });
     
     // Create roster state
@@ -426,6 +449,8 @@ async fn main_full() -> anyhow::Result<()> {
 
     // Initialize price cache
     let price_cache = Arc::new(PriceCache::new());
+    // Track SOL for volatility calculation
+    price_cache.track_token("So11111111111111111111111111111111111111112");
     tracing::info!("Price cache initialized");
 
     // Initialize Jito tip manager
@@ -680,13 +705,14 @@ async fn main_full() -> anyhow::Result<()> {
 
     // Create engine with notification, metrics, WebSocket support, and tip manager
     // (ws_state already created above)
-    let (engine, engine_handle) = engine::Engine::new_with_extras_and_tip_manager(
+    let (engine, engine_handle) = engine::Engine::new_with_extras_tip_manager_and_price_cache(
         config.clone(),
         db_pool.clone(),
         notifier.clone(),
         Some(metrics_state.clone()),
         Some(ws_state.clone()),
         Some(tip_manager.clone()),
+        Some(price_cache.clone()),
     );
 
     // Spawn engine processing loop
@@ -760,11 +786,29 @@ async fn main_full() -> anyhow::Result<()> {
         price_cache: price_cache.clone(),
     });
 
+    // Create SignalAggregator and HeliusClient for signal quality enhancements
+    let signal_aggregator_full = Arc::new(SignalAggregator::new(db_pool.clone()));
+    let helius_client_full = Arc::new(
+        HeliusClient::new(
+            config.monitoring.as_ref()
+                .and_then(|m| m.helius_api_key.clone())
+                .unwrap_or_default(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to create HeliusClient, signal quality will be limited");
+            // Create a dummy client with empty API key (will fail gracefully)
+            HeliusClient::new(String::new()).unwrap()
+        })
+    );
+    
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: engine_handle_for_webhook,
         token_parser,
         circuit_breaker: circuit_breaker.clone(),
+        portfolio_heat: None, // Optional - can be enabled later
+        signal_aggregator: Some(signal_aggregator_full.clone()),
+        helius_client: Some(helius_client_full.clone()),
     });
 
     // Create roster state
@@ -888,6 +932,7 @@ async fn main_full() -> anyhow::Result<()> {
         .route("/config", get(get_config).put(update_config))
         .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
         .route("/metrics/performance", get(get_performance_metrics))
+        .route("/metrics/costs", get(get_cost_metrics))
         .route("/metrics/strategy/{strategy}", get(get_strategy_performance))
         .route("/metrics/reconciliation", post(update_reconciliation_metrics))
         .route("/metrics/secret-rotation", post(update_secret_rotation_metrics))

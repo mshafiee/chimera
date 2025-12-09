@@ -145,6 +145,16 @@ pub struct Trade {
     pub pnl_sol: Option<f64>,
     /// Realized PnL in USD
     pub pnl_usd: Option<f64>,
+    /// Jito tip paid (in SOL)
+    pub jito_tip_sol: Option<f64>,
+    /// DEX fee paid (in SOL)
+    pub dex_fee_sol: Option<f64>,
+    /// Slippage cost (in SOL)
+    pub slippage_cost_sol: Option<f64>,
+    /// Total cost (Jito tip + DEX fee + slippage) in SOL
+    pub total_cost_sol: Option<f64>,
+    /// Net PnL after all costs (in SOL)
+    pub net_pnl_sol: Option<f64>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last update timestamp
@@ -170,6 +180,11 @@ impl Trade {
             error_message: None,
             pnl_sol: None,
             pnl_usd: None,
+            jito_tip_sol: None,
+            dex_fee_sol: None,
+            slippage_cost_sol: None,
+            total_cost_sol: None,
+            net_pnl_sol: None,
             created_at: now,
             updated_at: now,
         }

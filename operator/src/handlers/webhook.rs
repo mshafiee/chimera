@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::db::{self, DbPool};
-use crate::engine::EngineHandle;
+use crate::engine::{EngineHandle, SignalQuality};
 use crate::error::AppError;
 use crate::middleware::TIMESTAMP_HEADER;
 use crate::models::{Signal, SignalPayload, Strategy};
+use crate::monitoring::{HeliusClient, SignalAggregator};
 use crate::token::TokenParser;
 
 /// Webhook request - already validated by HMAC middleware
@@ -53,6 +54,12 @@ pub struct WebhookState {
     pub token_parser: Arc<TokenParser>,
     /// Circuit breaker
     pub circuit_breaker: Arc<CircuitBreaker>,
+    /// Portfolio heat manager (optional)
+    pub portfolio_heat: Option<Arc<crate::engine::PortfolioHeat>>,
+    /// Signal aggregator for consensus detection
+    pub signal_aggregator: Option<Arc<SignalAggregator>>,
+    /// Helius client for token age fetching
+    pub helius_client: Option<Arc<HeliusClient>>,
 }
 
 /// Webhook handler
@@ -178,6 +185,170 @@ pub async fn webhook_handler(
 
     // Create signal
     let signal = Signal::new(payload, timestamp, None);
+
+    // Signal quality check (for BUY signals only, EXIT/SELL don't need quality check)
+    if signal.payload.action == crate::models::Action::Buy {
+        // Get wallet WQS
+        let wallet_wqs = match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
+            Ok(Some(wallet)) => wallet.wqs_score.unwrap_or(50.0),
+            Ok(None) => 50.0,  // Default if wallet not found
+            Err(_) => 50.0,  // Default on error
+        };
+
+        // Check if consensus signal using SignalAggregator
+        let is_consensus = if let Some(ref aggregator) = state.signal_aggregator {
+            if let Some(ref token_address) = signal.payload.token_address {
+                // Add signal to aggregator and check for consensus
+                if let Some(consensus) = aggregator
+                    .add_signal(
+                        &signal.payload.wallet_address,
+                        token_address,
+                        "BUY",
+                        signal.payload.amount_sol,
+                    )
+                    .await
+                {
+                    // Consensus detected (2+ wallets buying same token)
+                    tracing::debug!(
+                        trade_uuid = %signal.trade_uuid,
+                        token_address = token_address,
+                        wallet_count = consensus.wallet_count,
+                        "Consensus signal detected"
+                    );
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Get liquidity from token safety check result (if available)
+        let liquidity_usd = if let Some(ref token_address) = signal.payload.token_address {
+            // Try to get liquidity from token parser cache or metadata
+            // For now, use a conservative estimate - will be checked in slow path
+            match state.token_parser.fast_check(token_address, signal.payload.strategy).await {
+                Ok(result) => result.liquidity_usd.unwrap_or(0.0),
+                Err(_) => 0.0,
+            }
+        } else {
+            0.0
+        };
+
+        // Get token age from Helius client
+        let token_age_hours = if let Some(ref helius_client) = state.helius_client {
+            if let Some(ref token_address) = signal.payload.token_address {
+                match helius_client.get_token_age_hours(token_address).await {
+                    Ok(age) => age,
+                    Err(e) => {
+                        tracing::debug!(
+                            trade_uuid = %signal.trade_uuid,
+                            token_address = token_address,
+                            error = %e,
+                            "Failed to fetch token age from Helius, using None"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Calculate signal quality
+        let quality = SignalQuality::calculate(
+            wallet_wqs,
+            is_consensus,
+            liquidity_usd,
+            token_age_hours,
+        );
+
+        // Reject if quality too low
+        if !quality.should_enter(0.7) {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                quality_score = quality.score,
+                wallet_wqs = wallet_wqs,
+                liquidity_usd = liquidity_usd,
+                "Signal rejected due to low quality"
+            );
+
+            // Log to dead letter queue
+            let _ = db::insert_dead_letter(
+                &state.db,
+                Some(&signal.trade_uuid),
+                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                "SIGNAL_QUALITY_TOO_LOW",
+                Some(&format!("Quality score: {:.2} < 0.7", quality.score)),
+                None,
+            )
+            .await;
+
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    status: WebhookStatus::Rejected,
+                    trade_uuid: signal.trade_uuid,
+                    reason: Some(format!("Signal quality too low: {:.2}", quality.score)),
+                }),
+            ));
+        }
+
+        tracing::debug!(
+            trade_uuid = %signal.trade_uuid,
+            quality_score = quality.score,
+            category = %quality.category(),
+            "Signal quality check passed"
+        );
+    }
+
+    // Check portfolio heat (if enabled)
+    if let Some(ref portfolio_heat) = state.portfolio_heat {
+        match portfolio_heat.can_open_position(signal.payload.amount_sol).await {
+            Ok(false) => {
+                tracing::warn!(
+                    trade_uuid = %signal.trade_uuid,
+                    amount_sol = signal.payload.amount_sol,
+                    "Signal rejected: portfolio heat limit reached"
+                );
+
+                // Log to dead letter queue
+                let _ = db::insert_dead_letter(
+                    &state.db,
+                    Some(&signal.trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "PORTFOLIO_HEAT_LIMIT",
+                    Some("Portfolio heat limit (20%) reached"),
+                    None,
+                )
+                .await;
+
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid: signal.trade_uuid,
+                        reason: Some("Portfolio heat limit reached".to_string()),
+                    }),
+                ));
+            }
+            Ok(true) => {
+                // Heat check passed
+            }
+            Err(e) => {
+                tracing::warn!(
+                    trade_uuid = %signal.trade_uuid,
+                    error = %e,
+                    "Portfolio heat check failed, allowing trade"
+                );
+            }
+        }
+    }
 
     // Insert into database as PENDING
     db::insert_trade(

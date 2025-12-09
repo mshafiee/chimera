@@ -28,3 +28,15 @@ mod token_safety_tests;
 #[path = "integration/roster_merge_tests.rs"]
 mod roster_merge_tests;
 
+#[path = "integration/consensus_detection_tests.rs"]
+mod consensus_detection_tests;
+
+#[path = "integration/helius_token_age_tests.rs"]
+mod helius_token_age_tests;
+
+#[path = "integration/volatility_tests.rs"]
+mod volatility_tests;
+
+#[path = "integration/dex_comparison_tests.rs"]
+mod dex_comparison_tests;
+

@@ -18,6 +18,15 @@ export interface StrategyPerformance {
   total_pnl: number
 }
 
+export interface CostMetrics {
+  avg_jito_tip_sol: number
+  avg_dex_fee_sol: number
+  avg_slippage_cost_sol: number
+  total_costs_30d_sol: number
+  net_profit_30d_sol: number
+  roi_percent: number
+}
+
 export function usePerformanceMetrics() {
   return useQuery({
     queryKey: ['metrics', 'performance'],
@@ -37,6 +46,17 @@ export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: numbe
         `/metrics/strategy/${strategy}`,
         { params: { days: days.toString() } }
       )
+      return data
+    },
+    refetchInterval: 60000, // Refetch every minute
+  })
+}
+
+export function useCostMetrics() {
+  return useQuery({
+    queryKey: ['metrics', 'costs'],
+    queryFn: async () => {
+      const { data } = await apiClient.get<CostMetrics>('/metrics/costs')
       return data
     },
     refetchInterval: 60000, // Refetch every minute

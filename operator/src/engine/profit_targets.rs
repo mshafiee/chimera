@@ -11,6 +11,8 @@ use tokio::sync::RwLock;
 use crate::config::ProfitManagementConfig;
 use crate::db::DbPool;
 use crate::price_cache::PriceCache;
+use crate::engine::momentum_exit::MomentumExit;
+use crate::engine::market_regime::MarketRegimeDetector;
 
 /// Profit target state
 pub struct ProfitTargetManager {
@@ -19,6 +21,10 @@ pub struct ProfitTargetManager {
     price_cache: Arc<PriceCache>,
     /// Active profit targets by trade UUID
     active_targets: Arc<RwLock<std::collections::HashMap<String, ProfitTargetState>>>,
+    /// Momentum exit detector (optional)
+    momentum_exit: Option<Arc<MomentumExit>>,
+    /// Market regime detector (optional)
+    market_regime: Option<Arc<MarketRegimeDetector>>,
 }
 
 /// Profit target state for a position
@@ -58,6 +64,60 @@ impl ProfitTargetManager {
             config,
             price_cache,
             active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            momentum_exit: None,
+            market_regime: None,
+        }
+    }
+
+    /// Create with momentum exit detector
+    pub fn with_momentum_exit(
+        db: DbPool,
+        config: Arc<ProfitManagementConfig>,
+        price_cache: Arc<PriceCache>,
+        momentum_exit: Arc<MomentumExit>,
+    ) -> Self {
+        Self {
+            db,
+            config,
+            price_cache,
+            active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            momentum_exit: Some(momentum_exit),
+            market_regime: None,
+        }
+    }
+
+    /// Create with market regime detector
+    pub fn with_market_regime(
+        db: DbPool,
+        config: Arc<ProfitManagementConfig>,
+        price_cache: Arc<PriceCache>,
+        market_regime: Arc<MarketRegimeDetector>,
+    ) -> Self {
+        Self {
+            db,
+            config,
+            price_cache,
+            active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            momentum_exit: None,
+            market_regime: Some(market_regime),
+        }
+    }
+
+    /// Create with both momentum exit and market regime
+    pub fn with_extras(
+        db: DbPool,
+        config: Arc<ProfitManagementConfig>,
+        price_cache: Arc<PriceCache>,
+        momentum_exit: Option<Arc<MomentumExit>>,
+        market_regime: Option<Arc<MarketRegimeDetector>>,
+    ) -> Self {
+        Self {
+            db,
+            config,
+            price_cache,
+            active_targets: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            momentum_exit,
+            market_regime,
         }
     }
 
@@ -113,8 +173,15 @@ impl ProfitTargetManager {
         let profit_percent = ((current_price - state.entry_price) / state.entry_price) * 100.0;
         state.peak_profit_percent = profit_percent.max(state.peak_profit_percent);
 
+        // Get profit targets (dynamic based on market regime if available)
+        let targets = if let Some(ref regime_detector) = self.market_regime {
+            regime_detector.get_profit_targets()
+        } else {
+            self.config.targets.clone()
+        };
+
         // Check tiered profit targets
-        for target in &self.config.targets {
+        for target in &targets {
             if profit_percent >= *target && !state.targets_hit.contains(target) {
                 state.targets_hit.push(*target);
                 return ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent);
@@ -137,9 +204,44 @@ impl ProfitTargetManager {
             state.trailing_stop_price = current_price * (1.0 - self.config.trailing_stop_distance / 100.0);
         }
 
-        // Check time-based exit (after time_exit_hours if profitable)
+        // Refined time-based exit logic
         if let Ok(elapsed) = state.entry_time.elapsed() {
-            if elapsed.as_secs() >= self.config.time_exit_hours * 3600 && profit_percent > 0.0 {
+            let elapsed_hours = elapsed.as_secs() / 3600;
+            
+            // If profitable >10%: Extend to 48h
+            if profit_percent > 10.0 {
+                if elapsed_hours >= 48 {
+                    return ProfitTargetAction::FullExit;
+                }
+            }
+            // If profitable <5%: Exit after 12h (lock in small profits)
+            else if profit_percent > 0.0 && profit_percent < 5.0 {
+                if elapsed_hours >= 12 {
+                    return ProfitTargetAction::FullExit;
+                }
+            }
+            // If at loss: Exit after 6h (cut losses faster)
+            else if profit_percent < 0.0 {
+                if elapsed_hours >= 6 {
+                    return ProfitTargetAction::FullExit;
+                }
+            }
+            // Default: Original time_exit_hours for moderate profits (5-10%)
+            else if elapsed_hours >= self.config.time_exit_hours as u64 && profit_percent > 0.0 {
+                return ProfitTargetAction::FullExit;
+            }
+        }
+
+        // Check momentum exit (early exit on negative momentum)
+        if let Some(ref momentum) = self.momentum_exit {
+            if momentum
+                .should_exit(trade_uuid, token_address, state.entry_price, state.entry_time)
+                .await
+            {
+                tracing::info!(
+                    trade_uuid = %trade_uuid,
+                    "Momentum exit triggered: negative momentum detected"
+                );
                 return ProfitTargetAction::FullExit;
             }
         }

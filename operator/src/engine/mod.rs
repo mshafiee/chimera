@@ -13,6 +13,14 @@ pub mod profit_targets;
 pub mod stop_loss;
 pub mod mev_protection;
 pub mod position_sizer;
+pub mod signal_quality;
+pub mod kelly_sizer;
+pub mod momentum_exit;
+pub mod dex_comparator;
+pub mod market_regime;
+pub mod portfolio_heat;
+pub mod rpc_cache;
+pub mod volume_cache;
 
 pub use channel::*;
 pub use degradation::*;
@@ -23,6 +31,14 @@ pub use profit_targets::{ProfitTargetManager, ProfitTargetAction};
 pub use stop_loss::{StopLossManager, StopLossAction};
 pub use mev_protection::MevProtection;
 pub use position_sizer::PositionSizer;
+pub use signal_quality::{SignalQuality, SignalFactors, QualityCategory};
+pub use kelly_sizer::{KellySizer, KellyResult};
+pub use momentum_exit::{MomentumExit, MomentumExitAction};
+pub use dex_comparator::{DexComparator, DexComparisonResult};
+pub use market_regime::{MarketRegimeDetector, MarketRegime};
+pub use portfolio_heat::{PortfolioHeat, HeatResult};
+pub use rpc_cache::{RpcCache, CacheStats};
+pub use volume_cache::VolumeCache;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
@@ -30,6 +46,7 @@ use crate::handlers::{WsEvent, WsState, TradeUpdateData};
 use crate::metrics::MetricsState;
 use crate::models::Signal;
 use crate::notifications::CompositeNotifier;
+use crate::price_cache::PriceCache;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -171,8 +188,23 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
         tip_manager: Option<Arc<TipManager>>,
     ) -> (Self, EngineHandle) {
-        Self::new_with_optional_extras_and_tip_manager(
-            config, db, Some(notifier), metrics, ws_state, tip_manager,
+        Self::new_with_extras_tip_manager_and_price_cache(
+            config, db, notifier, metrics, ws_state, tip_manager, None,
+        )
+    }
+
+    /// Create a new engine instance with all optional extras including tip manager and price cache
+    pub fn new_with_extras_tip_manager_and_price_cache(
+        config: AppConfig,
+        db: DbPool,
+        notifier: Arc<CompositeNotifier>,
+        metrics: Option<Arc<MetricsState>>,
+        ws_state: Option<Arc<WsState>>,
+        tip_manager: Option<Arc<TipManager>>,
+        price_cache: Option<Arc<PriceCache>>,
+    ) -> (Self, EngineHandle) {
+        Self::new_with_optional_extras_tip_manager_and_price_cache(
+            config, db, Some(notifier), metrics, ws_state, tip_manager, price_cache,
         )
     }
 
@@ -184,19 +216,21 @@ impl Engine {
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
-        Self::new_with_optional_extras_and_tip_manager(
-            config, db, notifier, metrics, ws_state, None,
+        Self::new_with_optional_extras_tip_manager_and_price_cache(
+            config, db, notifier, metrics, ws_state, None, None,
         )
     }
 
-    /// Internal helper to create engine with optional extras including tip manager
-    fn new_with_optional_extras_and_tip_manager(
+
+    /// Internal helper to create engine with optional extras including tip manager and price cache
+    fn new_with_optional_extras_tip_manager_and_price_cache(
         config: AppConfig,
         db: DbPool,
         notifier: Option<Arc<CompositeNotifier>>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
         tip_manager: Option<Arc<TipManager>>,
+        price_cache: Option<Arc<PriceCache>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
         let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
@@ -214,6 +248,10 @@ impl Engine {
         
         if let Some(ref tip_manager) = tip_manager {
             executor = executor.with_tip_manager(tip_manager.clone());
+        }
+        
+        if let Some(ref price_cache) = price_cache {
+            executor = executor.with_price_cache(price_cache.clone());
         }
 
         let executor_arc = Arc::new(tokio::sync::RwLock::new(executor));

@@ -1634,6 +1634,23 @@ pub struct PerformanceMetricsResponse {
     pub pnl_30d_change_percent: Option<f64>,
 }
 
+/// Cost metrics response
+#[derive(Debug, Serialize)]
+pub struct CostMetricsResponse {
+    /// Average Jito tip per trade (SOL)
+    pub avg_jito_tip_sol: f64,
+    /// Average DEX fee per trade (SOL)
+    pub avg_dex_fee_sol: f64,
+    /// Average slippage cost per trade (SOL)
+    pub avg_slippage_cost_sol: f64,
+    /// Total costs in last 30 days (SOL)
+    pub total_costs_30d_sol: f64,
+    /// Net profit in last 30 days (SOL) - after all costs
+    pub net_profit_30d_sol: f64,
+    /// ROI percentage (net profit / total costs * 100)
+    pub roi_percent: f64,
+}
+
 /// Strategy performance response
 #[derive(Debug, Serialize)]
 pub struct StrategyPerformanceResponse {
@@ -1664,6 +1681,87 @@ pub async fn get_performance_metrics(
         pnl_24h_change_percent: None,
         pnl_7d_change_percent: None,
         pnl_30d_change_percent: None,
+    }))
+}
+
+/// Get cost metrics (30-day cost breakdown)
+///
+/// GET /api/v1/metrics/costs
+/// Requires: readonly+ role
+pub async fn get_cost_metrics(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<CostMetricsResponse>, AppError> {
+    // Query cost metrics from trades table
+    let from_date = chrono::Utc::now() - chrono::Duration::days(30);
+    let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+    // Get all trades from last 30 days
+    let trades = db::get_trades(
+        &state.db,
+        Some(&from_date_str),
+        None,
+        None, // All statuses
+        None, // All strategies
+        None, // All wallets
+        None, // No limit
+        None, // No offset
+    )
+    .await?;
+
+    // Calculate averages and totals
+    let mut total_jito_tip = 0.0;
+    let mut total_dex_fee = 0.0;
+    let mut total_slippage = 0.0;
+    let mut total_costs = 0.0;
+    let mut total_net_pnl = 0.0;
+    let mut trade_count = 0;
+
+    for trade in &trades {
+        if let Some(cost) = trade.total_cost_sol {
+            if cost > 0.0 {
+                trade_count += 1;
+                total_jito_tip += trade.jito_tip_sol.unwrap_or(0.0);
+                total_dex_fee += trade.dex_fee_sol.unwrap_or(0.0);
+                total_slippage += trade.slippage_cost_sol.unwrap_or(0.0);
+                total_costs += cost;
+            }
+        }
+        if let Some(net_pnl) = trade.net_pnl_sol {
+            total_net_pnl += net_pnl;
+        }
+    }
+
+    let avg_jito_tip = if trade_count > 0 {
+        total_jito_tip / trade_count as f64
+    } else {
+        0.0
+    };
+
+    let avg_dex_fee = if trade_count > 0 {
+        total_dex_fee / trade_count as f64
+    } else {
+        0.0
+    };
+
+    let avg_slippage = if trade_count > 0 {
+        total_slippage / trade_count as f64
+    } else {
+        0.0
+    };
+
+    let roi_percent = if total_costs > 0.0 {
+        (total_net_pnl / total_costs) * 100.0
+    } else {
+        0.0
+    };
+
+    Ok(Json(CostMetricsResponse {
+        avg_jito_tip_sol: avg_jito_tip,
+        avg_dex_fee_sol: avg_dex_fee,
+        avg_slippage_cost_sol: avg_slippage,
+        total_costs_30d_sol: total_costs,
+        net_profit_30d_sol: total_net_pnl,
+        roi_percent,
     }))
 }
 

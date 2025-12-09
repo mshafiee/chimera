@@ -15,7 +15,7 @@ use axum::{
     Router,
 };
 use prometheus::{
-    Encoder, Histogram, HistogramOpts, HistogramVec, IntGauge, Opts, Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntGauge, Opts, Registry, TextEncoder,
 };
 use std::sync::Arc;
 
@@ -47,6 +47,12 @@ pub struct MetricsState {
     pub secret_rotation_last_success: IntGauge,
     /// Secret rotation days until due (gauge)
     pub secret_rotation_days_until_due: IntGauge,
+    /// Average cost per trade (SOL) - histogram
+    pub cost_per_trade: HistogramVec,
+    /// Signal quality distribution (histogram)
+    pub signal_quality_score: Histogram,
+    /// Portfolio heat percentage (gauge)
+    pub portfolio_heat_percent: prometheus::Gauge,
 }
 
 impl MetricsState {
@@ -177,6 +183,39 @@ impl MetricsState {
             .register(Box::new(secret_rotation_days_until_due.clone()))
             .expect("Failed to register secret_rotation_days_until_due");
 
+        // Cost per trade histogram (by cost type)
+        let cost_per_trade = HistogramVec::new(
+            HistogramOpts::new(
+                "chimera_cost_per_trade_sol",
+                "Cost per trade in SOL",
+            ),
+            &["cost_type"], // "jito_tip", "dex_fee", "slippage", "total"
+        )
+        .expect("Failed to create cost_per_trade histogram");
+        registry
+            .register(Box::new(cost_per_trade.clone()))
+            .expect("Failed to register cost_per_trade");
+
+        // Signal quality score histogram
+        let signal_quality_score = Histogram::with_opts(HistogramOpts::new(
+            "chimera_signal_quality_score",
+            "Signal quality score distribution (0.0-1.0)",
+        ))
+        .expect("Failed to create signal_quality_score histogram");
+        registry
+            .register(Box::new(signal_quality_score.clone()))
+            .expect("Failed to register signal_quality_score");
+
+        // Portfolio heat percentage gauge
+        let portfolio_heat_percent = Gauge::with_opts(Opts::new(
+            "chimera_portfolio_heat_percent",
+            "Current portfolio heat as percentage of capital",
+        ))
+        .expect("Failed to create portfolio_heat_percent gauge");
+        registry
+            .register(Box::new(portfolio_heat_percent.clone()))
+            .expect("Failed to register portfolio_heat_percent");
+
         Self {
             registry,
             queue_depth,
@@ -191,6 +230,9 @@ impl MetricsState {
             reconciliation_unresolved,
             secret_rotation_last_success,
             secret_rotation_days_until_due,
+            cost_per_trade,
+            signal_quality_score,
+            portfolio_heat_percent,
         }
     }
 

@@ -186,6 +186,55 @@ pub async fn update_trade_status(
     Ok(())
 }
 
+/// Update trade costs
+pub async fn update_trade_costs(
+    pool: &DbPool,
+    trade_uuid: &str,
+    jito_tip_sol: f64,
+    dex_fee_sol: f64,
+    slippage_cost_sol: f64,
+) -> AppResult<()> {
+    let total_cost_sol = jito_tip_sol + dex_fee_sol + slippage_cost_sol;
+    
+    sqlx::query(
+        r#"
+        UPDATE trades 
+        SET jito_tip_sol = ?, dex_fee_sol = ?, slippage_cost_sol = ?, total_cost_sol = ?
+        WHERE trade_uuid = ?
+        "#,
+    )
+    .bind(jito_tip_sol)
+    .bind(dex_fee_sol)
+    .bind(slippage_cost_sol)
+    .bind(total_cost_sol)
+    .bind(trade_uuid)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Update trade net PnL (after costs)
+pub async fn update_trade_net_pnl(
+    pool: &DbPool,
+    trade_uuid: &str,
+    net_pnl_sol: f64,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE trades 
+        SET net_pnl_sol = ?
+        WHERE trade_uuid = ?
+        "#,
+    )
+    .bind(net_pnl_sol)
+    .bind(trade_uuid)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 /// Insert into dead letter queue
 pub async fn insert_dead_letter(
     pool: &DbPool,
@@ -1166,6 +1215,11 @@ pub struct TradeDetail {
     pub error_message: Option<String>,
     pub pnl_sol: Option<f64>,
     pub pnl_usd: Option<f64>,
+    pub jito_tip_sol: Option<f64>,
+    pub dex_fee_sol: Option<f64>,
+    pub slippage_cost_sol: Option<f64>,
+    pub total_cost_sol: Option<f64>,
+    pub net_pnl_sol: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1186,7 +1240,8 @@ pub async fn get_trades(
         r#"
         SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
                side, amount_sol, price_at_signal, tx_signature, status, retry_count,
-               error_message, pnl_sol, pnl_usd, created_at, updated_at
+               error_message, pnl_sol, pnl_usd, jito_tip_sol, dex_fee_sol, slippage_cost_sol,
+               total_cost_sol, net_pnl_sol, created_at, updated_at
         FROM trades
         WHERE 1=1
         "#
@@ -1292,12 +1347,12 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
     let mut csv = String::new();
     
     // Header
-    csv.push_str("id,trade_uuid,wallet_address,token_address,token_symbol,strategy,side,amount_sol,price_at_signal,tx_signature,status,pnl_sol,pnl_usd,created_at\n");
+    csv.push_str("id,trade_uuid,wallet_address,token_address,token_symbol,strategy,side,amount_sol,price_at_signal,tx_signature,status,pnl_sol,pnl_usd,jito_tip_sol,dex_fee_sol,slippage_cost_sol,total_cost_sol,net_pnl_sol,created_at\n");
     
     // Data rows
     for trade in trades {
         csv.push_str(&format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
             trade.id,
             trade.trade_uuid,
             trade.wallet_address,
@@ -1311,6 +1366,11 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.status,
             trade.pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade.pnl_usd.map(|p| p.to_string()).unwrap_or_default(),
+            trade.jito_tip_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade.dex_fee_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade.slippage_cost_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade.total_cost_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade.net_pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade.created_at,
         ));
     }

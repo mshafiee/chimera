@@ -33,9 +33,10 @@ impl MevProtection {
             return self.config.exit_tip_sol;
         }
 
-        // Consensus signals get medium priority
+        // Consensus signals get higher priority (increased tip for consensus)
         if is_consensus {
-            return self.config.consensus_tip_sol;
+            // Use higher tip for consensus (1.5x the standard consensus tip)
+            return self.config.consensus_tip_sol * 1.5;
         }
 
         // Standard signals get low priority
