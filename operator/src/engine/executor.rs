@@ -19,6 +19,13 @@ use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 
+/// Maximum transaction size in bytes (raw, before base64 encoding)
+/// Solana's limit is 1232 bytes for raw transaction size
+const MAX_TX_SIZE_RAW: usize = 1232;
+/// Maximum transaction size in bytes (base64 encoded)
+/// Solana's limit is 1644 bytes for encoded transaction size
+const MAX_TX_SIZE_ENCODED: usize = 1644;
+
 /// RPC mode for trade execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcMode {
@@ -453,6 +460,16 @@ impl Executor {
             "Executing trade via Jito bundle"
         );
 
+        // Check if devnet simulation mode is enabled
+        if self.config.jupiter.devnet_simulation_mode {
+            tracing::info!(
+                trade_uuid = %signal.trade_uuid,
+                "Devnet simulation mode: skipping RPC submission, returning simulated signature"
+            );
+            // Return a simulated signature (format: "simulated_<uuid>")
+            return Ok(format!("simulated_{}", signal.trade_uuid));
+        }
+
         // Skip RPC health check - proceed with transaction
         tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Proceeding with Jito trade execution");
 
@@ -632,6 +649,16 @@ impl Executor {
             "Executing trade via standard TPU"
         );
 
+        // Check if devnet simulation mode is enabled
+        if self.config.jupiter.devnet_simulation_mode {
+            tracing::info!(
+                trade_uuid = %signal.trade_uuid,
+                "Devnet simulation mode: skipping RPC submission, returning simulated signature"
+            );
+            // Return a simulated signature (format: "simulated_<uuid>")
+            return Ok(format!("simulated_{}", signal.trade_uuid));
+        }
+
         // Skip RPC health check for devnet - just proceed with transaction
         // The actual transaction submission will fail if RPC is unavailable
         tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Proceeding with trade execution");
@@ -662,6 +689,22 @@ impl Executor {
         Ok(signature)
     }
 
+    /// Validate transaction size before submission
+    fn validate_transaction_size(&self, tx_bytes: &[u8]) -> Result<(), ExecutorError> {
+        if tx_bytes.len() > MAX_TX_SIZE_RAW {
+            tracing::error!(
+                actual_size = tx_bytes.len(),
+                max_size = MAX_TX_SIZE_RAW,
+                "Transaction size exceeds Solana limit"
+            );
+            return Err(ExecutorError::TransactionTooLarge {
+                actual: tx_bytes.len(),
+                max: MAX_TX_SIZE_RAW,
+            });
+        }
+        Ok(())
+    }
+
     /// Submit a signed transaction to the RPC
     async fn submit_transaction(
         &self,
@@ -670,6 +713,11 @@ impl Executor {
     ) -> Result<String, ExecutorError> {
         // Ensure transaction is signed
         // Note: TransactionBuilder should have already signed it, but we verify here
+        
+        // Validate transaction size before submission
+        let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
+        self.validate_transaction_size(&tx_bytes)?;
         
         // Send transaction via RPC
         let signature = self
@@ -694,6 +742,9 @@ impl Executor {
         wallet_keypair: &solana_sdk::signature::Keypair,
     ) -> Result<String, ExecutorError> {
         tracing::debug!("Starting VersionedTransaction signing and submission");
+        
+        // Validate transaction size before processing
+        self.validate_transaction_size(transaction_bytes)?;
         
         // Parse the versioned transaction using legacy bincode format for Solana compatibility
         let versioned_tx: VersionedTransaction = 
@@ -787,6 +838,10 @@ impl Executor {
                 tracing::error!(error = %e, "Failed to serialize signed transaction");
                 ExecutorError::TransactionFailed(format!("Failed to serialize signed transaction: {}", e))
             })?;
+        
+        // Validate signed transaction size before submission
+        self.validate_transaction_size(&signed_bytes)?;
+        
         let tx_base64 = BASE64.encode(&signed_bytes);
         
         tracing::debug!(tx_base64_len = tx_base64.len(), "Serialized transaction, submitting to RPC");
@@ -999,6 +1054,10 @@ pub enum ExecutorError {
     /// Circuit breaker tripped
     #[error("Circuit breaker tripped: {0}")]
     CircuitBreakerTripped(String),
+
+    /// Transaction size exceeds Solana limits
+    #[error("Transaction too large: {actual} bytes (max: {max} bytes)")]
+    TransactionTooLarge { actual: usize, max: usize },
 }
 
 #[cfg(test)]

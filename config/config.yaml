@@ -46,6 +46,10 @@ jito:
   tip_percentile: 50
   tip_percent_max: 0.10
 
+jupiter:
+  api_url: "https://lite-api.jup.ag/swap/v1"
+  # devnet_simulation_mode: Set via CHIMERA_JUPITER__DEVNET_SIMULATION_MODE env var
+
 queue:
   capacity: 1000
   load_shed_threshold_percent: 80

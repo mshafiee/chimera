@@ -61,11 +61,23 @@ impl TransactionBuilder {
     ///
     /// This uses Jupiter Swap API which returns a pre-built transaction
     /// that just needs to be signed.
+    /// In devnet simulation mode, returns a simulated transaction without calling Jupiter.
     pub async fn build_swap_transaction(
         &self,
         signal: &Signal,
         wallet_keypair: &Keypair,
     ) -> AppResult<BuiltTransaction> {
+        // Check if devnet simulation mode is enabled
+        if self.config.jupiter.devnet_simulation_mode {
+            tracing::info!(
+                token = %signal.token_address(),
+                action = ?signal.payload.action,
+                amount_sol = signal.payload.amount_sol,
+                "Devnet simulation mode: skipping Jupiter API, creating simulated transaction"
+            );
+            return self.build_simulated_transaction(signal, wallet_keypair).await;
+        }
+
         // Determine input and output mints
         let (input_mint, output_mint, amount) = match signal.payload.action {
             Action::Buy => {
@@ -153,6 +165,31 @@ impl TransactionBuilder {
         }
     }
 
+    /// Build a simulated transaction for devnet testing
+    /// This creates a minimal transaction that won't be submitted to RPC
+    async fn build_simulated_transaction(
+        &self,
+        signal: &Signal,
+        wallet_keypair: &Keypair,
+    ) -> AppResult<BuiltTransaction> {
+        // Get recent blockhash (still needed for transaction structure)
+        let blockhash = self
+            .rpc_client
+            .get_latest_blockhash()
+            .await
+            .map_err(|e| crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e)))?;
+
+        // Create a minimal empty transaction for simulation
+        // This transaction will be marked as simulated and won't be submitted to RPC
+        let empty_tx = Transaction::new_with_payer(&[], Some(&wallet_keypair.pubkey()));
+        
+        // Return as Legacy transaction with the blockhash
+        // The executor will detect this is a simulated transaction and skip RPC submission
+        Ok(BuiltTransaction::Legacy {
+            transaction: empty_tx,
+            blockhash,
+        })
+    }
 
     /// Get swap transaction from Jupiter Swap API
     async fn get_jupiter_swap(
@@ -166,11 +203,11 @@ impl TransactionBuilder {
         let quote = self.get_jupiter_quote(input_mint, output_mint, amount).await?;
 
         // Then get the swap transaction
-        // Use the new Jupiter Lite API for swap
+        // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
         // Note: Jupiter lite API may ignore asLegacyTransaction and still return V0 transactions
         // V0 transactions use Address Lookup Tables (ALTs) which may not exist on devnet
         // If ALT errors occur, consider using mainnet RPC or a different Jupiter endpoint
-        let url = "https://lite-api.jup.ag/swap/v1/swap";
+        let url = format!("{}/swap", self.config.jupiter.api_url);
         let payload = serde_json::json!({
             "quoteResponse": quote,  // Pass the full quote response
             "userPublicKey": user_public_key.to_string(),
@@ -202,11 +239,11 @@ impl TransactionBuilder {
         output_mint: Pubkey,
         amount: u64,
     ) -> AppResult<JupiterQuote> {
-        // Use the new Jupiter Lite API (free, no auth required)
+        // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
         // Old quote-api.jup.ag/v6 is deprecated
         let url = format!(
-            "https://lite-api.jup.ag/swap/v1/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
-            input_mint, output_mint, amount
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
+            self.config.jupiter.api_url, input_mint, output_mint, amount
         );
 
         tracing::debug!(url = %url, "Requesting Jupiter quote");

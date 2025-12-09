@@ -50,8 +50,28 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("TEST 4: Adding engine + recovery manager tasks");
     
     // Load configuration
-    let config = load_config()?;
+    let mut config = load_config()?;
+    
+    // Explicitly override Jupiter simulation mode from environment if set
+    // This ensures the env var takes precedence over YAML/config defaults
+    if let Ok(sim_mode) = std::env::var("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE") {
+        let sim_mode_bool = sim_mode.to_lowercase() == "true" || sim_mode == "1";
+        if sim_mode_bool != config.jupiter.devnet_simulation_mode {
+            tracing::info!(
+                old_value = config.jupiter.devnet_simulation_mode,
+                new_value = sim_mode_bool,
+                "Overriding Jupiter simulation mode from environment variable"
+            );
+            config.jupiter.devnet_simulation_mode = sim_mode_bool;
+        }
+    }
+    
     tracing::info!(host = %config.server.host, port = config.server.port, "Configuration loaded");
+    tracing::info!(
+        jupiter_simulation_mode = config.jupiter.devnet_simulation_mode,
+        jupiter_api_url = %config.jupiter.api_url,
+        "Jupiter configuration loaded"
+    );
     
     // Initialize database
     let db_pool = db::init_pool(&config.database).await?;
@@ -234,11 +254,23 @@ async fn main() -> anyhow::Result<()> {
         .with_state(webhook_state.clone());
     
     // Build roster routes
-    let roster_routes = Router::new()
-        .route("/roster/merge", post(roster_merge))
-        .route("/roster/validate", get(roster_validate))
-        .with_state(roster_state.clone())
-        .layer(axum_middleware::from_fn_with_state(auth_state.clone(), bearer_auth));
+    // In devnet, allow roster merge without auth for easier testing
+    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
+    let is_devnet = chimera_env == "devnet" || config.database.path.to_string_lossy().contains("devnet");
+    
+    let roster_routes = if is_devnet {
+        tracing::info!("Devnet mode: roster merge endpoint does not require authentication");
+        Router::new()
+            .route("/roster/merge", post(roster_merge))
+            .route("/roster/validate", get(roster_validate))
+            .with_state(roster_state.clone())
+    } else {
+        Router::new()
+            .route("/roster/merge", post(roster_merge))
+            .route("/roster/validate", get(roster_validate))
+            .with_state(roster_state.clone())
+            .layer(axum_middleware::from_fn_with_state(auth_state.clone(), bearer_auth))
+    };
     
     // Build auth routes
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());

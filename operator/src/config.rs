@@ -24,6 +24,9 @@ pub struct AppConfig {
     pub strategy: StrategyConfig,
     /// Jito tip configuration
     pub jito: JitoConfig,
+    /// Jupiter API configuration
+    #[serde(default)]
+    pub jupiter: JupiterConfig,
     /// Queue configuration
     pub queue: QueueConfig,
     /// Token safety configuration
@@ -293,6 +296,21 @@ fn default_tip_percent_max() -> f64 {
     0.10
 }
 
+/// Jupiter API configuration
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct JupiterConfig {
+    /// Jupiter API base URL
+    #[serde(default = "default_jupiter_api_url")]
+    pub api_url: String,
+    /// Enable devnet simulation mode (skip Jupiter API, simulate trades)
+    #[serde(default)]
+    pub devnet_simulation_mode: bool,
+}
+
+fn default_jupiter_api_url() -> String {
+    "https://lite-api.jup.ag/swap/v1".to_string()
+}
+
 /// Queue configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueueConfig {
@@ -518,15 +536,17 @@ impl AppConfig {
             .set_default("security.webhook_burst_size", 150)?
             .set_default("queue.capacity", 1000)?
             .set_default("queue.load_shed_threshold_percent", 80)?
-            // Load from config files
+            // Load from config files (lower priority)
             .add_source(File::with_name("config").required(false))
             .add_source(File::with_name("config/config").required(false))
-            // Override with environment variables
+            // Override with environment variables (highest priority - loaded last)
             // CHIMERA_SERVER__PORT=8081 -> server.port = 8081
+            // CHIMERA_JUPITER__DEVNET_SIMULATION_MODE=true -> jupiter.devnet_simulation_mode = true
             .add_source(
                 Environment::with_prefix("CHIMERA")
                     .separator("__")
-                    .try_parsing(true),
+                    .try_parsing(true)
+                    .list_separator(","),
             )
             .build()?;
 
