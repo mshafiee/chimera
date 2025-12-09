@@ -14,6 +14,7 @@ interface TradesParams {
   to?: string
   status?: string
   strategy?: string
+  wallet_address?: string
   limit?: number
   offset?: number
 }
@@ -27,6 +28,7 @@ export function useTrades(params: TradesParams = {}) {
       if (params.to) searchParams.set('to', params.to)
       if (params.status) searchParams.set('status', params.status)
       if (params.strategy) searchParams.set('strategy', params.strategy)
+      if (params.wallet_address) searchParams.set('wallet_address', params.wallet_address)
       if (params.limit) searchParams.set('limit', params.limit.toString())
       if (params.offset) searchParams.set('offset', params.offset.toString())
       
@@ -45,6 +47,7 @@ export async function exportTrades(
   if (params.to) searchParams.set('to', params.to)
   if (params.status) searchParams.set('status', params.status)
   if (params.strategy) searchParams.set('strategy', params.strategy)
+  if (params.wallet_address) searchParams.set('wallet_address', params.wallet_address)
   searchParams.set('format', format)
 
   const response = await apiClient.get('/trades/export', {

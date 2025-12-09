@@ -1017,6 +1017,7 @@ pub async fn get_trades(
     to_date: Option<&str>,
     status_filter: Option<&str>,
     strategy_filter: Option<&str>,
+    wallet_address_filter: Option<&str>,
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> AppResult<Vec<TradeDetail>> {
@@ -1053,6 +1054,11 @@ pub async fn get_trades(
         bindings.push(strategy.to_string());
     }
 
+    if let Some(wallet_address) = wallet_address_filter {
+        query.push_str(" AND wallet_address = ?");
+        bindings.push(wallet_address.to_string());
+    }
+
     query.push_str(" ORDER BY created_at DESC");
 
     if let Some(lim) = limit {
@@ -1081,6 +1087,7 @@ pub async fn count_trades(
     to_date: Option<&str>,
     status_filter: Option<&str>,
     strategy_filter: Option<&str>,
+    wallet_address_filter: Option<&str>,
 ) -> AppResult<i64> {
     let mut query = String::from("SELECT COUNT(*) FROM trades WHERE 1=1");
     let mut bindings: Vec<String> = Vec::new();
@@ -1103,6 +1110,11 @@ pub async fn count_trades(
     if let Some(strategy) = strategy_filter {
         query.push_str(" AND strategy = ?");
         bindings.push(strategy.to_string());
+    }
+
+    if let Some(wallet_address) = wallet_address_filter {
+        query.push_str(" AND wallet_address = ?");
+        bindings.push(wallet_address.to_string());
     }
 
     let mut q = sqlx::query_as::<_, (i64,)>(&query);

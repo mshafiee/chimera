@@ -534,6 +534,8 @@ pub struct TradesQuery {
     pub status: Option<String>,
     /// Filter by strategy
     pub strategy: Option<String>,
+    /// Filter by wallet address
+    pub wallet_address: Option<String>,
     /// Limit number of results
     pub limit: Option<i64>,
     /// Offset for pagination
@@ -569,6 +571,7 @@ pub async fn list_trades(
         params.to.as_deref(),
         params.status.as_deref(),
         params.strategy.as_deref(),
+        params.wallet_address.as_deref(),
         Some(limit),
         Some(offset),
     )
@@ -580,6 +583,7 @@ pub async fn list_trades(
         params.to.as_deref(),
         params.status.as_deref(),
         params.strategy.as_deref(),
+        params.wallet_address.as_deref(),
     )
     .await?;
 
@@ -606,6 +610,7 @@ pub async fn export_trades(
         params.to.as_deref(),
         params.status.as_deref(),
         params.strategy.as_deref(),
+        params.wallet_address.as_deref(),
         None, // No limit
         None, // No offset
     )
@@ -750,6 +755,7 @@ pub async fn get_strategy_performance(
         None,
         Some("CLOSED"),
         Some(&strategy),
+        None, // No wallet_address filter for strategy performance
         None,
         None,
     )

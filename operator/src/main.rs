@@ -997,6 +997,7 @@ async fn generate_daily_summary(db: &db::DbPool) -> anyhow::Result<(f64, u32, f6
         Some(&yesterday_end),
         Some("CLOSED"),
         None,
+        None, // No wallet_address filter for daily summary
         None,
         None,
     )
