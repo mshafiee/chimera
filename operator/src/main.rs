@@ -835,14 +835,26 @@ async fn main_full() -> anyhow::Result<()> {
         .with_state(webhook_state.clone());
 
     // Build roster routes
-    let roster_routes = Router::new()
-        .route("/roster/merge", post(roster_merge))
-        .route("/roster/validate", get(roster_validate))
-        .with_state(roster_state.clone())
-        .layer(axum_middleware::from_fn_with_state(
-            auth_state.clone(),
-            bearer_auth,
-        ));
+    // In devnet, allow roster merge without auth for easier testing
+    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
+    let is_devnet = chimera_env == "devnet" || config.database.path.to_string_lossy().contains("devnet");
+    
+    let roster_routes = if is_devnet {
+        tracing::info!("Devnet mode: roster merge endpoint does not require authentication");
+        Router::new()
+            .route("/roster/merge", post(roster_merge))
+            .route("/roster/validate", get(roster_validate))
+            .with_state(roster_state.clone())
+    } else {
+        Router::new()
+            .route("/roster/merge", post(roster_merge))
+            .route("/roster/validate", get(roster_validate))
+            .with_state(roster_state.clone())
+            .layer(axum_middleware::from_fn_with_state(
+                auth_state.clone(),
+                bearer_auth,
+            ))
+    };
 
     // Build auth routes
     let jwt_secret = std::env::var("JWT_SECRET")

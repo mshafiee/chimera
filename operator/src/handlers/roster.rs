@@ -45,8 +45,8 @@ pub struct RosterState {
 ///
 /// POST /api/v1/roster/merge
 ///
-/// Requires admin authentication (to be implemented via middleware).
 /// Merges wallets from roster_new.db into the main database.
+/// In devnet, this endpoint can be called without authentication for easier testing.
 pub async fn roster_merge(
     State(state): State<Arc<RosterState>>,
     Json(request): Json<MergeRequest>,
