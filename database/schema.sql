@@ -215,6 +215,94 @@ CREATE INDEX IF NOT EXISTS idx_historical_liquidity_timestamp
     ON historical_liquidity(timestamp DESC);
 
 -- =============================================================================
+-- MONITORING TABLES
+-- =============================================================================
+
+-- Wallet monitoring: Track webhook subscriptions and polling state
+CREATE TABLE IF NOT EXISTS wallet_monitoring (
+    wallet_address TEXT PRIMARY KEY,
+    helius_webhook_id TEXT,
+    rpc_polling_active INTEGER DEFAULT 0,
+    last_transaction_signature TEXT,
+    last_monitored_at TIMESTAMP,
+    monitoring_enabled INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_monitoring_enabled 
+    ON wallet_monitoring(monitoring_enabled) WHERE monitoring_enabled = 1;
+
+-- Exit targets: Position-level profit targets and stops
+CREATE TABLE IF NOT EXISTS exit_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT NOT NULL UNIQUE,
+    entry_price REAL NOT NULL,
+    entry_amount_sol REAL NOT NULL,
+    profit_targets TEXT,  -- JSON array of target percentages
+    targets_hit TEXT,     -- JSON array of hit targets
+    trailing_stop_active INTEGER DEFAULT 0,
+    trailing_stop_price REAL,
+    peak_price REAL,
+    peak_profit_percent REAL,
+    stop_loss_price REAL,
+    entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid)
+);
+
+CREATE INDEX IF NOT EXISTS idx_exit_targets_trade ON exit_targets(trade_uuid);
+
+-- Signal aggregation: Multi-wallet signal tracking
+CREATE TABLE IF NOT EXISTS signal_aggregation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    wallet_address TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('BUY', 'SELL')),
+    amount_sol REAL NOT NULL,
+    signature TEXT,
+    is_consensus INTEGER DEFAULT 0,
+    consensus_wallet_count INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(token_address, wallet_address, signature)
+);
+
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time 
+    ON signal_aggregation(token_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus 
+    ON signal_aggregation(is_consensus) WHERE is_consensus = 1;
+
+-- Wallet copy performance: Per-wallet copy trading metrics
+CREATE TABLE IF NOT EXISTS wallet_copy_performance (
+    wallet_address TEXT PRIMARY KEY,
+    copy_pnl_7d REAL DEFAULT 0.0,
+    copy_pnl_30d REAL DEFAULT 0.0,
+    signal_success_rate REAL DEFAULT 0.0,
+    avg_return_per_trade REAL DEFAULT 0.0,
+    total_trades INTEGER DEFAULT 0,
+    winning_trades INTEGER DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_copy_performance_pnl 
+    ON wallet_copy_performance(copy_pnl_7d DESC);
+
+-- Rate limit metrics: Credit usage and rate tracking
+CREATE TABLE IF NOT EXISTS rate_limit_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_type TEXT NOT NULL,  -- 'webhook', 'rpc', 'total'
+    requests_per_second REAL,
+    total_credits_used INTEGER,
+    rate_limit_hits INTEGER DEFAULT 0,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limit_metrics_time 
+    ON rate_limit_metrics(timestamp DESC);
+
+-- =============================================================================
 -- TRIGGERS
 -- =============================================================================
 
@@ -237,4 +325,18 @@ CREATE TRIGGER IF NOT EXISTS positions_updated_at
     AFTER UPDATE ON positions
 BEGIN
     UPDATE positions SET last_updated = CURRENT_TIMESTAMP WHERE id = NEW.id;
+END;
+
+-- Auto-update updated_at on wallet_monitoring
+CREATE TRIGGER IF NOT EXISTS wallet_monitoring_updated_at
+    AFTER UPDATE ON wallet_monitoring
+BEGIN
+    UPDATE wallet_monitoring SET updated_at = CURRENT_TIMESTAMP WHERE wallet_address = NEW.wallet_address;
+END;
+
+-- Auto-update last_updated on exit_targets
+CREATE TRIGGER IF NOT EXISTS exit_targets_updated_at
+    AFTER UPDATE ON exit_targets
+BEGIN
+    UPDATE exit_targets SET last_updated = CURRENT_TIMESTAMP WHERE id = NEW.id;
 END;

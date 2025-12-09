@@ -93,3 +93,41 @@ notifications:
     enabled: true
     hour_utc: 20  # 8 PM UTC
     minute: 0
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  helius_api_key: "609cb910-17a5-4a76-9d1b-2ca9c42f759e"
+  helius_webhook_url: "http://operator:8080/api/v1/monitoring/helius"
+  webhook_registration_batch_size: 10
+  webhook_registration_delay_ms: 200
+  webhook_processing_rate_limit: 45
+  rpc_polling_enabled: true
+  rpc_poll_interval_secs: 8
+  rpc_poll_batch_size: 6
+  rpc_poll_rate_limit: 40
+  max_active_wallets: 20
+
+# Profit management configuration
+profit_management:
+  targets: [25, 50, 100, 200]  # Percentage targets
+  tiered_exit_percent: 25       # Sell 25% at each target
+  trailing_stop_activation: 50  # Activate after +50%
+  trailing_stop_distance: 20    # -20% from peak
+  hard_stop_loss: 15            # -15% max loss
+  time_exit_hours: 24           # Exit profitable positions after 24h
+
+# Position sizing configuration
+position_sizing:
+  base_size_sol: 0.1
+  max_size_sol: 2.0
+  min_size_sol: 0.02
+  consensus_multiplier: 1.5
+  max_concurrent_positions: 5
+
+# MEV protection configuration
+mev_protection:
+  always_use_jito: true
+  exit_tip_sol: 0.007
+  consensus_tip_sol: 0.003
+  standard_tip_sol: 0.0015

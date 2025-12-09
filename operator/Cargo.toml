@@ -65,6 +65,9 @@ prometheus = "0.14.0"
 # PDF generation
 printpdf = "0.8.2"
 
+# Random number generation
+rand = "0.8"
+
 [dev-dependencies]
 # Testing utilities
 axum-test = "18.4.1"

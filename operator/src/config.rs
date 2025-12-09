@@ -35,6 +35,18 @@ pub struct AppConfig {
     /// Notification configuration
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    /// Monitoring configuration
+    #[serde(default)]
+    pub monitoring: Option<MonitoringConfig>,
+    /// Profit management configuration
+    #[serde(default)]
+    pub profit_management: ProfitManagementConfig,
+    /// Position sizing configuration
+    #[serde(default)]
+    pub position_sizing: PositionSizingConfig,
+    /// MEV protection configuration
+    #[serde(default)]
+    pub mev_protection: MevProtectionConfig,
 }
 
 /// HTTP server configuration
@@ -470,10 +482,6 @@ pub struct NotificationRulesConfig {
     pub rpc_fallback: bool,
 }
 
-fn default_true() -> bool {
-    true
-}
-
 impl Default for NotificationRulesConfig {
     fn default() -> Self {
         Self {
@@ -511,6 +519,250 @@ impl Default for DailySummaryConfig {
             enabled: true,
             hour_utc: default_summary_hour(),
             minute: 0,
+        }
+    }
+}
+
+/// Monitoring configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct MonitoringConfig {
+    /// Enable automatic monitoring
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Helius API key
+    #[serde(default)]
+    pub helius_api_key: Option<String>,
+    /// Webhook URL for Helius to send transactions
+    #[serde(default)]
+    pub helius_webhook_url: Option<String>,
+    /// Batch size for webhook registration
+    #[serde(default = "default_webhook_batch_size")]
+    pub webhook_registration_batch_size: usize,
+    /// Delay between webhook registration batches (ms)
+    #[serde(default = "default_webhook_delay")]
+    pub webhook_registration_delay_ms: u64,
+    /// Rate limit for webhook processing (req/sec)
+    #[serde(default = "default_monitoring_webhook_rate_limit")]
+    pub webhook_processing_rate_limit: u32,
+    /// Enable RPC polling fallback
+    #[serde(default = "default_true")]
+    pub rpc_polling_enabled: bool,
+    /// RPC poll interval in seconds
+    #[serde(default = "default_rpc_poll_interval")]
+    pub rpc_poll_interval_secs: u64,
+    /// RPC poll batch size
+    #[serde(default = "default_rpc_poll_batch")]
+    pub rpc_poll_batch_size: usize,
+    /// RPC poll rate limit (req/sec)
+    #[serde(default = "default_rpc_poll_rate_limit")]
+    pub rpc_poll_rate_limit: u32,
+    /// Maximum active wallets to monitor
+    #[serde(default = "default_max_active_wallets")]
+    pub max_active_wallets: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_webhook_batch_size() -> usize {
+    10
+}
+
+fn default_webhook_delay() -> u64 {
+    200
+}
+
+fn default_monitoring_webhook_rate_limit() -> u32 {
+    45
+}
+
+fn default_rpc_poll_interval() -> u64 {
+    8
+}
+
+fn default_rpc_poll_batch() -> usize {
+    6
+}
+
+fn default_rpc_poll_rate_limit() -> u32 {
+    40
+}
+
+fn default_max_active_wallets() -> usize {
+    20
+}
+
+impl Default for MonitoringConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            helius_api_key: None,
+            helius_webhook_url: None,
+            webhook_registration_batch_size: default_webhook_batch_size(),
+            webhook_registration_delay_ms: default_webhook_delay(),
+            webhook_processing_rate_limit: default_webhook_rate_limit(),
+            rpc_polling_enabled: true,
+            rpc_poll_interval_secs: default_rpc_poll_interval(),
+            rpc_poll_batch_size: default_rpc_poll_batch(),
+            rpc_poll_rate_limit: default_rpc_poll_rate_limit(),
+            max_active_wallets: default_max_active_wallets(),
+        }
+    }
+}
+
+/// Profit management configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfitManagementConfig {
+    /// Profit targets (percentages)
+    #[serde(default = "default_profit_targets")]
+    pub targets: Vec<f64>,
+    /// Percentage to sell at each target
+    #[serde(default = "default_tiered_exit_percent")]
+    pub tiered_exit_percent: f64,
+    /// Activate trailing stop after this profit %
+    #[serde(default = "default_trailing_stop_activation")]
+    pub trailing_stop_activation: f64,
+    /// Trailing stop distance from peak (%)
+    #[serde(default = "default_trailing_stop_distance")]
+    pub trailing_stop_distance: f64,
+    /// Hard stop loss (%)
+    #[serde(default = "default_hard_stop_loss")]
+    pub hard_stop_loss: f64,
+    /// Time-based exit (hours)
+    #[serde(default = "default_time_exit_hours")]
+    pub time_exit_hours: u64,
+}
+
+fn default_profit_targets() -> Vec<f64> {
+    vec![25.0, 50.0, 100.0, 200.0]
+}
+
+fn default_tiered_exit_percent() -> f64 {
+    25.0
+}
+
+fn default_trailing_stop_activation() -> f64 {
+    50.0
+}
+
+fn default_trailing_stop_distance() -> f64 {
+    20.0
+}
+
+fn default_hard_stop_loss() -> f64 {
+    15.0
+}
+
+fn default_time_exit_hours() -> u64 {
+    24
+}
+
+impl Default for ProfitManagementConfig {
+    fn default() -> Self {
+        Self {
+            targets: default_profit_targets(),
+            tiered_exit_percent: default_tiered_exit_percent(),
+            trailing_stop_activation: default_trailing_stop_activation(),
+            trailing_stop_distance: default_trailing_stop_distance(),
+            hard_stop_loss: default_hard_stop_loss(),
+            time_exit_hours: default_time_exit_hours(),
+        }
+    }
+}
+
+/// Position sizing configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct PositionSizingConfig {
+    /// Base position size in SOL
+    #[serde(default = "default_base_size_sol")]
+    pub base_size_sol: f64,
+    /// Maximum position size in SOL
+    #[serde(default = "default_max_size_sol")]
+    pub max_size_sol: f64,
+    /// Minimum position size in SOL
+    #[serde(default = "default_min_size_sol")]
+    pub min_size_sol: f64,
+    /// Consensus multiplier (when multiple wallets buy same token)
+    #[serde(default = "default_consensus_multiplier")]
+    pub consensus_multiplier: f64,
+    /// Maximum concurrent positions
+    #[serde(default = "default_max_concurrent_positions")]
+    pub max_concurrent_positions: usize,
+}
+
+fn default_base_size_sol() -> f64 {
+    0.1
+}
+
+fn default_max_size_sol() -> f64 {
+    2.0
+}
+
+fn default_min_size_sol() -> f64 {
+    0.02
+}
+
+fn default_consensus_multiplier() -> f64 {
+    1.5
+}
+
+fn default_max_concurrent_positions() -> usize {
+    5
+}
+
+impl Default for PositionSizingConfig {
+    fn default() -> Self {
+        Self {
+            base_size_sol: default_base_size_sol(),
+            max_size_sol: default_max_size_sol(),
+            min_size_sol: default_min_size_sol(),
+            consensus_multiplier: default_consensus_multiplier(),
+            max_concurrent_positions: default_max_concurrent_positions(),
+        }
+    }
+}
+
+/// MEV protection configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct MevProtectionConfig {
+    /// Always use Jito bundles
+    #[serde(default = "default_always_use_jito")]
+    pub always_use_jito: bool,
+    /// Tip for exit signals (SOL)
+    #[serde(default = "default_exit_tip_sol")]
+    pub exit_tip_sol: f64,
+    /// Tip for consensus signals (SOL)
+    #[serde(default = "default_consensus_tip_sol")]
+    pub consensus_tip_sol: f64,
+    /// Tip for standard signals (SOL)
+    #[serde(default = "default_standard_tip_sol")]
+    pub standard_tip_sol: f64,
+}
+
+fn default_always_use_jito() -> bool {
+    true
+}
+
+fn default_exit_tip_sol() -> f64 {
+    0.007
+}
+
+fn default_consensus_tip_sol() -> f64 {
+    0.003
+}
+
+fn default_standard_tip_sol() -> f64 {
+    0.0015
+}
+
+impl Default for MevProtectionConfig {
+    fn default() -> Self {
+        Self {
+            always_use_jito: default_always_use_jito(),
+            exit_tip_sol: default_exit_tip_sol(),
+            consensus_tip_sol: default_consensus_tip_sol(),
+            standard_tip_sol: default_standard_tip_sol(),
         }
     }
 }

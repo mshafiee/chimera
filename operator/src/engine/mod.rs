@@ -9,12 +9,20 @@ mod jito_searcher;
 pub mod recovery;
 pub mod tips;
 mod transaction_builder;
+pub mod profit_targets;
+pub mod stop_loss;
+pub mod mev_protection;
+pub mod position_sizer;
 
 pub use channel::*;
 pub use degradation::*;
 pub use executor::*;
 pub use recovery::RecoveryManager;
 pub use tips::TipManager;
+pub use profit_targets::{ProfitTargetManager, ProfitTargetAction};
+pub use stop_loss::{StopLossManager, StopLossAction};
+pub use mev_protection::MevProtection;
+pub use position_sizer::PositionSizer;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;

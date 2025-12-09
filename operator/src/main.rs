@@ -31,6 +31,7 @@ use chimera_operator::handlers::{
     list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
     roster_validate, update_config, update_wallet, update_reconciliation_metrics,
     update_secret_rotation_metrics, wallet_auth, webhook_handler, ws_handler,
+    helius_webhook_handler, get_monitoring_status, enable_wallet_monitoring, disable_wallet_monitoring,
     ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::middleware::{self, bearer_auth, AuthState, HmacState, Role};
@@ -295,6 +296,11 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
     
+    // Monitoring will be enabled in a future update
+    // For now, focus on core trading functionality
+    tracing::info!("Monitoring features will be enabled in next update");
+    let monitoring_routes = Router::new();
+
     // Create full router with all routes and middleware
     // Note: Layer order matters - bottom layers are applied first (innermost)
     let app = Router::new()
@@ -309,6 +315,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", roster_routes)
         .nest("/api/v1", auth_routes)
         .nest("/api/v1", ws_routes)
+        .nest("/api/v1", monitoring_routes)
         .merge(metrics_routes)
         .layer(cors)
         .layer(

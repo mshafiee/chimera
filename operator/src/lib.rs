@@ -12,6 +12,7 @@ pub mod handlers;
 pub mod middleware;
 pub mod models;
 pub mod metrics;
+pub mod monitoring;
 pub mod notifications;
 pub mod price_cache;
 pub mod roster;
