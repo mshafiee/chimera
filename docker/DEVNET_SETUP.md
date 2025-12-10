@@ -141,7 +141,7 @@ curl http://localhost:8080/api/v1/health
 open http://localhost:3000
 
 # 3. Check Grafana
-open http://localhost:3001
+open http://localhost:3002
 # Login: admin / admin (or your custom password)
 
 # 4. Check Prometheus
@@ -180,7 +180,7 @@ GRAFANA_PASSWORD=my-secure-password
 
 4. **Database**: The database is created automatically in `./data/chimera.db` when you initialize.
 
-5. **Ports**: Make sure ports 8080, 3000, 3001, 9090, and 9093 are available.
+5. **Ports**: Make sure ports 8080, 3000, 3002, 9090, and 9093 are available.
 
 ## 🐛 Troubleshooting
 
@@ -208,5 +208,5 @@ Edit `docker-compose.yml` to change port mappings if needed.
 Once running:
 1. Test webhook endpoint: `POST http://localhost:8080/api/v1/webhook`
 2. Explore web dashboard: http://localhost:3000
-3. Monitor metrics in Grafana: http://localhost:3001
+3. Monitor metrics in Grafana: http://localhost:3002
 4. Review logs: `./docker/docker-compose.sh logs devnet -f`

@@ -162,13 +162,60 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("RPC health check task started");
     
+    // Create metrics state (shared between task and router)
+    let metrics_state = Arc::new(MetricsState::new());
+    
+    // Spawn metrics update task
+    let metrics_state_clone = metrics_state.clone();
+    let circuit_breaker_clone = circuit_breaker.clone();
+    let db_pool_metrics = db_pool.clone();
+    let engine_handle_metrics = _engine_handle.clone();
+    let ws_state_metrics = ws_state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            interval.tick().await;
+
+            // Update circuit breaker state
+            let cb_state = circuit_breaker_clone.current_state();
+            let is_active = cb_state == chimera_operator::circuit_breaker::CircuitBreakerState::Active;
+            metrics_state_clone
+                .circuit_breaker_state
+                .set(if is_active { 1 } else { 0 });
+
+            // Update RPC health
+            if let Some(rpc_health) = engine_handle_metrics.get_rpc_health().await {
+                metrics_state_clone
+                    .rpc_health
+                    .set(if rpc_health.healthy { 1 } else { 0 });
+            }
+
+            // Update active positions count
+            if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
+                metrics_state_clone.active_positions.set(count as i64);
+            }
+
+            // Update total trades count
+            if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
+                metrics_state_clone.total_trades.set(count as i64);
+            }
+
+            // Broadcast health update via WebSocket
+            ws_state_metrics.broadcast(chimera_operator::handlers::WsEvent::HealthUpdate(
+                chimera_operator::handlers::HealthUpdateData {
+                    status: "healthy".to_string(), // Could be more sophisticated
+                    queue_depth: engine_handle_metrics.queue_depth(),
+                    trading_allowed: is_active,
+                },
+            ));
+        }
+    });
+    tracing::info!("Metrics update task started");
+    
     tracing::info!("All background tasks spawned");
     
     // Now create the FULL router with all routes
     tracing::info!("Creating full router with states...");
-    
-    // Create app state
-    let metrics_state = Arc::new(MetricsState::new());
     
     let app_state = Arc::new(AppState {
         db: db_pool.clone(),
@@ -777,6 +824,13 @@ async fn main_full() -> anyhow::Result<()> {
             metrics_state_clone
                 .circuit_breaker_state
                 .set(if is_active { 1 } else { 0 });
+
+            // Update RPC health
+            if let Some(rpc_health) = engine_handle_metrics.get_rpc_health().await {
+                metrics_state_clone
+                    .rpc_health
+                    .set(if rpc_health.healthy { 1 } else { 0 });
+            }
 
             // Update active positions count
             if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
