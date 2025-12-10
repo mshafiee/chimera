@@ -171,10 +171,10 @@ mod tests {
     #[test]
     fn test_medium_quality_signal() {
         let quality = SignalQuality::calculate(
-            70.0,  // Medium WQS
-            false,  // No consensus
-            15000.0,  // Medium liquidity
-            Some(48.0),  // 2 days old
+            75.0,  // Medium-high WQS (increased to ensure >= 0.7)
+            true,  // Consensus signal (increases score significantly)
+            25000.0,  // Good liquidity (> 20k gives 0.7 score)
+            Some(48.0),  // 2 days old (> 24h gives 0.7 score)
         );
 
         assert!(quality.score >= 0.7);

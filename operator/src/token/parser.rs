@@ -373,10 +373,11 @@ mod tests {
     #[test]
     fn test_default_config_liquidity_thresholds() {
         let config = TokenSafetyConfig::default();
-        assert_eq!(config.min_liquidity_shield_usd, 10_000.0, 
-            "Shield liquidity threshold should be $10,000");
-        assert_eq!(config.min_liquidity_spear_usd, 5_000.0,
-            "Spear liquidity threshold should be $5,000");
+        // Default includes 20% buffer: 10k * 1.2 = 12k, 5k * 1.2 = 6k
+        assert_eq!(config.min_liquidity_shield_usd, 12_000.0, 
+            "Shield liquidity threshold should be $12,000 (10k + 20% buffer)");
+        assert_eq!(config.min_liquidity_spear_usd, 6_000.0,
+            "Spear liquidity threshold should be $6,000 (5k + 20% buffer)");
     }
 
     #[test]
@@ -500,9 +501,10 @@ mod tests {
     #[test]
     fn test_shield_liquidity_exact_threshold() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 10_000.0;
+        // Default threshold is 12_000.0 (10k + 20% buffer)
+        let liquidity_usd = 12_000.0;
         let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
-        assert!(!should_reject, "Shield at exact $10k threshold should pass");
+        assert!(!should_reject, "Shield at exact $12k threshold should pass");
     }
 
     #[test]

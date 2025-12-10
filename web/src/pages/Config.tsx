@@ -101,34 +101,34 @@ export function Config() {
   useEffect(() => {
     if (config) {
       // Trading Configuration
-      setMaxLoss24h(config.circuit_breakers.max_loss_24h)
-      setMaxConsecutiveLosses(config.circuit_breakers.max_consecutive_losses)
-      setMaxDrawdown(config.circuit_breakers.max_drawdown_percent)
-      setCooldownMinutes(config.circuit_breakers.cool_down_minutes)
-      setShieldPercent(config.strategy_allocation.shield_percent)
-      setMaxPositionSol(config.strategy.max_position_sol)
-      setMinPositionSol(config.strategy.min_position_sol)
+      setMaxLoss24h(config.circuit_breakers?.max_loss_24h ?? 0)
+      setMaxConsecutiveLosses(config.circuit_breakers?.max_consecutive_losses ?? 0)
+      setMaxDrawdown(config.circuit_breakers?.max_drawdown_percent ?? 0)
+      setCooldownMinutes(config.circuit_breakers?.cool_down_minutes ?? 0)
+      setShieldPercent(config.strategy_allocation?.shield_percent ?? 70)
+      setMaxPositionSol(config.strategy?.max_position_sol ?? 1.0)
+      setMinPositionSol(config.strategy?.min_position_sol ?? 0.01)
 
       // Profit Management
-      setProfitTargets(config.profit_management.targets)
-      setTieredExitPercent(config.profit_management.tiered_exit_percent)
-      setTrailingStopActivation(config.profit_management.trailing_stop_activation)
-      setTrailingStopDistance(config.profit_management.trailing_stop_distance)
-      setHardStopLoss(config.profit_management.hard_stop_loss)
-      setTimeExitHours(config.profit_management.time_exit_hours)
+      setProfitTargets(config.profit_management?.targets ?? [])
+      setTieredExitPercent(config.profit_management?.tiered_exit_percent ?? 25)
+      setTrailingStopActivation(config.profit_management?.trailing_stop_activation ?? 50)
+      setTrailingStopDistance(config.profit_management?.trailing_stop_distance ?? 20)
+      setHardStopLoss(config.profit_management?.hard_stop_loss ?? 15)
+      setTimeExitHours(config.profit_management?.time_exit_hours ?? 24)
 
       // Position Sizing
-      setBaseSizeSol(config.position_sizing.base_size_sol)
-      setMaxSizeSol(config.position_sizing.max_size_sol)
-      setMinSizeSol(config.position_sizing.min_size_sol)
-      setConsensusMultiplier(config.position_sizing.consensus_multiplier)
-      setMaxConcurrentPositions(config.position_sizing.max_concurrent_positions)
+      setBaseSizeSol(config.position_sizing?.base_size_sol ?? 0.1)
+      setMaxSizeSol(config.position_sizing?.max_size_sol ?? 2.0)
+      setMinSizeSol(config.position_sizing?.min_size_sol ?? 0.02)
+      setConsensusMultiplier(config.position_sizing?.consensus_multiplier ?? 1.5)
+      setMaxConcurrentPositions(config.position_sizing?.max_concurrent_positions ?? 5)
 
       // MEV Protection
-      setAlwaysUseJito(config.mev_protection.always_use_jito)
-      setExitTipSol(config.mev_protection.exit_tip_sol)
-      setConsensusTipSol(config.mev_protection.consensus_tip_sol)
-      setStandardTipSol(config.mev_protection.standard_tip_sol)
+      setAlwaysUseJito(config.mev_protection?.always_use_jito ?? true)
+      setExitTipSol(config.mev_protection?.exit_tip_sol ?? 0.007)
+      setConsensusTipSol(config.mev_protection?.consensus_tip_sol ?? 0.003)
+      setStandardTipSol(config.mev_protection?.standard_tip_sol ?? 0.0015)
 
       // Monitoring
       if (config.monitoring) {
@@ -144,28 +144,28 @@ export function Config() {
       }
 
       // Token Safety
-      setMinLiquidityShield(config.token_safety.min_liquidity_shield_usd)
-      setMinLiquiditySpear(config.token_safety.min_liquidity_spear_usd)
-      setHoneypotDetection(config.token_safety.honeypot_detection_enabled)
-      setCacheCapacity(config.token_safety.cache_capacity)
-      setCacheTtl(config.token_safety.cache_ttl_seconds)
+      setMinLiquidityShield(config.token_safety?.min_liquidity_shield_usd ?? 10000)
+      setMinLiquiditySpear(config.token_safety?.min_liquidity_spear_usd ?? 5000)
+      setHoneypotDetection(config.token_safety?.honeypot_detection_enabled ?? true)
+      setCacheCapacity(config.token_safety?.cache_capacity ?? 1000)
+      setCacheTtl(config.token_safety?.cache_ttl_seconds ?? 3600)
 
       // Notifications
-      setTelegramEnabled(config.notifications.telegram.enabled)
-      setTelegramRateLimit(config.notifications.telegram.rate_limit_seconds)
-      setNotifCircuitBreaker(config.notifications.rules.circuit_breaker_triggered)
-      setNotifWalletDrained(config.notifications.rules.wallet_drained)
-      setNotifPositionExited(config.notifications.rules.position_exited)
-      setNotifWalletPromoted(config.notifications.rules.wallet_promoted)
-      setNotifDailySummary(config.notifications.rules.daily_summary)
-      setNotifRpcFallback(config.notifications.rules.rpc_fallback)
-      setDailySummaryEnabled(config.notifications.daily_summary.enabled)
-      setDailySummaryHour(config.notifications.daily_summary.hour_utc)
-      setDailySummaryMinute(config.notifications.daily_summary.minute)
+      setTelegramEnabled(config.notifications?.telegram?.enabled ?? false)
+      setTelegramRateLimit(config.notifications?.telegram?.rate_limit_seconds ?? 60)
+      setNotifCircuitBreaker(config.notifications?.rules?.circuit_breaker_triggered ?? true)
+      setNotifWalletDrained(config.notifications?.rules?.wallet_drained ?? true)
+      setNotifPositionExited(config.notifications?.rules?.position_exited ?? true)
+      setNotifWalletPromoted(config.notifications?.rules?.wallet_promoted ?? true)
+      setNotifDailySummary(config.notifications?.rules?.daily_summary ?? true)
+      setNotifRpcFallback(config.notifications?.rules?.rpc_fallback ?? true)
+      setDailySummaryEnabled(config.notifications?.daily_summary?.enabled ?? true)
+      setDailySummaryHour(config.notifications?.daily_summary?.hour_utc ?? 20)
+      setDailySummaryMinute(config.notifications?.daily_summary?.minute ?? 0)
 
       // Queue
-      setQueueCapacity(config.queue.capacity)
-      setLoadShedThreshold(config.queue.load_shed_threshold_percent)
+      setQueueCapacity(config.queue?.capacity ?? 1000)
+      setLoadShedThreshold(config.queue?.load_shed_threshold_percent ?? 80)
     }
   }, [config])
 
@@ -1257,25 +1257,25 @@ export function Config() {
               <div>
                 <div className="text-text-muted">Tip Floor</div>
                 <div className="font-mono-numbers">
-                  {config?.jito_tip_strategy.tip_floor.toFixed(4)} SOL
+                  {config?.jito_tip_strategy?.tip_floor.toFixed(4) ?? '0.0000'} SOL
                 </div>
               </div>
               <div>
                 <div className="text-text-muted">Tip Ceiling</div>
                 <div className="font-mono-numbers">
-                  {config?.jito_tip_strategy.tip_ceiling.toFixed(4)} SOL
+                  {config?.jito_tip_strategy?.tip_ceiling.toFixed(4) ?? '0.0000'} SOL
                 </div>
               </div>
               <div>
                 <div className="text-text-muted">Percentile</div>
                 <div className="font-mono-numbers">
-                  {config?.jito_tip_strategy.tip_percentile}th
+                  {config?.jito_tip_strategy?.tip_percentile ?? 50}th
                 </div>
               </div>
               <div>
                 <div className="text-text-muted">Max % of Trade</div>
                 <div className="font-mono-numbers">
-                  {((config?.jito_tip_strategy.tip_percent_max || 0) * 100).toFixed(1)}%
+                  {((config?.jito_tip_strategy?.tip_percent_max || 0) * 100).toFixed(1)}%
                 </div>
               </div>
             </div>
@@ -1610,13 +1610,13 @@ function ConfigReadOnly({
           <div className="bg-shield/10 border border-shield/30 rounded-lg p-4">
             <div className="text-shield font-semibold">🛡️ Shield</div>
             <div className="text-2xl font-mono-numbers mt-1">
-              {config.strategy_allocation.shield_percent}%
+              {config?.strategy_allocation?.shield_percent ?? 70}%
             </div>
           </div>
           <div className="bg-spear/10 border border-spear/30 rounded-lg p-4">
             <div className="text-spear font-semibold">⚔️ Spear</div>
             <div className="text-2xl font-mono-numbers mt-1">
-              {config.strategy_allocation.spear_percent}%
+              {config?.strategy_allocation?.spear_percent ?? 30}%
             </div>
           </div>
         </div>
