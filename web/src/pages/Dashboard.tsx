@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { ExternalLink } from 'lucide-react'
+import { ExternalLink, AlertTriangle } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge, StrategyBadge, StatusBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
@@ -101,6 +101,31 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* System Halted Banner - Prominent Alert */}
+      {health && !health.circuit_breaker.trading_allowed && (
+        <Card className="bg-loss/10 border-loss border-2">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-6 h-6 text-loss flex-shrink-0" />
+              <div className="flex-1">
+                <div className="font-semibold text-loss mb-1">Trading Halted</div>
+                <div className="text-sm text-text-muted">
+                  {health.circuit_breaker.trip_reason || 'Trading has been halted by the kill switch or circuit breaker.'}
+                  {health.circuit_breaker.cooldown_remaining_secs && (
+                    <span className="ml-2">
+                      Cooldown: {Math.floor(health.circuit_breaker.cooldown_remaining_secs / 60)}m {health.circuit_breaker.cooldown_remaining_secs % 60}s
+                    </span>
+                  )}
+                </div>
+              </div>
+              <Badge variant="danger" size="sm">
+                {health.circuit_breaker.state}
+              </Badge>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      
       {/* Simplified Mobile View - Key Metrics Only */}
       <div className="md:hidden space-y-3">
         <Card padding="sm">

@@ -1,7 +1,7 @@
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Wifi, WifiOff } from 'lucide-react'
 import { Button } from '../ui/Button'
-import { ConnectWalletButton } from '../wallet'
+import { ConnectWalletButton, AdminLogin, LogoutButton } from '../wallet'
 import { useAuthStore } from '../../stores/authStore'
 
 const pageTitles: Record<string, string> = {
@@ -64,7 +64,7 @@ export function Header({ isConnected = false, lastUpdate, onRefresh }: HeaderPro
 
         {/* User Info */}
         {isAuthenticated && user && (
-          <div className="flex items-center gap-2 pl-4 border-l border-border">
+          <div className="flex items-center gap-3 pl-4 border-l border-border">
             <div className="w-8 h-8 rounded-full bg-shield/20 flex items-center justify-center">
               <span className="text-shield text-sm font-medium">
                 {user.identifier.slice(0, 2).toUpperCase()}
@@ -76,11 +76,16 @@ export function Header({ isConnected = false, lastUpdate, onRefresh }: HeaderPro
               </div>
               <div className="text-text-muted text-xs capitalize">{user.role}</div>
             </div>
+            <LogoutButton />
           </div>
         )}
 
-        {/* Connect Wallet Button */}
-        <ConnectWalletButton />
+        {/* Admin Login or Connect Wallet */}
+        {!isAuthenticated ? (
+          <AdminLogin />
+        ) : (
+          <ConnectWalletButton />
+        )}
       </div>
     </header>
   )

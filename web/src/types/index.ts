@@ -116,12 +116,12 @@ export interface ConfigResponse {
     fallback_triggered: boolean
   }
   monitoring?: MonitoringConfig
-  profit_management: ProfitManagementConfig
-  position_sizing: PositionSizingConfig
-  mev_protection: MevProtectionConfig
-  token_safety: TokenSafetyConfig
-  notifications: NotificationsConfig
-  queue: QueueConfig
+  profit_management?: ProfitManagementConfig
+  position_sizing?: PositionSizingConfig
+  mev_protection?: MevProtectionConfig
+  token_safety?: TokenSafetyConfig
+  notifications?: NotificationsConfig
+  queue?: QueueConfig
 }
 
 export interface MonitoringConfig {

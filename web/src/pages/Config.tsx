@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { 
-  AlertTriangle, Save, RefreshCw, History, Power, Lock, 
+  AlertTriangle, Save, RefreshCw, History, Power, 
   Shield, Zap, TrendingUp, Target, Settings,
   Activity, Bell, ShieldCheck
 } from 'lucide-react'
@@ -10,18 +10,20 @@ import { Badge } from '../components/ui/Badge'
 import { Modal, ConfirmModal } from '../components/ui/Modal'
 import { ConfigSection, ConfigInput, ConfigToggle, ConfigArrayInput } from '../components/config'
 import { useConfig, useUpdateConfig, useResetCircuitBreaker, useHealth, useConfigAudit } from '../api'
+import { useTripCircuitBreaker } from '../api/config'
 import { useAuthStore } from '../stores/authStore'
 import { toast } from '../components/ui/Toast'
 import type { ConfigAudit, ConfigResponse, HealthResponse } from '../types'
 
 export function Config() {
-  const { hasPermission } = useAuthStore()
+  const { hasPermission, user, isAuthenticated } = useAuthStore()
   const isAdmin = hasPermission('admin')
 
   const { data: config, isLoading, refetch } = useConfig()
   const { data: health } = useHealth()
   const updateConfig = useUpdateConfig()
   const resetCircuitBreaker = useResetCircuitBreaker()
+  const tripCircuitBreaker = useTripCircuitBreaker()
 
   // Trading Configuration State
   const [maxLoss24h, setMaxLoss24h] = useState(0)
@@ -92,7 +94,6 @@ export function Config() {
   const [showResetConfirm, setShowResetConfirm] = useState(false)
   const [showHistoryModal, setShowHistoryModal] = useState(false)
   const [showKillSwitchModal, setShowKillSwitchModal] = useState(false)
-  const [killSwitchPassword, setKillSwitchPassword] = useState('')
   const [killSwitchConfirm, setKillSwitchConfirm] = useState('')
 
   const { data: configAudit, isLoading: auditLoading } = useConfigAudit({ limit: 50 })
@@ -364,29 +365,39 @@ export function Config() {
   }
 
   const handleEmergencyKillSwitch = async () => {
-    if (killSwitchPassword !== killSwitchConfirm) {
-      toast.error('Passwords do not match')
+    if (killSwitchConfirm !== 'HALT') {
+      toast.error('Please type "HALT" to confirm')
       return
     }
-    if (killSwitchPassword.length < 8) {
-      toast.error('Password must be at least 8 characters')
+    
+    // Verify we have authentication before proceeding
+    const { user, isAuthenticated } = useAuthStore.getState()
+    if (!isAuthenticated || !user?.token) {
+      toast.error('You must be authenticated to activate the kill switch. Please log in again.')
       return
     }
+    
+    // Debug: Log the token being used (first 8 chars only for security)
+    console.log('Using token:', user.token.substring(0, 8) + '...', 'Type:', user.token.includes('.') ? 'JWT' : 'Wallet Address')
+    
     try {
-      await updateConfig.mutateAsync({
-        circuit_breakers: {
-          max_loss_24h: 0.01,
-          max_consecutive_losses: 1,
-          max_drawdown_percent: 0.1,
-          cool_down_minutes: 999999,
-        },
-      })
+      // Use the dedicated trip endpoint which immediately halts trading
+      await tripCircuitBreaker.mutateAsync('Emergency kill switch activated')
       setShowKillSwitchModal(false)
-      setKillSwitchPassword('')
       setKillSwitchConfirm('')
       toast.success('Emergency kill switch activated. All trading halted.')
-    } catch (error) {
-      toast.error('Failed to activate kill switch')
+      // Refetch health to show updated status
+      setTimeout(() => {
+        window.location.reload()
+      }, 1000)
+    } catch (error: any) {
+      const errorMessage = error.response?.data?.details || error.response?.data?.reason || error.message
+      if (error.response?.status === 401 || error.response?.status === 403) {
+        toast.error(`Authentication failed: ${errorMessage}. Please log in again with your admin wallet.`)
+        // Don't auto-logout - let user try to re-authenticate
+      } else {
+        toast.error(`Failed to activate kill switch: ${errorMessage}`)
+      }
     }
   }
 
@@ -1059,20 +1070,20 @@ export function Config() {
               unit="seconds"
             />
           </div>
-          {config && (
+          {config && config.token_safety && (
             <div>
               <h4 className="text-sm font-semibold text-text mb-2">Authority Whitelists (Read-only)</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
                 <div>
                   <div className="text-text-muted mb-2">Freeze Authority Whitelist</div>
                   <div className="bg-surface-light rounded p-2 font-mono text-xs">
-                    {config.token_safety.freeze_authority_whitelist.length} tokens
+                    {config.token_safety.freeze_authority_whitelist?.length ?? 0} tokens
                   </div>
                 </div>
                 <div>
                   <div className="text-text-muted mb-2">Mint Authority Whitelist</div>
                   <div className="bg-surface-light rounded p-2 font-mono text-xs">
-                    {config.token_safety.mint_authority_whitelist.length} tokens
+                    {config.token_safety.mint_authority_whitelist?.length ?? 0} tokens
                   </div>
                 </div>
               </div>
@@ -1411,7 +1422,7 @@ export function Config() {
             <div className="min-w-0">
               <div className="font-semibold text-loss mb-1 text-sm md:text-base">Halt All Trading</div>
               <div className="text-xs md:text-sm text-text-muted">
-                Immediately stop all trading activity. Requires password confirmation.
+                Immediately stop all trading activity. Requires confirmation.
               </div>
             </div>
             <Button
@@ -1489,53 +1500,45 @@ export function Config() {
         isOpen={showKillSwitchModal}
         onClose={() => {
           setShowKillSwitchModal(false)
-          setKillSwitchPassword('')
           setKillSwitchConfirm('')
         }}
         title="Emergency Kill Switch"
         size="sm"
       >
         <div className="space-y-4">
-          <div className="flex items-center gap-3 text-loss">
-            <AlertTriangle className="w-5 h-5" />
+          <div className="flex items-start gap-3 text-loss">
+            <AlertTriangle className="w-5 h-5 mt-0.5" />
             <div>
-              <div className="font-semibold">Warning: This will halt all trading</div>
+              <div className="font-semibold mb-1">Warning: This will halt all trading</div>
               <div className="text-sm text-text-muted">
-                All circuit breakers will be set to extreme values to immediately stop trading.
+                All circuit breakers will be set to extreme values to immediately stop all trading activity. 
+                This action can only be reversed by manually resetting the circuit breaker.
               </div>
             </div>
           </div>
-          <div>
+          <div className="bg-surface-light border border-loss/20 rounded-lg p-3">
             <label className="block text-sm font-medium text-text mb-2">
-              <Lock className="w-4 h-4 inline mr-1" />
-              Enter Password to Confirm
+              Type <span className="font-mono font-semibold text-loss">HALT</span> to confirm:
             </label>
             <input
-              type="password"
-              value={killSwitchPassword}
-              onChange={(e) => setKillSwitchPassword(e.target.value)}
-              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-loss"
-              placeholder="Password"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-text mb-2">
-              Confirm Password
-            </label>
-            <input
-              type="password"
+              type="text"
               value={killSwitchConfirm}
               onChange={(e) => setKillSwitchConfirm(e.target.value)}
-              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-loss"
-              placeholder="Confirm password"
+              className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-loss font-mono"
+              placeholder="Type HALT here"
+              autoComplete="off"
             />
+            {killSwitchConfirm && killSwitchConfirm !== 'HALT' && (
+              <div className="mt-2 text-xs text-text-muted">
+                Please type exactly "HALT" to confirm
+              </div>
+            )}
           </div>
           <div className="flex gap-3 justify-end">
             <Button
               variant="secondary"
               onClick={() => {
                 setShowKillSwitchModal(false)
-                setKillSwitchPassword('')
                 setKillSwitchConfirm('')
               }}
             >
@@ -1544,8 +1547,8 @@ export function Config() {
             <Button
               variant="danger"
               onClick={handleEmergencyKillSwitch}
-              loading={updateConfig.isPending}
-              disabled={!killSwitchPassword || !killSwitchConfirm || killSwitchPassword !== killSwitchConfirm}
+              loading={tripCircuitBreaker.isPending}
+              disabled={killSwitchConfirm !== 'HALT'}
             >
               <Power className="w-4 h-4 mr-2" />
               Activate Kill Switch

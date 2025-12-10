@@ -1460,6 +1460,57 @@ pub async fn reset_circuit_breaker(
     }))
 }
 
+/// Manually trip circuit breaker (kill switch)
+///
+/// POST /api/v1/config/circuit-breaker/trip
+/// Requires: admin role
+pub async fn trip_circuit_breaker(
+    State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<CircuitBreakerResetResponse>, AppError> {
+    let status_before = state.circuit_breaker.status();
+    let previous_state = status_before.state.to_string();
+
+    let reason = body
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Emergency kill switch activated")
+        .to_string();
+
+    // First, set extreme circuit breaker config values
+    let mut config = state.config.write().await;
+    config.circuit_breakers.max_loss_24h_usd = 0.01;
+    config.circuit_breakers.max_consecutive_losses = 1;
+    config.circuit_breakers.max_drawdown_percent = 0.1;
+    config.circuit_breakers.cooldown_minutes = 999999;
+    drop(config);
+
+    // Then manually trip the circuit breaker
+    state
+        .circuit_breaker
+        .manual_trip(&auth.0.identifier, reason.clone())
+        .await?;
+
+    let status_after = state.circuit_breaker.status();
+    let new_state = status_after.state.to_string();
+
+    tracing::warn!(
+        admin = %auth.0.identifier,
+        previous_state = %previous_state,
+        new_state = %new_state,
+        reason = %reason,
+        "Circuit breaker manually tripped (kill switch)"
+    );
+
+    Ok(Json(CircuitBreakerResetResponse {
+        success: true,
+        message: format!("Kill switch activated: {}", reason),
+        previous_state,
+        new_state,
+    }))
+}
+
 // =============================================================================
 // TRADES API
 // =============================================================================

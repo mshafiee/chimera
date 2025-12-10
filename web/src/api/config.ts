@@ -134,3 +134,20 @@ export function useResetCircuitBreaker() {
     },
   })
 }
+
+export function useTripCircuitBreaker() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async (reason?: string) => {
+      const { data } = await apiClient.post<CircuitBreakerResetResponse>('/config/circuit-breaker/trip', {
+        reason: reason || 'Emergency kill switch activated',
+      })
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['config'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+    },
+  })
+}

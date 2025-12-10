@@ -90,17 +90,26 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
     if (connected && publicKey && !isAuthenticated) {
       // Wallet connected but not authenticated - trigger auth
       authenticate()
-    } else if (!connected && isAuthenticated) {
-      // Wallet disconnected - logout
-      logout()
+    } else if (!connected && isAuthenticated && user) {
+      // Wallet disconnected - only logout if user was authenticated via wallet signature (JWT token)
+      // Admin login uses wallet address directly as token (no JWT), so preserve it
+      // Check if token is a JWT (contains dots) vs wallet address (no dots, base58)
+      const isJwtToken = user.token.includes('.')
+      if (isJwtToken && user.identifier === publicKey?.toBase58()) {
+        // JWT token and identifier matches wallet - this was wallet-based auth, logout
+        logout()
+      }
+      // If token is not JWT (wallet address), it's admin login - preserve it
     }
-  }, [connected, publicKey, isAuthenticated, authenticate, logout])
+  }, [connected, publicKey, isAuthenticated, user, authenticate, logout])
 
-  // Handle wallet change
+  // Handle wallet change (only for wallet-based auth, not admin login)
   useEffect(() => {
     if (connected && publicKey && isAuthenticated && user) {
-      // Check if wallet changed
-      if (user.identifier !== publicKey.toBase58()) {
+      // Only handle wallet change for JWT-based auth (wallet signature)
+      // Admin login uses wallet address as token, so don't interfere
+      const isJwtToken = user.token.includes('.')
+      if (isJwtToken && user.identifier !== publicKey.toBase58()) {
         // Different wallet connected - re-authenticate
         logout()
         authenticate()

@@ -157,6 +157,9 @@ pub struct SecurityConfig {
     /// API keys for management endpoints (format: "key:role")
     #[serde(default)]
     pub api_keys: Vec<ApiKeyConfig>,
+    /// Admin wallets for management endpoints
+    #[serde(default)]
+    pub admin_wallets: Vec<AdminWalletConfig>,
 }
 
 /// API key configuration
@@ -164,6 +167,15 @@ pub struct SecurityConfig {
 pub struct ApiKeyConfig {
     /// The API key value
     pub key: String,
+    /// The role: admin, operator, readonly
+    pub role: String,
+}
+
+/// Admin wallet configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminWalletConfig {
+    /// The wallet address
+    pub address: String,
     /// The role: admin, operator, readonly
     pub role: String,
 }

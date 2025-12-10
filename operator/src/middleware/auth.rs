@@ -9,7 +9,7 @@
 //!
 //! Authentication methods:
 //! - Bearer token in Authorization header
-//! - API keys loaded from config or admin_wallets table
+//! - API keys and admin wallets loaded from config into memory
 
 use axum::{
     extract::{Request, State},
@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::db::DbPool;
 
 /// User roles for authorization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -80,29 +79,32 @@ pub struct AuthenticatedUser {
 /// Authentication state
 #[derive(Clone)]
 pub struct AuthState {
-    /// Database pool for checking admin_wallets table
-    pub db: DbPool,
     /// In-memory cache of API keys to roles
     api_keys: Arc<RwLock<HashMap<String, Role>>>,
+    /// In-memory cache of admin wallets to roles
+    admin_wallets: Arc<RwLock<HashMap<String, Role>>>,
     /// Whether to allow unauthenticated readonly access
     pub allow_anonymous_readonly: bool,
 }
 
 impl AuthState {
     /// Create a new auth state
-    pub fn new(db: DbPool) -> Self {
+    pub fn new() -> Self {
         Self {
-            db,
             api_keys: Arc::new(RwLock::new(HashMap::new())),
+            admin_wallets: Arc::new(RwLock::new(HashMap::new())),
             allow_anonymous_readonly: false,
         }
     }
 
-    /// Create auth state with pre-configured API keys
-    pub fn with_api_keys(db: DbPool, api_keys: HashMap<String, Role>) -> Self {
+    /// Create auth state with pre-configured API keys and admin wallets
+    pub fn with_auth_config(
+        api_keys: HashMap<String, Role>,
+        admin_wallets: HashMap<String, Role>,
+    ) -> Self {
         Self {
-            db,
             api_keys: Arc::new(RwLock::new(api_keys)),
+            admin_wallets: Arc::new(RwLock::new(admin_wallets)),
             allow_anonymous_readonly: false,
         }
     }
@@ -125,19 +127,10 @@ impl AuthState {
         keys.get(key).copied()
     }
 
-    /// Check wallet address in admin_wallets table
+    /// Check wallet address in memory cache
     async fn check_admin_wallet(&self, address: &str) -> Option<Role> {
-        let result: Result<(String,), _> = sqlx::query_as(
-            "SELECT role FROM admin_wallets WHERE wallet_address = ?"
-        )
-        .bind(address)
-        .fetch_one(&self.db)
-        .await;
-
-        match result {
-            Ok((role_str,)) => role_str.parse().ok(),
-            Err(_) => None,
-        }
+        let wallets = self.admin_wallets.read().await;
+        wallets.get(address).copied()
     }
 
     /// Authenticate a token (tries API key first, then admin_wallets)
@@ -150,7 +143,7 @@ impl AuthState {
             });
         }
 
-        // Then check admin_wallets table (token could be a wallet address)
+        // Then check in-memory admin wallets (token could be a wallet address)
         if let Some(role) = self.check_admin_wallet(token).await {
             return Some(AuthenticatedUser {
                 identifier: token.to_string(),
@@ -169,7 +162,7 @@ pub struct AuthExtension(pub AuthenticatedUser);
 /// Bearer token authentication middleware
 ///
 /// Extracts Bearer token from Authorization header and validates against
-/// configured API keys and admin_wallets table.
+/// configured API keys and admin wallets loaded from config.
 ///
 /// On success, adds AuthExtension to request for downstream handlers.
 pub async fn bearer_auth(

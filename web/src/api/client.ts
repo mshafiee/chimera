@@ -24,8 +24,17 @@ apiClient.interceptors.response.use(
   (response) => response,
   (error: AxiosError<{ reason?: string; details?: string }>) => {
     if (error.response?.status === 401) {
-      // Clear auth on unauthorized
-      useAuthStore.getState().logout()
+      // Only logout on 401 if it's clearly an authentication failure
+      // Don't logout on 401 for operation failures (let components handle those)
+      const url = error.config?.url || ''
+      const isAuthEndpoint = url.includes('/auth/')
+      
+      // Only auto-logout if it's an auth endpoint (login/authentication failed)
+      // For other endpoints, it might be a permission issue or invalid token - let component handle it
+      if (isAuthEndpoint) {
+        useAuthStore.getState().logout()
+      }
+      // For non-auth endpoints, don't auto-logout - let the component show the error
     }
     return Promise.reject(error)
   }

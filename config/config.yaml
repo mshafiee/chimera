@@ -26,6 +26,10 @@ security:
   max_timestamp_drift_secs: 60
   webhook_rate_limit: 100
   webhook_burst_size: 150
+  # Admin wallets for API access
+  admin_wallets:
+    - address: "7s79kvpdcGzjHF4bHtJVEbd9p2eESZ9kv1hNjhgBepCp"
+      role: "admin"
 
 circuit_breakers:
   max_loss_24h_usd: 500

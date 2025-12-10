@@ -29,7 +29,7 @@ use chimera_operator::engine::{self, RecoveryManager, TipManager};
 use chimera_operator::handlers::{
     export_trades, get_config, get_cost_metrics, get_performance_metrics, get_position, get_strategy_performance,
     get_wallet, health_check, health_simple, list_config_audit, list_dead_letter_queue,
-    list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
+    list_positions, list_trades, list_wallets, reset_circuit_breaker, trip_circuit_breaker, roster_merge,
     roster_validate, update_config, update_wallet, update_reconciliation_metrics,
     update_secret_rotation_metrics, wallet_auth, webhook_handler, ws_handler,
     get_monitoring_status, enable_wallet_monitoring, disable_wallet_monitoring, helius_webhook_handler,
@@ -189,7 +189,34 @@ async fn main() -> anyhow::Result<()> {
     });
     
     // Create auth state
-    let auth_state = Arc::new(AuthState::new(db_pool.clone()));
+    // Load API keys and admin wallets from config
+    let mut api_keys_map = std::collections::HashMap::new();
+    for key_config in &config.security.api_keys {
+        if let Ok(role) = key_config.role.parse::<Role>() {
+            api_keys_map.insert(key_config.key.clone(), role);
+            tracing::debug!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %role, "API key configured");
+        } else {
+            tracing::warn!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %key_config.role, "Invalid role in API key config");
+        }
+    }
+    
+    let mut admin_wallets_map = std::collections::HashMap::new();
+    for wallet_config in &config.security.admin_wallets {
+        if let Ok(role) = wallet_config.role.parse::<Role>() {
+            admin_wallets_map.insert(wallet_config.address.clone(), role);
+            tracing::debug!(wallet = %wallet_config.address, role = %role, "Admin wallet configured");
+        } else {
+            tracing::warn!(wallet = %wallet_config.address, role = %wallet_config.role, "Invalid role in admin wallet config");
+        }
+    }
+    
+    let auth_state = Arc::new(AuthState::with_auth_config(api_keys_map, admin_wallets_map));
+    tracing::warn!(
+        api_key_count = config.security.api_keys.len(),
+        admin_wallet_count = config.security.admin_wallets.len(),
+        admin_wallets = ?config.security.admin_wallets.iter().map(|w| &w.address).collect::<Vec<_>>(),
+        "Auth state initialized with admin wallets"
+    );
     
     // Build health routes with AppState
     let health_routes = Router::new()
@@ -216,6 +243,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/wallets/{address}", get(get_wallet).put(update_wallet))
         .route("/config", put(update_config))
         .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
+        .route("/config/circuit-breaker/trip", post(trip_circuit_breaker))
         .route("/metrics/reconciliation", post(update_reconciliation_metrics))
         .route("/metrics/secret-rotation", post(update_secret_rotation_metrics))
         .with_state(api_state.clone())
@@ -838,7 +866,7 @@ async fn main_full() -> anyhow::Result<()> {
     // WebSocket state is created above with engine
     tracing::info!("WebSocket broadcast channel initialized");
 
-    // Create auth state with API keys from config
+    // Create auth state with API keys and admin wallets from config
     let mut api_keys_map = std::collections::HashMap::new();
     for key_config in &config.security.api_keys {
         if let Ok(role) = key_config.role.parse::<Role>() {
@@ -848,9 +876,21 @@ async fn main_full() -> anyhow::Result<()> {
             tracing::warn!(role = %key_config.role, "Invalid role in API key config");
         }
     }
-    let auth_state = Arc::new(AuthState::with_api_keys(db_pool.clone(), api_keys_map));
+    
+    let mut admin_wallets_map = std::collections::HashMap::new();
+    for wallet_config in &config.security.admin_wallets {
+        if let Ok(role) = wallet_config.role.parse::<Role>() {
+            admin_wallets_map.insert(wallet_config.address.clone(), role);
+            tracing::debug!(wallet = %wallet_config.address, role = %role, "Admin wallet configured");
+        } else {
+            tracing::warn!(wallet = %wallet_config.address, role = %wallet_config.role, "Invalid role in admin wallet config");
+        }
+    }
+    
+    let auth_state = Arc::new(AuthState::with_auth_config(api_keys_map, admin_wallets_map));
     tracing::info!(
         api_key_count = config.security.api_keys.len(),
+        admin_wallet_count = config.security.admin_wallets.len(),
         "Auth state initialized"
     );
 
@@ -931,6 +971,7 @@ async fn main_full() -> anyhow::Result<()> {
         .route("/trades/export", get(export_trades))
         .route("/config", get(get_config).put(update_config))
         .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
+        .route("/config/circuit-breaker/trip", post(trip_circuit_breaker))
         .route("/metrics/performance", get(get_performance_metrics))
         .route("/metrics/costs", get(get_cost_metrics))
         .route("/metrics/strategy/{strategy}", get(get_strategy_performance))
