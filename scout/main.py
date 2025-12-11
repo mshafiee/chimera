@@ -256,7 +256,19 @@ def main():
     
     # Initialize components
     try:
-        analyzer = WalletAnalyzer()
+        # Get Helius API key from environment or RPC URL
+        helius_api_key = os.getenv("HELIUS_API_KEY")
+        if not helius_api_key:
+            # Try to extract from RPC URL
+            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
+            if "api-key=" in rpc_url:
+                helius_api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
+        
+        analyzer = WalletAnalyzer(
+            helius_api_key=helius_api_key,
+            discover_wallets=True,  # Enable wallet discovery from on-chain data
+            max_wallets=50,  # Limit to 50 wallets for analysis
+        )
     except Exception as e:
         print(f"[Scout] ERROR: Failed to initialize analyzer: {e}")
         sys.exit(1)
