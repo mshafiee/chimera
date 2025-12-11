@@ -959,6 +959,93 @@ pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Op
     Ok(wallet)
 }
 
+/// Add or update a wallet in the database
+///
+/// If the wallet doesn't exist, it will be created with CANDIDATE status.
+/// If it exists, it will be updated with new metrics.
+pub async fn upsert_wallet(
+    pool: &DbPool,
+    address: &str,
+    wqs_score: Option<f64>,
+    roi_7d: Option<f64>,
+    roi_30d: Option<f64>,
+    trade_count_30d: Option<i32>,
+    win_rate: Option<f64>,
+    max_drawdown_30d: Option<f64>,
+    avg_trade_size_sol: Option<f64>,
+    last_trade_at: Option<&str>,
+    notes: Option<&str>,
+) -> AppResult<bool> {
+    // Check if wallet exists
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM wallets WHERE address = ?"
+    )
+    .bind(address)
+    .fetch_one(pool)
+    .await?;
+
+    if exists > 0 {
+        // Update existing wallet
+        sqlx::query(
+            r#"
+            UPDATE wallets
+            SET wqs_score = COALESCE(?, wqs_score),
+                roi_7d = COALESCE(?, roi_7d),
+                roi_30d = COALESCE(?, roi_30d),
+                trade_count_30d = COALESCE(?, trade_count_30d),
+                win_rate = COALESCE(?, win_rate),
+                max_drawdown_30d = COALESCE(?, max_drawdown_30d),
+                avg_trade_size_sol = COALESCE(?, avg_trade_size_sol),
+                last_trade_at = COALESCE(?, last_trade_at),
+                notes = COALESCE(?, notes),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE address = ?
+            "#
+        )
+        .bind(wqs_score)
+        .bind(roi_7d)
+        .bind(roi_30d)
+        .bind(trade_count_30d)
+        .bind(win_rate)
+        .bind(max_drawdown_30d)
+        .bind(avg_trade_size_sol)
+        .bind(last_trade_at)
+        .bind(notes)
+        .bind(address)
+        .execute(pool)
+        .await?;
+        
+        Ok(true) // Updated
+    } else {
+        // Insert new wallet
+        sqlx::query(
+            r#"
+            INSERT INTO wallets (
+                address, status, wqs_score, roi_7d, roi_30d,
+                trade_count_30d, win_rate, max_drawdown_30d,
+                avg_trade_size_sol, last_trade_at, notes,
+                created_at, updated_at
+            )
+            VALUES (?, 'CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            "#
+        )
+        .bind(address)
+        .bind(wqs_score)
+        .bind(roi_7d)
+        .bind(roi_30d)
+        .bind(trade_count_30d)
+        .bind(win_rate)
+        .bind(max_drawdown_30d)
+        .bind(avg_trade_size_sol)
+        .bind(last_trade_at)
+        .bind(notes)
+        .execute(pool)
+        .await?;
+        
+        Ok(false) // Created
+    }
+}
+
 /// Update wallet status with optional TTL
 pub async fn update_wallet_status(
     pool: &DbPool,
