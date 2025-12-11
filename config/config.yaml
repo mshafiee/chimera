@@ -44,7 +44,7 @@ strategy:
   min_position_sol: 0.01
 
 jito:
-  enabled: false
+  enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
   tip_floor_sol: 0.001
   tip_ceiling_sol: 0.01
   tip_percentile: 50
