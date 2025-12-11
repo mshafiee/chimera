@@ -47,50 +47,95 @@ pub async fn helius_webhook_handler(
             .unwrap_or_default();
 
         if !wallet_address.is_empty() {
-            // Check if wallet is ACTIVE
-            if let Ok(Some(wallet)) = crate::db::get_wallet_by_address(&state.db, &wallet_address).await {
-                if wallet.status == "ACTIVE" {
-                    // Generate signal
-                    let direction = if swap.direction == crate::monitoring::SwapDirection::Buy {
-                        Action::Buy
-                    } else {
-                        Action::Sell
-                    };
-
-                    let strategy = if wallet.wqs_score.unwrap_or(0.0) >= 70.0 {
-                        Strategy::Shield
-                    } else {
-                        Strategy::Spear
-                    };
-
-                    let signal_payload = SignalPayload {
-                        wallet_address: wallet_address.clone(),
-                        strategy,
-                        token: swap.token_out.clone(),
-                        token_address: Some(swap.token_out.clone()),
-                        action: direction,
-                        amount_sol: swap.amount_in,
-                        trade_uuid: None,
-                    };
-
-                    let signal = Signal::new(
-                        signal_payload,
-                        chrono::Utc::now().timestamp(),
-                        None, // source_ip
-                    );
-
-                    // Queue signal
-                    if let Err(e) = state.engine.queue_signal(signal).await {
-                        tracing::error!(error = %e, "Failed to queue signal from webhook");
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            // Check if wallet exists in database
+            let wallet_opt = crate::db::get_wallet_by_address(&state.db, &wallet_address).await;
+            
+            // If wallet doesn't exist, automatically add it as CANDIDATE
+            let wallet = if let Ok(Some(w)) = wallet_opt {
+                w
+            } else {
+                // Auto-add wallet when detected making a trade
+                tracing::info!(
+                    wallet = %wallet_address,
+                    "New wallet detected, adding to database"
+                );
+                
+                // Add wallet with minimal info (will be analyzed by Scout later)
+                let _ = crate::db::upsert_wallet(
+                    &state.db,
+                    &wallet_address,
+                    None, // wqs_score - will be calculated by Scout
+                    None, // roi_7d
+                    None, // roi_30d
+                    Some(1), // trade_count_30d - at least 1 trade detected
+                    None, // win_rate
+                    None, // max_drawdown_30d
+                    Some(swap.amount_in), // avg_trade_size_sol
+                    Some(&chrono::Utc::now().to_rfc3339()), // last_trade_at
+                    Some("Auto-added from webhook detection"), // notes
+                ).await;
+                
+                // Fetch the newly added wallet
+                match crate::db::get_wallet_by_address(&state.db, &wallet_address).await {
+                    Ok(Some(w)) => w,
+                    _ => {
+                        tracing::warn!(
+                            wallet = %wallet_address,
+                            "Failed to retrieve newly added wallet"
+                        );
+                        return Ok(StatusCode::OK); // Don't fail, just skip
                     }
-
-                    tracing::info!(
-                        wallet = %wallet_address,
-                        token = %swap.token_out,
-                        "Queued signal from webhook"
-                    );
                 }
+            };
+            
+            // Only process signals from ACTIVE wallets
+            if wallet.status == "ACTIVE" {
+                // Generate signal
+                let direction = if swap.direction == crate::monitoring::SwapDirection::Buy {
+                    Action::Buy
+                } else {
+                    Action::Sell
+                };
+
+                let strategy = if wallet.wqs_score.unwrap_or(0.0) >= 70.0 {
+                    Strategy::Shield
+                } else {
+                    Strategy::Spear
+                };
+
+                let signal_payload = SignalPayload {
+                    wallet_address: wallet_address.clone(),
+                    strategy,
+                    token: swap.token_out.clone(),
+                    token_address: Some(swap.token_out.clone()),
+                    action: direction,
+                    amount_sol: swap.amount_in,
+                    trade_uuid: None,
+                };
+
+                let signal = Signal::new(
+                    signal_payload,
+                    chrono::Utc::now().timestamp(),
+                    None, // source_ip
+                );
+
+                // Queue signal
+                if let Err(e) = state.engine.queue_signal(signal).await {
+                    tracing::error!(error = %e, "Failed to queue signal from webhook");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+
+                tracing::info!(
+                    wallet = %wallet_address,
+                    token = %swap.token_out,
+                    "Queued signal from webhook"
+                );
+            } else {
+                tracing::debug!(
+                    wallet = %wallet_address,
+                    status = %wallet.status,
+                    "Wallet detected but not ACTIVE, skipping signal"
+                );
             }
         }
     }
