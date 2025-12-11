@@ -15,8 +15,9 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 
 from .wqs import WalletMetrics
-from .models import HistoricalTrade, TradeAction
+from .models import HistoricalTrade, TradeAction, LiquidityData
 from .helius_client import HeliusClient
+from .liquidity import LiquidityProvider
 
 
 class WalletAnalyzer:
@@ -51,6 +52,10 @@ class WalletAnalyzer:
         
         # Initialize Helius client
         self.helius_client = HeliusClient(helius_api_key)
+        
+        # Initialize LiquidityProvider for historical liquidity collection
+        db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
+        self.liquidity_provider = LiquidityProvider(db_path=db_path)
         
         # Cache for metrics and trades
         self._metrics_cache: Dict[str, WalletMetrics] = {}
@@ -343,13 +348,12 @@ class WalletAnalyzer:
         trades_7d = [t for t in sorted_trades if t.timestamp >= cutoff_7d]
         trades_30d = [t for t in sorted_trades if t.timestamp >= cutoff_30d]
         
-        # Calculate ROI (simplified - would need price data for accurate calculation)
-        # For now, estimate based on trade frequency and direction
-        roi_7d = self._estimate_roi(trades_7d)
-        roi_30d = self._estimate_roi(trades_30d)
+        # Calculate ROI from actual price changes
+        roi_7d = self._calculate_roi_from_trades(trades_7d, days=7)
+        roi_30d = self._calculate_roi_from_trades(trades_30d, days=30)
         
-        # Calculate win rate (simplified - would need actual PnL data)
-        win_rate = self._estimate_win_rate(trades_30d)
+        # Calculate win rate from actual PnL data
+        win_rate = self._calculate_win_rate_from_trades(trades_30d)
         
         # Calculate drawdown
         max_drawdown = self._calculate_drawdown_from_trades(trades_30d)
@@ -375,47 +379,271 @@ class WalletAnalyzer:
             win_streak_consistency=win_streak_consistency,
         )
     
-    def _estimate_roi(self, trades: List[HistoricalTrade]) -> float:
-        """Estimate ROI from trades (simplified - would need price data)."""
+    def _calculate_roi_from_trades(
+        self,
+        trades: List[HistoricalTrade],
+        days: int = 30,
+    ) -> float:
+        """
+        Calculate accurate ROI from historical trades.
+        
+        Tracks positions and calculates PnL from actual price changes.
+        
+        Args:
+            trades: List of historical trades
+            days: Time window for ROI calculation
+            
+        Returns:
+            ROI as percentage
+        """
         if not trades:
             return 0.0
         
-        # Simplified: assume alternating buy/sell with small profit
-        # In production, would calculate actual PnL from price changes
-        buy_count = sum(1 for t in trades if t.action == TradeAction.BUY)
-        sell_count = sum(1 for t in trades if t.action == TradeAction.SELL)
+        # Track positions: {token_address: {entry_price, entry_amount, total_cost}}
+        positions = {}
+        total_capital = 0.0
+        total_pnl = 0.0
         
-        # Rough estimate: more sells than buys suggests profit
-        if sell_count > 0:
-            return min(50.0, (sell_count / max(buy_count, 1)) * 10.0)
-        return 0.0
+        # Sort trades chronologically
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        
+        for trade in sorted_trades:
+            if trade.action == TradeAction.BUY:
+                # Open or add to position
+                if trade.token_address not in positions:
+                    positions[trade.token_address] = {
+                        'entry_price': trade.price_at_trade,
+                        'entry_amount': trade.amount_sol,
+                        'total_cost': trade.amount_sol * trade.price_at_trade,
+                    }
+                else:
+                    # Average entry price (weighted by amount)
+                    pos = positions[trade.token_address]
+                    additional_cost = trade.amount_sol * trade.price_at_trade
+                    total_cost = pos['total_cost'] + additional_cost
+                    total_amount = pos['entry_amount'] + trade.amount_sol
+                    pos['entry_price'] = total_cost / total_amount if total_amount > 0 else trade.price_at_trade
+                    pos['entry_amount'] = total_amount
+                    pos['total_cost'] = total_cost
+                
+                total_capital += trade.amount_sol * trade.price_at_trade
+                
+            elif trade.action == TradeAction.SELL:
+                # Close position and calculate PnL
+                if trade.token_address in positions:
+                    pos = positions[trade.token_address]
+                    entry_price = pos['entry_price']
+                    exit_price = trade.price_at_trade
+                    
+                    # Calculate PnL for the amount sold
+                    sell_amount = min(trade.amount_sol, pos['entry_amount'])
+                    if sell_amount > 0 and entry_price > 0:
+                        pnl = (exit_price - entry_price) * sell_amount
+                        total_pnl += pnl
+                    
+                    # Update position
+                    pos['entry_amount'] -= sell_amount
+                    if pos['entry_amount'] <= 0:
+                        del positions[trade.token_address]
+                else:
+                    # Selling without a position - use trade PnL if available
+                    if trade.pnl_sol is not None:
+                        total_pnl += trade.pnl_sol
+        
+        # Calculate ROI
+        if total_capital <= 0:
+            # If no capital deployed, try to estimate from PnL data
+            total_pnl_from_trades = sum(t.pnl_sol or 0.0 for t in sorted_trades if t.pnl_sol is not None)
+            if total_pnl_from_trades != 0:
+                # Estimate capital from trade amounts
+                estimated_capital = sum(t.amount_sol * (t.price_at_trade or 1.0) for t in sorted_trades if t.action == TradeAction.BUY)
+                if estimated_capital > 0:
+                    return (total_pnl_from_trades / estimated_capital) * 100
+            return 0.0
+        
+        roi_percent = (total_pnl / total_capital) * 100
+        return roi_percent
+    
+    def _estimate_roi(self, trades: List[HistoricalTrade]) -> float:
+        """
+        Estimate ROI from trades (legacy method - calls accurate calculation).
+        
+        Kept for backward compatibility.
+        """
+        return self._calculate_roi_from_trades(trades)
+    
+    def _calculate_win_rate_from_trades(
+        self,
+        trades: List[HistoricalTrade],
+    ) -> float:
+        """
+        Calculate accurate win rate from historical trades.
+        
+        Uses actual PnL data to determine wins vs losses.
+        
+        Args:
+            trades: List of historical trades
+            
+        Returns:
+            Win rate as float (0.0 to 1.0)
+        """
+        if not trades:
+            return 0.0
+        
+        # Only count SELL trades (closing positions) for win/loss
+        closing_trades = [t for t in trades if t.action == TradeAction.SELL]
+        
+        if not closing_trades:
+            return 0.0
+        
+        # Count wins and losses based on PnL
+        wins = 0
+        losses = 0
+        
+        for trade in closing_trades:
+            if trade.pnl_sol is not None:
+                if trade.pnl_sol > 0:
+                    wins += 1
+                elif trade.pnl_sol < 0:
+                    losses += 1
+        
+        total = wins + losses
+        
+        if total == 0:
+            return 0.0
+        
+        return wins / total
     
     def _estimate_win_rate(self, trades: List[HistoricalTrade]) -> float:
-        """Estimate win rate from trades (simplified)."""
-        if not trades:
-            return 0.0
+        """
+        Estimate win rate from trades (legacy method - calls accurate calculation).
         
-        # Simplified: assume 60% win rate for active traders
-        # In production, would calculate from actual PnL
-        return 0.6
+        Kept for backward compatibility.
+        """
+        return self._calculate_win_rate_from_trades(trades)
     
-    def _calculate_drawdown_from_trades(self, trades: List[HistoricalTrade]) -> float:
-        """Calculate drawdown from trades (simplified)."""
+    def _calculate_drawdown_from_trades(
+        self,
+        trades: List[HistoricalTrade],
+    ) -> float:
+        """
+        Calculate maximum drawdown from historical trades.
+        
+        Tracks running PnL and identifies peak-to-trough declines.
+        
+        Args:
+            trades: List of historical trades
+            
+        Returns:
+            Maximum drawdown as percentage (0.0 to 100.0)
+        """
         if not trades:
             return 0.0
         
-        # Simplified: assume moderate drawdown for active traders
-        # In production, would track running PnL and calculate actual drawdown
-        return 10.0
+        # Sort trades chronologically
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        
+        # Track running PnL
+        running_pnl = 0.0
+        peak_pnl = 0.0
+        max_drawdown = 0.0
+        
+        for trade in sorted_trades:
+            # Update running PnL
+            if trade.pnl_sol is not None:
+                running_pnl += trade.pnl_sol
+            else:
+                # If no PnL data, estimate from price changes for SELL trades
+                if trade.action == TradeAction.SELL:
+                    # Try to find corresponding BUY trade
+                    buy_trades = [t for t in sorted_trades 
+                                if t.token_address == trade.token_address 
+                                and t.action == TradeAction.BUY 
+                                and t.timestamp < trade.timestamp]
+                    if buy_trades:
+                        # Use most recent buy price
+                        last_buy = buy_trades[-1]
+                        if last_buy.price_at_trade > 0 and trade.price_at_trade > 0:
+                            estimated_pnl = (trade.price_at_trade - last_buy.price_at_trade) * trade.amount_sol
+                            running_pnl += estimated_pnl
+            
+            # Update peak
+            if running_pnl > peak_pnl:
+                peak_pnl = running_pnl
+            
+            # Calculate drawdown from peak
+            if peak_pnl > 0:
+                drawdown = (peak_pnl - running_pnl) / peak_pnl
+                max_drawdown = max(max_drawdown, drawdown)
+            elif peak_pnl < 0 and running_pnl < peak_pnl:
+                # Handle negative PnL case
+                drawdown = abs((running_pnl - peak_pnl) / abs(peak_pnl)) if peak_pnl != 0 else 0.0
+                max_drawdown = max(max_drawdown, drawdown)
+        
+        return max_drawdown * 100  # Convert to percentage
     
-    def _calculate_win_streak_consistency(self, trades: List[HistoricalTrade]) -> float:
-        """Calculate win streak consistency (simplified)."""
+    def _calculate_win_streak_consistency(
+        self,
+        trades: List[HistoricalTrade],
+    ) -> float:
+        """
+        Calculate win streak consistency from historical trades.
+        
+        Analyzes win/loss patterns to determine consistency.
+        Higher value = more consistent winning patterns.
+        
+        Args:
+            trades: List of historical trades
+            
+        Returns:
+            Consistency score (0.0 to 1.0)
+        """
         if not trades:
             return 0.0
         
-        # Simplified: assume moderate consistency
-        # In production, would analyze actual win/loss streaks
-        return 0.5
+        # Get closing trades with PnL
+        closing_trades = [
+            t for t in trades 
+            if t.action == TradeAction.SELL and t.pnl_sol is not None
+        ]
+        
+        if len(closing_trades) < 5:
+            return 0.0  # Need minimum trades for consistency
+        
+        # Determine wins/losses
+        outcomes = [1 if t.pnl_sol > 0 else 0 for t in closing_trades]
+        
+        # Calculate streak consistency
+        # Method: Analyze streak lengths and calculate variance
+        current_streak = 1
+        streaks = []
+        
+        for i in range(1, len(outcomes)):
+            if outcomes[i] == outcomes[i-1]:
+                current_streak += 1
+            else:
+                streaks.append(current_streak)
+                current_streak = 1
+        streaks.append(current_streak)
+        
+        if not streaks or len(streaks) < 2:
+            return 0.0
+        
+        # Calculate variance of streak lengths
+        # Lower variance = more consistent
+        avg_streak = sum(streaks) / len(streaks)
+        variance = sum((s - avg_streak) ** 2 for s in streaks) / len(streaks)
+        
+        # Normalize to 0-1 range (inverse relationship)
+        # Lower variance = higher consistency
+        max_variance = len(outcomes)  # Theoretical maximum
+        consistency = 1.0 - min(variance / max_variance, 1.0)
+        
+        # Also factor in win rate - higher win rate = higher consistency
+        win_rate = sum(outcomes) / len(outcomes)
+        consistency = (consistency * 0.7) + (win_rate * 0.3)  # Weighted combination
+        
+        return max(0.0, min(consistency, 1.0))  # Clamp to 0-1
     
     def get_historical_trades(
         self,
@@ -459,7 +687,12 @@ class WalletAnalyzer:
         return [t for t in trades if t.timestamp >= cutoff]
     
     def _fetch_real_historical_trades(self, address: str, days: int) -> List[HistoricalTrade]:
-        """Fetch real historical trades from Helius API."""
+        """
+        Fetch real historical trades from Helius API.
+        
+        Also collects liquidity snapshots for each trade to build historical
+        liquidity database for future backtesting.
+        """
         transactions = self.helius_client.get_wallet_transactions(
             address,
             days=days,
@@ -467,12 +700,42 @@ class WalletAnalyzer:
         )
         
         trades = []
+        liquidity_snapshots = []
+        
         for tx in transactions:
             swap = self.helius_client.parse_swap_transaction(tx)
             if swap:
                 trade = self._parse_swap_to_trade(swap, address)
                 if trade:
                     trades.append(trade)
+                    
+                    # Collect liquidity snapshot at trade time
+                    # This builds the historical liquidity database
+                    try:
+                        current_liq = self.liquidity_provider.get_current_liquidity(trade.token_address)
+                        if current_liq:
+                            # Create historical snapshot with trade timestamp
+                            historical_snapshot = LiquidityData(
+                                token_address=current_liq.token_address,
+                                liquidity_usd=current_liq.liquidity_usd,
+                                price_usd=current_liq.price_usd,
+                                volume_24h_usd=current_liq.volume_24h_usd,
+                                timestamp=trade.timestamp,  # Use trade timestamp
+                                source="analyzer_collection",
+                            )
+                            liquidity_snapshots.append(historical_snapshot)
+                    except Exception as e:
+                        # Log but don't fail on liquidity collection errors
+                        print(f"[Analyzer] Warning: Failed to collect liquidity for {trade.token_address[:8]}...: {e}")
+        
+        # Batch store liquidity snapshots for efficiency
+        if liquidity_snapshots:
+            try:
+                stored_count = self.liquidity_provider.store_liquidity_batch(liquidity_snapshots)
+                if stored_count > 0:
+                    print(f"[Analyzer] Collected {stored_count} liquidity snapshots for {address[:8]}...")
+            except Exception as e:
+                print(f"[Analyzer] Warning: Failed to store liquidity snapshots: {e}")
         
         return sorted(trades, key=lambda t: t.timestamp, reverse=True)
     

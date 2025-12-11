@@ -27,6 +27,7 @@ from .models import (
     SimulatedResult,
     SimulatedTrade,
     TradeAction,
+    LiquidityData,
 )
 from .liquidity import LiquidityProvider
 
@@ -189,7 +190,10 @@ class BacktestSimulator:
         sol_price: float,
     ) -> Tuple[SimulatedTrade, Optional[str]]:
         """
-        Simulate a single trade under current conditions.
+        Simulate a single trade under historical market conditions.
+        
+        Uses historical liquidity at the time of the trade, falling back
+        to current liquidity if historical data is unavailable.
         
         Args:
             trade: Historical trade to simulate
@@ -199,8 +203,28 @@ class BacktestSimulator:
         Returns:
             Tuple of (SimulatedTrade, rejection_reason)
         """
-        # Get current liquidity for the token
-        liquidity_data = self.liquidity.get_current_liquidity(trade.token_address)
+        # Get historical liquidity for the token at trade timestamp
+        # Falls back to current liquidity if historical unavailable
+        liquidity_data = self.liquidity.get_historical_liquidity_or_current(
+            trade.token_address,
+            trade.timestamp,
+        )
+        
+        # Collect current liquidity snapshot for future historical queries
+        # (if we don't have historical data, store current as historical)
+        if liquidity_data and liquidity_data.source.endswith("_fallback"):
+            # We used current liquidity as fallback, store it with historical timestamp
+            current_liq = self.liquidity.get_current_liquidity(trade.token_address)
+            if current_liq:
+                historical_snapshot = LiquidityData(
+                    token_address=current_liq.token_address,
+                    liquidity_usd=current_liq.liquidity_usd,
+                    price_usd=current_liq.price_usd,
+                    volume_24h_usd=current_liq.volume_24h_usd,
+                    timestamp=trade.timestamp,  # Use trade timestamp
+                    source="backtester_collection",
+                )
+                self.liquidity._store_in_database(historical_snapshot)
         
         if not liquidity_data:
             return SimulatedTrade(

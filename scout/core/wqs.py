@@ -50,8 +50,8 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     """
     score = 0.0
     
-    # Base score starts at 50 (neutral)
-    score = 50.0
+    # PDD specification: score starts at 0
+    score = 0.0
     
     # 1. ROI Performance (up to 25 points)
     if metrics.roi_30d is not None:

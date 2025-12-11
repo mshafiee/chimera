@@ -125,19 +125,24 @@ class LiquidityProvider:
         self,
         token_address: str,
         timestamp: datetime,
+        tolerance_hours: int = 6,
     ) -> Optional[LiquidityData]:
         """
-        Get historical liquidity for a token at a specific time.
+        Get historical liquidity for a token at a specific timestamp.
+        
+        Queries the historical_liquidity table for the closest snapshot
+        to the requested timestamp. Returns data only if within tolerance.
         
         Args:
             token_address: Token mint address
             timestamp: Historical timestamp
+            tolerance_hours: Maximum time difference to accept (default 6 hours)
             
         Returns:
-            LiquidityData or None if not available
+            LiquidityData or None if not available within tolerance
         """
         # Try database first (fastest)
-        db_data = self._get_from_database(token_address, timestamp)
+        db_data = self._get_from_database(token_address, timestamp, tolerance_hours)
         if db_data:
             return db_data
 
@@ -145,17 +150,77 @@ class LiquidityProvider:
         if hasattr(self, 'birdeye_client') and self.birdeye_client:
             birdeye_data = self.birdeye_client.get_historical_liquidity(token_address, timestamp)
             if birdeye_data:
-                # Store in database for future use
-                self._store_in_database(birdeye_data)
-                return birdeye_data
+                # Check if within tolerance
+                time_diff = abs((birdeye_data.timestamp - timestamp).total_seconds() / 3600)
+                if time_diff <= tolerance_hours:
+                    # Store in database for future use
+                    self._store_in_database(birdeye_data)
+                    return birdeye_data
 
-        # Fallback to simulation
-        return self._simulate_historical_liquidity(token_address, timestamp)
+        # Don't fallback to simulation - return None if no historical data
+        return None
+    
+    def get_historical_liquidity_or_current(
+        self,
+        token_address: str,
+        timestamp: datetime,
+    ) -> Optional[LiquidityData]:
+        """
+        Get historical liquidity, falling back to current if unavailable.
+        
+        This is the primary method for backtesting - it ensures we always
+        have liquidity data, even if historical data is missing.
+        
+        Args:
+            token_address: Token mint address
+            timestamp: Historical timestamp
+            
+        Returns:
+            LiquidityData (historical if available, otherwise current)
+        """
+        # Try to get historical liquidity first
+        historical = self.get_historical_liquidity(token_address, timestamp)
+        if historical:
+            return historical
+        
+        # Fallback to current liquidity
+        current = self.get_current_liquidity(token_address)
+        if current:
+            # Create historical data point from current
+            # Log fallback for monitoring
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Historical liquidity not available for {token_address[:8]}... "
+                f"at {timestamp.isoformat()}, using current liquidity as fallback"
+            )
+            return LiquidityData(
+                token_address=current.token_address,
+                liquidity_usd=current.liquidity_usd,
+                price_usd=current.price_usd,
+                volume_24h_usd=current.volume_24h_usd,
+                timestamp=timestamp,  # Use historical timestamp
+                source=f"{current.source}_fallback",
+            )
+        return None
 
     def _get_from_database(
-        self, token_address: str, timestamp: datetime
+        self, 
+        token_address: str, 
+        timestamp: datetime,
+        tolerance_hours: int = 6,
     ) -> Optional[LiquidityData]:
-        """Get historical liquidity from database."""
+        """
+        Get historical liquidity from database.
+        
+        Args:
+            token_address: Token mint address
+            timestamp: Historical timestamp
+            tolerance_hours: Maximum time difference to accept
+            
+        Returns:
+            LiquidityData or None if not found within tolerance
+        """
         if not hasattr(self, 'db_path') or not self.db_path:
             return None
 
@@ -164,9 +229,9 @@ class LiquidityProvider:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
-            # Query for data within 1 hour of requested timestamp
-            time_start = timestamp - timedelta(hours=1)
-            time_end = timestamp + timedelta(hours=1)
+            # Query for data within tolerance of requested timestamp
+            time_start = timestamp - timedelta(hours=tolerance_hours)
+            time_end = timestamp + timedelta(hours=tolerance_hours)
 
             cursor.execute(
                 """
@@ -176,28 +241,43 @@ class LiquidityProvider:
                 ORDER BY ABS(julianday(timestamp) - julianday(?))
                 LIMIT 1
                 """,
-                (token_address, time_start, time_end, timestamp),
+                (token_address, time_start.isoformat(), time_end.isoformat(), timestamp.isoformat()),
             )
 
             row = cursor.fetchone()
             conn.close()
 
             if row:
-                return LiquidityData(
-                    token_address=token_address,
-                    liquidity_usd=row[0],
-                    price_usd=row[1],
-                    volume_24h_usd=row[2],
-                    timestamp=datetime.fromisoformat(row[3]) if isinstance(row[3], str) else row[3],
-                    source=row[4] or "database",
-                )
+                # Parse timestamp
+                if isinstance(row[3], str):
+                    row_timestamp = datetime.fromisoformat(row[3].replace('Z', '+00:00'))
+                else:
+                    row_timestamp = row[3]
+                
+                # Verify it's within tolerance
+                time_diff = abs((row_timestamp - timestamp).total_seconds() / 3600)
+                if time_diff <= tolerance_hours:
+                    return LiquidityData(
+                        token_address=token_address,
+                        liquidity_usd=row[0],
+                        price_usd=row[1],
+                        volume_24h_usd=row[2],
+                        timestamp=row_timestamp,
+                        source=row[4] or "database",
+                    )
         except Exception as e:
-            print(f"Failed to query historical liquidity from database: {e}")
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to query historical liquidity from database: {e}")
 
         return None
 
     def _store_in_database(self, liquidity_data: LiquidityData) -> bool:
-        """Store liquidity data in database."""
+        """
+        Store liquidity data in database.
+        
+        Uses INSERT OR REPLACE to handle duplicate timestamps gracefully.
+        """
         if not hasattr(self, 'db_path') or not self.db_path:
             return False
 
@@ -206,6 +286,21 @@ class LiquidityProvider:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
 
+            # Ensure table exists
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS historical_liquidity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_address TEXT NOT NULL,
+                    liquidity_usd REAL NOT NULL,
+                    price_usd REAL,
+                    volume_24h_usd REAL,
+                    timestamp TIMESTAMP NOT NULL,
+                    source TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(token_address, timestamp)
+                )
+            """)
+            
             cursor.execute(
                 """
                 INSERT OR REPLACE INTO historical_liquidity 
@@ -217,7 +312,7 @@ class LiquidityProvider:
                     liquidity_data.liquidity_usd,
                     liquidity_data.price_usd,
                     liquidity_data.volume_24h_usd,
-                    liquidity_data.timestamp,
+                    liquidity_data.timestamp.isoformat() if isinstance(liquidity_data.timestamp, datetime) else liquidity_data.timestamp,
                     liquidity_data.source,
                 ),
             )
@@ -226,8 +321,80 @@ class LiquidityProvider:
             conn.close()
             return True
         except Exception as e:
-            print(f"Failed to store liquidity data in database: {e}")
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to store liquidity data in database: {e}")
             return False
+    
+    def store_liquidity_batch(self, liquidity_data_list: list[LiquidityData]) -> int:
+        """
+        Store multiple liquidity snapshots in a single transaction.
+        
+        Args:
+            liquidity_data_list: List of LiquidityData objects to store
+            
+        Returns:
+            Number of successfully stored records
+        """
+        if not liquidity_data_list:
+            return 0
+            
+        if not hasattr(self, 'db_path') or not self.db_path:
+            return 0
+
+        try:
+            import sqlite3
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+
+            # Ensure table exists
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS historical_liquidity (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_address TEXT NOT NULL,
+                    liquidity_usd REAL NOT NULL,
+                    price_usd REAL,
+                    volume_24h_usd REAL,
+                    timestamp TIMESTAMP NOT NULL,
+                    source TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(token_address, timestamp)
+                )
+            """)
+            
+            stored_count = 0
+            for liquidity_data in liquidity_data_list:
+                try:
+                    cursor.execute(
+                        """
+                        INSERT OR REPLACE INTO historical_liquidity 
+                        (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            liquidity_data.token_address,
+                            liquidity_data.liquidity_usd,
+                            liquidity_data.price_usd,
+                            liquidity_data.volume_24h_usd,
+                            liquidity_data.timestamp.isoformat() if isinstance(liquidity_data.timestamp, datetime) else liquidity_data.timestamp,
+                            liquidity_data.source,
+                        ),
+                    )
+                    stored_count += 1
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Failed to store liquidity data for {liquidity_data.token_address[:8]}...: {e}")
+                    continue
+
+            conn.commit()
+            conn.close()
+            return stored_count
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to store liquidity data batch: {e}")
+            return 0
     
     def estimate_slippage(
         self,
