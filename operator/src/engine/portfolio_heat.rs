@@ -150,3 +150,5 @@ mod tests {
         // This would be tested with actual database in integration tests
     }
 }
+
+

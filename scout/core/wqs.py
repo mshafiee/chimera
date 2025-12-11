@@ -36,8 +36,9 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     Calculate Wallet Quality Score (WQS) v2.
     
     Scoring breakdown:
-    - ROI performance: up to 25 points
-    - Win streak consistency: up to 20 points
+    - ROI performance: up to 40 points
+    - Win streak consistency: up to 30 points
+    - Activity bonus: up to 10 points
     - Anti-pump-and-dump: -15 points if 7d ROI > 2x 30d ROI
     - Statistical significance: 0.5x multiplier if < 20 trades
     - Drawdown penalty: -0.2 * drawdown_percent
@@ -48,46 +49,58 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     Returns:
         WQS score from 0 to 100
     """
+    # PDD specification: score starts at 0.
     score = 0.0
-    
-    # PDD specification: score starts at 0
-    score = 0.0
-    
-    # 1. ROI Performance (up to 25 points)
-    if metrics.roi_30d is not None:
-        # Cap ROI contribution at 100% for score calculation
-        roi_capped = min(metrics.roi_30d, 100.0)
-        score += (roi_capped / 100.0) * 25.0
-    
-    # 2. Win Streak Consistency (up to 20 points)
+
+    # 1) ROI Performance (up to 40 points)
+    #
+    # We intentionally allow strong wallets to exceed 70 overall so ACTIVE is reachable.
+    # Piecewise mapping:
+    # - 0%..100% ROI -> 0..35 points
+    # - 100%..200% ROI -> 35..40 points
+    if metrics.roi_30d is not None and metrics.roi_30d > 0:
+        roi = metrics.roi_30d
+        if roi <= 100.0:
+            score += (roi / 100.0) * 35.0
+        else:
+            roi_over = min(roi, 200.0) - 100.0
+            score += 35.0 + (roi_over / 100.0) * 5.0
+
+    # 2) Consistency (up to 30 points)
     if metrics.win_streak_consistency is not None:
-        score += metrics.win_streak_consistency * 20.0
+        score += max(0.0, min(metrics.win_streak_consistency, 1.0)) * 30.0
     elif metrics.win_rate is not None:
-        # Fallback: use win rate as proxy for consistency
-        score += metrics.win_rate * 15.0
-    
-    # 3. Anti-Pump-and-Dump Check
+        # Fallback: use win rate as proxy for consistency.
+        score += max(0.0, min(metrics.win_rate, 1.0)) * 25.0
+
+    # 3) Activity bonus (up to 10 points)
+    # Smooth ramp: 20 trades -> 0 points, 50+ trades -> full 10 points.
+    if metrics.trade_count_30d is not None:
+        tc = max(0, metrics.trade_count_30d)
+        if tc >= 50:
+            score += 10.0
+        elif tc > 20:
+            score += ((tc - 20) / 30.0) * 10.0
+
+    # 4) Anti-Pump-and-Dump Check
     # Penalize wallets with recent massive spikes (likely lucky trades)
     if metrics.roi_7d is not None and metrics.roi_30d is not None:
         if metrics.roi_30d > 0 and metrics.roi_7d > metrics.roi_30d * 2:
             score -= 15.0
     
-    # 4. Statistical Significance
+    # 5) Statistical Significance
     # Low confidence penalty for wallets with few trades
+    # Check <10 first (stronger penalty), then <20 (weaker penalty)
     if metrics.trade_count_30d is not None:
-        if metrics.trade_count_30d < 20:
-            score *= 0.5
-        elif metrics.trade_count_30d < 10:
-            score *= 0.25
+        if metrics.trade_count_30d < 10:
+            score *= 0.25  # Strong penalty for very few trades
+        elif metrics.trade_count_30d < 20:
+            score *= 0.5   # Moderate penalty for low trade count
     
-    # 5. Drawdown Penalty
+    # 6) Drawdown Penalty
     # High drawdown indicates poor risk management
     if metrics.max_drawdown_30d is not None:
         score -= metrics.max_drawdown_30d * 0.2
-    
-    # 6. Activity Bonus (small bonus for active traders)
-    if metrics.trade_count_30d is not None and metrics.trade_count_30d >= 50:
-        score += 5.0
     
     # Clamp to 0-100 range
     return max(0.0, min(score, 100.0))

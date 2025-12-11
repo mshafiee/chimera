@@ -498,9 +498,11 @@ impl Executor {
         let start = std::time::Instant::now();
 
         // Use HTTP directly to avoid Solana RPC client builder issues in Docker
+        // Use active RPC URL (fallback if in STANDARD mode)
+        let active_url = self.active_rpc_url();
         let health_check = async {
             let response = self.http_client
-                .post(&self.config.rpc.primary_url)
+                .post(active_url)
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -596,7 +598,8 @@ impl Executor {
         }
 
         // Skip RPC health check - proceed with transaction
-        tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Proceeding with Jito trade execution");
+        let active_url = self.active_rpc_url();
+        tracing::debug!(rpc_url = %active_url, "Proceeding with Jito trade execution");
 
         // Load wallet keypair from vault
         let secrets = load_secrets_with_fallback()
@@ -604,8 +607,9 @@ impl Executor {
         let wallet_keypair = load_wallet_keypair(&secrets)
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e)))?;
 
-        // Build transaction
-        let transaction_builder = TransactionBuilder::new(self.rpc_client.clone(), self.config.clone());
+        // Build transaction (use active RPC client)
+        let active_client = self.active_rpc_client();
+        let transaction_builder = TransactionBuilder::new(active_client.clone(), self.config.clone());
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
@@ -786,7 +790,8 @@ impl Executor {
 
         // Skip RPC health check for devnet - just proceed with transaction
         // The actual transaction submission will fail if RPC is unavailable
-        tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Proceeding with trade execution");
+        let active_url = self.active_rpc_url();
+        tracing::debug!(rpc_url = %active_url, "Proceeding with trade execution");
 
         // Load wallet keypair from vault
         let secrets = load_secrets_with_fallback()
@@ -794,8 +799,9 @@ impl Executor {
         let wallet_keypair = load_wallet_keypair(&secrets)
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e)))?;
 
-        // Build transaction
-        let transaction_builder = TransactionBuilder::new(self.rpc_client.clone(), self.config.clone());
+        // Build transaction (use active RPC client)
+        let active_client = self.active_rpc_client();
+        let transaction_builder = TransactionBuilder::new(active_client.clone(), self.config.clone());
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
@@ -844,9 +850,9 @@ impl Executor {
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
         self.validate_transaction_size(&tx_bytes)?;
         
-        // Send transaction via RPC
-        let signature = self
-            .rpc_client
+        // Send transaction via RPC (use active RPC client)
+        let active_client = self.active_rpc_client();
+        let signature = active_client
             .send_and_confirm_transaction(transaction)
             .await
             .map_err(|e| ExecutorError::TransactionFailed(format!("Transaction submission failed: {}", e)))?;
@@ -882,9 +888,9 @@ impl Executor {
         
         tracing::debug!("Parsed VersionedTransaction successfully");
         
-        // Get recent blockhash
-        let recent_blockhash = self
-            .rpc_client
+        // Get recent blockhash (use active RPC client)
+        let active_client = self.active_rpc_client();
+        let recent_blockhash = active_client
             .get_latest_blockhash()
             .await
             .map_err(|e| {
@@ -1000,13 +1006,14 @@ impl Executor {
             ]
         });
         
-        tracing::debug!(rpc_url = %self.config.rpc.primary_url, "Submitting transaction via direct HTTP");
+        let active_url = self.active_rpc_url();
+        tracing::debug!(rpc_url = %active_url, "Submitting transaction via direct HTTP");
         
-        // Submit via direct HTTP POST with proper timeout
+        // Submit via direct HTTP POST with proper timeout (use active RPC URL)
         let response_result = timeout(
             rpc_timeout,
             self.http_client
-                .post(&self.config.rpc.primary_url)
+                .post(active_url)
                 .json(&rpc_payload)
                 .send()
         )
@@ -1152,6 +1159,30 @@ impl Executor {
     /// Get time spent in fallback mode
     pub fn fallback_duration(&self) -> Option<chrono::Duration> {
         self.fallback_since.map(|t| Utc::now().signed_duration_since(t))
+    }
+
+    /// Get the active RPC client based on current mode
+    /// In STANDARD mode with fallback configured, returns fallback client
+    /// Otherwise returns primary client
+    fn active_rpc_client(&self) -> Arc<RpcClient> {
+        if self.rpc_mode == RpcMode::Standard {
+            if let Some(ref fallback_client) = self.fallback_rpc_client {
+                return fallback_client.clone();
+            }
+        }
+        self.rpc_client.clone()
+    }
+
+    /// Get the active RPC URL based on current mode
+    /// In STANDARD mode with fallback configured, returns fallback URL
+    /// Otherwise returns primary URL
+    fn active_rpc_url(&self) -> &str {
+        if self.rpc_mode == RpcMode::Standard {
+            if let Some(ref fallback_url) = self.config.rpc.fallback_url {
+                return fallback_url;
+            }
+        }
+        &self.config.rpc.primary_url
     }
 }
 

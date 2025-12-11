@@ -67,3 +67,5 @@ print('✓ Roster merge completed successfully')
 echo ""
 echo "Verifying wallets..."
 curl -s http://localhost:8080/api/v1/wallets | python3 -m json.tool 2>/dev/null | head -20
+
+

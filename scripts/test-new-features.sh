@@ -53,3 +53,5 @@ echo "  - Check logs for consensus detection in production"
 echo "  - Monitor volatility calculations"
 echo "  - Test DEX comparison with real trades"
 echo "  - Verify auto-demotion with test wallets"
+
+

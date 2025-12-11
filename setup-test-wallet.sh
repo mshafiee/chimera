@@ -64,3 +64,5 @@ echo "3. Enable monitoring: curl -X POST http://localhost:8080/api/v1/monitoring
 echo ""
 echo "Verify on Solana Explorer:"
 echo "  https://explorer.solana.com/address/$WALLET_ADDRESS"
+
+

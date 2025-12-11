@@ -221,3 +221,5 @@ class TestLiquidityProviderIntegration:
         assert result is not None
         assert result.liquidity_usd == 75000.0
         assert result.source == "integration_test"
+
+

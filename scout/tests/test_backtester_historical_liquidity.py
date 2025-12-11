@@ -221,3 +221,5 @@ class TestBacktesterHistoricalLiquidity:
         # Verify trade was rejected
         assert result.rejected is True
         assert "liquidity" in rejection_reason.lower() or "Insufficient" in rejection_reason
+
+

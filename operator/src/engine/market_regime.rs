@@ -123,3 +123,5 @@ mod tests {
         // This would be tested with actual price history in integration tests
     }
 }
+
+

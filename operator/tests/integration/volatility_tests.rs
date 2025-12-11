@@ -104,3 +104,5 @@ async fn test_volatility_high_volatility_detection() {
     // Should detect high volatility (>30%)
     assert!(volatility > 30.0, "Should detect high volatility scenario");
 }
+
+

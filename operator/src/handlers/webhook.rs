@@ -125,7 +125,15 @@ pub async fn webhook_handler(
     // Check for duplicate (idempotency)
     if db::trade_uuid_exists(&state.db, &trade_uuid).await? {
         tracing::info!(trade_uuid = %trade_uuid, "Duplicate signal rejected");
-        return Err(AppError::Duplicate(trade_uuid));
+        // Return PDD-shaped response: normal HTTP 200/202 with status: rejected
+        return Ok((
+            StatusCode::OK,
+            Json(WebhookResponse {
+                status: WebhookStatus::Rejected,
+                trade_uuid,
+                reason: Some("duplicate_signal".to_string()),
+            }),
+        ));
     }
 
     // Fast path token safety check (for BUY signals only)

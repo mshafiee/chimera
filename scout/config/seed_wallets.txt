@@ -1,0 +1,10 @@
+# Seed wallet addresses for wallet discovery
+# These are known active trading wallets
+# One wallet address per line
+# Scout will query these wallets' recent transactions to find related active traders
+
+# Add known active trader addresses here
+# Example:
+# 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
+
+

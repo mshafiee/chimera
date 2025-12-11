@@ -14,3 +14,5 @@ CREATE INDEX IF NOT EXISTS idx_trades_costs ON trades(total_cost_sol) WHERE tota
 
 -- Add index for net PnL analysis
 CREATE INDEX IF NOT EXISTS idx_trades_net_pnl ON trades(net_pnl_sol) WHERE net_pnl_sol IS NOT NULL;
+
+

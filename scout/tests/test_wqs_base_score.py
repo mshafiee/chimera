@@ -99,13 +99,28 @@ class TestWQSBaseScore:
         assert score < 20.0  # Should be low due to negative ROI and drawdown
     
     def test_wqs_statistical_significance_penalty(self):
-        """Test that low trade count applies penalty (0.5x multiplier)."""
-        # Low trade count (< 20)
+        """Test that low trade count applies penalty (0.5x multiplier for <20, 0.25x for <10)."""
+        # Very low trade count (< 10) - should apply 0.25x multiplier
+        metrics_very_low = WalletMetrics(
+            address="test",
+            roi_7d=10.0,
+            roi_30d=40.0,  # Would add 10 points
+            trade_count_30d=8,  # < 10, should apply 0.25x multiplier
+            win_rate=0.6,
+            max_drawdown_30d=5.0,
+            avg_trade_size_sol=0.5,
+            last_trade_at="2025-01-01T00:00:00",
+            win_streak_consistency=0.5,  # Would add 10 points
+        )
+        
+        score_very_low = calculate_wqs(metrics_very_low)
+        
+        # Low trade count (< 20 but >= 10) - should apply 0.5x multiplier
         metrics_low = WalletMetrics(
             address="test",
             roi_7d=10.0,
             roi_30d=40.0,  # Would add 10 points
-            trade_count_30d=15,  # < 20, should apply 0.5x multiplier
+            trade_count_30d=15,  # < 20 but >= 10, should apply 0.5x multiplier
             win_rate=0.6,
             max_drawdown_30d=5.0,
             avg_trade_size_sol=0.5,
@@ -130,7 +145,9 @@ class TestWQSBaseScore:
         
         score_high = calculate_wqs(metrics_high)
         
-        # Score with low trade count should be lower (due to 0.5x multiplier)
+        # Score with very low trade count (<10) should be lowest (due to 0.25x multiplier)
+        assert score_very_low < score_low
+        # Score with low trade count (<20) should be lower than high (due to 0.5x multiplier)
         assert score_low < score_high
     
     def test_wqs_anti_pump_and_dump_penalty(self):
@@ -169,3 +186,5 @@ class TestWQSBaseScore:
         assert score_pump < score_normal
         # Difference should be approximately 15 points
         assert abs((score_normal - score_pump) - 15.0) < 5.0  # Allow some variance
+
+

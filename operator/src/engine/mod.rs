@@ -44,9 +44,10 @@ use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::handlers::{WsEvent, WsState, TradeUpdateData};
 use crate::metrics::MetricsState;
-use crate::models::Signal;
+use crate::models::{Signal, Action, Strategy};
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
+use crate::token::TokenParser;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -141,6 +142,8 @@ pub struct Engine {
     metrics: Option<Arc<MetricsState>>,
     /// WebSocket state for real-time updates
     ws_state: Option<Arc<WsState>>,
+    /// Token parser for slow-path safety checks
+    token_parser: Option<Arc<TokenParser>>,
 }
 
 impl Engine {
@@ -204,7 +207,23 @@ impl Engine {
         price_cache: Option<Arc<PriceCache>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, Some(notifier), metrics, ws_state, tip_manager, price_cache,
+            config, db, Some(notifier), metrics, ws_state, tip_manager, price_cache, None,
+        )
+    }
+
+    /// Create a new engine instance with all optional extras including tip manager, price cache, and token parser
+    pub fn new_with_extras_tip_manager_price_cache_and_token_parser(
+        config: AppConfig,
+        db: DbPool,
+        notifier: Arc<CompositeNotifier>,
+        metrics: Option<Arc<MetricsState>>,
+        ws_state: Option<Arc<WsState>>,
+        tip_manager: Option<Arc<TipManager>>,
+        price_cache: Option<Arc<PriceCache>>,
+        token_parser: Option<Arc<TokenParser>>,
+    ) -> (Self, EngineHandle) {
+        Self::new_with_optional_extras_tip_manager_and_price_cache(
+            config, db, Some(notifier), metrics, ws_state, tip_manager, price_cache, token_parser,
         )
     }
 
@@ -217,7 +236,7 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, None, None,
+            config, db, notifier, metrics, ws_state, None, None, None,
         )
     }
 
@@ -231,6 +250,7 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
         tip_manager: Option<Arc<TipManager>>,
         price_cache: Option<Arc<PriceCache>>,
+        token_parser: Option<Arc<TokenParser>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
         let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
@@ -270,6 +290,7 @@ impl Engine {
             notifier,
             metrics,
             ws_state,
+            token_parser,
         };
 
         (engine, handle)
@@ -328,6 +349,146 @@ impl Engine {
         {
             tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING");
             return;
+        }
+
+        // Slow-path token safety check (for BUY signals only, before execution)
+        // EXIT signals don't need token validation, SELL signals already own the token
+        if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
+            if let Some(ref token_parser) = self.token_parser {
+                if let Some(ref token_address) = signal.payload.token_address {
+                    match token_parser.slow_check(token_address, signal.payload.strategy).await {
+                        Ok(result) => {
+                            if !result.safe {
+                                let reason = result
+                                    .rejection_reason
+                                    .unwrap_or_else(|| "Token failed slow-path safety check".to_string());
+
+                                tracing::warn!(
+                                    trade_uuid = %trade_uuid,
+                                    token = %token_address,
+                                    reason = %reason,
+                                    "Token rejected by slow-path safety check"
+                                );
+
+                                // Update trade status to DEAD_LETTER
+                                if let Err(e) = crate::db::update_trade_status(
+                                    &self.db,
+                                    &trade_uuid,
+                                    "DEAD_LETTER",
+                                    None,
+                                    Some(&reason),
+                                )
+                                .await
+                                {
+                                    tracing::error!(error = %e, "Failed to update trade status to DEAD_LETTER");
+                                }
+
+                                // Log to dead letter queue
+                                let _ = crate::db::insert_dead_letter(
+                                    &self.db,
+                                    Some(&trade_uuid),
+                                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                    "TOKEN_SLOW_SAFETY_FAILED",
+                                    Some(&reason),
+                                    signal.source_ip.as_deref(),
+                                )
+                                .await;
+
+                                // Broadcast update via WebSocket
+                                if let Some(ref ws) = self.ws_state {
+                                    ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                                        trade_uuid: trade_uuid.clone(),
+                                        status: "DEAD_LETTER".to_string(),
+                                        token_symbol: Some(signal.payload.token.clone()),
+                                        strategy: signal.payload.strategy.to_string(),
+                                    }));
+                                }
+
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            // Fail closed: on slow-check error, reject the trade
+                            let reason = format!("Slow-path token safety check failed: {}", e);
+                            tracing::error!(
+                                trade_uuid = %trade_uuid,
+                                token = %token_address,
+                                error = %e,
+                                "Slow-path token check error, rejecting trade"
+                            );
+
+                            // Update trade status to DEAD_LETTER
+                            if let Err(db_err) = crate::db::update_trade_status(
+                                &self.db,
+                                &trade_uuid,
+                                "DEAD_LETTER",
+                                None,
+                                Some(&reason),
+                            )
+                            .await
+                            {
+                                tracing::error!(error = %db_err, "Failed to update trade status to DEAD_LETTER");
+                            }
+
+                            // Log to dead letter queue
+                            let _ = crate::db::insert_dead_letter(
+                                &self.db,
+                                Some(&trade_uuid),
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                "TOKEN_SLOW_SAFETY_FAILED",
+                                Some(&reason),
+                                signal.source_ip.as_deref(),
+                            )
+                            .await;
+
+                            // Broadcast update via WebSocket
+                            if let Some(ref ws) = self.ws_state {
+                                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                                    trade_uuid: trade_uuid.clone(),
+                                    status: "DEAD_LETTER".to_string(),
+                                    token_symbol: Some(signal.payload.token.clone()),
+                                    strategy: signal.payload.strategy.to_string(),
+                                }));
+                            }
+
+                            return;
+                        }
+                    }
+                } else {
+                    // Missing token_address for BUY signal - reject
+                    let reason = "Missing token_address for BUY signal".to_string();
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        "BUY signal missing token_address, rejecting"
+                    );
+
+                    // Update trade status to DEAD_LETTER
+                    if let Err(e) = crate::db::update_trade_status(
+                        &self.db,
+                        &trade_uuid,
+                        "DEAD_LETTER",
+                        None,
+                        Some(&reason),
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "Failed to update trade status to DEAD_LETTER");
+                    }
+
+                    // Log to dead letter queue
+                    let _ = crate::db::insert_dead_letter(
+                        &self.db,
+                        Some(&trade_uuid),
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        "TOKEN_SLOW_SAFETY_FAILED",
+                        Some(&reason),
+                        signal.source_ip.as_deref(),
+                    )
+                    .await;
+
+                    return;
+                }
+            }
         }
 
         // Execute the trade

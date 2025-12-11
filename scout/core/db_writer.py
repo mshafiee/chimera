@@ -144,7 +144,7 @@ class RosterWriter:
             for wallet in wallets:
                 cursor.execute(
                     """
-                    INSERT INTO wallets (
+                    INSERT OR REPLACE INTO wallets (
                         address, status, wqs_score, roi_7d, roi_30d,
                         trade_count_30d, win_rate, max_drawdown_30d,
                         avg_trade_size_sol, last_trade_at, promoted_at,

@@ -23,7 +23,7 @@ def test_wqs_basic_calculation():
     
     score = calculate_wqs(wallet)
     assert 0 <= score <= 100
-    assert score > 50.0  # Should be above base score with good metrics
+    assert score > 30.0  # Should be strong with good metrics
 
 
 def test_wqs_low_trade_count_penalty():
@@ -270,8 +270,8 @@ def test_wqs_none_values():
     )
     
     score = calculate_wqs(wallet_minimal)
-    # Should return base score (50.0) with no adjustments
-    assert score == 50.0, f"Minimal wallet should return base score: {score}"
+    # PDD: score starts at 0.0
+    assert score == 0.0, f"Minimal wallet should return 0.0: {score}"
 
 
 def test_wqs_negative_values():
@@ -287,9 +287,8 @@ def test_wqs_negative_values():
     
     score = calculate_wqs(wallet_negative)
     assert 0 <= score <= 100
-    # Base (50) + win_streak (10) - drawdown (2) = 58, but negative ROI doesn't help
-    # Actually, negative drawdown in the original test wouldn't subtract, so let's test properly
-    assert score < 60.0, f"Negative ROI wallet should score lower: {score}"
+    # Score should be modest due to no ROI contribution and drawdown penalty.
+    assert score < 20.0, f"Negative ROI wallet should score low: {score}"
     
     # Test with all negative/zero values
     wallet_all_negative = WalletMetrics(

@@ -263,3 +263,5 @@ The Scout correctly finds profitable wallets if:
 5. ✅ High drawdown wallets are penalized (risk management)
 6. ✅ Losing wallets are rejected or rank very low
 7. ✅ Top-ranked wallets are classified as ACTIVE (WQS >= 70)
+
+

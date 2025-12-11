@@ -404,3 +404,5 @@ class TestWinStreakConsistency:
         
         # Should return 0.0 for insufficient trades
         assert consistency == 0.0
+
+

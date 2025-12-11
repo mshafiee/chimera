@@ -12,6 +12,7 @@ In production, this connects to:
 
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from .wqs import WalletMetrics
@@ -86,26 +87,71 @@ class WalletAnalyzer:
         if discover_wallets and self.helius_client.api_key:
             print("[Analyzer] Attempting to discover wallets from on-chain data...")
             try:
+                # Get configuration from environment variables
+                hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
+                min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
+                
                 discovered = self.helius_client.discover_wallets_from_recent_swaps(
-                    limit=200,  # Query more transactions to find active wallets
-                    min_trade_count=3,  # Minimum trades to be considered
+                    limit=1000,  # Max transactions to query (deprecated but kept for compatibility)
+                    min_trade_count=min_trade_count,
+                    max_wallets=max_wallets,
+                    hours_back=hours_back,
                 )
                 if discovered:
                     self._candidate_wallets = discovered[:max_wallets]
                     print(f"[Analyzer] Discovered {len(self._candidate_wallets)} candidate wallets")
-                else:
-                    print("[Analyzer] No wallets discovered, using sample data")
-                    self._load_sample_data()
+                    return
             except Exception as e:
                 print(f"[Analyzer] Warning: Failed to discover wallets: {e}")
-                print("[Analyzer] Falling back to sample data")
-                self._load_sample_data()
+                import traceback
+                if os.getenv("SCOUT_VERBOSE", "false").lower() == "true":
+                    traceback.print_exc()
+        
+        # Fallback: Try to load from existing roster database
+        try:
+            # Try main database first
+            roster_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
+            # Also check for roster_new.db in the data directory
+            data_dir = Path(roster_path).parent
+            roster_new_path = data_dir / "roster_new.db"
+            
+            for db_path in [roster_path, str(roster_new_path)]:
+                if os.path.exists(db_path):
+                    import sqlite3
+                    conn = sqlite3.connect(db_path)
+                    cursor = conn.cursor()
+                    # Check if wallets table exists
+                    cursor.execute("""
+                        SELECT name FROM sqlite_master 
+                        WHERE type='table' AND name='wallets'
+                    """)
+                    if cursor.fetchone():
+                        # Get existing wallets from database
+                        cursor.execute("""
+                            SELECT DISTINCT address 
+                            FROM wallets 
+                            WHERE status IN ('ACTIVE', 'CANDIDATE')
+                            ORDER BY wqs_score DESC NULLS LAST
+                            LIMIT ?
+                        """, (max_wallets,))
+                        existing_wallets = [row[0] for row in cursor.fetchall()]
+                        conn.close()
+                        
+                        if existing_wallets:
+                            self._candidate_wallets = existing_wallets[:max_wallets]
+                            print(f"[Analyzer] Loaded {len(self._candidate_wallets)} wallets from existing database ({db_path})")
+                            return
+                    else:
+                        conn.close()
+        except Exception as e:
+            print(f"[Analyzer] Warning: Failed to load from database: {e}")
+        
+        # Final fallback: sample data
+        if not self.helius_client.api_key:
+            print("[Analyzer] No Helius API key found, using sample data")
         else:
-            if not self.helius_client.api_key:
-                print("[Analyzer] No Helius API key found, using sample data")
-            else:
-                print("[Analyzer] Wallet discovery disabled, using sample data")
-            self._load_sample_data()
+            print("[Analyzer] No wallets discovered, using sample data")
+        self._load_sample_data()
     
     def _load_sample_data(self):
         """Load sample wallet data for testing."""
@@ -260,6 +306,48 @@ class WalletAnalyzer:
         if address in self._metrics_cache:
             return self._metrics_cache[address]
         
+        # Try to load from database first (if wallet exists there)
+        try:
+            db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
+            if os.path.exists(db_path):
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate,
+                           max_drawdown_30d, avg_trade_size_sol, last_trade_at
+                    FROM wallets
+                    WHERE address = ?
+                    LIMIT 1
+                """, (address,))
+                row = cursor.fetchone()
+                conn.close()
+                
+                if row:
+                    # Convert database row to WalletMetrics
+                    wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, \
+                    max_drawdown_30d, avg_trade_size_sol, last_trade_at = row
+                    
+                    # If we have some metrics, create WalletMetrics object
+                    if any(x is not None for x in [roi_7d, roi_30d, trade_count_30d, win_rate]):
+                        metrics = WalletMetrics(
+                            address=address,
+                            roi_7d=roi_7d,
+                            roi_30d=roi_30d,
+                            trade_count_30d=trade_count_30d,
+                            win_rate=win_rate,
+                            max_drawdown_30d=max_drawdown_30d,
+                            avg_trade_size_sol=avg_trade_size_sol,
+                            last_trade_at=last_trade_at,
+                            win_streak_consistency=None,  # Not stored in DB, will be calculated
+                        )
+                        self._metrics_cache[address] = metrics
+                        return metrics
+        except Exception as e:
+            # Log but don't fail - continue to try other sources
+            if os.getenv("SCOUT_VERBOSE", "false").lower() == "true":
+                print(f"[Analyzer] Warning: Failed to load metrics from database for {address[:8]}...: {e}")
+        
         # Fetch real data if Helius client is available
         if self.helius_client.api_key:
             try:
@@ -268,7 +356,8 @@ class WalletAnalyzer:
                     self._metrics_cache[address] = metrics
                     return metrics
             except Exception as e:
-                print(f"[Analyzer] Warning: Failed to fetch metrics for {address[:8]}...: {e}")
+                if os.getenv("SCOUT_VERBOSE", "false").lower() == "true":
+                    print(f"[Analyzer] Warning: Failed to fetch metrics for {address[:8]}...: {e}")
         
         # Fall back to cached sample data
         return self._metrics_cache.get(address)

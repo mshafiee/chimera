@@ -103,8 +103,24 @@ async fn main() -> anyhow::Result<()> {
     // Initialize notification service
     let notifier = Arc::new(notifications::CompositeNotifier::new());
     
+    // Initialize token parser (needed for slow-path safety checks in engine)
+    let token_cache = Arc::new(TokenCache::new(
+        config.token_safety.cache_capacity,
+        config.token_safety.cache_ttl_seconds,
+    ));
+    let token_fetcher = Arc::new(TokenMetadataFetcher::new(&config.rpc.primary_url));
+    let token_safety_config = TokenSafetyConfig {
+        freeze_authority_whitelist: config.token_safety.freeze_authority_whitelist.iter().cloned().collect(),
+        mint_authority_whitelist: config.token_safety.mint_authority_whitelist.iter().cloned().collect(),
+        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
+    };
+    let token_parser = Arc::new(TokenParser::new(token_safety_config, token_cache.clone(), token_fetcher.clone()));
+    tracing::info!("Token parser initialized");
+    
     // Create engine
-    let (engine, _engine_handle) = engine::Engine::new_with_extras_tip_manager_and_price_cache(
+    let (engine, _engine_handle) = engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
         config.clone(),
         db_pool.clone(),
         notifier.clone(),
@@ -112,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
         Some(ws_state.clone()),
         Some(tip_manager.clone()),
         Some(price_cache.clone()),
+        Some(token_parser.clone()),
     );
     tracing::info!("Engine created");
     
@@ -299,20 +316,7 @@ async fn main() -> anyhow::Result<()> {
             bearer_auth,
         ));
     
-    // Create webhook state
-    let token_cache = Arc::new(TokenCache::new(
-        config.token_safety.cache_capacity,
-        config.token_safety.cache_ttl_seconds,
-    ));
-    let token_fetcher = Arc::new(TokenMetadataFetcher::new(&config.rpc.primary_url));
-    let token_safety_config = TokenSafetyConfig {
-        freeze_authority_whitelist: config.token_safety.freeze_authority_whitelist.iter().cloned().collect(),
-        mint_authority_whitelist: config.token_safety.mint_authority_whitelist.iter().cloned().collect(),
-        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
-        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
-        honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
-    };
-    let token_parser = Arc::new(TokenParser::new(token_safety_config, token_cache.clone(), token_fetcher));
+    // Create webhook state (token_parser already created above)
     
     // Create SignalAggregator and HeliusClient for signal quality enhancements
     let signal_aggregator = Arc::new(SignalAggregator::new(db_pool.clone()));
@@ -375,10 +379,20 @@ async fn main() -> anyhow::Result<()> {
         config.security.max_timestamp_drift_secs,
     ));
     
-    // Build webhook routes with HMAC middleware
+    // Build rate limiter for webhook routes
+    let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()
+        .per_second(config.security.webhook_rate_limit as u64)
+        .burst_size(config.security.webhook_burst_size)
+        .key_extractor(middleware::ProxyAwareKeyExtractor)
+        .finish()
+        .unwrap();
+    let governor_layer = tower_governor::GovernorLayer::new(governor_conf);
+    
+    // Build webhook routes with rate limiting and HMAC middleware
     let webhook_routes = Router::new()
         .route("/webhook", post(webhook_handler))
         .with_state(webhook_state.clone())
+        .layer(governor_layer.clone())
         .layer(axum_middleware::from_fn_with_state(
             hmac_state.clone(),
             middleware::hmac_verify,
@@ -417,8 +431,7 @@ async fn main() -> anyhow::Result<()> {
     // Build metrics routes
     let metrics_routes = metrics_router().with_state(metrics_state.clone());
     
-    // Rate limiter disabled - tower_governor needs special config for docker networking
-    // Can be re-enabled with proper key extractor configuration
+    // Rate limiting is enabled on webhook routes with ProxyAwareKeyExtractor
     
     // Build CORS layer
     let cors = CorsLayer::new()
@@ -459,8 +472,7 @@ async fn main() -> anyhow::Result<()> {
                     )
                 })
         );
-    // Note: Rate limiting disabled for now - governor needs special configuration for docker
-    // .layer(governor_layer)
+    // Rate limiting is applied per-route (webhook routes have governor_layer)
     
     tracing::info!("Full router created with all routes and middleware");
     
@@ -778,9 +790,9 @@ async fn main_full() -> anyhow::Result<()> {
     // Create metrics state
     let metrics_state = Arc::new(MetricsState::new());
 
-    // Create engine with notification, metrics, WebSocket support, and tip manager
+    // Create engine with notification, metrics, WebSocket support, tip manager, and token parser
     // (ws_state already created above)
-    let (engine, engine_handle) = engine::Engine::new_with_extras_tip_manager_and_price_cache(
+    let (engine, engine_handle) = engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
         config.clone(),
         db_pool.clone(),
         notifier.clone(),
@@ -788,6 +800,7 @@ async fn main_full() -> anyhow::Result<()> {
         Some(ws_state.clone()),
         Some(tip_manager.clone()),
         Some(price_cache.clone()),
+        Some(token_parser.clone()),
     );
 
     // Spawn engine processing loop
