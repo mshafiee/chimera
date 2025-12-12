@@ -40,3 +40,6 @@ tmp/
 temp/
 *.tmp
 *.md
+/.hypothesis
+/operator/.hypothesis
+/scout/.hypothesis
