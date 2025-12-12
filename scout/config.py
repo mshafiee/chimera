@@ -201,3 +201,5 @@ class ScoutConfig:
                 print(f"  ⚠️  {warning}")
         else:
             print("\n✓ Configuration looks good!")
+
+

@@ -265,3 +265,5 @@ The Scout correctly finds profitable wallets if:
 7. ✅ Top-ranked wallets are classified as ACTIVE (WQS >= 70)
 
 
+
+
