@@ -93,20 +93,13 @@ class BacktestSimulator:
                 failure_reason="No trades to simulate",
             )
         
-        # Check minimum trade requirement
+        # NOTE:
+        # Even if there are insufficient trades, we still simulate what we have
+        # (so callers can see *why* trades would be rejected, liquidity issues, etc.).
+        insufficient_trades_failure: Optional[str] = None
         if len(trades) < self.config.min_trades_required:
-            return SimulatedResult(
-                wallet_address=wallet_address,
-                total_trades=len(trades),
-                simulated_trades=0,
-                rejected_trades=0,
-                original_pnl_sol=0.0,
-                simulated_pnl_sol=0.0,
-                pnl_difference_sol=0.0,
-                total_slippage_cost_sol=0.0,
-                total_fee_cost_sol=0.0,
-                passed=False,
-                failure_reason=f"Insufficient trades: {len(trades)} < {self.config.min_trades_required}",
+            insufficient_trades_failure = (
+                f"Insufficient trades: {len(trades)} < {self.config.min_trades_required}"
             )
         
         # Get minimum liquidity threshold for strategy
@@ -149,20 +142,25 @@ class BacktestSimulator:
         
         # Determine pass/fail
         passed = True
-        failure_reason = None
+        failure_reason: Optional[str] = None
+
+        # Fail if insufficient trades
+        if insufficient_trades_failure is not None:
+            passed = False
+            failure_reason = insufficient_trades_failure
         
         # Fail if too many trades rejected (>50%)
-        if rejection_rate > 0.5:
+        if passed and rejection_rate > 0.5:
             passed = False
             failure_reason = f"Too many trades rejected: {rejection_rate*100:.0f}%"
         
         # Fail if simulated PnL is negative
-        elif total_simulated_pnl < 0:
+        elif passed and total_simulated_pnl < 0:
             passed = False
             failure_reason = f"Negative simulated PnL: {total_simulated_pnl:.4f} SOL"
         
         # Fail if PnL reduction is too high (>80% reduction)
-        elif total_original_pnl > 0:
+        elif passed and total_original_pnl > 0:
             pnl_reduction = (total_original_pnl - total_simulated_pnl) / total_original_pnl
             if pnl_reduction > 0.8:
                 passed = False
@@ -203,12 +201,23 @@ class BacktestSimulator:
         Returns:
             Tuple of (SimulatedTrade, rejection_reason)
         """
-        # Get historical liquidity for the token at trade timestamp
-        # Falls back to current liquidity if historical unavailable
-        liquidity_data = self.liquidity.get_historical_liquidity_or_current(
-            trade.token_address,
-            trade.timestamp,
-        )
+        # Prefer explicit historical liquidity attached to the trade (if provided),
+        # otherwise query the provider (historical with fallback to current).
+        liquidity_data = None
+        if trade.liquidity_at_trade_usd is not None:
+            liquidity_data = LiquidityData(
+                token_address=trade.token_address,
+                liquidity_usd=trade.liquidity_at_trade_usd,
+                price_usd=0.0,
+                volume_24h_usd=0.0,
+                timestamp=trade.timestamp,
+                source="trade_attached",
+            )
+        else:
+            liquidity_data = self.liquidity.get_historical_liquidity_or_current(
+                trade.token_address,
+                trade.timestamp,
+            )
         
         # Collect current liquidity snapshot for future historical queries
         # (if we don't have historical data, store current as historical)
@@ -280,12 +289,15 @@ class BacktestSimulator:
         # Calculate costs
         slippage_cost = trade.amount_sol * slippage
         fee_cost = trade.amount_sol * self.config.dex_fee_percent
+        priority_fee_cost = max(0.0, self.config.priority_fee_sol_per_trade)
+        jito_tip_cost = max(0.0, self.config.jito_tip_sol_per_trade)
+        execution_cost = priority_fee_cost + jito_tip_cost
         
         # Calculate simulated PnL
         # For BUY trades: original PnL minus costs
         # For SELL trades: original PnL minus costs
         original_pnl = trade.pnl_sol or 0.0
-        simulated_pnl = original_pnl - slippage_cost - fee_cost
+        simulated_pnl = original_pnl - slippage_cost - fee_cost - execution_cost
         
         return SimulatedTrade(
             original_trade=trade,
@@ -293,7 +305,7 @@ class BacktestSimulator:
             liquidity_sufficient=True,
             estimated_slippage_percent=slippage,
             slippage_cost_sol=slippage_cost,
-            fee_cost_sol=fee_cost,
+            fee_cost_sol=fee_cost + execution_cost,
             simulated_pnl_sol=simulated_pnl,
             rejected=False,
             rejection_reason=None,

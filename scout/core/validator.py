@@ -36,10 +36,18 @@ logger = logging.getLogger(__name__)
 class PromotionCriteria:
     """Criteria for wallet promotion."""
     min_wqs_score: float = 70.0
+    # Minimum raw swap events (basic data sufficiency)
     min_trades: int = 5
+    # Minimum realized closes (SELLs with pnl) required for promotion
+    min_closes_required: int = 10
     max_rejection_rate: float = 0.5  # Max 50% of trades can be rejected
     require_positive_simulated_pnl: bool = True
     max_pnl_reduction_percent: float = 80.0  # Max 80% reduction allowed
+
+    # Walk-forward validation (reduce overfitting / "lucky wallet" promotion)
+    walk_forward_enabled: bool = True
+    walk_forward_holdout_fraction: float = 0.3  # validate on most recent 30%
+    walk_forward_min_trades: int = 5
 
 
 class PrePromotionValidator:
@@ -124,11 +132,42 @@ class PrePromotionValidator:
                 recommended_status="CANDIDATE",
                 notes=f"Need more trade history",
             )
+
+        # Step 2b: Check minimum realized closes (SELLs with computed PnL)
+        close_trades = [
+            t for t in trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None
+        ]
+        if len(close_trades) < self.criteria.min_closes_required:
+            logger.info(
+                f"Wallet failed close count check: {len(close_trades)} < {self.criteria.min_closes_required}"
+            )
+            return ValidationResult(
+                wallet_address=wallet_address,
+                status=ValidationStatus.FAILED_INSUFFICIENT_TRADES,
+                passed=False,
+                reason=f"Insufficient realized closes: {len(close_trades)} < {self.criteria.min_closes_required}",
+                recommended_status="CANDIDATE",
+                notes="Need more realized closes (SELLs) for reliable validation",
+            )
         
-        # Step 3: Run backtest simulation
+        # Step 3: Walk-forward split (optional)
+        wf_trades = trades
+        wf_notes = None
+        if self.criteria.walk_forward_enabled and trades:
+            sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+            holdout_n = int(max(1, round(len(sorted_trades) * self.criteria.walk_forward_holdout_fraction)))
+            wf_trades = sorted_trades[-holdout_n:]
+            wf_closes = [t for t in wf_trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None]
+            if len(wf_closes) < self.criteria.walk_forward_min_trades:
+                # If holdout too small, fall back to full set
+                wf_trades = trades
+            else:
+                wf_notes = f"Walk-forward holdout: {len(wf_trades)}/{len(trades)} trades"
+
+        # Step 4: Run backtest simulation (on walk-forward set if enabled)
         try:
             backtest_result = self.simulator.simulate_wallet(
-                wallet_address, trades, strategy
+                wallet_address, wf_trades, strategy
             )
         except Exception as e:
             logger.error(f"Backtest simulation error: {e}")
@@ -140,7 +179,7 @@ class PrePromotionValidator:
                 recommended_status="CANDIDATE",
             )
         
-        # Step 4: Check backtest results
+        # Step 5: Check backtest results
         if not backtest_result.passed:
             status = self._determine_failure_status(backtest_result.failure_reason)
             logger.info(f"Wallet failed backtest: {backtest_result.failure_reason}")
@@ -151,10 +190,10 @@ class PrePromotionValidator:
                 passed=False,
                 reason=backtest_result.failure_reason,
                 recommended_status="CANDIDATE",
-                notes=self._format_backtest_notes(backtest_result),
+                notes=" | ".join([p for p in [wf_notes, self._format_backtest_notes(backtest_result)] if p]),
             )
         
-        # Step 5: Additional checks on backtest results
+        # Step 6: Additional checks on backtest results
         
         # Check rejection rate
         if backtest_result.total_trades > 0:
@@ -194,7 +233,7 @@ class PrePromotionValidator:
             passed=True,
             reason="Passed all validation checks",
             recommended_status="ACTIVE",
-            notes=self._format_success_notes(wqs_score, backtest_result),
+            notes=" | ".join([p for p in [wf_notes, self._format_success_notes(wqs_score, backtest_result)] if p]),
         )
     
     def quick_check(
@@ -262,6 +301,52 @@ class PrePromotionValidator:
             f"Trades: {result.simulated_trades}/{result.total_trades} | "
             f"Simulated PnL: {result.simulated_pnl_sol:.4f} SOL | "
             f"Costs: {result.total_slippage_cost_sol + result.total_fee_cost_sol:.4f} SOL"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Backward compatibility
+# ---------------------------------------------------------------------------
+
+class WalletValidator(PrePromotionValidator):
+    """
+    Backward-compatible wrapper for older code/tests.
+
+    The Scout implementation standardized on `PrePromotionValidator`, but some
+    tests/imports still reference `WalletValidator`.
+    """
+
+    def validate(
+        self,
+        wallet: dict,
+        trades: Optional[List[HistoricalTrade]] = None,
+        strategy: str = "SHIELD",
+    ) -> ValidationResult:
+        """
+        Validate a wallet represented as a simple dict.
+
+        Expected keys (best-effort):
+        - address (required)
+        - roi_7d, roi_30d, trade_count_30d, win_rate, max_drawdown_30d,
+          avg_trade_size_sol, last_trade_at, win_streak_consistency
+        """
+        address = wallet.get("address", "")
+        metrics = WalletMetrics(
+            address=address,
+            roi_7d=wallet.get("roi_7d"),
+            roi_30d=wallet.get("roi_30d"),
+            trade_count_30d=wallet.get("trade_count_30d"),
+            win_rate=wallet.get("win_rate"),
+            max_drawdown_30d=wallet.get("max_drawdown_30d"),
+            avg_trade_size_sol=wallet.get("avg_trade_size_sol"),
+            last_trade_at=wallet.get("last_trade_at"),
+            win_streak_consistency=wallet.get("win_streak_consistency"),
+        )
+        return self.validate_for_promotion(
+            wallet_address=address,
+            metrics=metrics,
+            trades=trades or [],
+            strategy=strategy,
         )
 
 
