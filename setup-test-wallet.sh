@@ -66,3 +66,5 @@ echo "Verify on Solana Explorer:"
 echo "  https://explorer.solana.com/address/$WALLET_ADDRESS"
 
 
+
+
