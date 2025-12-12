@@ -62,6 +62,11 @@ class WalletAnalyzer:
         self._metrics_cache: Dict[str, WalletMetrics] = {}
         self._trades_cache: Dict[str, List[HistoricalTrade]] = {}
         self._candidate_wallets: List[str] = []
+        self._token_meta_cache: Dict[str, Dict[str, Any]] = {}
+
+        # Max txs to pull per wallet when computing metrics/trades
+        self._wallet_tx_limit = int(os.getenv("SCOUT_WALLET_TX_LIMIT", "500"))
+        self._wallet_tx_limit = max(50, min(self._wallet_tx_limit, 5000))
         
         # Try to load wallets from config file first
         wallet_list_file = os.getenv("SCOUT_WALLET_LIST_FILE", "/app/config/wallets.txt")
@@ -368,7 +373,7 @@ class WalletAnalyzer:
         transactions = self.helius_client.get_wallet_transactions(
             address,
             days=30,
-            limit=100,
+            limit=self._wallet_tx_limit,
         )
         
         if not transactions:
@@ -377,10 +382,9 @@ class WalletAnalyzer:
         # Parse transactions into trades
         trades = []
         for tx in transactions:
-            swap = self.helius_client.parse_swap_transaction(tx)
+            swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
             if swap:
                 # Convert to HistoricalTrade format
-                # Note: We need to determine token symbol and calculate PnL
                 trade = self._parse_swap_to_trade(swap, address)
                 if trade:
                     trades.append(trade)
@@ -394,37 +398,163 @@ class WalletAnalyzer:
     def _parse_swap_to_trade(self, swap: Dict[str, Any], wallet: str) -> Optional[HistoricalTrade]:
         """Parse a swap transaction into a HistoricalTrade."""
         try:
-            # Determine action (simplified: if SOL is input, it's a BUY)
-            action = TradeAction.BUY if swap.get("token_in") == "So11111111111111111111111111111111111111112" else TradeAction.SELL
-            
-            # Get timestamp
-            timestamp = datetime.utcfromtimestamp(swap.get("timestamp", int(datetime.utcnow().timestamp())))
-            
-            # Calculate amount in SOL
-            amount_sol = swap.get("amount_in", 0) if action == TradeAction.BUY else swap.get("amount_out", 0)
-            
-            # For now, we'll use placeholder values that will be refined
-            # In production, you'd fetch token metadata and prices
+            # Robust swap parsing already produced wallet-relative quantities
+            direction = (swap.get("direction") or "").upper()
+            if direction not in ("BUY", "SELL"):
+                return None
+
+            action = TradeAction.BUY if direction == "BUY" else TradeAction.SELL
+            timestamp = datetime.utcfromtimestamp(
+                swap.get("timestamp", int(datetime.utcnow().timestamp()))
+            )
+
+            token_mint = swap.get("token_mint", "") or swap.get("token_out", "")
+            token_amount = float(swap.get("token_amount") or 0.0)
+            sol_amount_raw = swap.get("sol_amount")
+            price_sol_raw = swap.get("price_sol")
+            price_usd_raw = swap.get("price_usd")
+            usd_amount_raw = swap.get("usd_amount")
+
+            sol_amount: float = float(sol_amount_raw or 0.0) if sol_amount_raw is not None else 0.0
+            price_sol: float = float(price_sol_raw or 0.0) if price_sol_raw is not None else 0.0
+            price_usd: Optional[float] = float(price_usd_raw) if price_usd_raw is not None else None
+
+            # If this was a token->token swap valued in USD, derive SOL notional using SOL/USD.
+            if sol_amount_raw is None and usd_amount_raw is not None:
+                try:
+                    usd_amount = float(usd_amount_raw)
+                    sol_price_usd = self.liquidity_provider.get_sol_price_usd()
+                    if usd_amount > 0 and sol_price_usd > 0:
+                        sol_amount = usd_amount / sol_price_usd
+                        price_sol = (sol_amount / token_amount) if token_amount > 0 else 0.0
+                except Exception:
+                    pass
+
+            # Token metadata enrichment (symbol/decimals)
+            token_symbol = swap.get("token_symbol") or None
+            if not token_symbol or token_symbol == "UNKNOWN":
+                token_symbol = self._get_token_symbol(token_mint) or "UNKNOWN"
+
             trade = HistoricalTrade(
-                token_address=swap.get("token_out", "") if action == TradeAction.BUY else swap.get("token_in", ""),
-                token_symbol="UNKNOWN",  # Would fetch from token metadata
+                token_address=token_mint,
+                token_symbol=token_symbol,
                 action=action,
-                amount_sol=float(amount_sol) / 1e9 if amount_sol else 0.0,  # Convert lamports to SOL
-                price_at_trade=0.0,  # Would calculate from swap amounts
+                amount_sol=sol_amount,  # SOL notional (spent/received)
+                price_at_trade=price_sol,  # SOL per token
                 timestamp=timestamp,
                 tx_signature=swap.get("signature", ""),
-                pnl_sol=None,  # Would calculate from price changes
+                pnl_sol=None,
                 liquidity_at_trade_usd=None,
+                token_amount=token_amount,
+                sol_amount=sol_amount,
+                price_sol=price_sol,
+                price_usd=price_usd,
             )
+            # If we didn't get USD price directly, derive it from SOL/USD.
+            if trade.price_usd is None and trade.price_sol and trade.price_sol > 0:
+                sol_price_usd = self.liquidity_provider.get_sol_price_usd()
+                if sol_price_usd > 0:
+                    trade.price_usd = trade.price_sol * sol_price_usd
+
             return trade
         except Exception as e:
             print(f"[Analyzer] Error parsing swap: {e}")
             return None
+
+    def _get_token_symbol(self, token_mint: str) -> Optional[str]:
+        """Best-effort token symbol lookup with caching."""
+        if not token_mint:
+            return None
+        if token_mint in self._token_meta_cache:
+            return self._token_meta_cache[token_mint].get("symbol")
+
+        # 1) Known tokens map
+        if hasattr(self.liquidity_provider, "KNOWN_TOKENS") and token_mint in self.liquidity_provider.KNOWN_TOKENS:
+            symbol = self.liquidity_provider.KNOWN_TOKENS[token_mint][0]
+            self._token_meta_cache[token_mint] = {"symbol": symbol}
+            return symbol
+
+        # 2) Birdeye (if available)
+        try:
+            if getattr(self.liquidity_provider, "birdeye_client", None):
+                meta = self.liquidity_provider.birdeye_client.get_token_metadata(token_mint)
+                if meta:
+                    self._token_meta_cache[token_mint] = meta
+                    return meta.get("symbol")
+        except Exception:
+            pass
+
+        self._token_meta_cache[token_mint] = {}
+        return None
+
+    def _enrich_trades_with_realized_pnl(self, trades: List[HistoricalTrade]) -> List[HistoricalTrade]:
+        """
+        Compute realized PnL (in SOL) for SELL trades using average cost basis.
+
+        This makes metrics like win-rate and drawdown meaningful even when the
+        raw swap payload doesn't directly include PnL.
+        """
+        # If these trades are in the legacy "price_at_trade + pnl_sol" test format
+        # (no `token_amount` / `sol_amount`), don't try to overwrite/derive PnL.
+        if all(t.token_amount is None and t.sol_amount is None and t.price_sol is None for t in trades):
+            return trades
+
+        # Track per-token position: {token: (token_qty, cost_basis_sol)}
+        positions: Dict[str, Dict[str, float]] = {}
+
+        # Sort chronologically for cost-basis accounting
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+
+        for t in sorted_trades:
+            token = t.token_address
+            token_qty = t.token_amount
+            sol_amt = t.sol_amount if t.sol_amount is not None else t.amount_sol
+
+            # If token_amount missing (legacy tests), infer from SOL and price if possible
+            if token_qty is None or token_qty <= 0:
+                if t.price_at_trade and t.price_at_trade > 0 and sol_amt and sol_amt > 0:
+                    token_qty = sol_amt / t.price_at_trade
+                    t.token_amount = token_qty
+
+            if token_qty is None or token_qty <= 0 or sol_amt is None:
+                continue
+
+            if t.action == TradeAction.BUY:
+                pos = positions.setdefault(token, {"qty": 0.0, "cost_sol": 0.0})
+                pos["qty"] += token_qty
+                pos["cost_sol"] += sol_amt
+
+            elif t.action == TradeAction.SELL:
+                pos = positions.get(token)
+                if not pos or pos["qty"] <= 0:
+                    # Can't compute cost basis; leave pnl as None
+                    continue
+
+                sell_qty = min(token_qty, pos["qty"])
+                if sell_qty <= 0:
+                    continue
+
+                avg_cost_per_token = pos["cost_sol"] / pos["qty"] if pos["qty"] > 0 else 0.0
+                cost_basis_sol = avg_cost_per_token * sell_qty
+                realized_pnl_sol = sol_amt - cost_basis_sol
+
+                t.pnl_sol = realized_pnl_sol
+
+                # Reduce position
+                pos["qty"] -= sell_qty
+                pos["cost_sol"] -= cost_basis_sol
+                if pos["qty"] <= 1e-12:
+                    positions.pop(token, None)
+
+        return trades
     
     def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
+
+        # Ensure SELL trades have realized pnl populated (cost-basis)
+        self._enrich_trades_with_realized_pnl(trades)
         
         # Sort trades by timestamp
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
@@ -436,6 +566,15 @@ class WalletAnalyzer:
         
         trades_7d = [t for t in sorted_trades if t.timestamp >= cutoff_7d]
         trades_30d = [t for t in sorted_trades if t.timestamp >= cutoff_30d]
+
+        # IMPORTANT:
+        # `trade_count_30d` is intentionally defined as the number of *realized closes*,
+        # i.e. SELL trades with a computed `pnl_sol`. This makes significance tests and
+        # win/loss metrics comparable and prevents “lots of buys, few sells” wallets
+        # from looking statistically robust.
+        close_trades_30d = [
+            t for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol is not None
+        ]
         
         # Calculate ROI from actual price changes
         roi_7d = self._calculate_roi_from_trades(trades_7d, days=7)
@@ -460,13 +599,58 @@ class WalletAnalyzer:
             address=address,
             roi_7d=roi_7d,
             roi_30d=roi_30d,
-            trade_count_30d=len(trades_30d),
+            trade_count_30d=len(close_trades_30d),
             win_rate=win_rate,
             max_drawdown_30d=max_drawdown,
             avg_trade_size_sol=avg_trade_size,
             last_trade_at=last_trade_at,
             win_streak_consistency=win_streak_consistency,
         )
+
+    def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:
+        """
+        Compute additional wallet stats from realized PnL (SOL) for persistence.
+
+        Returns:
+          - avg_win_sol
+          - avg_loss_sol
+          - profit_factor (sum_wins / sum_losses)
+          - realized_pnl_30d_sol (sum of realized pnl over SELL trades)
+        """
+        if not trades:
+            return {
+                "avg_win_sol": None,
+                "avg_loss_sol": None,
+                "profit_factor": None,
+                "realized_pnl_30d_sol": None,
+            }
+
+        self._enrich_trades_with_realized_pnl(trades)
+
+        pnls = [t.pnl_sol for t in trades if t.action == TradeAction.SELL and t.pnl_sol is not None]
+        if not pnls:
+            return {
+                "avg_win_sol": None,
+                "avg_loss_sol": None,
+                "profit_factor": None,
+                "realized_pnl_30d_sol": 0.0,
+            }
+
+        wins = [p for p in pnls if p > 0]
+        losses = [abs(p) for p in pnls if p < 0]
+        sum_wins = sum(wins)
+        sum_losses = sum(losses)
+
+        avg_win = (sum_wins / len(wins)) if wins else None
+        avg_loss = (sum_losses / len(losses)) if losses else None
+        profit_factor = (sum_wins / sum_losses) if sum_losses > 0 else (float("inf") if sum_wins > 0 else None)
+
+        return {
+            "avg_win_sol": avg_win,
+            "avg_loss_sol": avg_loss,
+            "profit_factor": profit_factor if profit_factor != float("inf") else None,
+            "realized_pnl_30d_sol": sum(pnls),
+        }
     
     def _calculate_roi_from_trades(
         self,
@@ -488,70 +672,44 @@ class WalletAnalyzer:
         if not trades:
             return 0.0
         
-        # Track positions: {token_address: {entry_price, entry_amount, total_cost}}
-        positions = {}
-        total_capital = 0.0
+        # Two supported modes:
+        # 1) Robust swap-derived mode: use SOL cashflows + derived realized PnL (SOL)
+        # 2) Legacy/test mode: use amount_sol as "units", price_at_trade as price (USD),
+        #    and pnl_sol as profit/loss in same units as price (USD)
+
+        has_swap_fields = any(t.sol_amount is not None or t.token_amount is not None for t in trades)
+
+        if has_swap_fields:
+            # Ensure we have realized PnL populated for SELL trades
+            self._enrich_trades_with_realized_pnl(trades)
+
+            total_spent_sol = 0.0
+            realized_pnl_sol = 0.0
+
+            for t in trades:
+                sol_amt = t.sol_amount if t.sol_amount is not None else t.amount_sol
+                if t.action == TradeAction.BUY and sol_amt:
+                    total_spent_sol += max(0.0, sol_amt)
+                elif t.action == TradeAction.SELL and t.pnl_sol is not None:
+                    realized_pnl_sol += t.pnl_sol
+
+            if total_spent_sol <= 0:
+                return 0.0
+
+            return (realized_pnl_sol / total_spent_sol) * 100.0
+
+        # Legacy/test mode
+        total_cost = 0.0
         total_pnl = 0.0
-        
-        # Sort trades chronologically
-        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
-        
-        for trade in sorted_trades:
-            if trade.action == TradeAction.BUY:
-                # Open or add to position
-                if trade.token_address not in positions:
-                    positions[trade.token_address] = {
-                        'entry_price': trade.price_at_trade,
-                        'entry_amount': trade.amount_sol,
-                        'total_cost': trade.amount_sol * trade.price_at_trade,
-                    }
-                else:
-                    # Average entry price (weighted by amount)
-                    pos = positions[trade.token_address]
-                    additional_cost = trade.amount_sol * trade.price_at_trade
-                    total_cost = pos['total_cost'] + additional_cost
-                    total_amount = pos['entry_amount'] + trade.amount_sol
-                    pos['entry_price'] = total_cost / total_amount if total_amount > 0 else trade.price_at_trade
-                    pos['entry_amount'] = total_amount
-                    pos['total_cost'] = total_cost
-                
-                total_capital += trade.amount_sol * trade.price_at_trade
-                
-            elif trade.action == TradeAction.SELL:
-                # Close position and calculate PnL
-                if trade.token_address in positions:
-                    pos = positions[trade.token_address]
-                    entry_price = pos['entry_price']
-                    exit_price = trade.price_at_trade
-                    
-                    # Calculate PnL for the amount sold
-                    sell_amount = min(trade.amount_sol, pos['entry_amount'])
-                    if sell_amount > 0 and entry_price > 0:
-                        pnl = (exit_price - entry_price) * sell_amount
-                        total_pnl += pnl
-                    
-                    # Update position
-                    pos['entry_amount'] -= sell_amount
-                    if pos['entry_amount'] <= 0:
-                        del positions[trade.token_address]
-                else:
-                    # Selling without a position - use trade PnL if available
-                    if trade.pnl_sol is not None:
-                        total_pnl += trade.pnl_sol
-        
-        # Calculate ROI
-        if total_capital <= 0:
-            # If no capital deployed, try to estimate from PnL data
-            total_pnl_from_trades = sum(t.pnl_sol or 0.0 for t in sorted_trades if t.pnl_sol is not None)
-            if total_pnl_from_trades != 0:
-                # Estimate capital from trade amounts
-                estimated_capital = sum(t.amount_sol * (t.price_at_trade or 1.0) for t in sorted_trades if t.action == TradeAction.BUY)
-                if estimated_capital > 0:
-                    return (total_pnl_from_trades / estimated_capital) * 100
+        for t in trades:
+            if t.action == TradeAction.BUY:
+                total_cost += (t.amount_sol or 0.0) * (t.price_at_trade or 0.0)
+            elif t.action == TradeAction.SELL and t.pnl_sol is not None:
+                total_pnl += t.pnl_sol
+
+        if total_cost <= 0:
             return 0.0
-        
-        roi_percent = (total_pnl / total_capital) * 100
-        return roi_percent
+        return (total_pnl / total_cost) * 100.0
     
     def _estimate_roi(self, trades: List[HistoricalTrade]) -> float:
         """
@@ -578,6 +736,9 @@ class WalletAnalyzer:
         """
         if not trades:
             return 0.0
+
+        # Ensure pnl is populated for SELL trades (if possible)
+        self._enrich_trades_with_realized_pnl(trades)
         
         # Only count SELL trades (closing positions) for win/loss
         closing_trades = [t for t in trades if t.action == TradeAction.SELL]
@@ -632,44 +793,23 @@ class WalletAnalyzer:
         # Sort trades chronologically
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
         
-        # Track running PnL
-        running_pnl = 0.0
-        peak_pnl = 0.0
-        max_drawdown = 0.0
-        
-        for trade in sorted_trades:
-            # Update running PnL
-            if trade.pnl_sol is not None:
-                running_pnl += trade.pnl_sol
-            else:
-                # If no PnL data, estimate from price changes for SELL trades
-                if trade.action == TradeAction.SELL:
-                    # Try to find corresponding BUY trade
-                    buy_trades = [t for t in sorted_trades 
-                                if t.token_address == trade.token_address 
-                                and t.action == TradeAction.BUY 
-                                and t.timestamp < trade.timestamp]
-                    if buy_trades:
-                        # Use most recent buy price
-                        last_buy = buy_trades[-1]
-                        if last_buy.price_at_trade > 0 and trade.price_at_trade > 0:
-                            estimated_pnl = (trade.price_at_trade - last_buy.price_at_trade) * trade.amount_sol
-                            running_pnl += estimated_pnl
-            
-            # Update peak
-            if running_pnl > peak_pnl:
-                peak_pnl = running_pnl
-            
-            # Calculate drawdown from peak
-            if peak_pnl > 0:
-                drawdown = (peak_pnl - running_pnl) / peak_pnl
-                max_drawdown = max(max_drawdown, drawdown)
-            elif peak_pnl < 0 and running_pnl < peak_pnl:
-                # Handle negative PnL case
-                drawdown = abs((running_pnl - peak_pnl) / abs(peak_pnl)) if peak_pnl != 0 else 0.0
-                max_drawdown = max(max_drawdown, drawdown)
-        
-        return max_drawdown * 100  # Convert to percentage
+        # Ensure realized PnL exists for sells
+        self._enrich_trades_with_realized_pnl(trades)
+
+        # Build equity curve from realized PnL over SELL trades
+        equity = 0.0
+        peak = 0.0
+        max_dd = 0.0
+
+        for t in sorted_trades:
+            if t.action != TradeAction.SELL or t.pnl_sol is None:
+                continue
+            equity += t.pnl_sol
+            peak = max(peak, equity)
+            if peak > 0:
+                max_dd = max(max_dd, (peak - equity) / peak)
+
+        return max_dd * 100.0
     
     def _calculate_win_streak_consistency(
         self,
@@ -689,6 +829,9 @@ class WalletAnalyzer:
         """
         if not trades:
             return 0.0
+
+        # Ensure pnl is populated for SELL trades (if possible)
+        self._enrich_trades_with_realized_pnl(trades)
         
         # Get closing trades with PnL
         closing_trades = [
@@ -699,40 +842,30 @@ class WalletAnalyzer:
         if len(closing_trades) < 5:
             return 0.0  # Need minimum trades for consistency
         
-        # Determine wins/losses
+        # Determine wins/losses (1=win, 0=loss)
         outcomes = [1 if t.pnl_sol > 0 else 0 for t in closing_trades]
-        
-        # Calculate streak consistency
-        # Method: Analyze streak lengths and calculate variance
-        current_streak = 1
-        streaks = []
-        
-        for i in range(1, len(outcomes)):
-            if outcomes[i] == outcomes[i-1]:
-                current_streak += 1
-            else:
-                streaks.append(current_streak)
-                current_streak = 1
-        streaks.append(current_streak)
-        
-        if not streaks or len(streaks) < 2:
+        n = len(outcomes)
+        if n < 5:
             return 0.0
-        
-        # Calculate variance of streak lengths
-        # Lower variance = more consistent
-        avg_streak = sum(streaks) / len(streaks)
-        variance = sum((s - avg_streak) ** 2 for s in streaks) / len(streaks)
-        
-        # Normalize to 0-1 range (inverse relationship)
-        # Lower variance = higher consistency
-        max_variance = len(outcomes)  # Theoretical maximum
-        consistency = 1.0 - min(variance / max_variance, 1.0)
-        
-        # Also factor in win rate - higher win rate = higher consistency
-        win_rate = sum(outcomes) / len(outcomes)
-        consistency = (consistency * 0.7) + (win_rate * 0.3)  # Weighted combination
-        
-        return max(0.0, min(consistency, 1.0))  # Clamp to 0-1
+
+        # Streak lengths of same outcome
+        current = 1
+        streaks = []
+        for i in range(1, n):
+            if outcomes[i] == outcomes[i - 1]:
+                current += 1
+            else:
+                streaks.append(current)
+                current = 1
+        streaks.append(current)
+
+        # Longer average streak => more consistent; alternating => ~1
+        mean_streak = sum(streaks) / len(streaks) if streaks else 1.0
+        streak_component = mean_streak / n  # 0..1
+        win_rate = sum(outcomes) / n
+
+        consistency = (streak_component * 0.7) + (win_rate * 0.3)
+        return max(0.0, min(consistency, 1.0))
     
     def get_historical_trades(
         self,
@@ -785,14 +918,14 @@ class WalletAnalyzer:
         transactions = self.helius_client.get_wallet_transactions(
             address,
             days=days,
-            limit=100,
+            limit=self._wallet_tx_limit,
         )
         
         trades = []
         liquidity_snapshots = []
         
         for tx in transactions:
-            swap = self.helius_client.parse_swap_transaction(tx)
+            swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
             if swap:
                 trade = self._parse_swap_to_trade(swap, address)
                 if trade:
@@ -826,6 +959,8 @@ class WalletAnalyzer:
             except Exception as e:
                 print(f"[Analyzer] Warning: Failed to store liquidity snapshots: {e}")
         
+        # Enrich with realized PnL before returning/caching
+        self._enrich_trades_with_realized_pnl(trades)
         return sorted(trades, key=lambda t: t.timestamp, reverse=True)
     
     def fetch_recent_trades(self, address: str, days: int = 30) -> List[dict]:

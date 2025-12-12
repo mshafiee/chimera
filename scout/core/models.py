@@ -57,6 +57,12 @@ class HistoricalTrade:
     # Optional fields that may be populated from historical data
     liquidity_at_trade_usd: Optional[float] = None
     pnl_sol: Optional[float] = None  # Actual PnL if this was a closing trade
+
+    # Additional optional fields for robust swap parsing / PnL derivation
+    token_amount: Optional[float] = None  # Token units bought/sold (UI units)
+    sol_amount: Optional[float] = None  # SOL spent/received for this swap (positive)
+    price_sol: Optional[float] = None  # SOL per token at execution time
+    price_usd: Optional[float] = None  # USD per token at execution time (if available)
     
     def __post_init__(self):
         """Convert string action to enum if needed."""
@@ -189,6 +195,13 @@ class BacktestConfig:
     
     # Fee configuration
     dex_fee_percent: float = 0.003  # 0.3% typical DEX fee
+
+    # Execution costs (SOL-denominated, per swap) to better match Operator reality.
+    #
+    # These are intentionally simple knobs; if you want a more accurate model,
+    # wire in tip estimation (percentile) + RPC/compute-budget fee estimation.
+    priority_fee_sol_per_trade: float = 0.0
+    jito_tip_sol_per_trade: float = 0.0
     
     # Slippage configuration
     max_slippage_percent: float = 0.05  # 5% max acceptable slippage
