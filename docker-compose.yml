@@ -43,6 +43,7 @@ services:
     volumes:
       - ./data:/app/data
       - scout-data:/app/scout-data
+      - ./scout:/app
     environment:
       - PYTHONUNBUFFERED=1
     env_file:

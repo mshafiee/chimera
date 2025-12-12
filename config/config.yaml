@@ -30,6 +30,10 @@ security:
   admin_wallets:
     - address: "7s79kvpdcGzjHF4bHtJVEbd9p2eESZ9kv1hNjhgBepCp"
       role: "admin"
+  # API keys for automated scripts
+  api_keys:
+    - key: "dev-admin-key"
+      role: "admin"
 
 circuit_breakers:
   max_loss_24h_usd: 500
