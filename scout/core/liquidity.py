@@ -5,51 +5,57 @@ This module provides current and historical liquidity data for tokens,
 used to validate whether historical trades can be replicated under
 current market conditions.
 
-Data sources:
-- Jupiter API: Current liquidity and price data
-- Birdeye API: Historical liquidity snapshots
+Data sources (multi-source with deterministic ranking):
+- Birdeye API: Best historical coverage, current liquidity
 - DexScreener: Alternative liquidity source
+- Jupiter API: Price data, liquidity proxy
 
-Current implementation: Stub with realistic estimates for testing.
-In production, connect to actual APIs.
+Mode: real (default) or simulated (for testing/dev)
 """
 
 import math
 import os
+import logging
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import random
 import requests
 
 from .models import LiquidityData
 
-# Import Birdeye client if available (lazy import to avoid circular imports)
-BIRDEYE_AVAILABLE = False
-BirdeyeClient = None
+# Import source clients
+try:
+    from .birdeye_client import BirdeyeClient
+    BIRDEYE_AVAILABLE = True
+except ImportError:
+    BIRDEYE_AVAILABLE = False
+    BirdeyeClient = None
 
-def _get_birdeye_client():
-    """Lazy load BirdeyeClient to avoid circular imports."""
-    global BIRDEYE_AVAILABLE, BirdeyeClient
-    if BirdeyeClient is None:
-        try:
-            from .birdeye_client import BirdeyeClient as _BirdeyeClient
-            BirdeyeClient = _BirdeyeClient
-            BIRDEYE_AVAILABLE = True
-        except ImportError:
-            BIRDEYE_AVAILABLE = False
-    return BirdeyeClient
+try:
+    from .liquidity_sources.dexscreener_client import DexScreenerClient
+    DEXSCREENER_AVAILABLE = True
+except ImportError:
+    DEXSCREENER_AVAILABLE = False
+    DexScreenerClient = None
+
+try:
+    from .liquidity_sources.jupiter_client import JupiterLiquidityClient
+    JUPITER_AVAILABLE = True
+except ImportError:
+    JUPITER_AVAILABLE = False
+    JupiterLiquidityClient = None
+
+logger = logging.getLogger(__name__)
 
 
 class LiquidityProvider:
     """
-    Provides liquidity data for tokens.
+    Provides liquidity data for tokens using multi-source providers.
     
-    In production, this connects to:
-    - Jupiter Price API (https://price.jup.ag)
-    - Birdeye API (historical data)
-    - Historical liquidity database
-    - Birdeye API for historical data
-    - DexScreener as fallback
+    Sources (priority order):
+    1. Birdeye (best historical coverage)
+    2. DexScreener (alternative liquidity)
+    3. Jupiter (price + liquidity proxy)
     
     Usage:
         provider = LiquidityProvider()
@@ -57,21 +63,23 @@ class LiquidityProvider:
         historical = provider.get_historical_liquidity(token, datetime(2024, 1, 1))
     """
     
-    # Known tokens with typical liquidity ranges (for simulation)
+    # Known tokens with typical liquidity ranges (for simulation mode only)
     KNOWN_TOKENS = {
-        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": ("BONK", 5_000_000),   # BONK - high liquidity
-        "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm": ("WIF", 2_000_000),    # WIF
-        "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr": ("POPCAT", 500_000),   # POPCAT
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": ("USDC", 100_000_000), # USDC - stablecoin
-        "So11111111111111111111111111111111111111112": ("SOL", 500_000_000),    # Wrapped SOL
+        "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": ("BONK", 5_000_000),
+        "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm": ("WIF", 2_000_000),
+        "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr": ("POPCAT", 500_000),
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": ("USDC", 100_000_000),
+        "So11111111111111111111111111111111111111112": ("SOL", 500_000_000),
     }
     
     def __init__(
         self,
         jupiter_api_url: str = "https://price.jup.ag/v6",
         birdeye_api_key: Optional[str] = None,
+        dexscreener_api_key: Optional[str] = None,
         cache_ttl_seconds: int = 60,
         db_path: Optional[str] = None,
+        mode: str = "real",
     ):
         """
         Initialize the liquidity provider.
@@ -79,20 +87,41 @@ class LiquidityProvider:
         Args:
             jupiter_api_url: Jupiter Price API URL
             birdeye_api_key: Birdeye API key for historical data
+            dexscreener_api_key: DexScreener API key (optional)
             cache_ttl_seconds: Cache TTL in seconds
             db_path: Path to SQLite database for historical liquidity storage
+            mode: 'real' (default) or 'simulated' (for testing/dev)
         """
-        self.jupiter_api_url = jupiter_api_url
-        self.birdeye_api_key = birdeye_api_key or os.getenv("BIRDEYE_API_KEY")
-        self.cache_ttl = cache_ttl_seconds
+        self.mode = mode.lower() or os.getenv("SCOUT_LIQUIDITY_MODE", "real").lower()
+        self.cache_ttl = cache_ttl_seconds or int(os.getenv("SCOUT_LIQUIDITY_CACHE_TTL_SECONDS", "60"))
         self.db_path = db_path or os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
         
-        # Initialize Birdeye client if API key is available
+        # Initialize source clients (only in real mode)
         self.birdeye_client = None
-        if self.birdeye_api_key:
-            client_cls = _get_birdeye_client()
-            if client_cls is not None and BIRDEYE_AVAILABLE:
-                self.birdeye_client = client_cls(self.birdeye_api_key)
+        self.dexscreener_client = None
+        self.jupiter_client = None
+        
+        if self.mode == "real":
+            # Birdeye (priority 1)
+            self.birdeye_api_key = birdeye_api_key or os.getenv("BIRDEYE_API_KEY")
+            if self.birdeye_api_key and BIRDEYE_AVAILABLE and BirdeyeClient:
+                self.birdeye_client = BirdeyeClient(self.birdeye_api_key)
+            elif not self.birdeye_api_key:
+                logger.warning("BIRDEYE_API_KEY not set - Birdeye source unavailable")
+            
+            # DexScreener (priority 2)
+            if DEXSCREENER_AVAILABLE and DexScreenerClient:
+                self.dexscreener_client = DexScreenerClient(dexscreener_api_key)
+            
+            # Jupiter (priority 3)
+            if JUPITER_AVAILABLE and JupiterLiquidityClient:
+                self.jupiter_client = JupiterLiquidityClient(jupiter_api_url)
+            
+            if not any([self.birdeye_client, self.dexscreener_client, self.jupiter_client]):
+                logger.warning("No liquidity sources available - falling back to simulated mode")
+                self.mode = "simulated"
+        else:
+            logger.info(f"LiquidityProvider running in {self.mode} mode")
         
         # In-memory cache
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
@@ -100,7 +129,7 @@ class LiquidityProvider:
     
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
-        Get current liquidity for a token.
+        Get current liquidity for a token using multi-source ranking.
         
         Args:
             token_address: Token mint address
@@ -113,17 +142,90 @@ class LiquidityProvider:
         if cached:
             return cached
         
-        # In production: Query Jupiter API
-        # response = requests.get(f"{self.jupiter_api_url}/price?ids={token_address}")
-        # data = response.json()
+        # Simulated mode
+        if self.mode == "simulated":
+            liquidity_data = self._simulate_current_liquidity(token_address)
+            if liquidity_data:
+                self._add_to_cache(token_address, liquidity_data)
+            return liquidity_data
         
-        # Simulate liquidity data
-        liquidity_data = self._simulate_current_liquidity(token_address)
+        # Real mode: try sources in priority order
+        candidates: List[LiquidityData] = []
+        
+        # 1. Birdeye
+        if self.birdeye_client:
+            try:
+                birdeye_data = self.birdeye_client.get_current_liquidity(token_address)
+                if birdeye_data and birdeye_data.liquidity_usd > 0:
+                    candidates.append(birdeye_data)
+            except Exception as e:
+                logger.debug(f"Birdeye failed for {token_address[:8]}...: {e}")
+        
+        # 2. DexScreener
+        if self.dexscreener_client:
+            try:
+                dexscreener_data = self.dexscreener_client.get_current_liquidity(token_address)
+                if dexscreener_data and dexscreener_data.liquidity_usd > 0:
+                    candidates.append(dexscreener_data)
+            except Exception as e:
+                logger.debug(f"DexScreener failed for {token_address[:8]}...: {e}")
+        
+        # 3. Jupiter (price only, liquidity_usd = 0)
+        if self.jupiter_client:
+            try:
+                jupiter_data = self.jupiter_client.get_current_liquidity(token_address)
+                if jupiter_data:
+                    candidates.append(jupiter_data)
+            except Exception as e:
+                logger.debug(f"Jupiter failed for {token_address[:8]}...: {e}")
+        
+        # Deterministic ranking: pick best candidate
+        liquidity_data = self._rank_liquidity_sources(candidates, token_address)
         
         if liquidity_data:
             self._add_to_cache(token_address, liquidity_data)
         
         return liquidity_data
+    
+    def _rank_liquidity_sources(
+        self, candidates: List[LiquidityData], token_address: str
+    ) -> Optional[LiquidityData]:
+        """
+        Deterministically rank liquidity sources and pick the best.
+        
+        Ranking criteria (in order):
+        1. Highest liquidity_usd (if > 0)
+        2. Newest timestamp
+        3. Source priority (birdeye > dexscreener > jupiter)
+        
+        Args:
+            candidates: List of LiquidityData from different sources
+            token_address: Token address (for logging)
+            
+        Returns:
+            Best LiquidityData or None
+        """
+        if not candidates:
+            return None
+        
+        # Filter out candidates with no liquidity data (unless all are like that)
+        has_liquidity = [c for c in candidates if c.liquidity_usd > 0]
+        if has_liquidity:
+            candidates = has_liquidity
+        
+        # Sort by: liquidity (desc), timestamp (desc), source priority
+        source_priority = {"birdeye": 3, "dexscreener": 2, "jupiter": 1}
+        
+        def rank_key(c: LiquidityData) -> Tuple[float, float, int]:
+            source_prio = source_priority.get(c.source.lower().split("_")[0], 0)
+            return (
+                c.liquidity_usd,  # Higher is better
+                c.timestamp.timestamp() if isinstance(c.timestamp, datetime) else 0.0,  # Newer is better
+                source_prio,  # Higher priority is better
+            )
+        
+        best = max(candidates, key=rank_key)
+        return best
     
     def get_historical_liquidity(
         self,
@@ -150,16 +252,19 @@ class LiquidityProvider:
         if db_data:
             return db_data
 
-        # Try Birdeye API if available
-        if hasattr(self, 'birdeye_client') and self.birdeye_client:
-            birdeye_data = self.birdeye_client.get_historical_liquidity(token_address, timestamp)
-            if birdeye_data:
-                # Check if within tolerance
-                time_diff = abs((birdeye_data.timestamp - timestamp).total_seconds() / 3600)
-                if time_diff <= tolerance_hours:
-                    # Store in database for future use
-                    self._store_in_database(birdeye_data)
-                    return birdeye_data
+        # Try Birdeye API if available (real mode)
+        if self.mode == "real" and self.birdeye_client:
+            try:
+                birdeye_data = self.birdeye_client.get_historical_liquidity(token_address, timestamp)
+                if birdeye_data:
+                    # Check if within tolerance
+                    time_diff = abs((birdeye_data.timestamp - timestamp).total_seconds() / 3600)
+                    if time_diff <= tolerance_hours:
+                        # Store in database for future use
+                        self._store_in_database(birdeye_data)
+                        return birdeye_data
+            except Exception as e:
+                logger.debug(f"Birdeye historical liquidity failed: {e}")
 
         # Don't fallback to simulation - return None if no historical data
         return None
@@ -187,25 +292,26 @@ class LiquidityProvider:
         if historical:
             return historical
         
-        # Fallback to current liquidity
-        current = self.get_current_liquidity(token_address)
-        if current:
-            # Create historical data point from current
-            # Log fallback for monitoring
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                f"Historical liquidity not available for {token_address[:8]}... "
-                f"at {timestamp.isoformat()}, using current liquidity as fallback"
-            )
-            return LiquidityData(
-                token_address=current.token_address,
-                liquidity_usd=current.liquidity_usd,
-                price_usd=current.price_usd,
-                volume_24h_usd=current.volume_24h_usd,
-                timestamp=timestamp,  # Use historical timestamp
-                source=f"{current.source}_fallback",
-            )
+        # Fallback to current liquidity (only if explicitly allowed)
+        # In real mode, we should avoid silent fallbacks unless necessary
+        allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true"
+        
+        if allow_fallback:
+            current = self.get_current_liquidity(token_address)
+            if current:
+                logger.warning(
+                    f"Historical liquidity not available for {token_address[:8]}... "
+                    f"at {timestamp.isoformat()}, using current liquidity as fallback"
+                )
+                return LiquidityData(
+                    token_address=current.token_address,
+                    liquidity_usd=current.liquidity_usd,
+                    price_usd=current.price_usd,
+                    volume_24h_usd=current.volume_24h_usd,
+                    timestamp=timestamp,  # Use historical timestamp
+                    source=f"{current.source}_fallback",
+                )
+        
         return None
 
     def _get_from_database(
@@ -450,9 +556,19 @@ class LiquidityProvider:
             if (datetime.utcnow() - cached_at).total_seconds() < 60:
                 return price
 
-        # Best-effort: Jupiter price API (no key required)
+        # Try Jupiter client first (if available)
+        if self.mode == "real" and self.jupiter_client:
+            try:
+                price = self.jupiter_client.get_sol_price_usd()
+                if price and price > 0:
+                    self._sol_price_cache = (price, datetime.utcnow())
+                    return price
+            except Exception as e:
+                logger.debug(f"Jupiter SOL price failed: {e}")
+
+        # Fallback: direct Jupiter API call
         try:
-            url = f"{self.jupiter_api_url}/price"
+            url = "https://price.jup.ag/v6/price"
             resp = requests.get(url, params={"ids": "So11111111111111111111111111111111111111112"}, timeout=10)
             resp.raise_for_status()
             data = resp.json() or {}
@@ -466,14 +582,20 @@ class LiquidityProvider:
                 if price_f > 0:
                     self._sol_price_cache = (price_f, datetime.utcnow())
                     return price_f
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Direct Jupiter API call failed: {e}")
 
-        # Fallback estimate
+        # Fallback estimate (only if all else fails)
+        logger.warning("Using fallback SOL price estimate: 150.0 USD")
         return 150.0
     
     def _simulate_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
-        """Simulate current liquidity for testing."""
+        """
+        Simulate current liquidity for testing (only used in simulated mode).
+        
+        Note: This uses randomness, so results are non-deterministic.
+        Use real mode for production.
+        """
         # Check if it's a known token
         if token_address in self.KNOWN_TOKENS:
             symbol, base_liquidity = self.KNOWN_TOKENS[token_address]
