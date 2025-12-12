@@ -323,12 +323,31 @@ curl http://localhost:8080/api/v1/health
 
 Comprehensive documentation is available in the `docs/` directory:
 
-- **[Product Design Document](docs/pdd.md)** - Complete system specification
-- **[Architecture Documentation](docs/architecture.md)** - System design and components
-- **[API Documentation](docs/api.md)** - REST API reference
-- **[Pre-Deployment Checklist](docs/pre-deployment-checklist.md)** - Deployment verification steps
-- **[Security Audit Checklist](docs/security-audit-checklist.md)** - Security best practices
+- **[Documentation Index](docs/README.md)** - Complete documentation catalog
+
+### Core Documentation
+- **[Product Design Document](docs/core/pdd.md)** - Complete system specification
+- **[Architecture Documentation](docs/core/architecture.md)** - System design and components
+- **[API Documentation](docs/core/api.md)** - REST API reference
+
+### Operations & Deployment
+- **[Pre-Deployment Checklist](docs/operations/pre-deployment-checklist.md)** - Deployment verification steps
+- **[Security Audit Checklist](docs/operations/security-audit-checklist.md)** - Security best practices
+- **[Reconciliation Monitoring](docs/operations/reconciliation-monitoring.md)** - Trade audit procedures
+
+### User Guides
+- **[Testing Guide](docs/guides/testing-guide.md)** - Running tests and verification
+- **[Scout User Guide](docs/guides/scout-user-guide.md)** - Using the Scout intelligence layer
+- **[Notifications Setup](docs/guides/notifications-setup.md)** - Telegram and Discord configuration
+
+### Development
+- **[Implementation Status](docs/development/IMPLEMENTATION_STATUS.md)** - Current feature status
+- **[TODO List](docs/development/TODO_LIST.md)** - Planned enhancements
+- **[Test Coverage](docs/development/test-coverage-summary.md)** - Test coverage overview
+
+### Additional Resources
 - **[Runbooks](ops/runbooks/)** - Incident response procedures
+- **[Prometheus Config](ops/prometheus/)** - Monitoring and alerting setup
 
 ---
 
@@ -365,7 +384,7 @@ cd web && npm run test:e2e
 - **Load Tests:** Webhook flood (100 req/sec), queue saturation
 - **E2E Tests:** Dashboard, wallet promotion, configuration, trade ledger
 
-See [Test Coverage Summary](docs/test-coverage-summary.md) for details.
+See [Test Coverage Summary](docs/development/test-coverage-summary.md) for details.
 
 ---
 
@@ -465,7 +484,7 @@ This verifies:
    curl http://your-server:8080/api/v1/health
    ```
 
-See [Pre-Deployment Checklist](docs/pre-deployment-checklist.md) for complete deployment procedures.
+See [Pre-Deployment Checklist](docs/operations/pre-deployment-checklist.md) for complete deployment procedures.
 
 ---
 
@@ -509,7 +528,7 @@ Configure Telegram or Discord notifications for:
 - Daily trading summaries
 - RPC fallback events
 
-See [Notifications Setup](docs/notifications-setup.md) for configuration.
+See [Notifications Setup](docs/guides/notifications-setup.md) for configuration.
 
 ---
 
@@ -537,7 +556,7 @@ See [Notifications Setup](docs/notifications-setup.md) for configuration.
    - Monitor `dead_letter_queue` for failures
    - Run daily reconciliation checks
 
-See [Security Audit Checklist](docs/security-audit-checklist.md) for complete security procedures.
+See [Security Audit Checklist](docs/operations/security-audit-checklist.md) for complete security procedures.
 
 ---
 
@@ -595,6 +614,6 @@ Future enhancements (non-blocking):
 
 **Built with ❤️ for high-frequency Solana trading**
 
-[Documentation](docs/) • [API Reference](docs/api.md) • [Architecture](docs/architecture.md)
+[Documentation](docs/) • [API Reference](docs/core/api.md) • [Architecture](docs/core/architecture.md)
 
 </div>
