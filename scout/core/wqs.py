@@ -33,14 +33,18 @@ class WalletMetrics:
 
 def calculate_wqs(metrics: WalletMetrics) -> float:
     """
-    Calculate Wallet Quality Score (WQS) v2.
-    
-    Scoring breakdown (aligned with Scout test suite + PDD intent):
+    Calculate Wallet Quality Score (WQS) v2 (0-100).
+
+    This implementation matches the Scout test suite expectations and the PDD's
+    core intent: favor repeatable profitability with low drawdowns, penalize
+    recent ROI spikes, and discount low-sample wallets.
+
+    Scoring breakdown:
     - ROI performance: up to 25 points (capped at 100% ROI)
     - Consistency: up to 25 points (win_streak_consistency)
-    - Win rate fallback: up to 15 points (if consistency unavailable)
+    - Win rate fallback: up to 25 points (if consistency unavailable)
     - Activity bonus: +5 points if trade_count_30d >= 50
-    - Anti-pump-and-dump: -15 points if 7d ROI > 2x 30d ROI
+    - Anti-pump-and-dump: -15 points if 7d ROI > 2x 30d ROI (and 30d ROI > 0)
     - Statistical significance: smooth confidence multiplier based on
       realized closes (`trade_count_30d`), reaching 1.0 at 20+
     - Drawdown penalty: -0.2 * drawdown_percent
@@ -63,10 +67,10 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     if metrics.win_streak_consistency is not None:
         score += max(0.0, min(metrics.win_streak_consistency, 1.0)) * 25.0
     elif metrics.win_rate is not None:
-        # Fallback: use win rate as proxy for consistency.
-        score += max(0.0, min(metrics.win_rate, 1.0)) * 15.0
+        # Fallback: use win rate as proxy for consistency (up to 25 points)
+        score += max(0.0, min(metrics.win_rate, 1.0)) * 25.0
 
-    # 3) Activity bonus (+5 points if trade_count_30d >= 50)
+    # 3) Activity bonus (+5 if 50+ closes)
     if metrics.trade_count_30d is not None:
         tc = max(0, metrics.trade_count_30d)
         if tc >= 50:
@@ -81,18 +85,18 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     # 5) Statistical Significance
     # Low confidence penalty for wallets with few realized closes.
     #
-    # We use a smooth, monotonic multiplier so 1–4 closes don't get crushed
-    # to ~0 while still being heavily discounted.
+    # We use a smooth, monotonic multiplier so 1–4 closes are discounted but
+    # not annihilated, and 20+ closes reach full confidence.
     if metrics.trade_count_30d is not None:
         tc = max(0, int(metrics.trade_count_30d))
         if tc == 0:
             confidence = 0.0
         else:
-            # 1 close  -> 0.24
-            # 4 closes -> 0.36
-            # 10 closes -> 0.60
+            # 1 close  -> 0.525
+            # 2 closes -> 0.55
+            # 10 closes -> 0.75
             # 20 closes -> 1.00
-            confidence = min(1.0, 0.2 + 0.8 * (tc / 20.0))
+            confidence = min(1.0, 0.5 + 0.5 * (tc / 20.0))
         score *= confidence
     
     # 6) Drawdown Penalty
@@ -107,6 +111,11 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
 def classify_wallet(wqs_score: float) -> str:
     """
     Classify wallet based on WQS score.
+
+    Thresholds:
+    - ACTIVE: >= 70
+    - CANDIDATE: >= 40
+    - REJECTED: < 40
     
     Returns:
         'ACTIVE', 'CANDIDATE', or 'REJECTED'
