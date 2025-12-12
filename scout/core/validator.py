@@ -114,7 +114,7 @@ class PrePromotionValidator:
             logger.info(f"Wallet failed WQS check: {wqs_score:.1f} < {self.criteria.min_wqs_score}")
             return ValidationResult(
                 wallet_address=wallet_address,
-                status=ValidationStatus.FAILED_INSUFFICIENT_TRADES,
+                status=ValidationStatus.FAILED_WQS,
                 passed=False,
                 reason=f"WQS score {wqs_score:.1f} below threshold {self.criteria.min_wqs_score}",
                 recommended_status="CANDIDATE",
@@ -271,7 +271,13 @@ class PrePromotionValidator:
         
         reason_lower = failure_reason.lower()
         
-        if "liquidity" in reason_lower:
+        if "wqs" in reason_lower or "score" in reason_lower:
+            return ValidationStatus.FAILED_WQS
+        # "rejected/rejection" almost always indicates liquidity/slippage constraints
+        # in the simulator (even if the message also contains the word "trades").
+        elif "rejected" in reason_lower or "rejection" in reason_lower:
+            return ValidationStatus.FAILED_LIQUIDITY
+        elif "liquidity" in reason_lower:
             return ValidationStatus.FAILED_LIQUIDITY
         elif "slippage" in reason_lower:
             return ValidationStatus.FAILED_SLIPPAGE
