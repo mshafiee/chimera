@@ -912,8 +912,13 @@ class WalletAnalyzer:
         """
         Fetch real historical trades from Helius API.
         
-        Also collects liquidity snapshots for each trade to build historical
-        liquidity database for future backtesting.
+        Also collects *current* liquidity snapshots to build a time-series liquidity
+        database for future backtesting.
+
+        IMPORTANT:
+        We must never write "current liquidity" while stamping it with the *historical*
+        trade timestamp. That would poison the historical liquidity table and cause
+        the backtester to believe it has true historical liquidity for old timestamps.
         """
         transactions = self.helius_client.get_wallet_transactions(
             address,
@@ -931,19 +936,19 @@ class WalletAnalyzer:
                 if trade:
                     trades.append(trade)
                     
-                    # Collect liquidity snapshot at trade time
-                    # This builds the historical liquidity database
+                    # Collect a CURRENT liquidity snapshot (at collection time).
+                    # This builds a time-series liquidity database going forward.
                     try:
                         current_liq = self.liquidity_provider.get_current_liquidity(trade.token_address)
                         if current_liq:
-                            # Create historical snapshot with trade timestamp
+                            # Store snapshot at "now" (not at the trade's past timestamp).
                             historical_snapshot = LiquidityData(
                                 token_address=current_liq.token_address,
                                 liquidity_usd=current_liq.liquidity_usd,
                                 price_usd=current_liq.price_usd,
                                 volume_24h_usd=current_liq.volume_24h_usd,
-                                timestamp=trade.timestamp,  # Use trade timestamp
-                                source="analyzer_collection",
+                                timestamp=datetime.utcnow(),
+                                source="analyzer_collection_current",
                             )
                             liquidity_snapshots.append(historical_snapshot)
                     except Exception as e:
