@@ -33,7 +33,7 @@ def test_wqs_low_trade_count_penalty():
         roi_30d=50.0,
         win_streak_consistency=0.8,
         roi_7d=10.0,
-        trade_count_30d=10,  # Low count - should get 0.25x multiplier
+        trade_count_30d=2,  # Very low closes - should be heavily discounted
         max_drawdown_30d=5.0,
     )
     
@@ -42,7 +42,7 @@ def test_wqs_low_trade_count_penalty():
         roi_30d=50.0,
         win_streak_consistency=0.8,
         roi_7d=10.0,
-        trade_count_30d=50,  # High count - no penalty
+        trade_count_30d=25,  # High count - near full confidence
         max_drawdown_30d=5.0,
     )
     
@@ -50,16 +50,19 @@ def test_wqs_low_trade_count_penalty():
     score_high = calculate_wqs(wallet_high)
     
     assert score_high > score_low, f"High trade count should score higher: {score_high} vs {score_low}"
+    # Very low counts should not be zeroed out, but should be significantly discounted.
+    assert score_low > 0.0
+    assert (score_low / score_high) < 0.6
 
 
 def test_wqs_medium_trade_count_penalty():
-    """Test that medium trade count (10-20) gets 0.5x multiplier"""
+    """Test that medium trade count is discounted but not crushed."""
     wallet_medium = WalletMetrics(
         address="test_wallet_medium",
         roi_30d=50.0,
         win_streak_consistency=0.8,
         roi_7d=10.0,
-        trade_count_30d=15,  # Medium count - should get 0.5x multiplier
+        trade_count_30d=10,
         max_drawdown_30d=5.0,
     )
     
@@ -76,6 +79,33 @@ def test_wqs_medium_trade_count_penalty():
     score_high = calculate_wqs(wallet_high)
     
     assert score_high > score_medium, f"High trade count should score higher: {score_high} vs {score_medium}"
+    assert (score_medium / score_high) > 0.5
+
+
+def test_wqs_very_low_trade_count_curve():
+    """Sanity check: 1-4 closes are discounted but not annihilated."""
+    base = WalletMetrics(
+        address="base",
+        roi_30d=50.0,
+        win_streak_consistency=0.8,
+        roi_7d=10.0,
+        trade_count_30d=25,
+        max_drawdown_30d=5.0,
+    )
+    base_score = calculate_wqs(base)
+
+    for tc in [1, 2, 3, 4]:
+        w = WalletMetrics(
+            address=f"tc_{tc}",
+            roi_30d=50.0,
+            win_streak_consistency=0.8,
+            roi_7d=10.0,
+            trade_count_30d=tc,
+            max_drawdown_30d=5.0,
+        )
+        s = calculate_wqs(w)
+        assert s > 0.0
+        assert s < base_score
 
 
 def test_wqs_anti_pump_and_dump():

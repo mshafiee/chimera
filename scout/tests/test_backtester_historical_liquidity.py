@@ -136,7 +136,7 @@ class TestBacktesterHistoricalLiquidity:
         
         # Verify fallback was used
         assert result.current_liquidity_usd == 100000.0  # Fallback value
-        assert "fallback" in result.current_liquidity_usd or result.liquidity_sufficient is True
+        assert result.liquidity_sufficient is True
     
     def test_backtester_simulates_wallet_with_historical_liquidity(self):
         """Test full wallet simulation with historical liquidity."""

@@ -304,7 +304,7 @@ class TestDrawdownCalculation:
                 price_at_trade=10.0,
                 timestamp=datetime.utcnow() - timedelta(days=5),
                 tx_signature="tx1",
-                pnl_sol=10.0,  # Peak
+                pnl_sol=10.0,  # Equity to 10
             ),
             HistoricalTrade(
                 token_address="token1",
@@ -314,7 +314,7 @@ class TestDrawdownCalculation:
                 price_at_trade=10.0,
                 timestamp=datetime.utcnow() - timedelta(days=4),
                 tx_signature="tx2",
-                pnl_sol=5.0,  # Drawdown from peak
+                pnl_sol=-5.0,  # Equity down to 5
             ),
             HistoricalTrade(
                 token_address="token1",
@@ -324,7 +324,7 @@ class TestDrawdownCalculation:
                 price_at_trade=10.0,
                 timestamp=datetime.utcnow() - timedelta(days=3),
                 tx_signature="tx3",
-                pnl_sol=3.0,  # Further drawdown
+                pnl_sol=-2.0,  # Equity down to 3
             ),
         ]
         
