@@ -34,6 +34,7 @@ from core.analyzer import WalletAnalyzer
 from core.models import BacktestConfig, ValidationStatus
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
+from core.auto_merge import auto_merge_roster
 
 # Import config module if available
 try:
@@ -557,9 +558,24 @@ def main():
         try:
             write_roster_atomic(records, str(output_path))
             print(f"[Scout] Successfully wrote {len(records)} wallets")
-            print(f"\n[Scout] To merge with Operator:")
-            print(f"  kill -HUP $(pgrep chimera_operator)")
-            print(f"  OR call POST /api/v1/roster/merge")
+            
+            # Automatically merge roster into main database
+            print(f"\n[Scout] Automatically merging roster into main database...")
+            merge_success, merge_message = auto_merge_roster(
+                roster_path=str(output_path),
+                api_url=os.getenv("CHIMERA_API_URL", "http://localhost:8080"),
+                operator_container=os.getenv("CHIMERA_OPERATOR_CONTAINER", "chimera-operator"),
+                prefer_api=True,
+                retries=3,
+            )
+            
+            if merge_success:
+                print(f"[Scout] ✓ {merge_message}")
+            else:
+                print(f"[Scout] ⚠ Automatic merge failed: {merge_message}")
+                print(f"[Scout] You can manually merge with:")
+                print(f"  kill -HUP $(pgrep chimera_operator)")
+                print(f"  OR call POST /api/v1/roster/merge")
         except Exception as e:
             print(f"[Scout] ERROR: Failed to write roster: {e}")
             sys.exit(1)
