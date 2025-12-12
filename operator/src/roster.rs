@@ -153,13 +153,15 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         INSERT INTO wallets (
             address, status, wqs_score, roi_7d, roi_30d,
             trade_count_30d, win_rate, max_drawdown_30d,
-            avg_trade_size_sol, last_trade_at, promoted_at,
+            avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+            last_trade_at, promoted_at,
             ttl_expires_at, notes, created_at, updated_at
         )
         SELECT 
             address, status, wqs_score, roi_7d, roi_30d,
             trade_count_30d, win_rate, max_drawdown_30d,
-            avg_trade_size_sol, last_trade_at, promoted_at,
+            avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+            last_trade_at, promoted_at,
             ttl_expires_at, notes, created_at, CURRENT_TIMESTAMP
         FROM new_roster.wallets
         "#,

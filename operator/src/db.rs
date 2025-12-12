@@ -897,6 +897,10 @@ pub struct WalletDetail {
     pub win_rate: Option<f64>,
     pub max_drawdown_30d: Option<f64>,
     pub avg_trade_size_sol: Option<f64>,
+    pub avg_win_sol: Option<f64>,
+    pub avg_loss_sol: Option<f64>,
+    pub profit_factor: Option<f64>,
+    pub realized_pnl_30d_sol: Option<f64>,
     pub last_trade_at: Option<String>,
     pub promoted_at: Option<String>,
     pub ttl_expires_at: Option<String>,
@@ -912,7 +916,9 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
             sqlx::query_as::<_, WalletDetail>(
                 r#"
                 SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
-                       win_rate, max_drawdown_30d, avg_trade_size_sol, last_trade_at,
+                       win_rate, max_drawdown_30d, avg_trade_size_sol,
+                       avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                       last_trade_at,
                        promoted_at, ttl_expires_at, notes, created_at, updated_at
                 FROM wallets
                 WHERE status = ?
@@ -927,7 +933,9 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
             sqlx::query_as::<_, WalletDetail>(
                 r#"
                 SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
-                       win_rate, max_drawdown_30d, avg_trade_size_sol, last_trade_at,
+                       win_rate, max_drawdown_30d, avg_trade_size_sol,
+                       avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                       last_trade_at,
                        promoted_at, ttl_expires_at, notes, created_at, updated_at
                 FROM wallets
                 ORDER BY wqs_score DESC NULLS LAST
@@ -946,7 +954,9 @@ pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Op
     let wallet = sqlx::query_as::<_, WalletDetail>(
         r#"
         SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
-               win_rate, max_drawdown_30d, avg_trade_size_sol, last_trade_at,
+               win_rate, max_drawdown_30d, avg_trade_size_sol,
+               avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+               last_trade_at,
                promoted_at, ttl_expires_at, notes, created_at, updated_at
         FROM wallets
         WHERE address = ?

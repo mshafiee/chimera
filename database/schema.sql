@@ -96,6 +96,10 @@ CREATE TABLE IF NOT EXISTS wallets (
     win_rate REAL,
     max_drawdown_30d REAL,
     avg_trade_size_sol REAL,
+    avg_win_sol REAL,
+    avg_loss_sol REAL,
+    profit_factor REAL,
+    realized_pnl_30d_sol REAL,
     last_trade_at TIMESTAMP,
     promoted_at TIMESTAMP,
     ttl_expires_at TIMESTAMP,  -- For temporary promotions

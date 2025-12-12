@@ -35,6 +35,10 @@ class WalletRecord:
     win_rate: Optional[float] = None
     max_drawdown_30d: Optional[float] = None
     avg_trade_size_sol: Optional[float] = None
+    avg_win_sol: Optional[float] = None
+    avg_loss_sol: Optional[float] = None
+    profit_factor: Optional[float] = None
+    realized_pnl_30d_sol: Optional[float] = None
     last_trade_at: Optional[str] = None
     promoted_at: Optional[str] = None
     ttl_expires_at: Optional[str] = None
@@ -65,6 +69,10 @@ class RosterWriter:
         win_rate REAL,
         max_drawdown_30d REAL,
         avg_trade_size_sol REAL,
+        avg_win_sol REAL,
+        avg_loss_sol REAL,
+        profit_factor REAL,
+        realized_pnl_30d_sol REAL,
         last_trade_at TIMESTAMP,
         promoted_at TIMESTAMP,
         ttl_expires_at TIMESTAMP,
@@ -147,9 +155,10 @@ class RosterWriter:
                     INSERT OR REPLACE INTO wallets (
                         address, status, wqs_score, roi_7d, roi_30d,
                         trade_count_30d, win_rate, max_drawdown_30d,
-                        avg_trade_size_sol, last_trade_at, promoted_at,
+                        avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                        last_trade_at, promoted_at,
                         ttl_expires_at, notes, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         wallet.address,
@@ -161,6 +170,10 @@ class RosterWriter:
                         wallet.win_rate,
                         wallet.max_drawdown_30d,
                         wallet.avg_trade_size_sol,
+                        wallet.avg_win_sol,
+                        wallet.avg_loss_sol,
+                        wallet.profit_factor,
+                        wallet.realized_pnl_30d_sol,
                         wallet.last_trade_at,
                         wallet.promoted_at,
                         wallet.ttl_expires_at,
