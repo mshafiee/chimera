@@ -35,11 +35,20 @@ from core.models import BacktestConfig, ValidationStatus
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
 
+# Import config module if available
+try:
+    from config import ScoutConfig
+    CONFIG_AVAILABLE = True
+except ImportError:
+    CONFIG_AVAILABLE = False
+    ScoutConfig = None
+
 
 # Default configuration (tuned defaults; can be overridden by env/flags)
+# Note: WQS thresholds aligned with rescaled 0-100 range (see wqs.py)
 DEFAULT_OUTPUT_PATH = "../data/roster_new.db"
-DEFAULT_MIN_WQS_ACTIVE = 35.0
-DEFAULT_MIN_WQS_CANDIDATE = 25.0
+DEFAULT_MIN_WQS_ACTIVE = 60.0  # Rescaled from 35.0 (was ~55% of old max, now 60% of 0-100)
+DEFAULT_MIN_WQS_CANDIDATE = 30.0  # Rescaled from 25.0 (was ~45% of old max, now 30% of 0-100)
 DEFAULT_DISCOVERY_HOURS = 168
 DEFAULT_WALLET_TX_LIMIT = 500
 DEFAULT_WALLET_TX_MAX_PAGES = 20
@@ -101,14 +110,15 @@ def _calibration_report(records: List[WalletRecord], stats: Dict[str, Any]) -> N
     for p in [10, 25, 50, 75, 90]:
         print(f"    p{p}: {fmt(_percentile(wins, p))}")
 
-    # Suggested thresholds (heuristics)
+    # Suggested thresholds (heuristics) - aligned with rescaled 0-100 WQS
     # Prefer using the subset with >=3 closes so we don't let "no-close" wallets
     # drag thresholds toward zero.
     p75 = _percentile(wqs_closers, 75) or _percentile(wqs, 75) or DEFAULT_MIN_WQS_CANDIDATE
     p90 = _percentile(wqs_closers, 90) or _percentile(wqs, 90) or DEFAULT_MIN_WQS_ACTIVE
 
-    suggested_candidate = max(25.0, min(60.0, p75))
-    suggested_active = max(suggested_candidate + 10.0, min(85.0, p90))
+    # Thresholds now in 0-100 range
+    suggested_candidate = max(30.0, min(70.0, p75))
+    suggested_active = max(suggested_candidate + 15.0, min(90.0, p90))
 
     median_closes = _percentile(closes, 50) or 0.0
     p75_closes = _percentile(closes, 75) or 0.0
@@ -407,20 +417,34 @@ def main():
     print(f"Started at: {datetime.utcnow().isoformat()}")
     print("=" * 70)
     
+    # Print configuration summary if config module available
+    if CONFIG_AVAILABLE and ScoutConfig:
+        ScoutConfig.print_config_summary()
+        print()
+    
     # Initialize components
     try:
         # Ensure env-driven knobs are set for deeper modules (Analyzer/HeliusClient)
         os.environ["SCOUT_DISCOVERY_HOURS"] = str(args.discovery_hours)
         os.environ["SCOUT_WALLET_TX_LIMIT"] = str(args.wallet_tx_limit)
         os.environ["SCOUT_WALLET_TX_MAX_PAGES"] = str(args.wallet_tx_max_pages)
-
-        # Get Helius API key from environment or RPC URL
-        helius_api_key = os.getenv("HELIUS_API_KEY")
-        if not helius_api_key:
-            # Try to extract from RPC URL
-            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
-            if "api-key=" in rpc_url:
-                helius_api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
+        
+        # Get configuration (use config module if available, else fallback to env)
+        if CONFIG_AVAILABLE and ScoutConfig:
+            liquidity_mode = ScoutConfig.get_liquidity_mode()
+            helius_api_key = ScoutConfig.get_helius_api_key()
+        else:
+            liquidity_mode = os.getenv("SCOUT_LIQUIDITY_MODE", "real").lower()
+            helius_api_key = os.getenv("HELIUS_API_KEY")
+            if not helius_api_key:
+                # Try to extract from RPC URL
+                rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
+                if "api-key=" in rpc_url:
+                    helius_api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
+        
+        if liquidity_mode == "simulated":
+            print("[Scout] WARNING: Running with simulated liquidity mode - results are non-deterministic!")
+            print("[Scout] Set SCOUT_LIQUIDITY_MODE=real and provide BIRDEYE_API_KEY for production use")
         
         analyzer = WalletAnalyzer(
             helius_api_key=helius_api_key,
@@ -435,7 +459,24 @@ def main():
     validator = None
     if not args.skip_backtest:
         try:
-            liquidity_provider = LiquidityProvider()
+            # Initialize liquidity provider with configuration
+            if CONFIG_AVAILABLE and ScoutConfig:
+                liquidity_mode = ScoutConfig.get_liquidity_mode()
+                cache_ttl = ScoutConfig.get_liquidity_cache_ttl()
+                birdeye_key = ScoutConfig.get_birdeye_api_key()
+                dexscreener_key = ScoutConfig.get_dexscreener_api_key()
+            else:
+                liquidity_mode = os.getenv("SCOUT_LIQUIDITY_MODE", "real").lower()
+                cache_ttl = int(os.getenv("SCOUT_LIQUIDITY_CACHE_TTL_SECONDS", "60"))
+                birdeye_key = os.getenv("BIRDEYE_API_KEY")
+                dexscreener_key = os.getenv("DEXSCREENER_API_KEY")
+            
+            liquidity_provider = LiquidityProvider(
+                mode=liquidity_mode,
+                cache_ttl_seconds=cache_ttl,
+                birdeye_api_key=birdeye_key,
+                dexscreener_api_key=dexscreener_key,
+            )
             backtest_config = BacktestConfig(
                 min_liquidity_shield_usd=args.min_liquidity_shield,
                 min_liquidity_spear_usd=args.min_liquidity_spear,
@@ -444,12 +485,14 @@ def main():
                 min_trades_required=5,
                 priority_fee_sol_per_trade=args.priority_fee_sol,
                 jito_tip_sol_per_trade=args.jito_tip_sol,
+                enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",
             )
             promotion_criteria = PromotionCriteria(
                 # Keep WQS threshold aligned with ACTIVE gate (validator only runs for ACTIVE candidates)
+                # Note: min_wqs_score should match min_wqs_active (rescaled 0-100 range)
                 min_wqs_score=args.min_wqs_active,
-                min_trades=5,
-                min_closes_required=args.min_closes_required,
+                min_trades=5,  # Minimum raw swap events
+                min_closes_required=args.min_closes_required,  # Minimum realized closes (SELLs with PnL)
                 walk_forward_enabled=True,
                 walk_forward_holdout_fraction=0.3,
                 walk_forward_min_trades=args.walk_forward_min_trades,

@@ -35,6 +35,7 @@ class ValidationStatus(Enum):
     FAILED_SLIPPAGE = "FAILED_SLIPPAGE"
     FAILED_NEGATIVE_PNL = "FAILED_NEGATIVE_PNL"
     FAILED_INSUFFICIENT_TRADES = "FAILED_INSUFFICIENT_TRADES"
+    FAILED_WQS = "FAILED_WQS"  # WQS score below threshold
     ERROR = "ERROR"
 
 
@@ -216,6 +217,14 @@ class BacktestConfig:
     # Strategy-specific settings
     shield_multiplier: float = 1.0  # Conservative multiplier for Shield
     spear_multiplier: float = 1.5  # More aggressive for Spear
+
+    # Copy-viability gate (PDD):
+    # If enabled, reject wallets whose traded tokens no longer meet current liquidity
+    # thresholds (i.e., the token is effectively dead/un-copyable now).
+    #
+    # Default is False to keep unit tests deterministic and to avoid surprising
+    # network calls in offline environments. Enable in production Scout runs.
+    enforce_current_liquidity: bool = False
     
     def get_min_liquidity(self, strategy: str) -> float:
         """Get minimum liquidity for a strategy type."""
