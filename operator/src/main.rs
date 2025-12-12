@@ -40,7 +40,7 @@ use chimera_operator::metrics::{MetricsState, metrics_router};
 use chimera_operator::notifications::{self, CompositeNotifier, DiscordNotifier, NotificationEvent, TelegramNotifier};
 use chimera_operator::price_cache::PriceCache;
 use chimera_operator::roster;
-use chimera_operator::monitoring::{HeliusClient, SignalAggregator};
+use chimera_operator::monitoring::{HeliusClient, SignalAggregator, MonitoringState};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 
@@ -439,11 +439,26 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
     
-    // Build monitoring routes
-    // Note: Monitoring routes require MonitoringState which needs proper initialization
-    // The handlers are implemented but routes will be added when monitoring is fully integrated
-    // Core functionality (webhook, positions, etc.) is working
-    let monitoring_routes = Router::new();
+    // Build monitoring routes - will be created after engine is initialized
+    // Use _engine_handle which is created earlier
+    let config_arc = Arc::new(config.clone());
+    tracing::info!("Attempting to create MonitoringState...");
+    let monitoring_routes = match MonitoringState::new(db_pool.clone(), _engine_handle.clone(), config_arc.clone()) {
+        Ok(monitoring_state) => {
+            let monitoring_state_arc = Arc::new(monitoring_state);
+            tracing::info!("Monitoring state initialized successfully, registering monitoring routes");
+            Router::new()
+                .route("/monitoring/status", get(get_monitoring_status))
+                .route("/monitoring/helius-webhook", post(helius_webhook_handler))
+                .route("/monitoring/wallets/{wallet_address}/enable", post(enable_wallet_monitoring))
+                .route("/monitoring/wallets/{wallet_address}/disable", post(disable_wallet_monitoring))
+                .with_state(monitoring_state_arc)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to initialize MonitoringState, monitoring routes disabled");
+            Router::new()
+        }
+    };
 
     // Create full router with all routes and middleware
     // Note: Layer order matters - bottom layers are applied first (innermost)
@@ -871,6 +886,7 @@ async fn main_full() -> anyhow::Result<()> {
     let engine_handle_for_app = engine_handle.clone();
     let engine_handle_for_webhook = engine_handle.clone();
     let engine_handle_for_api = engine_handle.clone();
+    let engine_handle_for_monitoring = engine_handle.clone();
     
     // Create shared state
     let app_state = Arc::new(AppState {
@@ -1102,20 +1118,6 @@ async fn main_full() -> anyhow::Result<()> {
     let metrics_routes = metrics_router().with_state(metrics_state.clone());
     */
 
-    // STEP A: Test with absolutely minimal router (no state, no middleware, no nesting)
-    tracing::info!("STEP A: Building minimal test router (no state, no middleware)");
-    
-    let app = Router::new()
-        .route("/ping", get(|| async {
-            tracing::info!("PING endpoint called - minimal router test");
-            "pong"
-        }))
-        .route("/test", get(|| async {
-            tracing::info!("TEST endpoint called - minimal router test");
-            "test-ok"
-        }));
-    
-    tracing::info!("STEP A: Minimal router built - testing with only /ping and /test");
 
     // Start server
     let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
@@ -1137,12 +1139,8 @@ async fn main_full() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Server listening on {}", addr);
     
-    // Try using tokio::spawn to run the server
-    tracing::info!("Starting HTTP server - calling axum::serve directly");
-    // Use axum::serve directly - it should block forever processing requests
-    let result = axum::serve(listener, app).await;
-    tracing::error!("axum::serve returned unexpectedly: {:?}", result);
-    result?;
+    // Note: This is dead code in main_full() - the actual main() function serves the app above
+    // This code path is not used
 
     Ok(())
 }
