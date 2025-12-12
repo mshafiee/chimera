@@ -5,7 +5,7 @@ import time
 from datetime import datetime
 from typing import Optional, Dict, Any
 import requests
-from core.models import LiquidityData
+from .models import LiquidityData
 
 
 class BirdeyeClient:
@@ -163,4 +163,22 @@ class BirdeyeClient:
             )
 
         return None
+
+    def get_token_metadata(self, token_address: str) -> Optional[Dict[str, Any]]:
+        """
+        Best-effort token metadata from Birdeye.
+
+        Returns a dict that may include: symbol, name, decimals.
+        """
+        endpoint = "/defi/token_overview"
+        params = {"address": token_address}
+        data = self._make_request(endpoint, params)
+        if not data or "data" not in data:
+            return None
+        overview = data.get("data", {}) or {}
+        meta: Dict[str, Any] = {}
+        for k in ("symbol", "name", "decimals"):
+            if k in overview and overview[k] is not None:
+                meta[k] = overview[k]
+        return meta or None
 

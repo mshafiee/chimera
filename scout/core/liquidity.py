@@ -19,8 +19,9 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Tuple
 import random
+import requests
 
-from core.models import LiquidityData
+from .models import LiquidityData
 
 # Import Birdeye client if available (lazy import to avoid circular imports)
 BIRDEYE_AVAILABLE = False
@@ -31,7 +32,7 @@ def _get_birdeye_client():
     global BIRDEYE_AVAILABLE, BirdeyeClient
     if BirdeyeClient is None:
         try:
-            from core.birdeye_client import BirdeyeClient as _BirdeyeClient
+            from .birdeye_client import BirdeyeClient as _BirdeyeClient
             BirdeyeClient = _BirdeyeClient
             BIRDEYE_AVAILABLE = True
         except ImportError:
@@ -88,11 +89,14 @@ class LiquidityProvider:
         
         # Initialize Birdeye client if API key is available
         self.birdeye_client = None
-        if self.birdeye_api_key and BIRDEYE_AVAILABLE:
-            self.birdeye_client = BirdeyeClient(self.birdeye_api_key)
+        if self.birdeye_api_key:
+            client_cls = _get_birdeye_client()
+            if client_cls is not None and BIRDEYE_AVAILABLE:
+                self.birdeye_client = client_cls(self.birdeye_api_key)
         
         # In-memory cache
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
+        self._sol_price_cache: Optional[Tuple[float, datetime]] = None
     
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
@@ -440,8 +444,32 @@ class LiquidityProvider:
         Returns:
             SOL price in USD
         """
-        # In production: Query price API
-        # For now, return a reasonable estimate
+        # Cache for short period
+        if self._sol_price_cache:
+            price, cached_at = self._sol_price_cache
+            if (datetime.utcnow() - cached_at).total_seconds() < 60:
+                return price
+
+        # Best-effort: Jupiter price API (no key required)
+        try:
+            url = f"{self.jupiter_api_url}/price"
+            resp = requests.get(url, params={"ids": "So11111111111111111111111111111111111111112"}, timeout=10)
+            resp.raise_for_status()
+            data = resp.json() or {}
+            price = (
+                data.get("data", {})
+                .get("So11111111111111111111111111111111111111112", {})
+                .get("price")
+            )
+            if price is not None:
+                price_f = float(price)
+                if price_f > 0:
+                    self._sol_price_cache = (price_f, datetime.utcnow())
+                    return price_f
+        except Exception:
+            pass
+
+        # Fallback estimate
         return 150.0
     
     def _simulate_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
