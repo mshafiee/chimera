@@ -182,6 +182,8 @@ class BirdeyeClient:
             return None
             
         return data.get("data")
+
+    def get_token_metadata(self, token_address: str) -> Optional[Dict[str, Any]]:
         """
         Best-effort token metadata from Birdeye.
 
@@ -198,4 +200,3 @@ class BirdeyeClient:
             if k in overview and overview[k] is not None:
                 meta[k] = overview[k]
         return meta or None
-
