@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 import requests
 
 
@@ -72,26 +73,34 @@ class HeliusClient:
 
     def __init__(self, api_key: Optional[str] = None):
         """
-        Initialize Helius client.
-
+        Initialize the Helius client.
+        
         Args:
-            api_key: Helius API key (from HELIUS_API_KEY env var if not provided)
+            api_key: Helius API key (optional, falls back to env var)
         """
-        self.api_key = api_key or os.getenv("HELIUS_API_KEY", "")
+        self.api_key = api_key or os.getenv("HELIUS_API_KEY")
         if not self.api_key:
-            # Try to extract from RPC URL if available
-            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
-            if "api-key=" in rpc_url:
-                self.api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
-        
-        # Use Helius API v0 endpoint (same as operator uses)
+            # Try to extract from RPC URL
+            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
+            if rpc_url:
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(rpc_url)
+                    query_params = parse_qs(parsed.query)
+                    if 'api-key' in query_params:
+                        self.api_key = query_params['api-key'][0]
+                except Exception:
+                    pass
+
         self.base_url = "https://api.helius.xyz/v0"
-        self.rate_limit_delay = 0.1  # 10 requests per second max
         self.last_request_time = 0.0
-        
-        # Caching
-        self._discovery_cache: Optional[Dict[str, Any]] = None
-        self._discovery_cache_time: Optional[float] = None
+        # Conservative rate limit: 10 calls/sec
+        self.rate_limit_delay = 0.1 
+        self._lock = threading.Lock()  # ADDED: Thread safety lock
+
+        # Cache valid discoveries between runs
+        self._discovery_cache: Dict[str, Any] = {}
+        self._discovery_cache_time = 0.0
         self._token_list_cache: Optional[List[str]] = None
         self._token_list_cache_time: Optional[float] = None
         
@@ -106,15 +115,17 @@ class HeliusClient:
         
         # Known wallets (for deduplication)
         self._known_wallets_cache: Set[str] = set()
+        # Keep track of unique wallets found in this run
         self._discovered_this_run: Set[str] = set()
 
     def _rate_limit(self):
-        """Ensure we don't exceed rate limits."""
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < self.rate_limit_delay:
-            time.sleep(self.rate_limit_delay - time_since_last)
-        self.last_request_time = time.time()
+        """Ensure we don't exceed rate limits (Thread-Safe)."""
+        with self._lock:  # ADDED: Lock acquisition
+            current_time = time.time()
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.rate_limit_delay:
+                time.sleep(self.rate_limit_delay - time_since_last)
+            self.last_request_time = time.time()
     
     def _check_circuit_breaker(self) -> bool:
         """Check if circuit breaker should prevent requests."""
@@ -421,6 +432,33 @@ class HeliusClient:
         if not isinstance(tx, dict):
             return []
         
+        # Check transaction value first - we want "real" value moves, not spam/dust
+        min_value_sol = float(os.getenv("SCOUT_DISCOVERY_MIN_SOL", "0.01"))
+        is_significant = False
+        
+        # Check native transfers
+        if "nativeTransfers" in tx:
+            for transfer in tx.get("nativeTransfers", []):
+                amt = transfer.get("amount", 0)
+                # specific key depends on Helius API version (sometimes lamports, sometimes SOL)
+                # assuming lamports if integer > 1000, else SOL
+                if amt > 1000:
+                    amt = amt / 1e9
+                if amt >= min_value_sol:
+                    is_significant = True
+                    break
+        
+        # Check token transfers (if no significant native transfer found yet)
+        if not is_significant and "tokenTransfers" in tx:
+            # We treat token transfers as potentially significant if we can't easily price them,
+            # but ideally we'd check USD value. For discovery speed, we'll be permissive here
+            # but strict on native SOL transfers if they are the only activity.
+            is_significant = True
+
+        if not is_significant:
+            # Skip low-value spam/dust transactions
+            return []
+
         wallets: Set[str] = set()
         
         # Primary: Extract fee payer (transaction signer) - most reliable
@@ -611,61 +649,6 @@ class HeliusClient:
         print(f"[Helius] Found {len(wallet_counts)} unique wallets from token queries")
         return dict(wallet_counts)
     
-    def _query_recent_blocks(self, num_blocks: int = 100) -> List[Dict]:
-        """
-        Query recent blocks using RPC.
-        
-        Args:
-            num_blocks: Number of recent blocks to query
-            
-        Returns:
-            List of block data dictionaries
-        """
-        # Note: This requires RPC endpoint, not just Helius Enhanced API
-        # For now, return empty list - this would need RPC client implementation
-        print("[Helius] Block-based discovery requires RPC client (not implemented yet)")
-        return []
-    
-    def _discover_from_recent_blocks(
-        self,
-        num_blocks: int = 100
-    ) -> Dict[str, int]:
-        """
-        Discover wallets from recent blocks by filtering DEX transactions.
-        
-        Args:
-            num_blocks: Number of recent blocks to query
-            
-        Returns:
-            Dictionary mapping wallet addresses to trade counts
-        """
-        wallet_counts: Dict[str, int] = defaultdict(int)
-        
-        # Get recent blocks
-        blocks = self._query_recent_blocks(num_blocks)
-        
-        if not blocks:
-            return {}
-        
-        dex_programs = {self.JUPITER_PROGRAM, self.RAYDIUM_PROGRAM, self.ORCA_PROGRAM}
-        
-        for block in blocks:
-            transactions = block.get("transactions", [])
-            for tx in transactions:
-                # Check if transaction involves DEX programs
-                if "instructions" in tx:
-                    for inst in tx.get("instructions", []):
-                        if "programId" in inst and inst["programId"] in dex_programs:
-                            # Extract wallet from transaction
-                            wallets = self._extract_wallets_from_transaction(tx)
-                            for wallet in wallets:
-                                if wallet not in self._discovered_this_run:
-                                    wallet_counts[wallet] += 1
-                                    self._discovered_this_run.add(wallet)
-                            break
-        
-        return dict(wallet_counts)
-    
     def _discover_from_dex_programs(
         self,
         hours_back: int = 24,
@@ -818,6 +801,7 @@ class HeliusClient:
         
         return dict(wallet_counts)
     
+
     def discover_wallets_from_recent_swaps(
         self,
         limit: int = 1000,
@@ -879,19 +863,7 @@ class HeliusClient:
             errors_encountered += 1
             print(f"[Helius] Strategy 1 failed: {e}")
         
-        # Strategy 2: Recent Blocks (Secondary) - Skip if we have enough wallets
-        if len(wallet_counts) < max_wallets // 2:
-            try:
-                print("[Helius] Strategy 2: Querying recent blocks...")
-                block_wallets = self._discover_from_recent_blocks(num_blocks=100)
-                for wallet, count in block_wallets.items():
-                    wallet_counts[wallet] += count
-                if block_wallets:
-                    strategy_used = f"{strategy_used}+blocks"
-                print(f"[Helius] Strategy 2 found {len(block_wallets)} wallets")
-            except Exception as e:
-                errors_encountered += 1
-                print(f"[Helius] Strategy 2 failed: {e}")
+
         
         # Strategy 3: DEX Program Accounts (Tertiary) - Skip if we have enough wallets
         if len(wallet_counts) < max_wallets // 2:
@@ -920,6 +892,22 @@ class HeliusClient:
             except Exception as e:
                 errors_encountered += 1
                 print(f"[Helius] Strategy 4 failed: {e}")
+
+        # Strategy 5: Reverse Token Analysis (Trending Tokens)
+        # Only run if we still need wallets and have Birdeye key
+        if len(wallet_counts) < max_wallets and os.getenv("BIRDEYE_API_KEY"):
+            try:
+                print("[Helius] Strategy 5: Analyzing top trending tokens (Reverse Analysis)...")
+                trending_wallets = self.discover_from_top_performing_tokens()
+                for wallet in trending_wallets:
+                    # Give these a high initial weight as they are trading hot tokens
+                    wallet_counts[wallet] += min_trade_count 
+                if trending_wallets:
+                    strategy_used = f"{strategy_used}+trending"
+                print(f"[Helius] Strategy 5 found {len(trending_wallets)} wallets")
+            except Exception as e:
+                errors_encountered += 1
+                print(f"[Helius] Strategy 5 failed: {e}")
 
         if not wallet_counts:
             print("[Helius] No wallets discovered from any strategy")
@@ -1012,29 +1000,36 @@ class HeliusClient:
 
         endpoint = f"/addresses/{wallet_address}/transactions"
 
-        # Pagination knobs
-        target = int(limit) if limit is not None else 0
-        target = max(0, target)
-        # We paginate using `before` signatures. Helius v0 does NOT accept a `limit`
-        # query param on this endpoint for some plans; we rely on default page size.
-        max_pages = int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", "10"))
-        max_pages = max(1, min(max_pages, 100))
-        # If target is large, increase pages proportionally (best-effort)
-        if target > 0:
-            max_pages = max(max_pages, min(100, (target // 100) + 2))
+        # Target total transactions to fetch
+        target = int(limit) if limit is not None else 100
+        
+        # Helius v0 standard page size is 100. requesting more often results in truncation.
+        BATCH_SIZE = 100
+        
+        # Safety break for pagination
+        MAX_PAGES = int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", "50"))
 
-        # Note: Helius API 'before' parameter expects a transaction signature, not timestamp.
         before_sig: Optional[str] = None
         all_txs: List[Dict[str, Any]] = []
         pages = 0
 
+        # Calculate cutoff timestamp once
+        cutoff_timestamp = 0
+        if days > 0:
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff_timestamp = int(cutoff.timestamp())
+
         while True:
-            if target > 0 and len(all_txs) >= target:
+            # Stop if we have enough
+            if len(all_txs) >= target:
                 break
-            if pages >= max_pages:
+            if pages >= MAX_PAGES:
                 break
 
-            params = {"type": "SWAP"}
+            params = {
+                "type": "SWAP",
+                "limit": BATCH_SIZE  # Explicitly request 100 per page
+            }
             if before_sig:
                 params["before"] = before_sig
 
@@ -1046,38 +1041,39 @@ class HeliusClient:
             if not batch:
                 break
 
-            all_txs.extend(batch)
+            # Filter by time window immediately to stop pagination early if possible
+            batch_filtered = []
+            reached_cutoff = False
+            
+            for tx in batch:
+                tx_ts = tx.get("timestamp")
+                if tx_ts:
+                    if tx_ts < cutoff_timestamp:
+                        reached_cutoff = True
+                        # Don't break immediately, checking strictly might be safer 
+                        # but usually API returns desc order.
+                    else:
+                        batch_filtered.append(tx)
+                else:
+                    # Keep if no timestamp (safe fallback)
+                    batch_filtered.append(tx)
+            
+            all_txs.extend(batch_filtered)
             pages += 1
 
-            # Prepare next page
+            # Prepare next page using the LAST tx from the raw batch (not filtered)
+            # This ensures we traverse the chain correctly even if we filtered out 
+            # some transactions in this batch due to timestamp
             last_sig = batch[-1].get("signature")
             if not last_sig or last_sig == before_sig:
                 break
             before_sig = last_sig
 
-            # Hard stop if we're not targeting a specific count (target==0)
-            # to avoid unbounded calls; in this mode callers should pass limit.
-            if target == 0:
+            if reached_cutoff:
                 break
 
-        transactions = all_txs
-        
-        # Filter by time window if specified
-        if days > 0:
-            cutoff = datetime.utcnow() - timedelta(days=days)
-            cutoff_timestamp = int(cutoff.timestamp())
-            filtered_transactions = []
-            for tx in transactions:
-                tx_timestamp = tx.get("timestamp")
-                if tx_timestamp and tx_timestamp >= cutoff_timestamp:
-                    filtered_transactions.append(tx)
-            transactions = filtered_transactions
-        
-        # Limit results
-        if limit > 0:
-            transactions = transactions[:limit]
-        
-        return transactions
+        # Final truncate to limit
+        return all_txs[:target]
 
     def parse_swap_transaction(
         self,
