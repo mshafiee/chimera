@@ -720,21 +720,15 @@ class WalletAnalyzer:
                     pass
             return symbol
 
-        # 2) Birdeye (if available)
+        # 2) Birdeye (if available) - Note: This is sync method, birdeye call is async
+        # For now, we skip async birdeye call here to avoid making this method async
+        # Token metadata is not critical for core functionality
+        # TODO: Make _get_token_symbol async if needed for full birdeye integration
         try:
             if getattr(self.liquidity_provider, "birdeye_client", None):
-                meta = self.liquidity_provider.birdeye_client.get_token_metadata(token_mint)
-                if meta:
-                    self._token_meta_cache[token_mint] = meta
-                    # Cache in Redis
-                    if self._redis_client and self._redis_client.is_available():
-                        try:
-                            import json
-                            cache_key = f"token_meta:{token_mint}"
-                            self._redis_client.set(cache_key, json.dumps(meta), ttl_seconds=7 * 24 * 3600)
-                        except Exception:
-                            pass
-                    return meta.get("symbol")
+                # Skip async birdeye call in sync context
+                # Token symbol is primarily for logging/display, not critical
+                pass
         except Exception:
             pass
 
