@@ -49,7 +49,7 @@ except ImportError:
 # Note: WQS thresholds aligned with rescaled 0-100 range (see wqs.py)
 DEFAULT_OUTPUT_PATH = "../data/roster_new.db"
 DEFAULT_MIN_WQS_ACTIVE = 60.0  # Rescaled from 35.0 (was ~55% of old max, now 60% of 0-100)
-DEFAULT_MIN_WQS_CANDIDATE = 30.0  # Rescaled from 25.0 (was ~45% of old max, now 30% of 0-100)
+DEFAULT_MIN_WQS_CANDIDATE = 20.0  # Lowered from 30.0 to capture more candidates during discovery
 DEFAULT_DISCOVERY_HOURS = 168
 DEFAULT_WALLET_TX_LIMIT = 500
 DEFAULT_WALLET_TX_MAX_PAGES = 20
@@ -561,21 +561,25 @@ def main():
             
             # Automatically merge roster into main database
             print(f"\n[Scout] Automatically merging roster into main database...")
-            merge_success, merge_message = auto_merge_roster(
-                roster_path=str(output_path),
-                api_url=os.getenv("CHIMERA_API_URL", "http://localhost:8080"),
-                operator_container=os.getenv("CHIMERA_OPERATOR_CONTAINER", "chimera-operator"),
-                prefer_api=True,
-                retries=3,
-            )
             
-            if merge_success:
-                print(f"[Scout] ✓ {merge_message}")
-            else:
-                print(f"[Scout] ⚠ Automatic merge failed: {merge_message}")
-                print(f"[Scout] You can manually merge with:")
-                print(f"  kill -HUP $(pgrep chimera_operator)")
-                print(f"  OR call POST /api/v1/roster/merge")
+            # NEW CODE: Wrap in try/except to prevent crash if Operator is down
+            try:
+                merge_success, merge_message = auto_merge_roster(
+                    roster_path=str(output_path),
+                    api_url=os.getenv("CHIMERA_API_URL", "http://localhost:8080"),
+                    operator_container=os.getenv("CHIMERA_OPERATOR_CONTAINER", "chimera-operator"),
+                    prefer_api=True,
+                    retries=3,
+                )
+                
+                if merge_success:
+                    print(f"[Scout] ✓ {merge_message}")
+                else:
+                    print(f"[Scout] ⚠ Automatic merge failed: {merge_message}")
+                    print(f"[Scout] Non-fatal error: Roster is saved on disk.")
+            except Exception as merge_err:
+                print(f"[Scout] ⚠ Exception during auto-merge: {merge_err}")
+                print(f"[Scout] Non-fatal error: Roster is saved on disk.")
         except Exception as e:
             print(f"[Scout] ERROR: Failed to write roster: {e}")
             sys.exit(1)
