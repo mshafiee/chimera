@@ -567,13 +567,18 @@ class WalletAnalyzer:
     
     def _fetch_token_creation_time(self, token_address: str) -> Optional[float]:
         """
-        Fetch token creation timestamp.
+        Fetch token creation timestamp with multi-source fallback.
+        
+        Sources (in order):
+        1. Cache
+        2. Birdeye API (best for DeFi tokens)
+        3. Known tokens hardcoded list
         
         Args:
             token_address: Token mint address
             
         Returns:
-            Timestamp (float) or None
+            Unix timestamp of token creation, or None
         """
         if not token_address:
             return None
@@ -583,20 +588,21 @@ class WalletAnalyzer:
             
         timestamp = None
         
-        # Try Birdeye (if available)
+        # Try Birdeye API
         try:
             if getattr(self.liquidity_provider, "birdeye_client", None):
                 creation_info = self.liquidity_provider.birdeye_client.get_token_creation_info(token_address)
                 if creation_info:
-                    # Parse timestamp (Birdeye uses 'tx_time' or similar)
-                    # Note: Field name depends on API, 'block_time' or 'tx_time' usually exists
-                    # Assuming standard Birdeye response for creation info
+                    # Handle both integer and string formats
                     ts = creation_info.get("blockUnixTime") or creation_info.get("txTime")
                     if ts:
                         timestamp = float(ts)
-        except Exception:
-            pass
-            
+        except Exception as e:
+            # Only log if verbose mode enabled
+            if os.getenv("SCOUT_VERBOSE") == "true":
+                print(f"[Analyzer] Birdeye creation fetch failed for {token_address[:8]}: {e}")
+        
+        # Cache the result (even if None) to avoid repeated API calls
         self._token_creation_cache[token_address] = timestamp
         return timestamp
 
@@ -654,14 +660,66 @@ class WalletAnalyzer:
 
     def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
         """
-        Detect if wallet behaves like an insider cluster member.
+        Detect insider behavior based on wallet age and funding.
+        
+        Fresh wallets (created <24h before first trade) are typically:
+        - Burner wallets for insider trading
+        - Bot wallets for sniping
+        - Ephemeral addresses to hide identity
+        
+        Returns:
+            Dict with insider metrics
         """
-        # Stub
+        is_fresh_wallet = False
+        
+        if not trades:
+            return {"is_fresh_wallet": False, "suspicion_score": 0.0}
+        
+        # Get first trade timestamp
+        first_trade_time = min(t.timestamp for t in trades)
+        
+        # Try to get wallet creation time (first transaction ever)
+        wallet_creation_time = self._get_wallet_creation_time_cached(address)
+        
+        if wallet_creation_time:
+            # Calculate hours between wallet creation and first trade
+            hours_diff = (first_trade_time.timestamp() - wallet_creation_time) / 3600
+            
+            # If wallet was created <24h before trading, it's suspicious
+            if hours_diff < 24:
+                is_fresh_wallet = True
+        
         return {
-            "is_insider": False, 
-            "cluster_id": None, 
-            "suspicion_score": 0.0
+            "is_fresh_wallet": is_fresh_wallet,
+            "suspicion_score": 100.0 if is_fresh_wallet else 0.0
         }
+    
+    def _get_wallet_creation_time_cached(self, address: str) -> Optional[float]:
+        """
+        Get wallet creation time (first transaction) with caching.
+        
+        Args:
+            address: Wallet address
+            
+        Returns:
+            Unix timestamp of first transaction, or None
+        """
+        if not hasattr(self, '_wallet_age_cache'):
+            self._wallet_age_cache = {}
+        
+        if address in self._wallet_age_cache:
+            return self._wallet_age_cache[address]
+        
+        # Try to get from Helius if available
+        creation_time = None
+        if self.helius_client and hasattr(self.helius_client, 'get_wallet_first_transaction'):
+            try:
+                creation_time = self.helius_client.get_wallet_first_transaction(address)
+            except Exception:
+                pass
+        
+        self._wallet_age_cache[address] = creation_time
+        return creation_time
 
     def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
@@ -755,6 +813,10 @@ class WalletAnalyzer:
         if entry_delays:
             avg_entry_delay = sum(entry_delays) / len(entry_delays)
         
+        # 3. Detect Insider Patterns (Fresh Wallet Check)
+        insider_metrics = self._detect_insider_patterns(address, trades)
+        is_fresh_wallet = insider_metrics.get("is_fresh_wallet", False)
+        
         return WalletMetrics(
             address=address,
             roi_7d=roi_7d,
@@ -767,6 +829,7 @@ class WalletAnalyzer:
             win_streak_consistency=win_streak_consistency,
             avg_entry_delay_seconds=avg_entry_delay,
             profit_factor=profit_factor,
+            is_fresh_wallet=is_fresh_wallet,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:

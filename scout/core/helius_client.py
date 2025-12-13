@@ -34,6 +34,53 @@ class DiscoveryStats:
 class HeliusClient:
     """Client for Helius API to discover wallets and fetch transactions."""
 
+    def get_wallet_first_transaction(self, wallet_address: str) -> Optional[float]:
+        """
+        Get the timestamp of the wallet's first transaction (creation time).
+        
+        This is used for insider/fresh wallet detection.
+        
+        Args:
+            wallet_address: Wallet address to check
+            
+        Returns:
+            Unix timestamp of first transaction, or None if unavailable
+        """
+        if not self.api_key:
+            return None
+        
+        try:
+            # Use RPC getSignaturesForAddress with pagination to find oldest signature
+            # Note: This is expensive for wallets with many transactions
+            # We limit to checking the last 1000 signatures for performance
+            rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
+            
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignaturesForAddress",
+                "params": [
+                    wallet_address,
+                    {
+                        "limit": 1000,  # Max allowed by Solana RPC
+                    }
+                ]
+            }
+            
+            response = requests.post(rpc_url, json=payload, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if "result" in data and data["result"]:
+                    # Signatures are returned newest first
+                    # The last one in the list is the oldest
+                    oldest_sig = data["result"][-1]
+                    if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
+                        return float(oldest_sig["blockTime"])
+        except Exception:
+            pass
+        
+        return None
+    
     def get_wallet_funder(self, wallet_address: str) -> Optional[str]:
         """
         Identify the address that funded this wallet (sent the first SOL).

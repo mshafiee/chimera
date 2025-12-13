@@ -32,6 +32,7 @@ class WalletMetrics:
     avg_entry_delay_seconds: Optional[float] = None
     profit_factor: Optional[float] = None
     sortino_ratio: Optional[float] = None
+    is_fresh_wallet: bool = False  # Insider/Burner detection
 
 
 def calculate_wqs(metrics: WalletMetrics) -> float:
@@ -174,6 +175,12 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
             score += 5.0
         elif metrics.sortino_ratio >= 1.0:
             score += 2.0
+    
+    # 9) Insider / Fresh Wallet Penalty
+    # Fresh wallets (created <24h before trading) are typically burners/insiders.
+    # We penalize them heavily to avoid copying ephemeral addresses.
+    if metrics.is_fresh_wallet:
+        score -= 20.0
     
     # 9) Recency Bias (Freshness)
     # Determine if the wallet is active and winning recently
