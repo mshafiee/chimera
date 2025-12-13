@@ -43,6 +43,8 @@ class WalletRecord:
     promoted_at: Optional[str] = None
     ttl_expires_at: Optional[str] = None
     notes: Optional[str] = None
+    archetype: Optional[str] = None  # TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
+    avg_entry_delay_seconds: Optional[float] = None
 
 
 class RosterWriter:
@@ -77,6 +79,7 @@ class RosterWriter:
         promoted_at TIMESTAMP,
         ttl_expires_at TIMESTAMP,
         notes TEXT,
+        archetype TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
@@ -157,8 +160,8 @@ class RosterWriter:
                         trade_count_30d, win_rate, max_drawdown_30d,
                         avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                         last_trade_at, promoted_at,
-                        ttl_expires_at, notes, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         wallet.address,
@@ -178,6 +181,8 @@ class RosterWriter:
                         wallet.promoted_at,
                         wallet.ttl_expires_at,
                         wallet.notes,
+                        wallet.archetype,
+                        wallet.avg_entry_delay_seconds,
                         now,
                         now,
                     )

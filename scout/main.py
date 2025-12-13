@@ -24,7 +24,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -36,6 +36,7 @@ from core.models import BacktestConfig, ValidationStatus
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
 from core.auto_merge import auto_merge_roster
+from core.metrics import get_metrics
 
 # Import config module if available
 try:
@@ -264,7 +265,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def analyze_wallets(
+async def analyze_wallets(
     analyzer: WalletAnalyzer,
     validator: Optional[PrePromotionValidator],
     min_wqs_active: float,
@@ -287,15 +288,15 @@ def analyze_wallets(
     if verbose:
         print(f"[Scout] Analyzing {len(candidates)} candidate wallets (Parallel)...")
 
-    # Define a single wallet processor function
-    def process_wallet(wallet_address):
+    # Define a single wallet processor function (async)
+    async def process_wallet(wallet_address):
         try:
-            metrics = analyzer.get_wallet_metrics(wallet_address)
+            metrics = await analyzer.get_wallet_metrics(wallet_address)
             if metrics is None:
                 return None
             
             wqs_score = calculate_wqs(metrics)
-            trades = analyzer.get_historical_trades(wallet_address, days=30)
+            trades = await analyzer.get_historical_trades(wallet_address, days=30)
             
             # Initial Status
             if wqs_score >= min_wqs_active:
@@ -343,15 +344,24 @@ def analyze_wallets(
             analyzer.clear_wallet_cache(wallet_address)
             return None
 
-    # Run in parallel (limit workers to avoid hitting Helius hard limits despite internal rate limiter)
-    max_workers = min(10, len(candidates))
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(process_wallet, w): w for w in candidates}
-        
-        for future in as_completed(futures):
-            res = future.result()
-            if not res:
-                continue
+    # Run in parallel using asyncio (with semaphore for rate limiting)
+    semaphore = asyncio.Semaphore(min(10, len(candidates)))
+    
+    async def process_with_semaphore(wallet_address):
+        async with semaphore:
+            return await process_wallet(wallet_address)
+    
+    # Process all wallets concurrently
+    tasks = [process_with_semaphore(w) for w in candidates]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for res in results:
+        if isinstance(res, Exception):
+            if verbose:
+                print(f"[Scout] ERROR: {res}")
+            continue
+        if not res:
+            continue
 
             # Unpack results and update stats
             wallet_addr = res['address']
@@ -379,6 +389,17 @@ def analyze_wallets(
                 notes_parts.append(f"Backtest: {res['backtest']['notes']}")
             notes_parts.append(f"Analyzed at {datetime.utcnow().isoformat()}")
 
+            # Determine archetype
+            archetype = None
+            if res['trades']:
+                try:
+                    from core.models import TraderArchetype
+                    archetype_enum = analyzer.determine_archetype(res['metrics'], res['trades'])
+                    archetype = archetype_enum.value if archetype_enum else None
+                except Exception as e:
+                    if verbose:
+                        print(f"  Warning: Failed to determine archetype for {wallet_addr[:8]}...: {e}")
+            
             record = WalletRecord(
                 address=wallet_addr,
                 status=status,
@@ -395,14 +416,16 @@ def analyze_wallets(
                 realized_pnl_30d_sol=res['wallet_stats'].get("realized_pnl_30d_sol"),
                 last_trade_at=res['metrics'].last_trade_at,
                 notes=" | ".join(notes_parts),
+                archetype=archetype,
+                avg_entry_delay_seconds=res['metrics'].avg_entry_delay_seconds,
             )
             records.append(record)
             
     return records, stats
 
 
-def main():
-    """Main entry point for the Scout."""
+async def main_async():
+    """Async main entry point for the Scout."""
     args = parse_args()
     
     print("=" * 70)
@@ -506,12 +529,19 @@ def main():
     else:
         print("[Scout] Backtest validation: DISABLED")
     
+    # Initialize metrics if enabled
+    metrics = get_metrics()
+    if metrics:
+        metrics.start_server()
+    
     # Analyze wallets
     print(f"\n[Scout] Analyzing wallets...")
     print(f"  Min WQS for ACTIVE: {args.min_wqs_active}")
     print(f"  Min WQS for CANDIDATE: {args.min_wqs_candidate}")
     
-    records, stats = analyze_wallets(
+    import time
+    analysis_start = time.time()
+    records, stats = await analyze_wallets(
         analyzer,
         validator,
         args.min_wqs_active,
@@ -520,6 +550,20 @@ def main():
         verbose=args.verbose,
     )
 
+    analysis_duration = time.time() - analysis_start
+    
+    # Update metrics
+    if metrics:
+        metrics.update_wqs_metrics(records)
+        metrics.update_archetype_counts(records)
+        metrics.increment_wallets_analyzed(stats['total'])
+        metrics.record_analysis_duration(analysis_duration)
+        
+        # Calculate total unrealized PnL from records (if available in future)
+        # For now, this would require adding unrealized_pnl to WalletRecord
+        # total_unrealized = sum(r.total_unrealized_loss_sol or 0.0 for r in records if r.status == "ACTIVE")
+        # metrics.update_unrealized_pnl(total_unrealized)
+    
     if args.calibration_report or args.verbose or args.dry_run:
         _calibration_report(records, stats)
     
@@ -575,6 +619,20 @@ def main():
         except Exception as e:
             print(f"[Scout] ERROR: Failed to write roster: {e}")
             sys.exit(1)
+
+
+def main():
+    """Main entry point for the Scout (sync wrapper for async main)."""
+    try:
+        asyncio.run(main_async())
+    except KeyboardInterrupt:
+        print("\n[Scout] Interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"[Scout] Fatal error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
     
     print(f"\n[Scout] Finished at: {datetime.utcnow().isoformat()}")
     print("=" * 70)
