@@ -687,13 +687,37 @@ class WalletAnalyzer:
         """Best-effort token symbol lookup with caching."""
         if not token_mint:
             return None
+        
+        # Check Redis cache first (persistent across restarts)
+        if self._redis_client and self._redis_client.is_available():
+            try:
+                import json
+                cache_key = f"token_meta:{token_mint}"
+                cached_json = self._redis_client.get(cache_key)
+                if cached_json:
+                    cached_meta = json.loads(cached_json)
+                    self._token_meta_cache[token_mint] = cached_meta
+                    return cached_meta.get("symbol")
+            except Exception as e:
+                logger.debug(f"Redis cache read failed for token meta: {e}")
+        
+        # Check in-memory cache
         if token_mint in self._token_meta_cache:
             return self._token_meta_cache[token_mint].get("symbol")
 
         # 1) Known tokens map
         if hasattr(self.liquidity_provider, "KNOWN_TOKENS") and token_mint in self.liquidity_provider.KNOWN_TOKENS:
             symbol = self.liquidity_provider.KNOWN_TOKENS[token_mint][0]
-            self._token_meta_cache[token_mint] = {"symbol": symbol}
+            meta = {"symbol": symbol}
+            self._token_meta_cache[token_mint] = meta
+            # Cache in Redis
+            if self._redis_client and self._redis_client.is_available():
+                try:
+                    import json
+                    cache_key = f"token_meta:{token_mint}"
+                    self._redis_client.set(cache_key, json.dumps(meta), ttl_seconds=7 * 24 * 3600)
+                except Exception:
+                    pass
             return symbol
 
         # 2) Birdeye (if available)
@@ -702,11 +726,27 @@ class WalletAnalyzer:
                 meta = self.liquidity_provider.birdeye_client.get_token_metadata(token_mint)
                 if meta:
                     self._token_meta_cache[token_mint] = meta
+                    # Cache in Redis
+                    if self._redis_client and self._redis_client.is_available():
+                        try:
+                            import json
+                            cache_key = f"token_meta:{token_mint}"
+                            self._redis_client.set(cache_key, json.dumps(meta), ttl_seconds=7 * 24 * 3600)
+                        except Exception:
+                            pass
                     return meta.get("symbol")
         except Exception:
             pass
 
         self._token_meta_cache[token_mint] = {}
+        # Cache empty result in Redis to avoid repeated API calls
+        if self._redis_client and self._redis_client.is_available():
+            try:
+                import json
+                cache_key = f"token_meta:{token_mint}"
+                self._redis_client.set(cache_key, json.dumps({}), ttl_seconds=24 * 3600)  # 1 day for empty results
+            except Exception:
+                pass
         return None
 
     def _enrich_trades_with_realized_pnl(self, trades: List[HistoricalTrade]) -> List[HistoricalTrade]:
