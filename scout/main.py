@@ -24,6 +24,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -272,54 +273,31 @@ def analyze_wallets(
     verbose: bool = False,
 ) -> Tuple[List[WalletRecord], dict]:
     """
-    Analyze wallets and generate roster records.
-    
-    Args:
-        analyzer: Wallet analyzer instance
-        validator: Pre-promotion validator instance
-        min_wqs_active: Minimum WQS for ACTIVE status
-        min_wqs_candidate: Minimum WQS for CANDIDATE status
-        skip_backtest: Skip backtest validation
-        verbose: Enable verbose logging
-        
-    Returns:
-        Tuple of (list of WalletRecords, statistics dict)
+    Analyze wallets in parallel and generate roster records.
     """
     records = []
     stats = {
-        "total": 0,
-        "active": 0,
-        "candidate": 0,
-        "rejected": 0,
-        "backtest_passed": 0,
-        "backtest_failed": 0,
-        "backtest_skipped": 0,
+        "total": 0, "active": 0, "candidate": 0, "rejected": 0,
+        "backtest_passed": 0, "backtest_failed": 0, "backtest_skipped": 0,
     }
     
-    # Get candidate wallets from analyzer
     candidates = analyzer.get_candidate_wallets()
     stats["total"] = len(candidates)
     
     if verbose:
-        print(f"[Scout] Analyzing {len(candidates)} candidate wallets...")
-    
-    for wallet_address in candidates:
-        try:
-            # Get wallet metrics
-            metrics = analyzer.get_wallet_metrics(wallet_address)
-            
-            if metrics is None:
-                if verbose:
-                    print(f"  [!] No metrics for {wallet_address[:8]}...")
-                continue
-            
-            # Calculate WQS
-            wqs_score = calculate_wqs(metrics)
+        print(f"[Scout] Analyzing {len(candidates)} candidate wallets (Parallel)...")
 
-            # Get historical trades once (used for stats + optional backtest)
+    # Define a single wallet processor function
+    def process_wallet(wallet_address):
+        try:
+            metrics = analyzer.get_wallet_metrics(wallet_address)
+            if metrics is None:
+                return None
+            
+            wqs_score = calculate_wqs(metrics)
             trades = analyzer.get_historical_trades(wallet_address, days=30)
             
-            # Initial status based on WQS only
+            # Initial Status
             if wqs_score >= min_wqs_active:
                 initial_status = "ACTIVE"
             elif wqs_score >= min_wqs_candidate:
@@ -327,85 +305,92 @@ def analyze_wallets(
             else:
                 initial_status = "REJECTED"
             
-            # For wallets that would be ACTIVE, run backtest validation
+            # Validation / Backtest logic
             final_status = initial_status
-            backtest_notes = None
+            backtest_res = {"status": "SKIPPED", "notes": None}
             
             if initial_status == "ACTIVE" and not skip_backtest and validator:
                 if trades:
-                    # Run backtest validation
                     validation = validator.validate_for_promotion(
                         wallet_address, metrics, trades, strategy="SHIELD"
                     )
-                    
                     if validation.passed:
-                        final_status = "ACTIVE"
-                        stats["backtest_passed"] += 1
-                        backtest_notes = f"Backtest PASSED: {validation.notes}"
-                        if verbose:
-                            print(f"  [ACTIVE] {wallet_address[:8]}... WQS: {wqs_score:.1f} | Backtest: PASSED")
+                        backtest_res = {"status": "PASSED", "notes": validation.notes}
                     else:
-                        # Demote to CANDIDATE if backtest fails
-                        final_status = "CANDIDATE"
-                        stats["backtest_failed"] += 1
-                        backtest_notes = f"Backtest FAILED: {validation.reason}"
-                        if verbose:
-                            print(f"  [CANDIDATE] {wallet_address[:8]}... WQS: {wqs_score:.1f} | Backtest: FAILED ({validation.reason})")
+                        final_status = "CANDIDATE" # Demote
+                        backtest_res = {"status": "FAILED", "notes": validation.reason}
                 else:
-                    # No trades to backtest, demote to CANDIDATE
                     final_status = "CANDIDATE"
-                    stats["backtest_skipped"] += 1
-                    backtest_notes = "No historical trades for backtest"
-                    if verbose:
-                        print(f"  [CANDIDATE] {wallet_address[:8]}... WQS: {wqs_score:.1f} | Backtest: SKIPPED (no trades)")
+                    backtest_res = {"status": "SKIPPED", "notes": "No trades"}
             
-            elif initial_status == "ACTIVE" and skip_backtest:
-                stats["backtest_skipped"] += 1
-                if verbose:
-                    print(f"  [ACTIVE] {wallet_address[:8]}... WQS: {wqs_score:.1f} | Backtest: SKIPPED")
+            return {
+                "address": wallet_address,
+                "metrics": metrics,
+                "wqs": wqs_score,
+                "status": final_status,
+                "backtest": backtest_res,
+                "trades": trades,
+                "wallet_stats": analyzer.compute_wallet_trade_stats(trades)
+            }
+        except Exception as e:
+            print(f"[Scout] ERROR processing {wallet_address}: {e}")
+            return None
+
+    # Run in parallel (limit workers to avoid hitting Helius hard limits despite internal rate limiter)
+    max_workers = min(10, len(candidates))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_wallet, w): w for w in candidates}
+        
+        for future in as_completed(futures):
+            res = future.result()
+            if not res:
+                continue
+
+            # Unpack results and update stats
+            wallet_addr = res['address']
+            wqs = res['wqs']
+            status = res['status']
             
-            elif verbose:
-                print(f"  [{final_status}] {wallet_address[:8]}... WQS: {wqs_score:.1f}")
+            # Update counters
+            if status == "ACTIVE": stats["active"] += 1
+            elif status == "CANDIDATE": stats["candidate"] += 1
+            else: stats["rejected"] += 1
             
-            # Update stats
-            if final_status == "ACTIVE":
-                stats["active"] += 1
-            elif final_status == "CANDIDATE":
-                stats["candidate"] += 1
-            else:
-                stats["rejected"] += 1
-            
-            # Build notes
-            notes_parts = [f"WQS: {wqs_score:.1f}"]
-            if backtest_notes:
-                notes_parts.append(backtest_notes)
+            bt_status = res['backtest']['status']
+            if bt_status == "PASSED": stats["backtest_passed"] += 1
+            elif bt_status == "FAILED": stats["backtest_failed"] += 1
+            elif bt_status == "SKIPPED" and status == "ACTIVE": stats["backtest_skipped"] += 1
+
+            # Console output
+            if verbose:
+                bt_str = f"| BT: {bt_status}" if bt_status != "SKIPPED" else ""
+                print(f"  [{status}] {wallet_addr[:8]}... WQS: {wqs:.1f} {bt_str}")
+
+            # Build record
+            notes_parts = [f"WQS: {wqs:.1f}"]
+            if res['backtest']['notes']:
+                notes_parts.append(f"Backtest: {res['backtest']['notes']}")
             notes_parts.append(f"Analyzed at {datetime.utcnow().isoformat()}")
-            
-            # Create wallet record
-            wallet_stats = analyzer.compute_wallet_trade_stats(trades)
+
             record = WalletRecord(
-                address=wallet_address,
-                status=final_status,
-                wqs_score=wqs_score,
-                roi_7d=metrics.roi_7d,
-                roi_30d=metrics.roi_30d,
-                trade_count_30d=metrics.trade_count_30d,
-                win_rate=metrics.win_rate,
-                max_drawdown_30d=metrics.max_drawdown_30d,
-                avg_trade_size_sol=metrics.avg_trade_size_sol,
-                avg_win_sol=wallet_stats.get("avg_win_sol"),
-                avg_loss_sol=wallet_stats.get("avg_loss_sol"),
-                profit_factor=wallet_stats.get("profit_factor"),
-                realized_pnl_30d_sol=wallet_stats.get("realized_pnl_30d_sol"),
-                last_trade_at=metrics.last_trade_at,
+                address=wallet_addr,
+                status=status,
+                wqs_score=wqs,
+                roi_7d=res['metrics'].roi_7d,
+                roi_30d=res['metrics'].roi_30d,
+                trade_count_30d=res['metrics'].trade_count_30d,
+                win_rate=res['metrics'].win_rate,
+                max_drawdown_30d=res['metrics'].max_drawdown_30d,
+                avg_trade_size_sol=res['metrics'].avg_trade_size_sol,
+                avg_win_sol=res['wallet_stats'].get("avg_win_sol"),
+                avg_loss_sol=res['wallet_stats'].get("avg_loss_sol"),
+                profit_factor=res['wallet_stats'].get("profit_factor"),
+                realized_pnl_30d_sol=res['wallet_stats'].get("realized_pnl_30d_sol"),
+                last_trade_at=res['metrics'].last_trade_at,
                 notes=" | ".join(notes_parts),
             )
             records.append(record)
             
-        except Exception as e:
-            print(f"[Scout] ERROR analyzing {wallet_address[:8]}...: {e}")
-            continue
-    
     return records, stats
 
 
