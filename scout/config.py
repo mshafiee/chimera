@@ -66,6 +66,19 @@ class ScoutConfig:
         """Get whether to allow fallback to current liquidity when historical unavailable."""
         return os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true"
     
+    @staticmethod
+    def get_strict_historical_liquidity() -> bool:
+        """
+        Get whether to enforce strict historical liquidity (production recommended).
+        
+        When True, rejects backtests if historical liquidity data is unavailable,
+        preventing "lucky" backtests based on current liquidity of mooned tokens.
+        
+        Default: True (production-safe)
+        """
+        # Default to True for production safety
+        return os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
+    
     # ========================================================================
     # WQS Thresholds (Rescaled 0-100 range)
     # ========================================================================

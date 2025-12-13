@@ -254,6 +254,21 @@ class WalletAnalyzer:
         self._price_cache: Dict[str, float] = {}  # Cache for token prices
         self._sol_price_usd: Optional[float] = None  # Cached SOL price
         
+        # Initialize Redis client for persistent caching (if available)
+        self._redis_client = None
+        try:
+            from .redis_client import RedisClient
+            if CONFIG_AVAILABLE and ScoutConfig and ScoutConfig.get_redis_enabled():
+                redis_url = ScoutConfig.get_redis_url()
+                self._redis_client = RedisClient(redis_url=redis_url, enabled=True)
+                if self._redis_client.is_available():
+                    logger.info("Redis cache enabled for token metadata and creation times")
+                else:
+                    logger.warning("Redis enabled but unavailable, using in-memory cache")
+                    self._redis_client = None
+        except ImportError:
+            pass  # Redis not available
+        
         # Known DEX program IDs for smart money detection
         self._dex_program_ids = {
             "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
@@ -782,7 +797,23 @@ class WalletAnalyzer:
         """
         if not token_address:
             return None
-            
+        
+        # Check Redis cache first (persistent across restarts)
+        if self._redis_client and self._redis_client.is_available():
+            try:
+                import json
+                cache_key = f"token_creation:{token_address}"
+                cached_json = self._redis_client.get(cache_key)
+                if cached_json:
+                    cached_data = json.loads(cached_json)
+                    # Handle None values (cached as "null" string)
+                    if cached_data == "null" or cached_data is None:
+                        return None
+                    return float(cached_data)
+            except Exception as e:
+                logger.debug(f"Redis cache read failed for token creation: {e}")
+        
+        # Check in-memory cache
         if token_address in self._token_creation_cache:
             return self._token_creation_cache[token_address]
             
@@ -805,6 +836,18 @@ class WalletAnalyzer:
                 print(f"[Analyzer] Birdeye creation fetch failed for {token_address[:8]}: {e}")
         
         # Cache the result (even if None) to avoid repeated API calls
+        # Store in Redis for persistence across restarts
+        if self._redis_client and self._redis_client.is_available():
+            try:
+                import json
+                cache_key = f"token_creation:{token_address}"
+                # Cache for 7 days (token creation time never changes)
+                cache_value = json.dumps(timestamp) if timestamp is not None else "null"
+                self._redis_client.set(cache_key, cache_value, ttl_seconds=7 * 24 * 3600)
+            except Exception as e:
+                logger.debug(f"Redis cache write failed for token creation: {e}")
+        
+        # Also cache in-memory for fast access
         self._token_creation_cache[token_address] = timestamp
         return timestamp
 
@@ -862,6 +905,16 @@ class WalletAnalyzer:
                                 freeze_opt = int.from_bytes(raw[46:50], 'little')
                                 if freeze_opt == 1:
                                     return False # Has freeze authority -> REJECT
+                                
+                                # Check mint_authority (offset 0-3: MintAuthOption)
+                                # If mint_authority is None (0), supply is fixed (good)
+                                # If mint_authority exists (1), supply can be inflated (risky)
+                                mint_auth_opt = int.from_bytes(raw[0:4], 'little')
+                                # Note: mint_authority = None (0) is actually SAFE (fixed supply)
+                                # mint_authority = Some(address) means supply can be minted (risky)
+                                # However, most legitimate tokens have mint_authority, so this is
+                                # primarily a check for tokens that explicitly disabled it (very safe)
+                                # For now, we rely on RugCheck for comprehensive mint authority checks
         except Exception:
             pass
         

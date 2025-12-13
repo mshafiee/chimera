@@ -49,11 +49,14 @@ services:
       # Redis Configuration
       - REDIS_ENABLED=true
       - REDIS_URL=redis://chimera-redis:6379
-      # RugCheck Configuration
-      - RUGCHECK_ENABLED=true
-      - RUGCHECK_FAIL_MODE=closed
-      # Smart Money Filters
-      - ENABLE_SMART_MONEY_FILTERS=true
+               # RugCheck Configuration
+               - RUGCHECK_ENABLED=true
+               - RUGCHECK_FAIL_MODE=closed
+               # Smart Money Filters
+               - ENABLE_SMART_MONEY_FILTERS=true
+               # Production Safety Settings
+               - SCOUT_STRICT_HISTORICAL_LIQUIDITY=true
+               - SCOUT_ENFORCE_CURRENT_LIQUIDITY=true
     env_file:
       - docker/env.mainnet-prod
       - docker/env.mainnet-prod.local

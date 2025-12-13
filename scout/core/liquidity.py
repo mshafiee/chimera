@@ -273,13 +273,18 @@ class LiquidityProvider:
         if db_data:
             return db_data
 
-        # NEW CODE: Strict mode check (if db missed, we might want to fail fast)
-        # However, checking API is usually allowed unless offline.
-        # But if strict mode is ON, and we finish checking all sources and find nothing,
+        # Strict mode check (production recommended)
+        # If strict mode is ON, and we finish checking all sources and find nothing,
         # we return None (which is default behavior).
         # The key strict check is in get_historical_liquidity_or_current to prevent fallback.
         # But for optimization, if strict and BIRDEYE not available, we can fail early.
-        if os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false").lower() == "true":
+        try:
+            from config import ScoutConfig
+            strict_mode = ScoutConfig.get_strict_historical_liquidity() if ScoutConfig else False
+        except ImportError:
+            strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
+        
+        if strict_mode:
             if not (self.mode == "real" and self.birdeye_client):
                 return None
 
@@ -323,8 +328,14 @@ class LiquidityProvider:
         if historical:
             return historical
         
-        # NEW CODE: Strict mode check
-        if os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false").lower() == "true":
+        # Strict mode check (production recommended)
+        try:
+            from config import ScoutConfig
+            strict_mode = ScoutConfig.get_strict_historical_liquidity() if ScoutConfig else False
+        except ImportError:
+            strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
+        
+        if strict_mode:
             logger.warning(f"Strict mode: Historical liquidity missing for {token_address}, rejecting.")
             return None
         
