@@ -79,62 +79,97 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
         if tc >= 50:
             score += 5.0
 
-    # 4) Anti-Pump-and-Dump Check
-    # Penalize wallets with recent massive spikes (likely lucky trades)
-    if metrics.roi_7d is not None and metrics.roi_30d is not None:
-        if metrics.roi_30d > 0 and metrics.roi_7d > metrics.roi_30d * 2:
-            score -= 15.0
     
-    # 5) Statistical Significance
-    # Low confidence penalty for wallets with few realized closes.
-    #
-    # We use a smooth, monotonic multiplier so 1–4 closes are discounted but
-    # not annihilated, and 20+ closes reach full confidence.
-    if metrics.trade_count_30d is not None:
-        tc = max(0, int(metrics.trade_count_30d))
-        if tc == 0:
-            confidence = 0.0
-        else:
-            # 1 close  -> 0.62
-            # 5 closes -> 0.70
-            # 10 closes -> 0.80
-            # 20 closes -> 1.00
-            # Detailed: Start at 0.6 base confidence, ramp to 1.0 at 20 trades
-            confidence = min(1.0, 0.6 + 0.4 * (tc / 20.0))
-        score *= confidence
-    else:
-        # Explicitly handle None case to avoid implicit 0 behavior if logic changes
-        # If trade_count_30d is None, it implies no trades or unknown, so confidence should be 0.
-        score *= 0.0
+    # 1) ROI Base Score (0-40 pts)
+    # Reward consistent positive ROI over 7d and 30d
+    roi_7d = metrics.roi_7d or 0.0
+    roi_30d = metrics.roi_30d or 0.0
     
-    # 6) Drawdown Penalty
-    # High drawdown indicates poor risk management
-    if metrics.max_drawdown_30d is not None:
-        score -= metrics.max_drawdown_30d * 0.2
+    if roi_30d > 0:
+        score += min(20.0, roi_30d * 0.5)  # Cap at +40% ROI
+    
+    if roi_7d > 0:
+        score += min(10.0, roi_7d * 1.0)   # Cap at +10% 7d ROI
+        
+    # Consistency Bonus: 7d is positive defined as > -5% (allow small pullback) 
+    # and 30d is solid.
+    if roi_7d > -5.0 and roi_30d > 20.0:
+        score += 10.0
 
-    # 7) Sniper Penalty (The "Copy-Ability" Check)
-    # If they consistently buy < 30 seconds after launch, they are likely a bot/sniper.
+    # 2) Win Rate & Profit Factor (0-20 pts)
+    win_rate = metrics.win_rate or 0.0
+    
+    if win_rate >= 0.5:
+        score += 5.0
+    if win_rate >= 0.65:
+        score += 5.0
+        
+            
+    # 3) Activity Level (0-20 pts)
+    count = metrics.trade_count_30d or 0
+    
+    # Monotonic increase up to saturation
+    if count >= 5: score += 2.0
+    if count >= 10: score += 3.0
+    if count >= 20: score += 5.0
+    if count >= 50: score += 5.0
+    if count >= 100: score += 5.0  # Grinder bonus
+    
+    # 4) Penalties (Drawdown & Pump-Dump)
+    dd = metrics.max_drawdown_30d or 0.0
+    
+    if dd > 50.0:
+        score -= 50.0  # Rekt
+    elif dd > 30.0:
+        score -= 25.0  # Dangerous
+    elif dd > 15.0:
+        score -= 5.0   # Careful
+        
+    # Anti-Pump-and-Dump / Lucky Shot Check
+    # If 7d ROI is huge but 30d is mediocre (or vice versa in specific ways), 
+    # check for anomaly. 
+    # Heuristic: If 7d ROI > 2x 30d ROI (and 30d is decent), might be a lucky recent pump.
+    if roi_30d > 10.0 and roi_7d > (roi_30d * 2.0):
+        score -= 10.0  # Suspicious spike
+        
+    # 5) Scalability / Liquidity Safety (Implicit in avg_trade_size)
+    if (metrics.avg_trade_size_sol or 0) < 0.05:
+        score -= 10.0  # Dust trader, hard to copy profitably due to fixed gas
+
+    # 6) Consistency (Win Streak)
+    if metrics.win_streak_consistency and metrics.win_streak_consistency > 0.4:
+        score += 5.0
+
+    # 7) Sniper / Bot Penalty (Critical for Copy Trading)
     if metrics.avg_entry_delay_seconds is not None:
-        if metrics.avg_entry_delay_seconds < 30: 
-            score -= 40.0 
-        elif metrics.avg_entry_delay_seconds < 120:
-            score -= 10.0
-        else:
-            score += 10.0
+        # If they buy < 30s after launch on average, they are likely a bot/sniper.
+        # We cannot copy them profitably due to MEV/Latency.
+        if metrics.avg_entry_delay_seconds < 30:
+            return 0.0 # IMMEDIATE REJECTION - DO NOT PASS 
+        
+        # If they buy < 60s, heavily penalize
+        elif metrics.avg_entry_delay_seconds < 60:
+            score -= 30.0
+            
+        # If they wait 2 mins - 1 hour, they are "Smart Money" (Human/Algo analysis)
+        # This is the "Sweet Spot" for copy trading.
+        elif 120 < metrics.avg_entry_delay_seconds < 3600:
+            score += 15.0
 
-    # 8) Advanced Risk Metrics Bonus (MODIFIED)
+    # ---------------------------------------------------------
+    # NEW: Profit Factor (The "Real" Trader Metric)
+    # ---------------------------------------------------------
+    # Win rate is easily faked (sell winners, hold losers). 
+    # Profit Factor (Total Gains / Total Losses) exposes bag holders.
     if metrics.profit_factor is not None:
-        if metrics.profit_factor >= 3.0:
-            score += 10.0  # Increased from 5.0 to reward high R:R
-        elif metrics.profit_factor >= 1.5:
-            score += 5.0   # Increased from 2.0
-            
-        # NEW: Compensation for low win rate if Profit Factor is high
-        # If Win Rate < 40% but Profit Factor > 2.0, refund some consistency points
-        if (metrics.win_rate or 0) < 0.40 and metrics.profit_factor > 2.0:
+        if metrics.profit_factor > 3.0: # Elite
+            score += 15.0
+        elif metrics.profit_factor > 1.5: # Profitable
             score += 5.0
-            
-    if metrics.sortino_ratio is not None:
+        elif metrics.profit_factor < 1.1: # Breakeven/Losing
+            score -= 25.0
+    # 8) Sortino/Sharpe Proxy
+    if metrics.sortino_ratio:
         if metrics.sortino_ratio >= 2.0:
             score += 5.0
         elif metrics.sortino_ratio >= 1.0:

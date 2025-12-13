@@ -177,11 +177,27 @@ class BirdeyeClient:
         endpoint = "/defi/token_creation_info"
         params = {"address": token_address}
         
-        data = self._make_request(endpoint, params)
-        if not data or "data" not in data:
-            return None
+        try:
+            url = f"{self.base_url}/defi/token_creation_info"
+            headers = {
+                "X-API-KEY": self.api_key,
+                "x-chain": "solana"
+            }
+            params = {"address": token_address}
             
-        return data.get("data")
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+            
+            if response.status_code == 429:
+                return None
+                
+            response.raise_for_status()
+            data = response.json()
+            
+            if data and "data" in data:
+                return data["data"]
+            return None
+        except Exception as e:
+            return None
 
     def get_token_metadata(self, token_address: str) -> Optional[Dict[str, Any]]:
         """

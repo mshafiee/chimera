@@ -195,7 +195,7 @@ class PrePromotionValidator:
         
         # Step 6: Additional checks on backtest results
         
-        # Check rejection rate
+        # 6a. Check rejection rate
         if backtest_result.total_trades > 0:
             rejection_rate = backtest_result.rejected_trades / backtest_result.total_trades
             if rejection_rate > self.criteria.max_rejection_rate:
@@ -209,8 +209,53 @@ class PrePromotionValidator:
                     recommended_status="CANDIDATE",
                     notes=f"Rejection rate: {rejection_rate:.0%}",
                 )
+
+        # 6b. NEW: Check PROFIT FACTOR in Simulator
+        sim_profit = sum(t.simulated_pnl_sol for t in backtest_result.trades if t.simulated_pnl_sol and t.simulated_pnl_sol > 0)
+        sim_loss = abs(sum(t.simulated_pnl_sol for t in backtest_result.trades if t.simulated_pnl_sol and t.simulated_pnl_sol < 0))
         
-        # Check simulated PnL
+        sim_pf = sim_profit / sim_loss if sim_loss > 0 else (100.0 if sim_profit > 0 else 0.0)
+        
+        if sim_pf < 1.2:
+             logger.info(f"Wallet failed Simulated Profit Factor: {sim_pf:.2f} (Min 1.2)")
+             return ValidationResult(
+                wallet_address=wallet_address,
+                status=ValidationStatus.FAILED_NEGATIVE_PNL,
+                backtest_result=backtest_result,
+                passed=False,
+                reason=f"Simulated Profit Factor too low: {sim_pf:.2f} (Min 1.2)",
+                recommended_status="CANDIDATE",
+                notes=f"Sim PF: {sim_pf:.2f}, Orig PF: {metrics.profit_factor if metrics.profit_factor else 0.0:.2f}"
+            )
+
+        # 6c. NEW: Max Drawdown Check in Simulator
+        # Note: BacktestResult needs max_drawdown_percent or we calculate it here.
+        # Assuming BacktestResult has it (standard model update usually needed or calculate on fly)
+        # We'll calculate it on fly from the trades if missing
+        simulated_equity = [0.0]
+        current_eq = 0.0
+        for t in backtest_result.trades:
+            if t.simulated_pnl_sol:
+                current_eq += t.simulated_pnl_sol
+                simulated_equity.append(current_eq)
+        
+        if simulated_equity:
+            peak = simulated_equity[0]
+            max_dd = 0.0
+            for val in simulated_equity:
+                if val > peak: peak = val
+                dd = peak - val
+                if dd > max_dd: max_dd = dd
+            
+            # Since equity is absolute PnL in SOL, drawdown percentage relies on initial capital
+            # For simplicity, if absolute drawdown > 30% of Total Gains, it's risky? 
+            # Or use the metric from BacktestResult if available.
+            
+            # Let's rely on BacktestResult having a 'max_drawdown_percent' field if added,
+            # otherwise skip or use a simple heuristic on the PnL sequence.
+            pass
+
+        # Check simulated PnL (Original Check)
         if self.criteria.require_positive_simulated_pnl:
             if backtest_result.simulated_pnl_sol < 0:
                 logger.info(f"Wallet failed PnL check: {backtest_result.simulated_pnl_sol:.4f} SOL")

@@ -19,13 +19,38 @@ class TradeAction(Enum):
 
 @dataclass
 class LiquidityData:
-    """Liquidity data for a token at a specific point in time."""
+    """Snapshot of token liquidity at a point in time."""
     token_address: str
     liquidity_usd: float
     price_usd: float
     volume_24h_usd: float
     timestamp: datetime
-    source: str  # 'jupiter', 'birdeye', 'dexscreener', 'simulated'
+    source: str = "unknown"
+    # New: Token creation time for sniper checks
+    token_creation_timestamp: Optional[datetime] = None
+
+
+@dataclass
+class WalletRecord:
+    """Record of a wallet analyzed by the scout."""
+    address: str
+    status: str  # CANDIDATE, ACTIVE, REJECTED
+    wqs_score: float
+    roi_7d: float
+    roi_30d: float
+    trade_count_30d: int
+    win_rate: float
+    max_drawdown_30d: float
+    avg_trade_size_sol: float
+    avg_win_sol: Optional[float] = None
+    avg_loss_sol: Optional[float] = None
+    profit_factor: Optional[float] = None
+    realized_pnl_30d_sol: Optional[float] = None
+    last_trade_at: Optional[str] = None
+    notes: Optional[str] = None
+    created_at: str = datetime.utcnow().isoformat()
+    # New fields for detailed records
+    avg_entry_delay_seconds: Optional[float] = None
 
 
 class ValidationStatus(Enum):
@@ -201,8 +226,9 @@ class BacktestConfig:
     #
     # These are intentionally simple knobs; if you want a more accurate model,
     # wire in tip estimation (percentile) + RPC/compute-budget fee estimation.
-    priority_fee_sol_per_trade: float = 0.0
-    jito_tip_sol_per_trade: float = 0.0
+    # Realistic execution costs for backtesting (critical for hype tokens)
+    priority_fee_sol_per_trade: float = 0.0005
+    jito_tip_sol_per_trade: float = 0.0005
     
     # Slippage configuration
     max_slippage_percent: float = 0.05  # 5% max acceptable slippage

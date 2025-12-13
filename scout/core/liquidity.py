@@ -557,24 +557,28 @@ class LiquidityProvider:
         
         trade_value_usd = amount_sol * sol_price_usd
         
-        # Base constant for Solana AMMs
-        k = 0.1 
+        # Base Slippage (AMM Constant Product Approximation)
+        # Slippage ~ Trade_Size / Liquidity
+        # We use a base constant of 0.1 for typical Solana DEX pools
+        base_slippage = 0.1 * math.sqrt(trade_value_usd / liquidity_usd)
+
+        # --- NEW: Volatility/Turnover Penalty ---
+        # High Volume / Low Liquidity = Jito Wars / Extreme Volatility
+        volatility_multiplier = 1.0
+        if liquidity_usd > 0:
+            turnover_ratio = volume_24h_usd / liquidity_usd
+            
+            if turnover_ratio > 10.0:
+                volatility_multiplier = 5.0 # Extreme Danger (New launch or rug)
+            elif turnover_ratio > 3.0:
+                volatility_multiplier = 2.5 # Very High Volatility
+            elif turnover_ratio > 1.0:
+                volatility_multiplier = 1.5 # Active trading
+
+        final_slippage = base_slippage * volatility_multiplier
         
-        # --- Dynamic Volatility Adjustment ---
-        # Calculate Turnover Ratio (Volume / Liquidity)
-        # Normal ratio is ~0.1 to 0.5. Pump tokens often hit > 2.0.
-        turnover_ratio = volume_24h_usd / liquidity_usd if liquidity_usd > 0 else 0
-        
-        # If turnover is high, implied volatility is high -> increase k
-        if turnover_ratio > 3.0:
-            k = 0.4  # Quadruple slippage penalty (high congestion/Jito wars)
-        elif turnover_ratio > 1.0:
-            k = 0.2  # Double slippage penalty
-        
-        slippage = k * math.sqrt(trade_value_usd / liquidity_usd)
-        
-        # Cap at 100%
-        return min(slippage, 1.0)
+        # Add fixed base network variance (e.g. 0.5%)
+        return min(final_slippage + 0.005, 1.0)
     
     def get_sol_price_usd(self) -> float:
         """
