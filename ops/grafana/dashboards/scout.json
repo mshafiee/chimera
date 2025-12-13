@@ -1,0 +1,175 @@
+{
+  "dashboard": {
+    "title": "Chimera Scout - Wallet Intelligence",
+    "tags": ["chimera", "scout", "wqs"],
+    "timezone": "browser",
+    "schemaVersion": 16,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Average WQS Score (Active Roster)",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+        "targets": [
+          {
+            "expr": "scout_wqs_average",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "decimals": 1,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": 0, "color": "red"},
+                {"value": 40, "color": "yellow"},
+                {"value": 60, "color": "green"},
+                {"value": 80, "color": "blue"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 2,
+        "title": "WQS Distribution",
+        "type": "histogram",
+        "gridPos": {"h": 8, "w": 10, "x": 6, "y": 0},
+        "targets": [
+          {
+            "expr": "scout_wqs_distribution",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none"
+          }
+        }
+      },
+      {
+        "id": 3,
+        "title": "Total Unrealized PnL (SOL)",
+        "type": "stat",
+        "gridPos": {"h": 8, "w": 8, "x": 16, "y": 0},
+        "targets": [
+          {
+            "expr": "scout_unrealized_pnl_total",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short",
+            "decimals": 2,
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {"value": null, "color": "green"},
+                {"value": 0, "color": "yellow"},
+                {"value": 10, "color": "red"}
+              ]
+            }
+          }
+        }
+      },
+      {
+        "id": 4,
+        "title": "Wallets by Archetype",
+        "type": "bargauge",
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "targets": [
+          {
+            "expr": "scout_wallets_by_archetype",
+            "refId": "A",
+            "legendFormat": "{{archetype}} - {{status}}"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          }
+        }
+      },
+      {
+        "id": 5,
+        "title": "WQS Trend (7 days)",
+        "type": "timeseries",
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+        "targets": [
+          {
+            "expr": "scout_wqs_average",
+            "refId": "A",
+            "legendFormat": "Average WQS"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none",
+            "decimals": 1
+          }
+        }
+      },
+      {
+        "id": 6,
+        "title": "RugCheck Rejections",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 0, "y": 16},
+        "targets": [
+          {
+            "expr": "rate(scout_rugcheck_rejections_total[5m])",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "ops",
+            "decimals": 2
+          }
+        }
+      },
+      {
+        "id": 7,
+        "title": "Wallets Analyzed",
+        "type": "stat",
+        "gridPos": {"h": 6, "w": 6, "x": 6, "y": 16},
+        "targets": [
+          {
+            "expr": "scout_wallets_analyzed_total",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "short"
+          }
+        }
+      },
+      {
+        "id": 8,
+        "title": "Analysis Duration",
+        "type": "histogram",
+        "gridPos": {"h": 6, "w": 12, "x": 12, "y": 16},
+        "targets": [
+          {
+            "expr": "scout_analysis_duration_seconds",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "s"
+          }
+        }
+      }
+    ],
+    "time": {
+      "from": "now-7d",
+      "to": "now"
+    }
+  }
+}

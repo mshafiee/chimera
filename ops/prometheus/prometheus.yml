@@ -28,6 +28,13 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 5s  # High frequency for real-time monitoring
     
+  # Chimera Scout metrics
+  - job_name: 'chimera-scout'
+    static_configs:
+      - targets: ['scout:8081']  # Scout metrics port
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+    
   # Optional: Node exporter for system metrics
   - job_name: 'node'
     static_configs:
