@@ -164,7 +164,24 @@ class BirdeyeClient:
 
         return None
 
-    def get_token_metadata(self, token_address: str) -> Optional[Dict[str, Any]]:
+    def get_token_creation_info(self, token_address: str) -> Optional[Dict[str, Any]]:
+        """
+        Get token creation info (including timestamp).
+        
+        Args:
+            token_address: Token mint address
+            
+        Returns:
+            Dict containing creation info or None
+        """
+        endpoint = "/defi/token_creation_info"
+        params = {"address": token_address}
+        
+        data = self._make_request(endpoint, params)
+        if not data or "data" not in data:
+            return None
+            
+        return data.get("data")
         """
         Best-effort token metadata from Birdeye.
 
