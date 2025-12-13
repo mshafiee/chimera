@@ -10,6 +10,7 @@ import sys
 import time
 import requests
 import subprocess
+import shutil
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -98,6 +99,10 @@ def merge_via_sighup(
     Returns:
         Tuple of (success: bool, message: str)
     """
+    # Check if docker binary exists before trying
+    if not shutil.which("docker"):
+        return False, "Docker binary not found (running inside container without socket access?)"
+
     # Try to find operator process in container
     try:
         # Get PID from container
