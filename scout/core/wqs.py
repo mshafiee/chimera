@@ -29,6 +29,9 @@ class WalletMetrics:
     avg_trade_size_sol: Optional[float] = None
     last_trade_at: Optional[str] = None
     win_streak_consistency: Optional[float] = None  # 0.0 to 1.0
+    avg_entry_delay_seconds: Optional[float] = None
+    profit_factor: Optional[float] = None
+    sortino_ratio: Optional[float] = None
 
 
 def calculate_wqs(metrics: WalletMetrics) -> float:
@@ -92,17 +95,50 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
         if tc == 0:
             confidence = 0.0
         else:
-            # 1 close  -> 0.525
-            # 2 closes -> 0.55
-            # 10 closes -> 0.75
+            # 1 close  -> 0.62
+            # 5 closes -> 0.70
+            # 10 closes -> 0.80
             # 20 closes -> 1.00
-            confidence = min(1.0, 0.5 + 0.5 * (tc / 20.0))
+            # Detailed: Start at 0.6 base confidence, ramp to 1.0 at 20 trades
+            confidence = min(1.0, 0.6 + 0.4 * (tc / 20.0))
         score *= confidence
+    else:
+        # Explicitly handle None case to avoid implicit 0 behavior if logic changes
+        # If trade_count_30d is None, it implies no trades or unknown, so confidence should be 0.
+        score *= 0.0
     
     # 6) Drawdown Penalty
     # High drawdown indicates poor risk management
     if metrics.max_drawdown_30d is not None:
         score -= metrics.max_drawdown_30d * 0.2
+
+    # 7) Sniper Penalty (The "Copy-Ability" Check)
+    # If they consistently buy < 30 seconds after launch, they are likely a bot/sniper.
+    if metrics.avg_entry_delay_seconds is not None:
+        if metrics.avg_entry_delay_seconds < 30: 
+            score -= 40.0 
+        elif metrics.avg_entry_delay_seconds < 120:
+            score -= 10.0
+        else:
+            score += 10.0
+
+    # 8) Advanced Risk Metrics Bonus (MODIFIED)
+    if metrics.profit_factor is not None:
+        if metrics.profit_factor >= 3.0:
+            score += 10.0  # Increased from 5.0 to reward high R:R
+        elif metrics.profit_factor >= 1.5:
+            score += 5.0   # Increased from 2.0
+            
+        # NEW: Compensation for low win rate if Profit Factor is high
+        # If Win Rate < 40% but Profit Factor > 2.0, refund some consistency points
+        if (metrics.win_rate or 0) < 0.40 and metrics.profit_factor > 2.0:
+            score += 5.0
+            
+    if metrics.sortino_ratio is not None:
+        if metrics.sortino_ratio >= 2.0:
+            score += 5.0
+        elif metrics.sortino_ratio >= 1.0:
+            score += 2.0
     
     # Clamp to 0-100 range
     return max(0.0, min(score, 100.0))
