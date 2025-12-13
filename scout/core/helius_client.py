@@ -29,6 +29,26 @@ class DiscoveryStats:
 class HeliusClient:
     """Client for Helius API to discover wallets and fetch transactions."""
 
+    def get_wallet_funder(self, wallet_address: str) -> Optional[str]:
+        """
+        Identify the address that funded this wallet (sent the first SOL).
+        Useful for detecting wallet clusters/insiders.
+        """
+        if not self.api_key:
+            return None
+            
+        try:
+            # Fetch the very first transaction history
+            # Helius/RPC allows querying by 'oldest' order or paginating back
+            # For this MVP, we stub this out as a placeholder for future
+            # deep history implementation.
+            pass 
+        except Exception:
+            return None
+        return None
+
+    # Known DEX program IDs
+
     # Known DEX program IDs
     JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
     RAYDIUM_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
@@ -1075,19 +1095,54 @@ class HeliusClient:
         # Final truncate to limit
         return all_txs[:target]
 
+    def parse_defi_transaction(self, tx: Dict[str, Any], wallet_address: str) -> Optional[Dict[str, Any]]:
+        """
+        Parse a transaction for DeFi activities beyond simple swaps.
+        Handles: TRANSFER, LP_DEPOSIT, LP_WITHDRAW, STAKE, UNSTAKE.
+        
+        Args:
+            tx: Helius transaction object
+            wallet_address: The wallet address being analyzed
+            
+        Returns:
+            Dictionary with delta details or None
+        """
+        try:
+            tx_type = tx.get("type", "UNKNOWN")
+            
+            # 1. Handle Transfers (IN/OUT)
+            if tx_type == "TRANSFER":
+                # Calculate net change for wallet
+                # This requires iterating through nativeTransfers and tokenTransfers
+                # to see what entered/left the specific wallet.
+                pass # Stub for deep transfer implementation
+
+            # 2. Handle LP / Staking
+            elif tx_type in ("ADD_LIQUIDITY", "REMOVE_LIQUIDITY", "STAKE_TOKEN", "UNSTAKE_TOKEN"):
+                # Extract token deltas
+                pass # Stub for LP implementation
+                
+            # For now, we rely on the existing parse_swap_transaction for the core logic
+            # and this method serves as the entry point for expanding coverage.
+            return None
+            
+        except Exception:
+            return None
+
     def parse_swap_transaction(
         self,
         tx: Dict[str, Any],
         wallet_address: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Parse a swap transaction to extract trade information.
-
+        Parse a SWAP transaction to extract trade details.
+        
         Args:
-            tx: Transaction dictionary from Helius API
-
+            tx: Transaction object from Helius
+            wallet_address: Wallet address to filter for
+            
         Returns:
-            Parsed trade dictionary or None if not a valid swap
+            Dictionary with swap details or None if not a valid swap
         """
         if not isinstance(tx, dict):
             return None

@@ -318,11 +318,13 @@ class BacktestSimulator:
             ), "Invalid trade size"
         
         # Estimate slippage using historical liquidity (trade-time conditions).
+        vol_24h = getattr(liquidity_data, 'volume_24h_usd', 0.0)
         slippage = self.liquidity.estimate_slippage(
             trade.token_address,
             trade_size_sol,
             historical_liquidity,
             sol_price,
+            volume_24h_usd=vol_24h,
         )
         
         # Check if slippage is acceptable

@@ -140,6 +140,40 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
         elif metrics.sortino_ratio >= 1.0:
             score += 2.0
     
+    # 9) Recency Bias (Freshness)
+    # Determine if the wallet is active and winning recently
+    if metrics.last_trade_at:
+        try:
+            # Handle timestamps with Z or offset
+            last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
+            last_trade = datetime.fromisoformat(last_trade_str)
+            
+            # Ensure timezone-aware comparison (assume utcnow is naive, so use naive delta if needed or unify)
+            # best practice: use fromisoformat which handles offset if present. 
+            # If naive, assume UTC.
+            now = datetime.utcnow()
+            if last_trade.tzinfo is not None:
+                # If last_trade is aware, make now aware (UTC)
+                from datetime import timezone
+                now = now.replace(tzinfo=timezone.utc)
+                
+            days_since_trade = (now - last_trade).days
+            
+            if days_since_trade <= 2:
+                score += 10.0  # Very active/fresh
+            elif days_since_trade <= 5:
+                score += 5.0   # Active
+            elif days_since_trade > 14:
+                score -= 10.0  # Stale wallet penalty
+                
+            # Bonus: Momentum check (7d ROI is positive and contributing heavily to 30d)
+            if (metrics.roi_7d or 0) > 0 and (metrics.roi_30d or 0) > 0:
+                # If >50% of monthly ROI came from this week, it's hot
+                if metrics.roi_7d >= (metrics.roi_30d * 0.5):
+                    score += 5.0
+        except (ValueError, TypeError):
+            pass
+
     # Clamp to 0-100 range
     return max(0.0, min(score, 100.0))
 

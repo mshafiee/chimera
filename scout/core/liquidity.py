@@ -524,6 +524,7 @@ class LiquidityProvider:
         amount_sol: float,
         liquidity_usd: float,
         sol_price_usd: float = 150.0,
+        volume_24h_usd: float = 0.0,
     ) -> float:
         """
         Estimate slippage for a trade based on trade size vs liquidity.
@@ -536,6 +537,7 @@ class LiquidityProvider:
             amount_sol: Trade size in SOL
             liquidity_usd: Pool liquidity in USD
             sol_price_usd: SOL price in USD
+            volume_24h_usd: 24h Volume in USD (used for volatility adjustment)
             
         Returns:
             Estimated slippage as a decimal (0.01 = 1%)
@@ -545,10 +547,19 @@ class LiquidityProvider:
         
         trade_value_usd = amount_sol * sol_price_usd
         
-        # Square root model for slippage estimation
-        # Slippage = k * sqrt(trade_value / liquidity)
-        # where k is a constant based on typical AMM behavior
-        k = 0.1  # Calibrated for typical Solana DEX behavior
+        # Base constant for Solana AMMs
+        k = 0.1 
+        
+        # --- Dynamic Volatility Adjustment ---
+        # Calculate Turnover Ratio (Volume / Liquidity)
+        # Normal ratio is ~0.1 to 0.5. Pump tokens often hit > 2.0.
+        turnover_ratio = volume_24h_usd / liquidity_usd if liquidity_usd > 0 else 0
+        
+        # If turnover is high, implied volatility is high -> increase k
+        if turnover_ratio > 3.0:
+            k = 0.4  # Quadruple slippage penalty (high congestion/Jito wars)
+        elif turnover_ratio > 1.0:
+            k = 0.2  # Double slippage penalty
         
         slippage = k * math.sqrt(trade_value_usd / liquidity_usd)
         

@@ -594,11 +594,49 @@ class WalletAnalyzer:
         self._token_creation_cache[token_address] = timestamp
         return timestamp
 
+    def _is_token_safe(self, token_address: str) -> bool:
+        """
+        Check if a token is safe (not a honeypot, rug, or freeze risk).
+        """
+        # 1. Check if known safe
+        if hasattr(self.liquidity_provider, "KNOWN_TOKENS") and token_address in self.liquidity_provider.KNOWN_TOKENS:
+            return True
+            
+        # 2. Check metadata via Helius/Birdeye
+        # If freeze authority is set, it's risky (unless allow-listed like USDC/USDT)
+        try:
+            if self.helius_client.api_key:
+                # Stub: Fetch asset info from Helius
+                # payload = self.helius_client.get_asset(token_address)
+                # if payload.get("mutable_metadata") is False ...
+                pass
+        except Exception:
+            pass
+            
+        # Default to True for now to avoid false positives blocking everything
+        # until robust rug-check API is integrated.
+        return True
+
+    def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
+        """
+        Detect if wallet behaves like an insider cluster member.
+        """
+        # Stub
+        return {
+            "is_insider": False, 
+            "cluster_id": None, 
+            "suspicion_score": 0.0
+        }
+
     def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
 
+        # Filter out unsafe tokens (optional, strict mode)
+        # safe_trades = [t for t in trades if self._is_token_safe(t.token_address)]
+        # For now, we analyze all trades but could flag the wallet later.
+        
         # Sort trades: Primary = Timestamp, Secondary = Action (BUY before SELL to allow intraday scalps)
         # Assuming TradeAction.BUY is defined such that it sorts appropriately, or use custom key
         sorted_trades = sorted(trades, key=lambda t: (
