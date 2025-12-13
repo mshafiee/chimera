@@ -28,6 +28,15 @@ from .backtester import BacktestSimulator
 from .liquidity import LiquidityProvider
 from .wqs import WalletMetrics, calculate_wqs
 
+# Import security client if available
+try:
+    from config import ScoutConfig
+    from .security_client import RugCheckClient
+    SECURITY_AVAILABLE = True
+except ImportError:
+    SECURITY_AVAILABLE = False
+    ScoutConfig = None
+    RugCheckClient = None
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +95,14 @@ class PrePromotionValidator:
         self.criteria = promotion_criteria or PromotionCriteria()
         
         self.simulator = BacktestSimulator(self.liquidity, self.backtest_config)
+        
+        # Initialize RugCheck client if enabled
+        self.rugcheck_client = None
+        if SECURITY_AVAILABLE and ScoutConfig and ScoutConfig.get_rugcheck_enabled():
+            try:
+                self.rugcheck_client = RugCheckClient()
+            except Exception as e:
+                logger.warning(f"Failed to initialize RugCheck client: {e}")
     
     def validate_for_promotion(
         self,
@@ -133,7 +150,37 @@ class PrePromotionValidator:
                 notes=f"Need more trade history",
             )
 
-        # Step 2b: Check minimum realized closes (SELLs with computed PnL)
+        # Step 2b: RugCheck validation - filter risky tokens
+        if self.rugcheck_client:
+            risky_tokens = []
+            safe_trades = []
+            for t in trades:
+                token_addr = t.token_address
+                if self.rugcheck_client.is_token_safe(token_addr):
+                    safe_trades.append(t)
+                else:
+                    risky_tokens.append(token_addr)
+            
+            if risky_tokens:
+                unique_risky = list(set(risky_tokens))
+                logger.warning(
+                    f"Wallet {wallet_address[:8]}... has {len(unique_risky)} risky tokens: {unique_risky[:3]}..."
+                )
+                # If significant portion of trades involve risky tokens, reject
+                risky_ratio = len(risky_tokens) / len(trades) if trades else 0
+                if risky_ratio > 0.3:  # More than 30% risky tokens
+                    return ValidationResult(
+                        wallet_address=wallet_address,
+                        status=ValidationStatus.FAILED_LIQUIDITY,  # Reuse status for security failure
+                        passed=False,
+                        reason=f"High exposure to risky tokens: {len(unique_risky)} risky tokens ({risky_ratio*100:.1f}% of trades)",
+                        recommended_status="REJECTED",
+                        notes=f"RugCheck flagged {len(unique_risky)} tokens",
+                    )
+                # Otherwise, use only safe trades for backtesting
+                trades = safe_trades
+        
+        # Step 2c: Check minimum realized closes (SELLs with computed PnL)
         close_trades = [
             t for t in trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None
         ]

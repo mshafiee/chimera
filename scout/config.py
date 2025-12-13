@@ -165,6 +165,39 @@ class ScoutConfig:
         if env_val:
             return [x.strip() for x in env_val.split(",") if x.strip()]
         return default_ids
+    
+    # ========================================================================
+    # RugCheck Security Configuration
+    # ========================================================================
+    
+    @staticmethod
+    def get_rugcheck_enabled() -> bool:
+        """Get whether RugCheck integration is enabled."""
+        return os.getenv("RUGCHECK_ENABLED", "true").lower() == "true"
+    
+    @staticmethod
+    def get_rugcheck_api_key() -> Optional[str]:
+        """Get RugCheck API key from environment (optional, uses public API if not set)."""
+        return os.getenv("RUGCHECK_API_KEY")
+    
+    @staticmethod
+    def get_rugcheck_fail_mode() -> str:
+        """Get RugCheck fail mode: 'open' (allow if API fails) or 'closed' (reject if API fails)."""
+        return os.getenv("RUGCHECK_FAIL_MODE", "closed").lower()
+    
+    # ========================================================================
+    # Redis Configuration
+    # ========================================================================
+    
+    @staticmethod
+    def get_redis_enabled() -> bool:
+        """Get whether Redis caching is enabled."""
+        return os.getenv("REDIS_ENABLED", "false").lower() == "true"
+    
+    @staticmethod
+    def get_redis_url() -> str:
+        """Get Redis connection URL."""
+        return os.getenv("REDIS_URL", "redis://localhost:6379")
 
     @staticmethod
     def validate_config() -> tuple[bool, list[str]]:
