@@ -63,6 +63,7 @@ class WalletAnalyzer:
         self._trades_cache: Dict[str, List[HistoricalTrade]] = {}
         self._candidate_wallets: List[str] = []
         self._token_meta_cache: Dict[str, Dict[str, Any]] = {}
+        self._token_creation_cache: Dict[str, Optional[float]] = {}
 
         # Max txs to pull per wallet when computing metrics/trades
         self._wallet_tx_limit = int(os.getenv("SCOUT_WALLET_TX_LIMIT", "500"))
@@ -501,6 +502,8 @@ class WalletAnalyzer:
 
         # Track per-token position: {token: (token_qty, cost_basis_sol)}
         positions: Dict[str, Dict[str, float]] = {}
+        
+        EPSILON = 1e-9  # Define constant
 
         # Sort chronologically for cost-basis accounting
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
@@ -526,15 +529,18 @@ class WalletAnalyzer:
 
             elif t.action == TradeAction.SELL:
                 pos = positions.get(token)
-                if not pos or pos["qty"] <= 0:
-                    # Can't compute cost basis; leave pnl as None
+                # Stricter check using EPSILON
+                if not pos or pos["qty"] < EPSILON:
                     continue
 
+                # Don't sell more than we tracked
                 sell_qty = min(token_qty, pos["qty"])
-                if sell_qty <= 0:
+                
+                # Check for near-zero sell quantity to prevent division errors
+                if sell_qty < EPSILON:
                     continue
 
-                avg_cost_per_token = pos["cost_sol"] / pos["qty"] if pos["qty"] > 0 else 0.0
+                avg_cost_per_token = pos["cost_sol"] / pos["qty"]
                 cost_basis_sol = avg_cost_per_token * sell_qty
                 realized_pnl_sol = sol_amt - cost_basis_sol
 
@@ -543,21 +549,67 @@ class WalletAnalyzer:
                 # Reduce position
                 pos["qty"] -= sell_qty
                 pos["cost_sol"] -= cost_basis_sol
-                if pos["qty"] <= 1e-12:
+                
+                # Clean up dust immediately
+                if pos["qty"] < EPSILON:
                     positions.pop(token, None)
+                else:
+                    # Sanity clamp to prevent negative cost on positive qty
+                    pos["cost_sol"] = max(0.0, pos["cost_sol"])
 
         return trades
     
+    def _fetch_token_creation_time(self, token_address: str) -> Optional[float]:
+        """
+        Fetch token creation timestamp.
+        
+        Args:
+            token_address: Token mint address
+            
+        Returns:
+            Timestamp (float) or None
+        """
+        if not token_address:
+            return None
+            
+        if token_address in self._token_creation_cache:
+            return self._token_creation_cache[token_address]
+            
+        timestamp = None
+        
+        # Try Birdeye (if available)
+        try:
+            if getattr(self.liquidity_provider, "birdeye_client", None):
+                creation_info = self.liquidity_provider.birdeye_client.get_token_creation_info(token_address)
+                if creation_info:
+                    # Parse timestamp (Birdeye uses 'tx_time' or similar)
+                    # Note: Field name depends on API, 'block_time' or 'tx_time' usually exists
+                    # Assuming standard Birdeye response for creation info
+                    ts = creation_info.get("blockUnixTime") or creation_info.get("txTime")
+                    if ts:
+                        timestamp = float(ts)
+        except Exception:
+            pass
+            
+        self._token_creation_cache[token_address] = timestamp
+        return timestamp
+
     def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
 
-        # Ensure SELL trades have realized pnl populated (cost-basis)
-        self._enrich_trades_with_realized_pnl(trades)
+        # Sort trades: Primary = Timestamp, Secondary = Action (BUY before SELL to allow intraday scalps)
+        # Assuming TradeAction.BUY is defined such that it sorts appropriately, or use custom key
+        sorted_trades = sorted(trades, key=lambda t: (
+            t.timestamp, 
+            0 if t.action == TradeAction.BUY else 1
+        ))
+
+        # Enrich AFTER sorting to ensure correct cost basis calculation
+        self._enrich_trades_with_realized_pnl(sorted_trades)
         
-        # Sort trades by timestamp
-        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        # ... rest of the function ...
         
         # Calculate time windows
         now = datetime.utcnow()
@@ -595,6 +647,38 @@ class WalletAnalyzer:
         # Calculate win streak consistency (simplified)
         win_streak_consistency = self._calculate_win_streak_consistency(trades_30d)
         
+        # Calculate average entry delay (Sniper Detection)
+        avg_entry_delay = None
+        entry_delays = []
+        
+        # Optimization: Only check for recent buys to avoid API hammers on large histories
+        buy_trades = [t for t in trades_30d if t.action == TradeAction.BUY]
+        
+        # Limit to checking unique tokens to minimize API calls
+        unique_tokens = list(set(t.token_address for t in buy_trades))
+        
+        # OPTIMIZED: Sort by trade frequency and only fetch top 10 most-traded tokens
+        # This reduces API calls while focusing on tokens that matter most for sniper detection
+        token_trade_counts = {token: sum(1 for t in buy_trades if t.token_address == token) for token in unique_tokens}
+        unique_tokens_sorted = sorted(unique_tokens, key=lambda t: token_trade_counts[t], reverse=True)
+        
+        # Pre-fetch creation times (this will cache them)
+        # Reduced from 20 to 10 tokens to minimize API overhead
+        for token in unique_tokens_sorted[:10]:
+            self._fetch_token_creation_time(token)
+            
+        for trade in buy_trades:
+            # Check if we have cached creation time (don't make new network calls inside this loop)
+            creation_ts = self._token_creation_cache.get(trade.token_address)
+            if creation_ts:
+                trade_ts = trade.timestamp.timestamp()
+                # Ensure delay is non-negative (clock skews can happen)
+                delay = max(0.0, trade_ts - creation_ts)
+                entry_delays.append(delay)
+                
+        if entry_delays:
+            avg_entry_delay = sum(entry_delays) / len(entry_delays)
+        
         return WalletMetrics(
             address=address,
             roi_7d=roi_7d,
@@ -605,6 +689,7 @@ class WalletAnalyzer:
             avg_trade_size_sol=avg_trade_size,
             last_trade_at=last_trade_at,
             win_streak_consistency=win_streak_consistency,
+            avg_entry_delay_seconds=avg_entry_delay,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:
@@ -800,16 +885,34 @@ class WalletAnalyzer:
         equity = 0.0
         peak = 0.0
         max_dd = 0.0
-
+        
+        cumulative_pnl = 0.0
+        
         for t in sorted_trades:
             if t.action != TradeAction.SELL or t.pnl_sol is None:
                 continue
-            equity += t.pnl_sol
-            peak = max(peak, equity)
-            if peak > 0:
-                max_dd = max(max_dd, (peak - equity) / peak)
+            cumulative_pnl += t.pnl_sol
+            
+            # Reset peak if we reach a new high in cumulative PnL
+            if cumulative_pnl > peak:
+                peak = cumulative_pnl
+            
+            # Calculate drawdown from peak
+            drawdown_amount = peak - cumulative_pnl
+            if drawdown_amount > 0:
+                # If peak is positive, standard calc
+                if peak > 0:
+                    current_dd = drawdown_amount / peak
+                else:
+                    # If peak is 0 or negative (started losing immediately), 
+                    # we can't use % of peak. We can treat it as % of capital lost?
+                    # Since we don't know total capital, we cap this edge case or ignore.
+                    current_dd = 0.0 
+                
+                max_dd = max(max_dd, current_dd)
 
         return max_dd * 100.0
+
     
     def _calculate_win_streak_consistency(
         self,
@@ -997,57 +1100,6 @@ class WalletAnalyzer:
             for t in trades
         ]
     
-    def calculate_roi(self, trades: List[dict]) -> float:
-        """
-        Calculate ROI from a list of trades.
-        
-        Args:
-            trades: List of trade dictionaries
-            
-        Returns:
-            ROI as percentage
-        """
-        if not trades:
-            return 0.0
-        
-        total_pnl = sum(t.get("pnl_sol", 0) or 0 for t in trades)
-        total_cost = sum(t.get("amount_sol", 0) for t in trades if t.get("action") == "BUY")
-        
-        if total_cost <= 0:
-            return 0.0
-        
-        return (total_pnl / total_cost) * 100
-    
-    def calculate_drawdown(self, trades: List[dict]) -> float:
-        """
-        Calculate maximum drawdown from a list of trades.
-        
-        Args:
-            trades: List of trade dictionaries
-            
-        Returns:
-            Maximum drawdown as percentage
-        """
-        if not trades:
-            return 0.0
-        
-        # Sort by timestamp
-        sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", ""))
-        
-        peak = 0.0
-        max_drawdown = 0.0
-        running_pnl = 0.0
-        
-        for trade in sorted_trades:
-            pnl = trade.get("pnl_sol", 0) or 0
-            running_pnl += pnl
-            peak = max(peak, running_pnl)
-            
-            if peak > 0:
-                drawdown = (peak - running_pnl) / peak
-                max_drawdown = max(max_drawdown, drawdown)
-        
-        return max_drawdown * 100
 
 
 # Example usage
