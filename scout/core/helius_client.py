@@ -6,6 +6,7 @@ import os
 import time
 import json
 import re
+import asyncio
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 from dataclasses import dataclass
@@ -13,7 +14,7 @@ from pathlib import Path
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
-import requests
+import aiohttp
 
 try:
     from ..config import ScoutConfig
@@ -33,8 +34,88 @@ class DiscoveryStats:
 
 class HeliusClient:
     """Client for Helius API to discover wallets and fetch transactions."""
+    
+    def __init__(self, api_key: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
+        """
+        Initialize the Helius client.
+        
+        Args:
+            api_key: Helius API key (optional, falls back to env var)
+            session: Optional aiohttp session (for connection pooling)
+        """
+        # Load DEX programs from config
+        if ScoutConfig:
+            self.dex_programs = ScoutConfig.get_dex_program_ids()
+        else:
+            # Fallback if config not available
+            self.dex_programs = [
+                "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+                "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+                "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",
+            ]
+        
+        # Update NON_WALLET_ADDRESSES
+        self.NON_WALLET_ADDRESSES.update(self.dex_programs)
 
-    def get_wallet_first_transaction(self, wallet_address: str) -> Optional[float]:
+        self.api_key = api_key or os.getenv("HELIUS_API_KEY")
+        if not self.api_key:
+            # Try to extract from RPC URL
+            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
+            if rpc_url:
+                try:
+                    from urllib.parse import urlparse, parse_qs
+                    parsed = urlparse(rpc_url)
+                    query_params = parse_qs(parsed.query)
+                    if 'api-key' in query_params:
+                        self.api_key = query_params['api-key'][0]
+                except Exception:
+                    pass
+
+        self.base_url = "https://api.helius.xyz/v0"
+        self.last_request_time = 0.0
+        # Conservative rate limit: 10 calls/sec
+        self.rate_limit_delay = 0.1 
+        self._lock = threading.Lock()  # Thread safety lock
+
+        # Cache valid discoveries between runs
+        self._discovery_cache: Dict[str, Any] = {}
+        self._discovery_cache_time = 0.0
+        self._token_list_cache: Optional[List[str]] = None
+        self._token_list_cache_time: Optional[float] = None
+        
+        # Circuit breaker
+        self._circuit_breaker_failures = 0
+        self._circuit_breaker_threshold = 5
+        self._circuit_breaker_reset_time: Optional[float] = None
+        
+        # API call tracking
+        self._api_calls_made = 0
+        self._max_api_calls = int(os.getenv("SCOUT_MAX_API_CALLS_PER_RUN", "500"))
+        
+        # Known wallets (for deduplication)
+        self._known_wallets_cache: Set[str] = set()
+        # Keep track of unique wallets found in this run
+        self._discovered_this_run: Set[str] = set()
+        
+        # Async session management
+        self._session = session
+        self._own_session = False
+    
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Get or create aiohttp session."""
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
+            self._own_session = True
+        return self._session
+
+    async def _close_session(self):
+        """Close session if we own it."""
+        if self._own_session and self._session:
+            await self._session.close()
+            self._session = None
+            self._own_session = False
+
+    async def get_wallet_first_transaction(self, wallet_address: str) -> Optional[float]:
         """
         Get the timestamp of the wallet's first transaction (creation time).
         
@@ -67,15 +148,16 @@ class HeliusClient:
                 ]
             }
             
-            response = requests.post(rpc_url, json=payload, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                if "result" in data and data["result"]:
-                    # Signatures are returned newest first
-                    # The last one in the list is the oldest
-                    oldest_sig = data["result"][-1]
-                    if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
-                        return float(oldest_sig["blockTime"])
+            session = await self._get_session()
+            async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if "result" in data and data["result"]:
+                        # Signatures are returned newest first
+                        # The last one in the list is the oldest
+                        oldest_sig = data["result"][-1]
+                        if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
+                            return float(oldest_sig["blockTime"])
         except Exception:
             pass
         
@@ -133,67 +215,6 @@ class HeliusClient:
         "jitoNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",  # common jito placeholder/program-like
     }
 
-    def __init__(self, api_key: Optional[str] = None):
-        """
-        Initialize the Helius client.
-        
-        Args:
-            api_key: Helius API key (optional, falls back to env var)
-        """
-        # Load DEX programs from config
-        if ScoutConfig:
-            self.dex_programs = ScoutConfig.get_dex_program_ids()
-        else:
-            # Fallback if config not available
-            self.dex_programs = [
-                "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
-                "675kPX9MHTjS2zt1qfr1NYHuzeLXqFM9H24wFSUt1Mp8",
-                "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",
-            ]
-        
-        # Update NON_WALLET_ADDRESSES
-        self.NON_WALLET_ADDRESSES.update(self.dex_programs)
-
-        self.api_key = api_key or os.getenv("HELIUS_API_KEY")
-        if not self.api_key:
-            # Try to extract from RPC URL
-            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
-            if rpc_url:
-                try:
-                    from urllib.parse import urlparse, parse_qs
-                    parsed = urlparse(rpc_url)
-                    query_params = parse_qs(parsed.query)
-                    if 'api-key' in query_params:
-                        self.api_key = query_params['api-key'][0]
-                except Exception:
-                    pass
-
-        self.base_url = "https://api.helius.xyz/v0"
-        self.last_request_time = 0.0
-        # Conservative rate limit: 10 calls/sec
-        self.rate_limit_delay = 0.1 
-        self._lock = threading.Lock()  # ADDED: Thread safety lock
-
-        # Cache valid discoveries between runs
-        self._discovery_cache: Dict[str, Any] = {}
-        self._discovery_cache_time = 0.0
-        self._token_list_cache: Optional[List[str]] = None
-        self._token_list_cache_time: Optional[float] = None
-        
-        # Circuit breaker
-        self._circuit_breaker_failures = 0
-        self._circuit_breaker_threshold = 5
-        self._circuit_breaker_reset_time: Optional[float] = None
-        
-        # API call tracking
-        self._api_calls_made = 0
-        self._max_api_calls = int(os.getenv("SCOUT_MAX_API_CALLS_PER_RUN", "500"))
-        
-        # Known wallets (for deduplication)
-        self._known_wallets_cache: Set[str] = set()
-        # Keep track of unique wallets found in this run
-        self._discovered_this_run: Set[str] = set()
-
     def _rate_limit(self):
         """Ensure we don't exceed rate limits (Thread-Safe)."""
         with self._lock:  # ADDED: Lock acquisition
@@ -225,11 +246,11 @@ class HeliusClient:
         if self._circuit_breaker_failures > 0:
             self._circuit_breaker_failures = max(0, self._circuit_breaker_failures - 1)
     
-    def _retry_with_backoff(self, func, max_retries: int = 3, *args, **kwargs):
-        """Retry a function with exponential backoff."""
+    async def _retry_with_backoff(self, coro, max_retries: int = 3):
+        """Retry a coroutine with exponential backoff."""
         for attempt in range(max_retries):
             try:
-                result = func(*args, **kwargs)
+                result = await coro
                 self._record_success()
                 return result
             except Exception as e:
@@ -237,10 +258,19 @@ class HeliusClient:
                     self._record_failure()
                     raise
                 backoff_time = 2 ** attempt  # 1s, 2s, 4s
-                time.sleep(backoff_time)
+                await asyncio.sleep(backoff_time)
         return None
 
-    def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None, use_retry: bool = True) -> Optional[Dict[str, Any]]:
+    async def _rate_limit_async(self):
+        """Async rate limiting."""
+        current_time = time.time()
+        with self._lock:
+            time_since_last = current_time - self.last_request_time
+            if time_since_last < self.rate_limit_delay:
+                await asyncio.sleep(self.rate_limit_delay - time_since_last)
+            self.last_request_time = time.time()
+
+    async def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None, use_retry: bool = True) -> Optional[Dict[str, Any]]:
         """
         Make a request to Helius API.
 
@@ -263,24 +293,27 @@ class HeliusClient:
             print(f"[Helius] Max API calls ({self._max_api_calls}) reached")
             return None
 
-        def _do_request():
-            self._rate_limit()
+        async def _do_request():
+            await self._rate_limit_async()
             url = f"{self.base_url}{endpoint}"
             request_params = params.copy() if params else {}
             request_params["api-key"] = self.api_key
 
-            response = requests.get(url, params=request_params, timeout=30)
-            
-            # Handle rate limiting
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 5))
-                print(f"[Helius] Rate limited, waiting {retry_after}s")
-                time.sleep(retry_after)
-                response = requests.get(url, params=request_params, timeout=30)
-            
-            response.raise_for_status()
-            self._api_calls_made += 1
-            return response.json()
+            session = await self._get_session()
+            async with session.get(url, params=request_params, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                # Handle rate limiting
+                if response.status == 429:
+                    retry_after = int(response.headers.get("Retry-After", 5))
+                    print(f"[Helius] Rate limited, waiting {retry_after}s")
+                    await asyncio.sleep(retry_after)
+                    async with session.get(url, params=request_params, timeout=aiohttp.ClientTimeout(total=30)) as retry_response:
+                        retry_response.raise_for_status()
+                        self._api_calls_made += 1
+                        return await retry_response.json()
+                
+                response.raise_for_status()
+                self._api_calls_made += 1
+                return await response.json()
         
         def _redact(s: str) -> str:
             # Redact api-key query parameter values to avoid leaking secrets in logs
@@ -289,16 +322,11 @@ class HeliusClient:
 
         try:
             if use_retry:
-                return self._retry_with_backoff(_do_request)
+                return await self._retry_with_backoff(_do_request())
             else:
-                return _do_request()
-        except requests.exceptions.RequestException as e:
+                return await _do_request()
+        except aiohttp.ClientError as e:
             print(f"[Helius] API request failed: {_redact(str(e))}")
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    print(f"[Helius] Response: {e.response.text[:200]}")
-                except:
-                    pass
             return None
 
     def _load_active_tokens(self) -> List[str]:
@@ -612,7 +640,7 @@ class HeliusClient:
             # Note: Helius API 'before' parameter expects a transaction signature, not timestamp
             # We'll query recent transactions without time filtering for now
             
-            data = self._make_request(endpoint, request_params)
+            data = await self._make_request(endpoint, request_params)
             if not data:
                 return token_addr, []
             
@@ -638,7 +666,7 @@ class HeliusClient:
             print(f"[Helius] Warning: Failed to query token {token_addr[:8]}...: {e}")
             return token_addr, []
     
-    def _discover_from_active_tokens(
+    async def _discover_from_active_tokens(
         self,
         token_addresses: Optional[List[str]] = None,
         hours_back: int = 24,
@@ -725,7 +753,7 @@ class HeliusClient:
         print(f"[Helius] Found {len(wallet_counts)} unique wallets from token queries")
         return dict(wallet_counts)
     
-    def _discover_from_dex_programs(
+    async def _discover_from_dex_programs(
         self,
         hours_back: int = 24,
         limit: int = 500
@@ -784,29 +812,35 @@ class HeliusClient:
                     api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
                 
                 # Make RPC request
-                self._rate_limit()
-                response = requests.post(
-                    rpc_url.split("?")[0] if "?" in rpc_url else rpc_url,
+                await self._rate_limit_async()
+                session = await self._get_session()
+                url = rpc_url.split("?")[0] if "?" in rpc_url else rpc_url
+                params = {"api-key": api_key} if api_key else {}
+                
+                async with session.post(
+                    url,
                     json=payload,
-                    params={"api-key": api_key} if api_key else {},
-                    timeout=30
-                )
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 429:
+                        retry_after = int(response.headers.get("Retry-After", 5))
+                        await asyncio.sleep(retry_after)
+                        async with session.post(
+                            url,
+                            json=payload,
+                            params=params,
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        ) as retry_response:
+                            retry_response.raise_for_status()
+                            self._api_calls_made += 1
+                            data = await retry_response.json()
+                    else:
+                        response.raise_for_status()
+                        self._api_calls_made += 1
+                        data = await response.json()
                 
-                if response.status_code == 429:
-                    retry_after = int(response.headers.get("Retry-After", 5))
-                    time.sleep(retry_after)
-                    response = requests.post(
-                        rpc_url.split("?")[0] if "?" in rpc_url else rpc_url,
-                        json=payload,
-                        params={"api-key": api_key} if api_key else {},
-                        timeout=30
-                    )
-                
-                response.raise_for_status()
-                self._api_calls_made += 1
-                
-                data = response.json()
-                if "result" in data and "data" in data["result"]:
+                    if "result" in data and "data" in data["result"]:
                     transactions = data["result"]["data"]
                     
                     for tx in transactions:
@@ -822,7 +856,7 @@ class HeliusClient:
         
         return dict(wallet_counts)
     
-    def _discover_from_seed_wallets(
+    async def _discover_from_seed_wallets(
         self,
         hours_back: int = 24,
         limit_per_wallet: int = 50
@@ -851,7 +885,7 @@ class HeliusClient:
                 break
             
             try:
-                transactions = self.get_wallet_transactions(
+                transactions = await self.get_wallet_transactions(
                     seed_wallet,
                     days=hours_back // 24 + 1,
                     limit=limit_per_wallet
@@ -872,7 +906,7 @@ class HeliusClient:
         return dict(wallet_counts)
     
 
-    def discover_wallets_from_recent_swaps(
+    async def discover_wallets_from_recent_swaps(
         self,
         limit: int = 1000,
         min_trade_count: int = 3,
@@ -924,7 +958,7 @@ class HeliusClient:
         # Strategy 1: Active Token Discovery (Primary)
         try:
             print("[Helius] Strategy 1: Querying active tokens...")
-            token_wallets = self._discover_from_active_tokens(hours_back=hours_back, limit_per_token=200)
+            token_wallets = await self._discover_from_active_tokens(hours_back=hours_back, limit_per_token=200)
             for wallet, count in token_wallets.items():
                 wallet_counts[wallet] += count
             strategy_used = "tokens"
@@ -939,7 +973,7 @@ class HeliusClient:
         if len(wallet_counts) < max_wallets // 2:
             try:
                 print("[Helius] Strategy 3: Querying DEX program accounts...")
-                program_wallets = self._discover_from_dex_programs(hours_back=hours_back, limit=500)
+                program_wallets = await self._discover_from_dex_programs(hours_back=hours_back, limit=500)
                 for wallet, count in program_wallets.items():
                     wallet_counts[wallet] += count
                 if program_wallets:
@@ -953,7 +987,7 @@ class HeliusClient:
         if len(wallet_counts) < max_wallets // 2:
             try:
                 print("[Helius] Strategy 4: Querying seed wallets...")
-                seed_wallets = self._discover_from_seed_wallets(hours_back=hours_back, limit_per_wallet=50)
+                seed_wallets = await self._discover_from_seed_wallets(hours_back=hours_back, limit_per_wallet=50)
                 for wallet, count in seed_wallets.items():
                     wallet_counts[wallet] += count
                 if seed_wallets:
@@ -1048,7 +1082,7 @@ class HeliusClient:
         wallets = self._extract_wallets_from_transaction(tx)
         return wallets[0] if wallets else None
 
-    def get_wallet_transactions(
+    async def get_wallet_transactions(
         self,
         wallet_address: str,
         days: int = 30,
@@ -1103,7 +1137,7 @@ class HeliusClient:
             if before_sig:
                 params["before"] = before_sig
 
-            data = self._make_request(endpoint, params)
+            data = await self._make_request(endpoint, params)
             if not data:
                 break
 
