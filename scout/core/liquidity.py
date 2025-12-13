@@ -601,7 +601,7 @@ class LiquidityProvider:
         # Add fixed base network variance (e.g. 0.5%)
         return min(final_slippage + 0.005, 1.0)
     
-    def get_sol_price_usd(self) -> float:
+    async def get_sol_price_usd(self) -> float:
         """
         Get current SOL price in USD.
         
@@ -617,19 +617,21 @@ class LiquidityProvider:
         # Try Jupiter client first (if available)
         if self.mode == "real" and self.jupiter_client:
             try:
-                price = self.jupiter_client.get_sol_price_usd()
+                price = await self.jupiter_client.get_sol_price_usd()
                 if price and price > 0:
                     self._sol_price_cache = (price, datetime.utcnow())
                     return price
             except Exception as e:
                 logger.debug(f"Jupiter SOL price failed: {e}")
 
-        # Fallback: direct Jupiter API call
+        # Fallback: direct Jupiter API call (async)
         try:
+            import aiohttp
             url = "https://price.jup.ag/v6/price"
-            resp = requests.get(url, params={"ids": "So11111111111111111111111111111111111111112"}, timeout=10)
-            resp.raise_for_status()
-            data = resp.json() or {}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params={"ids": "So11111111111111111111111111111111111111112"}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json() or {}
             price = (
                 data.get("data", {})
                 .get("So11111111111111111111111111111111111111112", {})

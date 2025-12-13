@@ -142,7 +142,7 @@ class PortfolioTracker:
         return total_unrealized_loss_sol
     
     @staticmethod
-    def fetch_bulk_prices(token_addresses: List[str]) -> Dict[str, float]:
+    async def fetch_bulk_prices(token_addresses: List[str]) -> Dict[str, float]:
         """
         Fetch current prices for multiple tokens from Jupiter Price API.
         
@@ -168,24 +168,26 @@ class PortfolioTracker:
             url = f"{base_url}?ids={token_list}"
             
             try:
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                data = response.json()
+                import aiohttp
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                        response.raise_for_status()
+                        data = await response.json()
                 
-                # Jupiter returns: {"data": {"token_address": {"price": 0.123, ...}, ...}}
-                price_data = data.get("data", {})
-                for token_addr in batch:
-                    token_info = price_data.get(token_addr, {})
-                    price = token_info.get("price")
-                    if price is not None:
-                        try:
-                            prices[token_addr] = float(price)
-                        except (ValueError, TypeError):
-                            prices[token_addr] = 0.0
-                    else:
-                        prices[token_addr] = 0.0
+                        # Jupiter returns: {"data": {"token_address": {"price": 0.123, ...}, ...}}
+                        price_data = data.get("data", {})
+                        for token_addr in batch:
+                            token_info = price_data.get(token_addr, {})
+                            price = token_info.get("price")
+                            if price is not None:
+                                try:
+                                    prices[token_addr] = float(price)
+                                except (ValueError, TypeError):
+                                    prices[token_addr] = 0.0
+                            else:
+                                prices[token_addr] = 0.0
                         
-            except requests.exceptions.RequestException as e:
+            except aiohttp.ClientError as e:
                 logger.warning(f"Failed to fetch prices from Jupiter: {e}")
                 # Set all batch tokens to 0.0 on error
                 for token_addr in batch:
@@ -628,7 +630,7 @@ class WalletAnalyzer:
             if sol_amount_raw is None and usd_amount_raw is not None:
                 try:
                     usd_amount = float(usd_amount_raw)
-                    sol_price_usd = self.liquidity_provider.get_sol_price_usd()
+                    sol_price_usd = await self.liquidity_provider.get_sol_price_usd()
                     if usd_amount > 0 and sol_price_usd > 0:
                         sol_amount = usd_amount / sol_price_usd
                         price_sol = (sol_amount / token_amount) if token_amount > 0 else 0.0
@@ -806,7 +808,7 @@ class WalletAnalyzer:
         self._token_creation_cache[token_address] = timestamp
         return timestamp
 
-    def _is_token_safe(self, token_address: str) -> bool:
+    async def _is_token_safe(self, token_address: str) -> bool:
         """
         Check if a token is safe (not a honeypot, rug, or freeze risk).
         
@@ -825,14 +827,13 @@ class WalletAnalyzer:
             return True
             
         # 2. Check Freeze Authority (The "Honeypot" Check)
+        # Also check for Token-2022 program which has different layout
         try:
             if self.helius_client and self.helius_client.api_key:
-                # Raw RPC call to getAccountInfo to check freeze authority
-                import requests
+                import aiohttp
                 import base64
                 
                 url = f"https://mainnet.helius-rpc.com/?api-key={self.helius_client.api_key}"
-                # Optimized minimal call
                 payload = {
                     "jsonrpc": "2.0", 
                     "id": "scout-honeypot", 
@@ -840,25 +841,33 @@ class WalletAnalyzer:
                     "params": [token_address, {"encoding": "base64"}]
                 }
                 
-                resp = requests.post(url, json=payload, timeout=3)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    val = data.get("result", {}).get("value")
-                    if val and val.get("data"):
-                         raw = base64.b64decode(val["data"][0])
-                         # Mint Layout: Freeze Option at offset 46 (u32)
-                         # 0-3: MintAuthOption, 4-35: MintAuth, 36-43: Supply, 44: Decimals, 45: Init
-                         # 46-49: FreezeAuthOption. If 1, Authority follows.
-                         if len(raw) >= 50:
-                             freeze_opt = int.from_bytes(raw[46:50], 'little')
-                             if freeze_opt == 1:
-                                 return False # Has freeze authority -> REJECT
+                # Use async call (this method is called from async context)
+                session = await self.helius_client._get_session()
+                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        val = data.get("result", {}).get("value")
+                        if val and val.get("data"):
+                            raw = base64.b64decode(val["data"][0])
+                            
+                            # Check if this is Token-2022 (different program ID)
+                            # Token-2022 uses TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
+                            # For now, we check the standard SPL Token layout
+                            # TODO: Add full Token-2022 support with transfer hooks check
+                            
+                            # Mint Layout: Freeze Option at offset 46 (u32)
+                            # 0-3: MintAuthOption, 4-35: MintAuth, 36-43: Supply, 44: Decimals, 45: Init
+                            # 46-49: FreezeAuthOption. If 1, Authority follows.
+                            if len(raw) >= 50:
+                                freeze_opt = int.from_bytes(raw[46:50], 'little')
+                                if freeze_opt == 1:
+                                    return False # Has freeze authority -> REJECT
         except Exception:
             pass
         
         return True
 
-    def _get_sol_price_usd(self) -> float:
+    async def _get_sol_price_usd(self) -> float:
         """
         Get current SOL price in USD.
         
@@ -871,7 +880,7 @@ class WalletAnalyzer:
         try:
             # Try to get from Jupiter Price API
             sol_mint = "So11111111111111111111111111111111111111112"
-            prices = PortfolioTracker.fetch_bulk_prices([sol_mint])
+            prices = await PortfolioTracker.fetch_bulk_prices([sol_mint])
             price = prices.get(sol_mint, 0.0)
             if price > 0:
                 self._sol_price_usd = price
@@ -1054,7 +1063,7 @@ class WalletAnalyzer:
             risky_tokens = []
             for t in trades:
                 token_addr = t.token_address
-                if self.rugcheck_client.is_token_safe(token_addr):
+                if await self.rugcheck_client.is_token_safe(token_addr):
                     safe_trades.append(t)
                 else:
                     risky_tokens.append(token_addr)
@@ -1142,7 +1151,7 @@ class WalletAnalyzer:
         await asyncio.gather(*tasks, return_exceptions=True)
             
         for token in unique_tokens:
-            creation_ts = self._token_creation_cache.get(token)
+            creation_ts = await self._token_creation_cache.get(token) if hasattr(self._token_creation_cache, 'get') else self._token_creation_cache.get(token)
             if creation_ts:
                 # Find the FIRST buy of this token by this wallet
                 first_buy = min([t.timestamp.timestamp() for t in buy_trades if t.token_address == token])
@@ -1208,10 +1217,10 @@ class WalletAnalyzer:
             # Fetch current prices for tokens with potential holdings
             if potential_holdings:
                 # Get SOL price for conversion
-                sol_price = self._get_sol_price_usd()
+                sol_price = await self._get_sol_price_usd()
                 
                 # Fetch prices in bulk
-                current_prices = PortfolioTracker.fetch_bulk_prices(potential_holdings)
+                current_prices = await PortfolioTracker.fetch_bulk_prices(potential_holdings)
                 
                 # Calculate unrealized PnL
                 total_unrealized_loss_sol = PortfolioTracker.calculate_unrealized_pnl(
@@ -1309,7 +1318,7 @@ class WalletAnalyzer:
                 try:
                     liq = self.liquidity_provider.get_current_liquidity(token)
                     if liq and liq.price_usd > 0:
-                        sol_price = self.liquidity_provider.get_sol_price_usd()
+                        sol_price = await self.liquidity_provider.get_sol_price_usd()
                         current_val_sol = (pos["qty"] * liq.price_usd) / sol_price
                         
                         # If current value is < 10% of cost, it's a RUG/Bag

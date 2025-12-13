@@ -312,7 +312,7 @@ async def analyze_wallets(
             
             if initial_status == "ACTIVE" and not skip_backtest and validator:
                 if trades:
-                    validation = validator.validate_for_promotion(
+                    validation = await validator.validate_for_promotion(
                         wallet_address, metrics, trades, strategy="SHIELD"
                     )
                     if validation.passed:
@@ -501,7 +501,7 @@ async def main_async():
                 min_trades_required=5,
                 priority_fee_sol_per_trade=args.priority_fee_sol,
                 jito_tip_sol_per_trade=args.jito_tip_sol,
-                enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",
+                enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",  # Default True for promotion safety
             )
             promotion_criteria = PromotionCriteria(
                 # Keep WQS threshold aligned with ACTIVE gate (validator only runs for ACTIVE candidates)

@@ -104,7 +104,7 @@ class PrePromotionValidator:
             except Exception as e:
                 logger.warning(f"Failed to initialize RugCheck client: {e}")
     
-    def validate_for_promotion(
+    async def validate_for_promotion(
         self,
         wallet_address: str,
         metrics: WalletMetrics,
@@ -156,7 +156,7 @@ class PrePromotionValidator:
             safe_trades = []
             for t in trades:
                 token_addr = t.token_address
-                if self.rugcheck_client.is_token_safe(token_addr):
+                if await self.rugcheck_client.is_token_safe(token_addr):
                     safe_trades.append(t)
                 else:
                     risky_tokens.append(token_addr)
