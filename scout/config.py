@@ -8,6 +8,8 @@ Loads from environment variables with sensible defaults.
 import os
 from typing import Optional
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+
 
 
 class ScoutConfig:
@@ -29,8 +31,15 @@ class ScoutConfig:
         if not key:
             # Try to extract from RPC URL
             rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
-            if "api-key=" in rpc_url:
-                key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
+            if rpc_url:
+                try:
+                    parsed = urlparse(rpc_url)
+                    query_params = parse_qs(parsed.query)
+                    # parse_qs returns a list, e.g., {'api-key': ['xyz']}
+                    if 'api-key' in query_params:
+                        key = query_params['api-key'][0]
+                except Exception:
+                    pass # Fallback to None if parsing fails
         return key
     
     @staticmethod
