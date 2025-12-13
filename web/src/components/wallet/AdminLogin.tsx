@@ -35,7 +35,7 @@ export function AdminLogin() {
       })
 
       // Try to get config to verify admin access
-      const response = await testClient.get('/config')
+      await testClient.get('/config')
       
       // If successful, the wallet is authenticated as admin
       // Store the wallet address as the token (backend uses it directly)

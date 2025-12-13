@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { 
-  AlertTriangle, Save, RefreshCw, History, Power, 
+import {
+  AlertTriangle, Save, RefreshCw, History, Power,
   Shield, Zap, TrendingUp, Target, Settings,
   Activity, Bell, ShieldCheck
 } from 'lucide-react'
@@ -16,7 +16,7 @@ import { toast } from '../components/ui/Toast'
 import type { ConfigAudit, ConfigResponse, HealthResponse } from '../types'
 
 export function Config() {
-  const { hasPermission, user, isAuthenticated } = useAuthStore()
+  const { hasPermission, user: _user, isAuthenticated: _isAuthenticated } = useAuthStore()
   const isAdmin = hasPermission('admin')
 
   const { data: config, isLoading, refetch } = useConfig()
@@ -369,17 +369,17 @@ export function Config() {
       toast.error('Please type "HALT" to confirm')
       return
     }
-    
+
     // Verify we have authentication before proceeding
     const { user, isAuthenticated } = useAuthStore.getState()
     if (!isAuthenticated || !user?.token) {
       toast.error('You must be authenticated to activate the kill switch. Please log in again.')
       return
     }
-    
+
     // Debug: Log the token being used (first 8 chars only for security)
     console.log('Using token:', user.token.substring(0, 8) + '...', 'Type:', user.token.includes('.') ? 'JWT' : 'Wallet Address')
-    
+
     try {
       // Use the dedicated trip endpoint which immediately halts trading
       await tripCircuitBreaker.mutateAsync('Emergency kill switch activated')
@@ -420,25 +420,25 @@ export function Config() {
     return {
       webhook: lastWebhookRotation
         ? {
-            lastRotated: new Date(lastWebhookRotation.changed_at),
-            nextDue: getNextRotationDate(lastWebhookRotation.changed_at, 30),
-            daysUntilDue: Math.ceil(
-              (getNextRotationDate(lastWebhookRotation.changed_at, 30).getTime() -
-                new Date().getTime()) /
-                (1000 * 60 * 60 * 24)
-            ),
-          }
+          lastRotated: new Date(lastWebhookRotation.changed_at),
+          nextDue: getNextRotationDate(lastWebhookRotation.changed_at, 30),
+          daysUntilDue: Math.ceil(
+            (getNextRotationDate(lastWebhookRotation.changed_at, 30).getTime() -
+              new Date().getTime()) /
+            (1000 * 60 * 60 * 24)
+          ),
+        }
         : null,
       rpc: lastRpcRotation
         ? {
-            lastRotated: new Date(lastRpcRotation.changed_at),
-            nextDue: getNextRotationDate(lastRpcRotation.changed_at, 90),
-            daysUntilDue: Math.ceil(
-              (getNextRotationDate(lastRpcRotation.changed_at, 90).getTime() -
-                new Date().getTime()) /
-                (1000 * 60 * 60 * 24)
-            ),
-          }
+          lastRotated: new Date(lastRpcRotation.changed_at),
+          nextDue: getNextRotationDate(lastRpcRotation.changed_at, 90),
+          daysUntilDue: Math.ceil(
+            (getNextRotationDate(lastRpcRotation.changed_at, 90).getTime() -
+              new Date().getTime()) /
+            (1000 * 60 * 60 * 24)
+          ),
+        }
         : null,
     }
   }
@@ -1060,8 +1060,8 @@ export function Config() {
             <ConfigInput
               label="Cache TTL"
               description="Time to live for cached token data"
-                value={cacheTtl}
-                onChange={(v: string | number) => setCacheTtl(typeof v === 'number' ? v : parseInt(String(v)) || 0)}
+              value={cacheTtl}
+              onChange={(v: string | number) => setCacheTtl(typeof v === 'number' ? v : parseInt(String(v)) || 0)}
               type="number"
               min={60}
               max={86400}
@@ -1364,8 +1364,8 @@ export function Config() {
                           rotationStatus.webhook.daysUntilDue <= 7
                             ? 'warning'
                             : rotationStatus.webhook.daysUntilDue <= 0
-                            ? 'danger'
-                            : 'success'
+                              ? 'danger'
+                              : 'success'
                         }
                       >
                         {rotationStatus.webhook.daysUntilDue} days
@@ -1395,8 +1395,8 @@ export function Config() {
                           rotationStatus.rpc.daysUntilDue <= 14
                             ? 'warning'
                             : rotationStatus.rpc.daysUntilDue <= 0
-                            ? 'danger'
-                            : 'success'
+                              ? 'danger'
+                              : 'success'
                         }
                       >
                         {rotationStatus.rpc.daysUntilDue} days
@@ -1511,7 +1511,7 @@ export function Config() {
             <div>
               <div className="font-semibold mb-1">Warning: This will halt all trading</div>
               <div className="text-sm text-text-muted">
-                All circuit breakers will be set to extreme values to immediately stop all trading activity. 
+                All circuit breakers will be set to extreme values to immediately stop all trading activity.
                 This action can only be reversed by manually resetting the circuit breaker.
               </div>
             </div>
@@ -1561,10 +1561,10 @@ export function Config() {
 }
 
 // Read-only view for non-admin users
-function ConfigReadOnly({ 
-  config, 
-  health 
-}: { 
+function ConfigReadOnly({
+  config,
+  health
+}: {
   config: ConfigResponse | null
   health: HealthResponse | null
 }) {
