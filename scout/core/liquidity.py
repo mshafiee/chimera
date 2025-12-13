@@ -368,6 +368,20 @@ class LiquidityProvider:
         
         return None
 
+    def _get_database_connection(self):
+        """
+        Helper to get a configured SQLite connection with WAL mode.
+        
+        WAL (Write-Ahead Logging) mode allows concurrent reads while writes
+        are in progress, preventing database locks when Rust Operator reads
+        while Python Scout writes.
+        """
+        import sqlite3
+        conn = sqlite3.connect(self.db_path, timeout=10.0)  # 10s timeout for busy retries
+        conn.execute("PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
+        conn.execute("PRAGMA synchronous=NORMAL;")  # Faster writes, still safe
+        return conn
+
     def _get_from_database(
         self, 
         token_address: str, 
@@ -389,8 +403,7 @@ class LiquidityProvider:
             return None
 
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_database_connection()
             cursor = conn.cursor()
 
             # Query for data within tolerance of requested timestamp
@@ -446,8 +459,7 @@ class LiquidityProvider:
             return False
 
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_database_connection()
             cursor = conn.cursor()
 
             # Ensure table exists
@@ -507,8 +519,7 @@ class LiquidityProvider:
             return 0
 
         try:
-            import sqlite3
-            conn = sqlite3.connect(self.db_path)
+            conn = self._get_database_connection()
             cursor = conn.cursor()
 
             # Ensure table exists

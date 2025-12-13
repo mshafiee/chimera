@@ -133,8 +133,10 @@ class RosterWriter:
         # Remove any existing temp file
         self._cleanup_temp()
         
-        # Create new database
-        conn = sqlite3.connect(str(self.temp_path))
+        # Create new database with WAL mode for concurrent access
+        conn = sqlite3.connect(str(self.temp_path), timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
+        conn.execute("PRAGMA synchronous=NORMAL;")  # Faster writes, still safe
         cursor = conn.cursor()
         
         try:

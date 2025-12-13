@@ -164,17 +164,27 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
             score += 15.0
 
     # ---------------------------------------------------------
-    # NEW: Profit Factor (The "Real" Trader Metric)
+    # IMPROVED: Profit Factor Logic (Martingale Risk Detection)
     # ---------------------------------------------------------
     # Win rate is easily faked (sell winners, hold losers). 
     # Profit Factor (Total Gains / Total Losses) exposes bag holders.
+    # 
+    # CRITICAL: High win rate but low profit factor = Martingale risk
+    # Example: Wins 90% of trades taking $1 profit, loses 10% taking $100 loss
+    # This trader will eventually blow up when they hit a losing streak.
     if metrics.profit_factor is not None:
-        if metrics.profit_factor > 3.0: # Elite
-            score += 15.0
-        elif metrics.profit_factor > 1.5: # Profitable
-            score += 5.0
-        elif metrics.profit_factor < 1.1: # Breakeven/Losing
-            score -= 25.0
+        if metrics.profit_factor > 3.0: 
+            score += 15.0  # Elite trader
+        elif metrics.profit_factor > 1.5: 
+            score += 5.0   # Profitable
+        elif metrics.profit_factor < 1.0:
+            # Losing trader (Gross Loss > Gross Win)
+            score -= 40.0 
+        elif metrics.profit_factor < 1.2: 
+            # Martingale Zone: Profitable but barely. High risk of blowup.
+            # Example: Wins often but wins are small compared to losses.
+            # This is the dangerous "90% win rate, 1.1 profit factor" trader.
+            score -= 20.0
     # 8) Sortino/Sharpe Proxy
     if metrics.sortino_ratio:
         if metrics.sortino_ratio >= 2.0:

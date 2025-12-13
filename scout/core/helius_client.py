@@ -1299,21 +1299,44 @@ class HeliusClient:
                 token_deltas[mint] += amt_ui
 
         # Include wSOL delta in SOL delta if present
-        if sol_mint in token_deltas and token_deltas[sol_mint] != 0.0:
-            sol_delta += token_deltas[sol_mint]
+        # FIX: Only add wSOL if it significantly changes the delta 
+        # or if native sol_delta is effectively zero
+        if sol_mint in token_deltas:
+            wsol_delta = token_deltas[sol_mint]
+            if abs(wsol_delta) > 0:
+                # If native SOL delta is effectively zero, use wSOL delta
+                if abs(sol_delta) < 0.001:
+                    sol_delta = wsol_delta
+                else:
+                    # Add wSOL to native SOL for total SOL movement
+                    sol_delta += wsol_delta
+
+        # Helper to identify if a mint is a stablecoin
+        def is_stable(m): return m in stable_mints
 
         # Choose primary (non-SOL) token by absolute delta
         primary_mint = None
         primary_delta = 0.0
+        
         for mint, delta in token_deltas.items():
             if mint == sol_mint:
                 continue
+            if is_stable(mint):
+                continue  # Skip stablecoins for primary selection
             if abs(delta) > abs(primary_delta):
                 primary_delta = delta
                 primary_mint = mint
 
         if not primary_mint:
-            return None
+            # If no volatile token found, check if it's just a SOL <-> Stable swap
+            for mint, delta in token_deltas.items():
+                if is_stable(mint) and abs(delta) > 0:
+                    primary_mint = mint
+                    primary_delta = delta
+                    break
+            
+            if not primary_mint:
+                return None
 
         # If we have no SOL leg, try to value token->token swaps using a stablecoin quote.
         if abs(sol_delta) < 1e-12:
@@ -1372,17 +1395,40 @@ class HeliusClient:
                 "net_token_delta": net_token_delta,
             }
 
-        # Determine direction and quantities
-        if primary_delta > 0 and sol_delta < 0:
-            direction = "BUY"
-            token_amount = primary_delta
-            sol_amount = abs(sol_delta)
-        elif primary_delta < 0 and sol_delta > 0:
-            direction = "SELL"
-            token_amount = abs(primary_delta)
-            sol_amount = abs(sol_delta)
+        # IMPROVED: Direction Logic
+        # Explicitly handle cases where SOL delta might be slightly noisy due to rent
+        # or where wrapping/unwrapping makes native SOL delta zero but wSOL moved
+        
+        # Threshold for considering a SOL movement "real" (0.001 SOL)
+        SIGNIFICANT_SOL = 0.001
+
+        if primary_delta > 0:
+            # We received tokens. Did we spend SOL or Stables?
+            if sol_delta < -SIGNIFICANT_SOL:
+                direction = "BUY"  # Spent SOL
+                token_amount = primary_delta
+                sol_amount = abs(sol_delta)
+            elif any(token_deltas[s] < 0 for s in stable_mints):
+                direction = "BUY"  # Spent Stables
+                token_amount = primary_delta
+                sol_amount = 0  # Will be derived from price
+            else:
+                # Ambiguous (maybe an airdrop or transfer?)
+                return None
+                
+        elif primary_delta < 0:
+            # We sent tokens. Did we receive SOL or Stables?
+            if sol_delta > SIGNIFICANT_SOL:
+                direction = "SELL"  # Received SOL
+                token_amount = abs(primary_delta)
+                sol_amount = sol_delta
+            elif any(token_deltas[s] > 0 for s in stable_mints):
+                direction = "SELL"  # Received Stables
+                token_amount = abs(primary_delta)
+                sol_amount = 0  # Will be derived
+            else:
+                return None
         else:
-            # Ambiguous (e.g., token->token, or mixed transfers)
             return None
 
         price_sol = (sol_amount / token_amount) if token_amount > 0 else 0.0
