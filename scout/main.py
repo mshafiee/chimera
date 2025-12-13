@@ -323,7 +323,7 @@ def analyze_wallets(
                     final_status = "CANDIDATE"
                     backtest_res = {"status": "SKIPPED", "notes": "No trades"}
             
-            return {
+            result = {
                 "address": wallet_address,
                 "metrics": metrics,
                 "wqs": wqs_score,
@@ -332,8 +332,15 @@ def analyze_wallets(
                 "trades": trades,
                 "wallet_stats": analyzer.compute_wallet_trade_stats(trades)
             }
+            
+            # MEMORY FIX: Clear analyzer cache for this wallet immediately
+            # We have extracted everything we need into 'result'
+            analyzer.clear_wallet_cache(wallet_address)
+            return result
         except Exception as e:
             print(f"[Scout] ERROR processing {wallet_address}: {e}")
+            # Ensure cleanup happens even on error
+            analyzer.clear_wallet_cache(wallet_address)
             return None
 
     # Run in parallel (limit workers to avoid hitting Helius hard limits despite internal rate limiter)

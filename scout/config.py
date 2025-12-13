@@ -152,27 +152,51 @@ class ScoutConfig:
     # ========================================================================
     
     @staticmethod
+    def get_dex_program_ids() -> list[str]:
+        """Get list of DEX program IDs to monitor."""
+        default_ids = [
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
+            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium
+            "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",  # Orca
+            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Whirlpool
+        ]
+        
+        env_val = os.getenv("SCOUT_DEX_PROGRAM_IDS")
+        if env_val:
+            return [x.strip() for x in env_val.split(",") if x.strip()]
+        return default_ids
+
+    @staticmethod
     def validate_config() -> tuple[bool, list[str]]:
         """
-        Validate configuration and return (is_valid, warnings).
+        Validate the current configuration.
         
         Returns:
-            Tuple of (is_valid, list of warning messages)
+            Tuple of (is_valid, list_of_warnings)
         """
         warnings = []
         is_valid = True
         
-        # Check liquidity mode
+        # Check API keys
+        if not os.getenv("HELIUS_API_KEY"):
+            warnings.append("HELIUS_API_KEY is not set. Discovery will use sample data.")
+        
+        if not os.getenv("BIRDEYE_API_KEY"):
+            warnings.append("BIRDEYE_API_KEY is not set. Historical liquidity data will be limited.")
+
+        # Strict Liquidity Check
         mode = ScoutConfig.get_liquidity_mode()
-        if mode == "simulated":
+        if mode == "real":
+            strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false").lower() == "true"
+            allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true"
+            
+            if not strict_mode and allow_fallback:
+                warnings.append("WARNING: Strict Historical Liquidity is OFF. Backtests may use current liquidity for old trades (Survivorship Bias).")
+                warnings.append("Recommended for Production: Set SCOUT_STRICT_HISTORICAL_LIQUIDITY=true")
+        elif mode == "simulated":
             warnings.append("WARNING: Running in simulated liquidity mode - results are non-deterministic!")
             warnings.append("Set SCOUT_LIQUIDITY_MODE=real and provide BIRDEYE_API_KEY for production use")
         
-        # Check API keys for real mode
-        if mode == "real":
-            if not ScoutConfig.get_birdeye_api_key():
-                warnings.append("WARNING: BIRDEYE_API_KEY not set - Birdeye source will be unavailable")
-                warnings.append("Historical liquidity coverage will be limited")
             
             if not ScoutConfig.get_helius_api_key():
                 warnings.append("WARNING: HELIUS_API_KEY not set - wallet transaction fetching may fail")

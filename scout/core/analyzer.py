@@ -65,6 +65,12 @@ class WalletAnalyzer:
         self._token_meta_cache: Dict[str, Dict[str, Any]] = {}
         self._token_creation_cache: Dict[str, Optional[float]] = {}
 
+    def clear_wallet_cache(self, address: str):
+        """Clear cached data for a specific wallet to free memory."""
+        self._metrics_cache.pop(address, None)
+        self._trades_cache.pop(address, None)
+        # Note: We keep _token_meta_cache as that is reusable across wallets
+
         # Max txs to pull per wallet when computing metrics/trades
         self._wallet_tx_limit = int(os.getenv("SCOUT_WALLET_TX_LIMIT", "500"))
         self._wallet_tx_limit = max(50, min(self._wallet_tx_limit, 5000))

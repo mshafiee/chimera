@@ -15,6 +15,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import requests
 
+try:
+    from ..config import ScoutConfig
+except ImportError:
+    ScoutConfig = None
+
 
 @dataclass
 class DiscoveryStats:
@@ -47,13 +52,6 @@ class HeliusClient:
             return None
         return None
 
-    # Known DEX program IDs
-
-    # Known DEX program IDs
-    JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
-    RAYDIUM_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
-    ORCA_PROGRAM = "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP"
-    
     # Known system accounts to filter out
     SYSTEM_ACCOUNTS = {
         "11111111111111111111111111111111",  # System Program
@@ -83,10 +81,7 @@ class HeliusClient:
         "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
         "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # WIF
         "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",  # POPCAT
-        # Known DEX programs
-        JUPITER_PROGRAM,
-        RAYDIUM_PROGRAM,
-        ORCA_PROGRAM,
+        # Known DEX programs will be added in __init__
         "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Whirlpool program
         "jitoNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",  # common jito placeholder/program-like
     }
@@ -98,6 +93,20 @@ class HeliusClient:
         Args:
             api_key: Helius API key (optional, falls back to env var)
         """
+        # Load DEX programs from config
+        if ScoutConfig:
+            self.dex_programs = ScoutConfig.get_dex_program_ids()
+        else:
+            # Fallback if config not available
+            self.dex_programs = [
+                "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+                "675kPX9MHTjS2zt1qfr1NYHuzeLXqFM9H24wFSUt1Mp8",
+                "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",
+            ]
+        
+        # Update NON_WALLET_ADDRESSES
+        self.NON_WALLET_ADDRESSES.update(self.dex_programs)
+
         self.api_key = api_key or os.getenv("HELIUS_API_KEY")
         if not self.api_key:
             # Try to extract from RPC URL
@@ -406,9 +415,9 @@ class HeliusClient:
             return False
         
         # Check if it's a known DEX program
-        if address in [self.JUPITER_PROGRAM, self.RAYDIUM_PROGRAM, self.ORCA_PROGRAM]:
+        if address in self.dex_programs:
             return False
-        
+            
         # NOTE: We intentionally do NOT filter out token mint addresses here.
         # Wallet discovery extracts many "user accounts" from transactions; some
         # tests also treat common mints (e.g., wSOL) as valid addresses.
@@ -687,13 +696,7 @@ class HeliusClient:
         wallet_counts: Dict[str, int] = defaultdict(int)
         cutoff_time = int((datetime.utcnow() - timedelta(hours=hours_back)).timestamp())
         
-        dex_programs = [
-            self.JUPITER_PROGRAM,
-            self.RAYDIUM_PROGRAM,
-            self.ORCA_PROGRAM,
-        ]
-        
-        print(f"[Helius] Discovering from {len(dex_programs)} DEX programs...")
+        print(f"[Helius] Discovering from {len(self.dex_programs)} DEX programs...")
         
         # Use RPC method getTransactionsForAddress
         rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
@@ -702,7 +705,7 @@ class HeliusClient:
             print("[Helius] RPC URL not configured for program account queries")
             return {}
         
-        for program_id in dex_programs:
+        for program_id in self.dex_programs:
             if self._api_calls_made >= self._max_api_calls:
                 break
             

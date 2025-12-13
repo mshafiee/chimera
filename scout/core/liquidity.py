@@ -252,6 +252,16 @@ class LiquidityProvider:
         if db_data:
             return db_data
 
+        # NEW CODE: Strict mode check (if db missed, we might want to fail fast)
+        # However, checking API is usually allowed unless offline.
+        # But if strict mode is ON, and we finish checking all sources and find nothing,
+        # we return None (which is default behavior).
+        # The key strict check is in get_historical_liquidity_or_current to prevent fallback.
+        # But for optimization, if strict and BIRDEYE not available, we can fail early.
+        if os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false").lower() == "true":
+            if not (self.mode == "real" and self.birdeye_client):
+                return None
+
         # Try Birdeye API if available (real mode)
         if self.mode == "real" and self.birdeye_client:
             try:
