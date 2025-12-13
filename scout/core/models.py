@@ -17,6 +17,15 @@ class TradeAction(Enum):
     SELL = "SELL"
 
 
+class TraderArchetype(Enum):
+    """Trader behavioral archetype classification."""
+    SNIPER = "SNIPER"       # Buys < 2 mins after launch, sells < 30 mins
+    SWING = "SWING"         # Holds > 4 hours
+    SCALPER = "SCALPER"     # Many trades, small timeframe (default)
+    INSIDER = "INSIDER"     # Fresh wallet, buys right before pumps
+    WHALE = "WHALE"         # Trade size > 50 SOL
+
+
 @dataclass
 class LiquidityData:
     """Snapshot of token liquidity at a point in time."""
@@ -51,6 +60,7 @@ class WalletRecord:
     created_at: str = datetime.utcnow().isoformat()
     # New fields for detailed records
     avg_entry_delay_seconds: Optional[float] = None
+    archetype: Optional[str] = None  # TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
 
 
 class ValidationStatus(Enum):

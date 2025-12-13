@@ -15,6 +15,7 @@ WQS v2 improvements:
 
 from dataclasses import dataclass
 from typing import Optional
+from datetime import datetime
 
 
 @dataclass
@@ -33,6 +34,11 @@ class WalletMetrics:
     profit_factor: Optional[float] = None
     sortino_ratio: Optional[float] = None
     is_fresh_wallet: bool = False  # Insider/Burner detection
+    total_unrealized_loss_sol: Optional[float] = None  # Unrealized PnL from bag holdings
+    total_realized_profit_sol: Optional[float] = None  # Total realized profit for comparison
+    dex_diversity_score: Optional[int] = None  # Count of unique DEXs used
+    uses_limit_orders: bool = False  # Detected Jupiter Limit Order usage
+    uses_mev_protection: bool = False  # Detected Jito bundle/MEV protection usage
 
 
 def calculate_wqs(metrics: WalletMetrics) -> float:
@@ -182,7 +188,34 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     if metrics.is_fresh_wallet:
         score -= 20.0
     
-    # 9) Recency Bias (Freshness)
+    # 10) Smart Money Bonuses
+    # DEX Diversity: Using multiple DEXs shows sophistication
+    if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
+        score += 5.0
+    
+    # Limit Orders: Sophisticated trading strategy
+    if metrics.uses_limit_orders:
+        score += 10.0
+    
+    # MEV Protection: Shows awareness of MEV risks
+    if metrics.uses_mev_protection:
+        score += 10.0
+    
+    # 11) Bag Holder Penalty (The "Hidden Loser" Detector)
+    # If unrealized losses > 50% of realized gains, this is a bad trader
+    # They sell winners and hold losers, making them look profitable when they're not.
+    if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
+        if metrics.total_realized_profit_sol > 0:
+            loss_ratio = metrics.total_unrealized_loss_sol / metrics.total_realized_profit_sol
+            if loss_ratio > 0.5:  # Losses > 50% of gains
+                score -= 30.0  # Massive Penalty
+            elif loss_ratio > 0.2:  # Losses > 20% of gains
+                score -= 15.0
+        elif metrics.total_unrealized_loss_sol > 1.0:  # Has losses but no realized profit
+            # If they have significant unrealized losses but no realized profit, they're a bag holder
+            score -= 20.0
+    
+    # 11) Recency Bias (Freshness)
     # Determine if the wallet is active and winning recently
     if metrics.last_trade_at:
         try:

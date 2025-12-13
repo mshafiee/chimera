@@ -11,14 +11,191 @@ In production, this connects to:
 """
 
 import os
+import requests
+import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
 from .wqs import WalletMetrics
-from .models import HistoricalTrade, TradeAction, LiquidityData
+from .models import HistoricalTrade, TradeAction, LiquidityData, TraderArchetype
 from .helius_client import HeliusClient
 from .liquidity import LiquidityProvider
+
+# Import config and security client
+try:
+    from config import ScoutConfig
+    from .security_client import RugCheckClient
+    SECURITY_AVAILABLE = True
+except ImportError:
+    SECURITY_AVAILABLE = False
+    ScoutConfig = None
+    RugCheckClient = None
+
+logger = logging.getLogger(__name__)
+
+
+class PortfolioTracker:
+    """
+    Reconstructs a wallet's current holdings to detect hidden losses (bag holders).
+    
+    This class replays trade history to determine current token positions and
+    calculates unrealized PnL by comparing current prices to cost basis.
+    """
+    
+    @staticmethod
+    def calculate_unrealized_pnl(
+        trades: List[HistoricalTrade], 
+        current_prices: Dict[str, float],
+        sol_price_usd: Optional[float] = None
+    ) -> float:
+        """
+        Replays trades to find current holdings and calculates paper loss.
+        
+        Args:
+            trades: List of historical trades (sorted by timestamp)
+            current_prices: Dict mapping token_address -> current_price_usd
+            sol_price_usd: Current SOL price in USD (for converting SOL cost basis to USD)
+            
+        Returns:
+            Total unrealized loss in SOL (positive value = loss)
+        """
+        holdings = {}  # token_addr -> amount (token units)
+        cost_basis = {}  # token_addr -> total_sol_spent
+        
+        # 1. Replay history using FIFO logic
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        for t in sorted_trades:
+            if t.action == TradeAction.BUY:
+                token_addr = t.token_address
+                # Calculate token amount from trade
+                token_amount = t.token_amount
+                if token_amount is None or token_amount == 0:
+                    # Fallback: calculate from SOL amount and price
+                    if t.price_sol and t.price_sol > 0:
+                        token_amount = t.amount_sol / t.price_sol
+                    elif t.price_at_trade and t.price_at_trade > 0:
+                        token_amount = t.amount_sol / t.price_at_trade
+                    else:
+                        continue  # Skip if we can't determine amount
+                
+                holdings[token_addr] = holdings.get(token_addr, 0.0) + token_amount
+                cost_basis[token_addr] = cost_basis.get(token_addr, 0.0) + t.amount_sol
+                
+            elif t.action == TradeAction.SELL:
+                token_addr = t.token_address
+                current_qty = holdings.get(token_addr, 0.0)
+                if current_qty <= 0:
+                    continue
+                
+                # Calculate token amount sold
+                token_amount = t.token_amount
+                if token_amount is None or token_amount == 0:
+                    if t.price_sol and t.price_sol > 0:
+                        token_amount = t.amount_sol / t.price_sol
+                    elif t.price_at_trade and t.price_at_trade > 0:
+                        token_amount = t.amount_sol / t.price_at_trade
+                    else:
+                        continue
+                
+                # FIFO: Reduce holdings and cost basis proportionally
+                ratio = min(1.0, token_amount / current_qty) if current_qty > 0 else 0.0
+                holdings[token_addr] = max(0.0, current_qty - token_amount)
+                cost_basis[token_addr] = cost_basis.get(token_addr, 0.0) * (1.0 - ratio)
+        
+        # 2. Calculate Value vs Cost for remaining holdings
+        total_unrealized_loss_sol = 0.0
+        
+        # Get SOL price if not provided (default to 1.0 if unavailable, will use SOL amounts directly)
+        if sol_price_usd is None:
+            sol_price_usd = 1.0  # Fallback: assume 1:1 if SOL price unavailable
+        
+        for token, qty in holdings.items():
+            if qty <= 0:
+                continue
+            
+            remaining_cost_sol = cost_basis.get(token, 0.0)
+            
+            # Ignore dust entries (< 0.5 SOL cost basis)
+            if remaining_cost_sol < 0.5:
+                continue
+            
+            # Get current price (in USD)
+            current_price_usd = current_prices.get(token, 0.0)
+            if current_price_usd <= 0:
+                # If price unavailable, assume it's worthless (100% loss)
+                total_unrealized_loss_sol += remaining_cost_sol
+                continue
+            
+            # Convert token quantity to USD value
+            current_val_usd = qty * current_price_usd
+            remaining_cost_usd = remaining_cost_sol * sol_price_usd
+            
+            # If value is < 20% of cost, it's a heavy bag
+            if remaining_cost_usd > 0:
+                if current_val_usd < (remaining_cost_usd * 0.20):
+                    # Calculate loss in SOL terms
+                    loss_usd = remaining_cost_usd - current_val_usd
+                    loss_sol = loss_usd / sol_price_usd if sol_price_usd > 0 else loss_usd
+                    total_unrealized_loss_sol += loss_sol
+        
+        return total_unrealized_loss_sol
+    
+    @staticmethod
+    def fetch_bulk_prices(token_addresses: List[str]) -> Dict[str, float]:
+        """
+        Fetch current prices for multiple tokens from Jupiter Price API.
+        
+        Args:
+            token_addresses: List of token mint addresses
+            
+        Returns:
+            Dict mapping token_address -> price_usd (0.0 if not found or error)
+        """
+        if not token_addresses:
+            return {}
+        
+        prices = {}
+        
+        # Jupiter Price API supports bulk requests via comma-separated IDs
+        # Max ~100 tokens per request to avoid URL length issues
+        batch_size = 100
+        base_url = "https://price.jup.ag/v6/price"
+        
+        for i in range(0, len(token_addresses), batch_size):
+            batch = token_addresses[i:i + batch_size]
+            token_list = ",".join(batch)
+            url = f"{base_url}?ids={token_list}"
+            
+            try:
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Jupiter returns: {"data": {"token_address": {"price": 0.123, ...}, ...}}
+                price_data = data.get("data", {})
+                for token_addr in batch:
+                    token_info = price_data.get(token_addr, {})
+                    price = token_info.get("price")
+                    if price is not None:
+                        try:
+                            prices[token_addr] = float(price)
+                        except (ValueError, TypeError):
+                            prices[token_addr] = 0.0
+                    else:
+                        prices[token_addr] = 0.0
+                        
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"Failed to fetch prices from Jupiter: {e}")
+                # Set all batch tokens to 0.0 on error
+                for token_addr in batch:
+                    prices[token_addr] = 0.0
+            except (ValueError, KeyError, TypeError) as e:
+                logger.warning(f"Failed to parse Jupiter price response: {e}")
+                for token_addr in batch:
+                    prices[token_addr] = 0.0
+        
+        return prices
 
 
 class WalletAnalyzer:
@@ -58,12 +235,33 @@ class WalletAnalyzer:
         db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
         self.liquidity_provider = LiquidityProvider(db_path=db_path)
         
+        # Initialize RugCheck client if enabled
+        self.rugcheck_client = None
+        if SECURITY_AVAILABLE and ScoutConfig and ScoutConfig.get_rugcheck_enabled():
+            try:
+                self.rugcheck_client = RugCheckClient()
+            except Exception as e:
+                logger.warning(f"Failed to initialize RugCheck client: {e}")
+        
         # Cache for metrics and trades
         self._metrics_cache: Dict[str, WalletMetrics] = {}
         self._trades_cache: Dict[str, List[HistoricalTrade]] = {}
         self._candidate_wallets: List[str] = []
         self._token_meta_cache: Dict[str, Dict[str, Any]] = {}
         self._token_creation_cache: Dict[str, Optional[float]] = {}
+        self._price_cache: Dict[str, float] = {}  # Cache for token prices
+        self._sol_price_usd: Optional[float] = None  # Cached SOL price
+        
+        # Known DEX program IDs for smart money detection
+        self._dex_program_ids = {
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
+            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium
+            "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",  # Orca
+            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Whirlpool
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # PumpFun
+        }
+        self._jito_program_id = "Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb"
+        self._jupiter_limit_order_program = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"  # Same as Jupiter, but check for limit order instructions
 
     def clear_wallet_cache(self, address: str):
         """Clear cached data for a specific wallet to free memory."""
@@ -301,7 +499,7 @@ class WalletAnalyzer:
         """
         return self._candidate_wallets
     
-    def get_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
+    async def get_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
         """
         Get metrics for a specific wallet.
         
@@ -363,7 +561,7 @@ class WalletAnalyzer:
         # Fetch real data if Helius client is available
         if self.helius_client.api_key:
             try:
-                metrics = self._fetch_real_wallet_metrics(address)
+                metrics = await self._fetch_real_wallet_metrics(address)
                 if metrics:
                     self._metrics_cache[address] = metrics
                     return metrics
@@ -374,10 +572,10 @@ class WalletAnalyzer:
         # Fall back to cached sample data
         return self._metrics_cache.get(address)
     
-    def _fetch_real_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
+    async def _fetch_real_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
         """Fetch real wallet metrics from Helius API."""
         # Get transaction history
-        transactions = self.helius_client.get_wallet_transactions(
+        transactions = await self.helius_client.get_wallet_transactions(
             address,
             days=30,
             limit=self._wallet_tx_limit,
@@ -400,7 +598,7 @@ class WalletAnalyzer:
             return None
         
         # Calculate metrics from trades
-        return self._calculate_metrics_from_trades(address, trades)
+        return await self._calculate_metrics_from_trades(address, trades)
     
     def _parse_swap_to_trade(self, swap: Dict[str, Any], wallet: str) -> Optional[HistoricalTrade]:
         """Parse a swap transaction into a HistoricalTrade."""
@@ -565,7 +763,7 @@ class WalletAnalyzer:
 
         return trades
     
-    def _fetch_token_creation_time(self, token_address: str) -> Optional[float]:
+    async def _fetch_token_creation_time(self, token_address: str) -> Optional[float]:
         """
         Fetch token creation timestamp with multi-source fallback.
         
@@ -591,12 +789,14 @@ class WalletAnalyzer:
         # Try Birdeye API
         try:
             if getattr(self.liquidity_provider, "birdeye_client", None):
-                creation_info = self.liquidity_provider.birdeye_client.get_token_creation_info(token_address)
-                if creation_info:
-                    # Handle both integer and string formats
-                    ts = creation_info.get("blockUnixTime") or creation_info.get("txTime")
-                    if ts:
-                        timestamp = float(ts)
+                birdeye_client = self.liquidity_provider.birdeye_client
+                if birdeye_client:
+                    creation_info = await birdeye_client.get_token_creation_info(token_address)
+                    if creation_info:
+                        # Handle both integer and string formats
+                        ts = creation_info.get("blockUnixTime") or creation_info.get("txTime")
+                        if ts:
+                            timestamp = float(ts)
         except Exception as e:
             # Only log if verbose mode enabled
             if os.getenv("SCOUT_VERBOSE") == "true":
@@ -658,6 +858,128 @@ class WalletAnalyzer:
         
         return True
 
+    def _get_sol_price_usd(self) -> float:
+        """
+        Get current SOL price in USD.
+        
+        Returns:
+            SOL price in USD, or 1.0 as fallback
+        """
+        if self._sol_price_usd is not None:
+            return self._sol_price_usd
+        
+        try:
+            # Try to get from Jupiter Price API
+            sol_mint = "So11111111111111111111111111111111111111112"
+            prices = PortfolioTracker.fetch_bulk_prices([sol_mint])
+            price = prices.get(sol_mint, 0.0)
+            if price > 0:
+                self._sol_price_usd = price
+                return price
+        except Exception as e:
+            logger.debug(f"Failed to fetch SOL price: {e}")
+        
+        # Fallback to 1.0 (will use SOL amounts directly)
+        return 1.0
+    
+    def determine_archetype(
+        self, 
+        metrics: WalletMetrics, 
+        trades: List[HistoricalTrade]
+    ) -> TraderArchetype:
+        """
+        Determine trader archetype based on trading behavior.
+        
+        Args:
+            metrics: Wallet performance metrics
+            trades: Historical trades
+            
+        Returns:
+            TraderArchetype enum value
+        """
+        # 1. INSIDER: Fresh wallet (created < 24h before trading)
+        if metrics.is_fresh_wallet:
+            return TraderArchetype.INSIDER
+        
+        # 2. WHALE: Average trade size > 50 SOL
+        if metrics.avg_trade_size_sol and metrics.avg_trade_size_sol > 50.0:
+            return TraderArchetype.WHALE
+        
+        # 3. SNIPER: Buys < 2 mins after launch on average
+        if metrics.avg_entry_delay_seconds is not None:
+            if metrics.avg_entry_delay_seconds < 120:  # < 2 minutes
+                return TraderArchetype.SNIPER
+        
+        # 4. SWING: Holds positions > 4 hours on average
+        avg_hold_time = self._calculate_avg_hold_time(trades)
+        if avg_hold_time and avg_hold_time > 14400:  # > 4 hours (14400 seconds)
+            return TraderArchetype.SWING
+        
+        # 5. Default: SCALPER (many trades, small timeframe)
+        return TraderArchetype.SCALPER
+    
+    def _calculate_avg_hold_time(self, trades: List[HistoricalTrade]) -> Optional[float]:
+        """
+        Calculate average hold time in seconds.
+        
+        Args:
+            trades: List of historical trades (sorted by timestamp)
+            
+        Returns:
+            Average hold time in seconds, or None if insufficient data
+        """
+        if not trades:
+            return None
+        
+        # Sort trades by timestamp
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        
+        # Track open positions: token_address -> (buy_time, buy_amount)
+        open_positions: Dict[str, List[tuple]] = {}  # token -> [(buy_time, buy_amount), ...]
+        hold_times = []
+        
+        for t in sorted_trades:
+            token_addr = t.token_address
+            timestamp = t.timestamp.timestamp()
+            
+            if t.action == TradeAction.BUY:
+                # Add to open positions
+                buy_amount = t.token_amount or t.amount_sol
+                if token_addr not in open_positions:
+                    open_positions[token_addr] = []
+                open_positions[token_addr].append((timestamp, buy_amount))
+                
+            elif t.action == TradeAction.SELL:
+                # Match with oldest buy (FIFO)
+                if token_addr in open_positions and open_positions[token_addr]:
+                    sell_amount = t.token_amount or t.amount_sol
+                    remaining_sell = sell_amount
+                    
+                    while remaining_sell > 0 and open_positions[token_addr]:
+                        buy_time, buy_amount = open_positions[token_addr][0]
+                        
+                        # Calculate how much of this buy is being sold
+                        sold_from_buy = min(remaining_sell, buy_amount)
+                        hold_time = timestamp - buy_time
+                        
+                        if hold_time > 0:  # Sanity check
+                            hold_times.append(hold_time)
+                        
+                        # Update positions
+                        if sold_from_buy >= buy_amount:
+                            # Fully sold this buy
+                            open_positions[token_addr].pop(0)
+                            remaining_sell -= buy_amount
+                        else:
+                            # Partially sold
+                            open_positions[token_addr][0] = (buy_time, buy_amount - sold_from_buy)
+                            remaining_sell = 0
+        
+        if not hold_times:
+            return None
+        
+        return sum(hold_times) / len(hold_times)
+    
     def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
         """
         Detect insider behavior based on wallet age and funding.
@@ -721,14 +1043,32 @@ class WalletAnalyzer:
         self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
 
-        # Filter out unsafe tokens (optional, strict mode)
-        # safe_trades = [t for t in trades if self._is_token_safe(t.token_address)]
-        # For now, we analyze all trades but could flag the wallet later.
+        # Filter out unsafe tokens using RugCheck if enabled
+        if self.rugcheck_client:
+            safe_trades = []
+            risky_tokens = []
+            for t in trades:
+                token_addr = t.token_address
+                if self.rugcheck_client.is_token_safe(token_addr):
+                    safe_trades.append(t)
+                else:
+                    risky_tokens.append(token_addr)
+            
+            if risky_tokens:
+                logger.debug(f"Wallet {address[:8]}... has {len(risky_tokens)} risky tokens filtered by RugCheck")
+            
+            # Use only safe trades for analysis
+            trades = safe_trades
+            
+            # If all trades were filtered out, return None
+            if not trades:
+                logger.debug(f"Wallet {address[:8]}... rejected: all trades involved risky tokens")
+                return None
         
         # Sort trades: Primary = Timestamp, Secondary = Action (BUY before SELL to allow intraday scalps)
         # Assuming TradeAction.BUY is defined such that it sorts appropriately, or use custom key
@@ -797,8 +1137,9 @@ class WalletAnalyzer:
         unique_tokens = list(set(t.token_address for t in buy_trades))[:5]
         
         # Pre-fetch creation times (this will cache them)
-        for token in unique_tokens:
-            self._fetch_token_creation_time(token)
+        import asyncio
+        tasks = [self._fetch_token_creation_time(token) for token in unique_tokens]
+        await asyncio.gather(*tasks, return_exceptions=True)
             
         for token in unique_tokens:
             creation_ts = self._token_creation_cache.get(token)
@@ -817,6 +1158,71 @@ class WalletAnalyzer:
         insider_metrics = self._detect_insider_patterns(address, trades)
         is_fresh_wallet = insider_metrics.get("is_fresh_wallet", False)
         
+        # 4. Smart Money Detection (DEX diversity, limit orders, MEV protection)
+        # Note: Full detection requires transaction instruction parsing
+        # For now, we set defaults that can be enhanced with transaction analysis
+        dex_diversity_score = None  # Will be calculated if transaction data available
+        uses_limit_orders = False
+        uses_mev_protection = False
+        
+        # Try to detect from transaction signatures if available
+        # This is a placeholder - full implementation would parse transaction instructions
+        # For now, we'll set these in a future enhancement when we have transaction details
+        
+        # 5. Calculate Unrealized PnL (Bag Holder Detection)
+        total_unrealized_loss_sol = None
+        total_realized_profit_sol = None
+        
+        try:
+            # Calculate realized profit from SELL trades
+            realized_pnls = [t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol is not None]
+            total_realized_profit_sol = sum(pnl for pnl in realized_pnls if pnl > 0)
+            
+            # Get unique token addresses from current holdings
+            buy_trades = [t for t in sorted_trades if t.action == TradeAction.BUY]
+            sell_trades = [t for t in sorted_trades if t.action == TradeAction.SELL]
+            
+            # Find tokens that have buys but may not have been fully sold
+            tokens_with_buys = set(t.token_address for t in buy_trades)
+            tokens_fully_sold = set()
+            
+            # Track sell amounts per token
+            sell_amounts = {}
+            for t in sell_trades:
+                token_addr = t.token_address
+                token_amount = t.token_amount or 0.0
+                sell_amounts[token_addr] = sell_amounts.get(token_addr, 0.0) + token_amount
+            
+            # Find tokens that might have remaining holdings
+            potential_holdings = []
+            buy_amounts = {}
+            for t in buy_trades:
+                token_addr = t.token_address
+                token_amount = t.token_amount or 0.0
+                buy_amounts[token_addr] = buy_amounts.get(token_addr, 0.0) + token_amount
+                
+                # If buy amount > sell amount, there might be holdings
+                if buy_amounts[token_addr] > sell_amounts.get(token_addr, 0.0):
+                    potential_holdings.append(token_addr)
+            
+            # Fetch current prices for tokens with potential holdings
+            if potential_holdings:
+                # Get SOL price for conversion
+                sol_price = self._get_sol_price_usd()
+                
+                # Fetch prices in bulk
+                current_prices = PortfolioTracker.fetch_bulk_prices(potential_holdings)
+                
+                # Calculate unrealized PnL
+                total_unrealized_loss_sol = PortfolioTracker.calculate_unrealized_pnl(
+                    sorted_trades,
+                    current_prices,
+                    sol_price
+                )
+        except Exception as e:
+            logger.warning(f"Failed to calculate unrealized PnL for {address}: {e}")
+            total_unrealized_loss_sol = None
+        
         return WalletMetrics(
             address=address,
             roi_7d=roi_7d,
@@ -830,6 +1236,11 @@ class WalletAnalyzer:
             avg_entry_delay_seconds=avg_entry_delay,
             profit_factor=profit_factor,
             is_fresh_wallet=is_fresh_wallet,
+            total_unrealized_loss_sol=total_unrealized_loss_sol,
+            total_realized_profit_sol=total_realized_profit_sol,
+            dex_diversity_score=dex_diversity_score,
+            uses_limit_orders=uses_limit_orders,
+            uses_mev_protection=uses_mev_protection,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:
@@ -1189,7 +1600,7 @@ class WalletAnalyzer:
         consistency = (streak_component * 0.7) + (win_rate * 0.3)
         return max(0.0, min(consistency, 1.0))
     
-    def get_historical_trades(
+    async def get_historical_trades(
         self,
         address: str,
         days: int = 30,
@@ -1218,7 +1629,7 @@ class WalletAnalyzer:
         # Fetch real data if Helius client is available
         if self.helius_client.api_key:
             try:
-                trades = self._fetch_real_historical_trades(address, days)
+                trades = await self._fetch_real_historical_trades(address, days)
                 if trades:
                     self._trades_cache[address] = trades
                     return trades
@@ -1230,7 +1641,7 @@ class WalletAnalyzer:
         cutoff = datetime.utcnow() - timedelta(days=days)
         return [t for t in trades if t.timestamp >= cutoff]
     
-    def _fetch_real_historical_trades(self, address: str, days: int) -> List[HistoricalTrade]:
+    async def _fetch_real_historical_trades(self, address: str, days: int) -> List[HistoricalTrade]:
         """
         Fetch real historical trades from Helius API.
         
@@ -1242,7 +1653,7 @@ class WalletAnalyzer:
         trade timestamp. That would poison the historical liquidity table and cause
         the backtester to believe it has true historical liquidity for old timestamps.
         """
-        transactions = self.helius_client.get_wallet_transactions(
+        transactions = await self.helius_client.get_wallet_transactions(
             address,
             days=days,
             limit=self._wallet_tx_limit,
