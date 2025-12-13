@@ -23,7 +23,6 @@ from .analyzer import WalletAnalyzer
 from .backtester import BacktestSimulator
 from .db_writer import RosterWriter, WalletRecord, write_roster_atomic
 from .birdeye_client import BirdeyeClient
-from .liquidity_collector import LiquidityCollector
 from .liquidity import LiquidityProvider
 from .models import (
     LiquidityData,
@@ -48,7 +47,6 @@ for _sub in [
     "db_writer",
     "helius_client",
     "liquidity",
-    "liquidity_collector",
     "models",
     "validator",
     "wqs",
@@ -88,5 +86,4 @@ __all__ = [
     "classify_wallet",
     # Historical Liquidity (optional)
     "BirdeyeClient",
-    "LiquidityCollector",
 ]
