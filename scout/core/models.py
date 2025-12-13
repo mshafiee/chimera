@@ -206,7 +206,6 @@ class BacktestConfig:
     
     # Slippage configuration
     max_slippage_percent: float = 0.05  # 5% max acceptable slippage
-    slippage_model: str = "sqrt"  # 'sqrt' or 'linear'
     
     # Lookback period
     lookback_days: int = 30

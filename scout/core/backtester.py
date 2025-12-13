@@ -440,57 +440,7 @@ class BacktestSimulator:
         # Use empty positions dict for legacy behavior (no position tracking)
         return self._simulate_trade_roundtrip(trade, min_liquidity, sol_price, {})
     
-    def estimate_promotion_viability(
-        self,
-        trades: List[HistoricalTrade],
-        strategy: str = "SHIELD",
-    ) -> dict:
-        """
-        Quick estimate of whether a wallet would pass backtest.
-        
-        This is a lighter-weight check that can be run before full simulation.
-        
-        Args:
-            trades: Historical trades
-            strategy: Strategy type
-            
-        Returns:
-            Dict with viability assessment
-        """
-        if len(trades) < self.config.min_trades_required:
-            return {
-                "viable": False,
-                "reason": "Insufficient trades",
-                "trade_count": len(trades),
-                "required": self.config.min_trades_required,
-            }
-        
-        min_liquidity = self.config.get_min_liquidity(strategy)
-        
-        # Quick liquidity check on unique tokens
-        unique_tokens = set(t.token_address for t in trades)
-        low_liquidity_tokens = []
-        
-        for token in unique_tokens:
-            liq = self.liquidity.get_current_liquidity(token)
-            if liq and liq.liquidity_usd < min_liquidity:
-                low_liquidity_tokens.append(token[:8] + "...")
-        
-        if len(low_liquidity_tokens) > len(unique_tokens) * 0.5:
-            return {
-                "viable": False,
-                "reason": "Too many low-liquidity tokens",
-                "low_liquidity_count": len(low_liquidity_tokens),
-                "total_tokens": len(unique_tokens),
-            }
-        
-        return {
-            "viable": True,
-            "reason": "Passes preliminary checks",
-            "trade_count": len(trades),
-            "unique_tokens": len(unique_tokens),
-            "low_liquidity_tokens": len(low_liquidity_tokens),
-        }
+
 
 
 # Example usage

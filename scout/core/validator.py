@@ -314,46 +314,7 @@ class PrePromotionValidator:
 # Backward compatibility
 # ---------------------------------------------------------------------------
 
-class WalletValidator(PrePromotionValidator):
-    """
-    Backward-compatible wrapper for older code/tests.
 
-    The Scout implementation standardized on `PrePromotionValidator`, but some
-    tests/imports still reference `WalletValidator`.
-    """
-
-    def validate(
-        self,
-        wallet: dict,
-        trades: Optional[List[HistoricalTrade]] = None,
-        strategy: str = "SHIELD",
-    ) -> ValidationResult:
-        """
-        Validate a wallet represented as a simple dict.
-
-        Expected keys (best-effort):
-        - address (required)
-        - roi_7d, roi_30d, trade_count_30d, win_rate, max_drawdown_30d,
-          avg_trade_size_sol, last_trade_at, win_streak_consistency
-        """
-        address = wallet.get("address", "")
-        metrics = WalletMetrics(
-            address=address,
-            roi_7d=wallet.get("roi_7d"),
-            roi_30d=wallet.get("roi_30d"),
-            trade_count_30d=wallet.get("trade_count_30d"),
-            win_rate=wallet.get("win_rate"),
-            max_drawdown_30d=wallet.get("max_drawdown_30d"),
-            avg_trade_size_sol=wallet.get("avg_trade_size_sol"),
-            last_trade_at=wallet.get("last_trade_at"),
-            win_streak_consistency=wallet.get("win_streak_consistency"),
-        )
-        return self.validate_for_promotion(
-            wallet_address=address,
-            metrics=metrics,
-            trades=trades or [],
-            strategy=strategy,
-        )
 
 
 def validate_wallet_for_promotion(
