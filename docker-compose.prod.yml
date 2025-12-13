@@ -1,0 +1,90 @@
+services:
+  # Redis - Caching layer for Scout
+  redis:
+    image: redis:7-alpine
+    container_name: chimera-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    profiles:
+      - mainnet-prod
+
+  # Chimera Scout - Wallet intelligence layer (Production)
+  scout:
+    build:
+      context: ./scout
+      dockerfile: Dockerfile
+    container_name: chimera-scout
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - scout-data:/app/scout-data
+      - ./scout:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CHIMERA_API_URL=http://chimera-operator:8080
+      - CHIMERA_OPERATOR_CONTAINER=chimera-operator
+      # Discovery Configuration
+      - SCOUT_MIN_TRADE_COUNT=3
+      - SCOUT_MAX_WALLETS=500                                    # Increased for async capability
+      - SCOUT_DISCOVERY_HOURS=168                               # 7 days
+      - SCOUT_LIQUIDITY_MODE=real
+      # Performance Optimization
+      - SCOUT_WALLET_TX_LIMIT=500
+      - SCOUT_WALLET_TX_MAX_PAGES=20
+      - SCOUT_DISCOVERY_MIN_SOL=0.05
+      # WQS Thresholds
+      - SCOUT_MIN_WQS_ACTIVE=60.0
+      - SCOUT_MIN_WQS_CANDIDATE=30.0
+      # Redis Configuration
+      - REDIS_ENABLED=true
+      - REDIS_URL=redis://chimera-redis:6379
+      # RugCheck Configuration
+      - RUGCHECK_ENABLED=true
+      - RUGCHECK_FAIL_MODE=closed
+      # Smart Money Filters
+      - ENABLE_SMART_MONEY_FILTERS=true
+    env_file:
+      - docker/env.mainnet-prod
+      - docker/env.mainnet-prod.local
+    depends_on:
+      - operator
+      - redis
+    networks:
+      - chimera-network
+    # Run scout on a schedule (daily at 2 AM UTC) with automatic roster merge
+    command: >
+      sh -c "
+        while true; do
+          echo '[Scout] Starting wallet analysis...';
+          python main.py --output /app/data/roster_new.db || true;
+          if [ -f /app/data/roster_new.db ]; then
+            echo '[Scout] Analysis complete, triggering roster merge...';
+            curl -X POST http://chimera-operator:8080/api/v1/roster/merge -H 'Content-Type: application/json' -d '{}' || echo '[Scout] Merge API call failed';
+          fi;
+          echo '[Scout] Sleeping for 24 hours...';
+          sleep 86400;
+        done
+      "
+    profiles:
+      - mainnet-prod
+
+volumes:
+  redis-data:
+    driver: local
+  scout-data:
+    driver: local
+
+networks:
+  chimera-network:
+    driver: bridge

@@ -123,9 +123,30 @@ class LiquidityProvider:
         else:
             logger.info(f"LiquidityProvider running in {self.mode} mode")
         
-        # In-memory cache
+        # In-memory cache (fallback)
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
         self._sol_price_cache: Optional[Tuple[float, datetime]] = None
+        
+        # Redis client (if enabled)
+        self.redis_client = None
+        if REDIS_AVAILABLE and RedisClient:
+            try:
+                if CONFIG_AVAILABLE and ScoutConfig:
+                    redis_enabled = ScoutConfig.get_redis_enabled()
+                    redis_url = ScoutConfig.get_redis_url()
+                else:
+                    redis_enabled = os.getenv("REDIS_ENABLED", "false").lower() == "true"
+                    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+                
+                if redis_enabled:
+                    self.redis_client = RedisClient(redis_url=redis_url, enabled=True)
+                    if self.redis_client.is_available():
+                        logger.info("Redis cache enabled for liquidity data")
+                    else:
+                        logger.warning("Redis enabled but unavailable, using fallback cache")
+                        self.redis_client = None
+            except Exception as e:
+                logger.warning(f"Failed to initialize Redis client: {e}, using fallback cache")
     
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
@@ -687,25 +708,84 @@ class LiquidityProvider:
         )
     
     def _get_from_cache(self, token_address: str) -> Optional[LiquidityData]:
-        """Get data from cache if not expired."""
-        if token_address not in self._cache:
-            return None
+        """
+        Get liquidity data from cache (Redis or in-memory).
         
-        data, cached_at = self._cache[token_address]
-        age = (datetime.utcnow() - cached_at).total_seconds()
+        Args:
+            token_address: Token address
+            
+        Returns:
+            Cached LiquidityData or None
+        """
+        # Try Redis first if available
+        if self.redis_client and self.redis_client.is_available():
+            try:
+                cache_key = f"liquidity:{token_address}"
+                cached_json = self.redis_client.get(cache_key)
+                if cached_json:
+                    data_dict = json.loads(cached_json)
+                    # Reconstruct LiquidityData from dict
+                    return LiquidityData(
+                        token_address=data_dict["token_address"],
+                        liquidity_usd=data_dict["liquidity_usd"],
+                        price_usd=data_dict["price_usd"],
+                        volume_24h_usd=data_dict.get("volume_24h_usd", 0.0),
+                        timestamp=datetime.fromisoformat(data_dict["timestamp"]),
+                        source=data_dict.get("source", "cache"),
+                    )
+            except Exception as e:
+                logger.debug(f"Redis cache get failed for {token_address[:8]}...: {e}")
         
-        if age > self.cache_ttl:
-            del self._cache[token_address]
-            return None
+        # Fallback to in-memory cache
+        if token_address in self._cache:
+            data, cached_time = self._cache[token_address]
+            age = (datetime.utcnow() - cached_time).total_seconds()
+            if age < self.cache_ttl:
+                return data
+            else:
+                # Expired, remove from cache
+                del self._cache[token_address]
         
-        return data
+        return None
     
     def _add_to_cache(self, token_address: str, data: LiquidityData) -> None:
+        """
+        Add liquidity data to cache (Redis or in-memory).
+        
+        Args:
+            token_address: Token address
+            data: LiquidityData to cache
+        """
+        # Try Redis first if available
+        if self.redis_client and self.redis_client.is_available():
+            try:
+                cache_key = f"liquidity:{token_address}"
+                data_dict = {
+                    "token_address": data.token_address,
+                    "liquidity_usd": data.liquidity_usd,
+                    "price_usd": data.price_usd,
+                    "volume_24h_usd": data.volume_24h_usd,
+                    "timestamp": data.timestamp.isoformat(),
+                    "source": data.source,
+                }
+                self.redis_client.set(cache_key, json.dumps(data_dict), ttl_seconds=self.cache_ttl)
+                return
+            except Exception as e:
+                logger.debug(f"Redis cache set failed for {token_address[:8]}...: {e}")
+        
+        # Fallback to in-memory cache
+        self._cache[token_address] = (data, datetime.utcnow())
+    
         """Add data to cache."""
         self._cache[token_address] = (data, datetime.utcnow())
     
     def clear_cache(self) -> None:
-        """Clear the liquidity cache."""
+        """Clear the liquidity cache (Redis and in-memory)."""
+        if self.redis_client and self.redis_client.is_available():
+            try:
+                self.redis_client.clear()
+            except Exception as e:
+                logger.debug(f"Redis cache clear failed: {e}")
         self._cache.clear()
 
 
