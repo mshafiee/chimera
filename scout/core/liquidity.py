@@ -292,6 +292,11 @@ class LiquidityProvider:
         if historical:
             return historical
         
+        # NEW CODE: Strict mode check
+        if os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false").lower() == "true":
+            logger.warning(f"Strict mode: Historical liquidity missing for {token_address}, rejecting.")
+            return None
+        
         # Fallback to current liquidity (only if explicitly allowed)
         # In real mode, we should avoid silent fallbacks unless necessary
         allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true"
@@ -299,17 +304,24 @@ class LiquidityProvider:
         if allow_fallback:
             current = self.get_current_liquidity(token_address)
             if current:
+                # Use current liquidity as fallback but CAP it to avoid "Survivorship Bias"
+                # If a token mooned (10k -> 10M), assuming 10M historical is dangerous.
+                # If a token rugged (1M -> 1k), assuming 1k is strict/safe.
+                # We cap at $50k to allow testing small caps but filter out mooners.
+                safe_fallback_liquidity = min(current.liquidity_usd, 50000.0)
+                
                 logger.warning(
                     f"Historical liquidity not available for {token_address[:8]}... "
-                    f"at {timestamp.isoformat()}, using current liquidity as fallback"
+                    f"at {timestamp.isoformat()}. Using CAPPED current liquidity "
+                    f"(${safe_fallback_liquidity:,.0f}) as fallback."
                 )
                 return LiquidityData(
                     token_address=current.token_address,
-                    liquidity_usd=current.liquidity_usd,
+                    liquidity_usd=safe_fallback_liquidity,
                     price_usd=current.price_usd,
                     volume_24h_usd=current.volume_24h_usd,
                     timestamp=timestamp,  # Use historical timestamp
-                    source=f"{current.source}_fallback",
+                    source=f"{current.source}_fallback_capped",
                 )
         
         return None
