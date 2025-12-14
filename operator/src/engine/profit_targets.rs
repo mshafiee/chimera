@@ -183,11 +183,8 @@ impl ProfitTargetManager {
 
         // Get profit targets (dynamic based on market regime if available)
         let targets: Vec<Decimal> = if let Some(ref regime_detector) = self.market_regime {
-            // Convert f64 targets to Decimal for precision
+            // Profit targets are already Decimal for precision
             regime_detector.get_profit_targets()
-                .iter()
-                .map(|&t| Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO))
-                .collect()
         } else {
             self.config.targets.clone()
         };

@@ -63,9 +63,10 @@ impl SignalQuality {
         };
         score += consensus_score * 0.3;
 
-        // 3. Liquidity score (20% weight) - convert Decimal to f64 only for threshold comparison
-        let liquidity_usd_f64 = liquidity_usd.to_f64().unwrap_or(0.0);
-        let liquidity_score = if liquidity_usd > Decimal::from(50000) {
+        // 3. Liquidity score (20% weight) - use Decimal directly for comparisons
+        // Note: We keep the score calculation in f64 since it's a statistical metric (0.0-1.0)
+        // but we use Decimal for the liquidity threshold comparisons to avoid precision issues
+        let liquidity_score: f64 = if liquidity_usd > Decimal::from(50000) {
             1.0
         } else if liquidity_usd > Decimal::from(20000) {
             0.7

@@ -22,14 +22,14 @@ pub struct PositionSizer {
 #[derive(Debug, Clone)]
 pub struct SizingFactors {
     pub is_consensus: bool,
-    pub wallet_wqs: f64,
-    pub wallet_success_rate: f64,
-    pub token_age_hours: Option<f64>,
-    pub estimated_slippage: f64,
+    pub wallet_wqs: f64,  // WQS score (0-100), used for threshold comparisons only
+    pub wallet_success_rate: Decimal,  // Success rate (0.0-1.0), used in financial calculations
+    pub token_age_hours: Option<f64>,  // Token age in hours, used for threshold comparisons only
+    pub estimated_slippage: Decimal,  // Slippage percentage, used in financial calculations
     /// Signal quality score (0.0-1.0)
-    pub signal_quality: Option<f64>,
+    pub signal_quality: Option<Decimal>,  // Quality score, used in financial calculations
     /// Token 24h volatility percentage (None if unknown)
-    pub token_volatility_24h: Option<f64>,
+    pub token_volatility_24h: Option<Decimal>,  // Volatility percentage, used in financial calculations
 }
 
 impl PositionSizer {
@@ -64,9 +64,9 @@ impl PositionSizer {
         };
 
         // Wallet performance multiplier (based on success rate)
-        let performance_mult = if factors.wallet_success_rate >= 0.6 {
+        let performance_mult = if factors.wallet_success_rate >= Decimal::from_str("0.6").unwrap_or(Decimal::ZERO) {
             Decimal::from_str("1.1").unwrap_or(Decimal::ONE)
-        } else if factors.wallet_success_rate < 0.4 {
+        } else if factors.wallet_success_rate < Decimal::from_str("0.4").unwrap_or(Decimal::ZERO) {
             Decimal::from_str("0.8").unwrap_or(Decimal::ONE)
         } else {
             Decimal::ONE
@@ -84,7 +84,7 @@ impl PositionSizer {
         };
 
         // High slippage penalty (>2%)
-        let slippage_mult = if factors.estimated_slippage > 2.0 {
+        let slippage_mult = if factors.estimated_slippage > Decimal::from_str("2.0").unwrap_or(Decimal::ZERO) {
             Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
         } else {
             Decimal::ONE
@@ -95,9 +95,11 @@ impl PositionSizer {
         // Medium quality (0.7-0.9): 1.0x
         // Low quality (<0.7): 0.7x (shouldn't reach here due to filter)
         let quality_mult = if let Some(quality) = factors.signal_quality {
-            if quality >= 0.9 {
+            let high_threshold = Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
+            let medium_threshold = Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
+            if quality >= high_threshold {
                 Decimal::from_str("1.3").unwrap_or(Decimal::ONE)
-            } else if quality >= 0.7 {
+            } else if quality >= medium_threshold {
                 Decimal::ONE
             } else {
                 Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
@@ -110,16 +112,14 @@ impl PositionSizer {
         // If volatility > 30%, reduce size proportionally
         // Use Decimal arithmetic to avoid f64 precision issues
         let volatility_mult = if let Some(volatility) = factors.token_volatility_24h {
-            if volatility > 30.0 {
-                // Convert volatility to Decimal for calculation
-                let volatility_dec = Decimal::from_f64_retain(volatility).unwrap_or(Decimal::ZERO);
-                let threshold = Decimal::from_str("30.0").unwrap_or(Decimal::ZERO);
+            let threshold = Decimal::from_str("30.0").unwrap_or(Decimal::ZERO);
+            if volatility > threshold {
                 let step = Decimal::from_str("10.0").unwrap_or(Decimal::ONE);
                 let reduction_rate = Decimal::from_str("0.3").unwrap_or(Decimal::ZERO);
                 let min_mult = Decimal::from_str("0.5").unwrap_or(Decimal::ONE);
                 
                 // Calculate: (volatility - 30) / 10 * 0.3
-                let excess = volatility_dec - threshold;
+                let excess = volatility - threshold;
                 let steps = excess / step;
                 let reduction = steps * reduction_rate;
                 let multiplier = Decimal::ONE - reduction;
@@ -159,7 +159,7 @@ impl PositionSizer {
         &self,
         wallet_address: &str,
         is_consensus: bool,
-        estimated_slippage: f64,
+        estimated_slippage: Decimal,
         token_address: Option<&str>,
         helius_client: Option<&crate::monitoring::HeliusClient>,
     ) -> SizingFactors {
@@ -171,9 +171,13 @@ impl PositionSizer {
         };
 
         // Get wallet performance metrics from database
+        // Convert success rate percentage to Decimal (0.0-1.0)
         let success_rate = match crate::db::get_wallet_copy_performance(&self.db, wallet_address).await {
-            Ok(Some(metrics)) => metrics.signal_success_rate / 100.0,
-            _ => 0.5, // Default fallback if no performance data exists
+            Ok(Some(metrics)) => {
+                Decimal::from_f64_retain(metrics.signal_success_rate / 100.0)
+                    .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ZERO))
+            },
+            _ => Decimal::from_str("0.5").unwrap_or(Decimal::ZERO), // Default fallback if no performance data exists
         };
 
         // Get token age if token address and Helius client are provided
