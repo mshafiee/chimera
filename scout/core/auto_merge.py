@@ -21,6 +21,7 @@ def merge_via_api(
     timeout: int = 30,
     retries: int = 3,
     retry_delay: float = 2.0,
+    api_token: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
     Merge roster via Operator API endpoint.
@@ -31,6 +32,8 @@ def merge_via_api(
         timeout: Request timeout in seconds
         retries: Number of retry attempts
         retry_delay: Delay between retries in seconds
+        api_token: Optional API token/key for authentication.
+                   If not provided, will try to read from CHIMERA_API_TOKEN env var.
         
     Returns:
         Tuple of (success: bool, message: str)
@@ -41,13 +44,22 @@ def merge_via_api(
     if roster_path:
         payload["roster_path"] = roster_path
     
+    # Get API token from parameter or environment variable
+    if api_token is None:
+        api_token = os.getenv("CHIMERA_API_TOKEN")
+    
+    # Build headers with authentication if token is available
+    headers = {"Content-Type": "application/json"}
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    
     for attempt in range(retries):
         try:
             response = requests.post(
                 endpoint,
                 json=payload,
                 timeout=timeout,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
             )
             
             if response.status_code == 200:
@@ -149,6 +161,7 @@ def auto_merge_roster(
     operator_container: str = "chimera-operator",
     prefer_api: bool = True,
     retries: int = 3,
+    api_token: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
     Automatically merge roster using best available method.
@@ -162,6 +175,8 @@ def auto_merge_roster(
         operator_container: Docker container name for operator
         prefer_api: Whether to prefer API over SIGHUP
         retries: Number of retry attempts for API
+        api_token: Optional API token/key for authentication.
+                   If not provided, will try to read from CHIMERA_API_TOKEN env var.
         
     Returns:
         Tuple of (success: bool, message: str)
@@ -197,6 +212,7 @@ def auto_merge_roster(
             api_url=api_url,
             roster_path=roster_path,
             retries=retries,
+            api_token=api_token,
         )
         if success:
             return True, message
@@ -217,6 +233,7 @@ def auto_merge_roster(
             api_url=api_url,
             roster_path=roster_path,
             retries=retries,
+            api_token=api_token,
         )
 
 
@@ -253,6 +270,12 @@ if __name__ == "__main__":
         default=3,
         help="Number of retry attempts for API (default: 3)",
     )
+    parser.add_argument(
+        "--api-token",
+        type=str,
+        default=None,
+        help="API token/key for authentication (default: read from CHIMERA_API_TOKEN env var)",
+    )
     
     args = parser.parse_args()
     
@@ -262,6 +285,7 @@ if __name__ == "__main__":
         operator_container=args.operator_container,
         prefer_api=not args.prefer_sighup,
         retries=args.retries,
+        api_token=args.api_token,
     )
     
     if success:
