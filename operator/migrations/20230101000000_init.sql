@@ -1,13 +1,6 @@
 -- Chimera v7.1 Database Schema
 -- High-frequency copy-trading system for Solana
 
--- Enable WAL mode for concurrent reads during writes
-PRAGMA journal_mode = WAL;
--- Set busy timeout to 5 seconds to handle momentary locks
-PRAGMA busy_timeout = 5000;
--- Enable foreign key constraints
-PRAGMA foreign_keys = ON;
-
 -- =============================================================================
 -- CORE TRADING TABLES
 -- =============================================================================

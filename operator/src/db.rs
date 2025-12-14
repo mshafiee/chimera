@@ -7,9 +7,10 @@ use crate::config::DatabaseConfig;
 use crate::error::{AppError, AppResult};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
-use std::path::Path;
+// Path removed
+
 use std::str::FromStr;
-use tracing::{info, warn};
+use tracing::info;
 
 /// Type alias for the SQLite connection pool
 pub type DbPool = Pool<Sqlite>;
@@ -57,48 +58,13 @@ pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
 
 /// Run database migrations (apply schema)
 pub async fn run_migrations(pool: &DbPool) -> AppResult<()> {
-    // Read and execute schema file
-    let schema_path = Path::new("database/schema.sql");
+    // Use the macro which embeds the migrations into the binary
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|e| AppError::Database(e.into()))?;
 
-    if !schema_path.exists() {
-        warn!("Schema file not found at {:?}, skipping migrations", schema_path);
-        return Ok(());
-    }
-
-    let schema = std::fs::read_to_string(schema_path).map_err(|e| {
-        AppError::Internal(format!("Failed to read schema file: {}", e))
-    })?;
-
-    // Split schema into individual statements and execute
-    // SQLite doesn't support multiple statements in one query
-    for statement in schema.split(';') {
-        let stmt = statement.trim();
-        if stmt.is_empty() || stmt.starts_with("--") {
-            continue;
-        }
-
-        // Skip PRAGMA statements that might conflict with connection settings
-        if stmt.to_uppercase().starts_with("PRAGMA JOURNAL_MODE")
-            || stmt.to_uppercase().starts_with("PRAGMA BUSY_TIMEOUT")
-        {
-            continue;
-        }
-
-        sqlx::query(stmt)
-            .execute(pool)
-            .await
-            .map_err(|e| {
-                // Log but don't fail on "already exists" errors
-                if e.to_string().contains("already exists") {
-                    warn!("Table/index already exists, skipping: {}", e);
-                    return e;
-                }
-                e
-            })
-            .ok(); // Continue on error (table already exists)
-    }
-
-    info!("Database schema applied successfully");
+    info!("Database migrations applied successfully");
     Ok(())
 }
 
