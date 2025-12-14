@@ -5,14 +5,15 @@
 
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
+use rust_decimal::Decimal;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// Volume entry
 #[derive(Debug, Clone)]
 pub struct VolumeEntry {
-    /// Volume in USD
-    pub volume_usd: f64,
+    /// Volume in USD (using Decimal for precision)
+    pub volume_usd: Decimal,
     /// Timestamp
     pub timestamp: DateTime<Utc>,
 }
@@ -20,7 +21,7 @@ pub struct VolumeEntry {
 /// Volume cache for token trading volumes
 pub struct VolumeCache {
     /// Volume history by token (token -> VecDeque of (timestamp, volume))
-    volume_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, f64)>>>>,
+    volume_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>>>,
 }
 
 impl VolumeCache {
@@ -32,7 +33,7 @@ impl VolumeCache {
     }
 
     /// Record volume for a token
-    pub fn record_volume(&self, token_address: &str, volume_usd: f64) {
+    pub fn record_volume(&self, token_address: &str, volume_usd: Decimal) {
         let now = Utc::now();
         let mut history = self.volume_history.write();
         let token_history = history.entry(token_address.to_string()).or_insert_with(VecDeque::new);
@@ -52,7 +53,7 @@ impl VolumeCache {
     /// Get 24h average volume for a token
     ///
     /// Returns None if insufficient data
-    pub fn get_24h_average_volume(&self, token_address: &str) -> Option<f64> {
+    pub fn get_24h_average_volume(&self, token_address: &str) -> Option<Decimal> {
         let history = self.volume_history.read();
         let token_history = history.get(token_address)?;
         
@@ -60,27 +61,28 @@ impl VolumeCache {
             return None;
         }
         
-        let total_volume: f64 = token_history.iter().map(|(_, volume)| *volume).sum();
-        let count = token_history.len() as f64;
+        let total_volume: Decimal = token_history.iter().map(|(_, volume)| *volume).sum();
+        let count = Decimal::from(token_history.len());
         
         Some(total_volume / count)
     }
 
     /// Get current volume (most recent entry)
-    pub fn get_current_volume(&self, token_address: &str) -> Option<f64> {
+    pub fn get_current_volume(&self, token_address: &str) -> Option<Decimal> {
         let history = self.volume_history.read();
         let token_history = history.get(token_address)?;
         token_history.back().map(|(_, volume)| *volume)
     }
 
     /// Check if volume dropped significantly (>50% from 24h average)
-    pub fn has_volume_drop(&self, token_address: &str, threshold_percent: f64) -> bool {
+    pub fn has_volume_drop(&self, token_address: &str, threshold_percent: Decimal) -> bool {
         if let (Some(current), Some(average)) = (
             self.get_current_volume(token_address),
             self.get_24h_average_volume(token_address),
         ) {
-            if average > 0.0 {
-                let drop_percent = ((average - current) / average) * 100.0;
+            if average > Decimal::ZERO {
+                let drop = average - current;
+                let drop_percent = (drop / average) * Decimal::from(100);
                 return drop_percent >= threshold_percent;
             }
         }

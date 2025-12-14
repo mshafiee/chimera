@@ -5,6 +5,7 @@
 use crate::error::AppError;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
+use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -15,8 +16,8 @@ use tokio::sync::RwLock;
 pub struct PoolLiquidity {
     /// Token address
     pub token_address: String,
-    /// Total liquidity in USD
-    pub liquidity_usd: f64,
+    /// Total liquidity in USD (using Decimal for precision)
+    pub liquidity_usd: Decimal,
     /// Pool addresses containing this token
     pub pool_addresses: Vec<String>,
 }
@@ -67,7 +68,7 @@ impl PoolEnumerator {
     }
 
     /// Get liquidity for a token from Raydium pools
-    pub async fn get_raydium_liquidity(&self, token_address: &str) -> Result<f64, AppError> {
+    pub async fn get_raydium_liquidity(&self, token_address: &str) -> Result<Decimal, AppError> {
         // Check cache first
         if let Some(cached) = self.get_from_cache(token_address).await {
             return Ok(cached.liquidity_usd);
@@ -92,7 +93,7 @@ impl PoolEnumerator {
         // - Parsing account data (token A, token B, reserves)
         // - Calculating liquidity from reserves * price
 
-        let liquidity = 0.0;
+        let liquidity = Decimal::ZERO;
 
         // Cache the result (even if 0.0)
         self.cache_result(token_address, liquidity, vec![]).await;
@@ -101,7 +102,7 @@ impl PoolEnumerator {
     }
 
     /// Get liquidity for a token from Orca pools
-    pub async fn get_orca_liquidity(&self, token_address: &str) -> Result<f64, AppError> {
+    pub async fn get_orca_liquidity(&self, token_address: &str) -> Result<Decimal, AppError> {
         // Check cache first
         if let Some(cached) = self.get_from_cache(token_address).await {
             return Ok(cached.liquidity_usd);
@@ -118,7 +119,7 @@ impl PoolEnumerator {
             "Querying Orca pools (simplified implementation)"
         );
 
-        let liquidity = 0.0;
+        let liquidity = Decimal::ZERO;
 
         // Cache the result
         self.cache_result(token_address, liquidity, vec![]).await;
@@ -127,9 +128,9 @@ impl PoolEnumerator {
     }
 
     /// Get liquidity from both Raydium and Orca pools
-    pub async fn get_combined_liquidity(&self, token_address: &str) -> Result<f64, AppError> {
-        let raydium_liq = self.get_raydium_liquidity(token_address).await.unwrap_or(0.0);
-        let orca_liq = self.get_orca_liquidity(token_address).await.unwrap_or(0.0);
+    pub async fn get_combined_liquidity(&self, token_address: &str) -> Result<Decimal, AppError> {
+        let raydium_liq = self.get_raydium_liquidity(token_address).await.unwrap_or(Decimal::ZERO);
+        let orca_liq = self.get_orca_liquidity(token_address).await.unwrap_or(Decimal::ZERO);
 
         Ok(raydium_liq + orca_liq)
     }
@@ -152,7 +153,7 @@ impl PoolEnumerator {
     async fn cache_result(
         &self,
         token_address: &str,
-        liquidity_usd: f64,
+        liquidity_usd: Decimal,
         pool_addresses: Vec<String>,
     ) {
         let mut cache = self.cache.write().await;
@@ -195,11 +196,11 @@ mod tests {
         let enumerator = PoolEnumerator::new(rpc_client, 10, 60);
         
         // Test caching
-        enumerator.cache_result("test_token", 1000.0, vec![]).await;
+        enumerator.cache_result("test_token", Decimal::from(1000), vec![]).await;
         
         // Should be able to retrieve from cache
         let cached = enumerator.get_from_cache("test_token").await;
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap().liquidity_usd, 1000.0);
+        assert_eq!(cached.unwrap().liquidity_usd, Decimal::from(1000));
     }
 }

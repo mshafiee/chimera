@@ -254,8 +254,8 @@ impl TokenParser {
             Strategy::Exit => Decimal::ZERO, // No liquidity check for exits
         };
 
-        // Check liquidity
-        let liquidity_usd_f64 = match self.fetcher.get_liquidity(token_address).await {
+        // Check liquidity (already returns Decimal for precision)
+        let liquidity_usd = match self.fetcher.get_liquidity(token_address).await {
             Ok(liq) => liq,
             Err(e) => {
                 tracing::warn!(
@@ -268,9 +268,6 @@ impl TokenParser {
                 ));
             }
         };
-
-        // Convert to Decimal for precise comparison
-        let liquidity_usd = Decimal::from_f64_retain(liquidity_usd_f64).unwrap_or(Decimal::ZERO);
         if liquidity_usd < min_liquidity {
                     return Ok(TokenSafetyResult {
                         safe: false,

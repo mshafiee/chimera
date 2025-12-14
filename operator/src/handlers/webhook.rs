@@ -240,11 +240,11 @@ pub async fn webhook_handler(
             // Try to get liquidity from token parser cache or metadata
             // For now, use a conservative estimate - will be checked in slow path
             match state.token_parser.fast_check(token_address, signal.payload.strategy).await {
-                Ok(result) => result.liquidity_usd.map(|d| d.to_f64().unwrap_or(0.0)).unwrap_or(0.0),
-                Err(_) => 0.0,
+                Ok(result) => result.liquidity_usd.unwrap_or(rust_decimal::Decimal::ZERO),
+                Err(_) => rust_decimal::Decimal::ZERO,
             }
         } else {
-            0.0
+            rust_decimal::Decimal::ZERO
         };
 
         // Get token age from Helius client
@@ -283,7 +283,7 @@ pub async fn webhook_handler(
                 trade_uuid = %signal.trade_uuid,
                 quality_score = quality.score,
                 wallet_wqs = wallet_wqs,
-                liquidity_usd = liquidity_usd,
+                liquidity_usd = %liquidity_usd,
                 "Signal rejected due to low quality"
             );
 
@@ -477,6 +477,6 @@ mod tests {
         assert_eq!(payload.strategy, Strategy::Shield);
         assert_eq!(payload.token, "BONK");
         assert_eq!(payload.action, Action::Buy);
-        assert_eq!(payload.amount_sol, 0.5);
+        assert_eq!(payload.amount_sol, Decimal::from_str("0.5").unwrap());
     }
 }

@@ -37,7 +37,7 @@ impl SignalQuality {
     /// # Arguments
     /// * `wallet_wqs` - Wallet Quality Score (0-100)
     /// * `is_consensus` - Whether this is a consensus signal
-    /// * `liquidity_usd` - Current liquidity in USD
+    /// * `liquidity_usd` - Current liquidity in USD (using Decimal for precision)
     /// * `token_age_hours` - Token age in hours (None if unknown)
     ///
     /// # Returns
@@ -45,9 +45,10 @@ impl SignalQuality {
     pub fn calculate(
         wallet_wqs: f64,
         is_consensus: bool,
-        liquidity_usd: f64,
+        liquidity_usd: rust_decimal::Decimal,
         token_age_hours: Option<f64>,
     ) -> Self {
+        use rust_decimal::Decimal;
         let mut score = 0.0;
 
         // 1. Wallet quality (40% weight)
@@ -62,14 +63,15 @@ impl SignalQuality {
         };
         score += consensus_score * 0.3;
 
-        // 3. Liquidity score (20% weight)
-        let liquidity_score = if liquidity_usd > 50000.0 {
+        // 3. Liquidity score (20% weight) - convert Decimal to f64 only for threshold comparison
+        let liquidity_usd_f64 = liquidity_usd.to_f64().unwrap_or(0.0);
+        let liquidity_score = if liquidity_usd > Decimal::from(50000) {
             1.0
-        } else if liquidity_usd > 20000.0 {
+        } else if liquidity_usd > Decimal::from(20000) {
             0.7
-        } else if liquidity_usd > 10000.0 {
+        } else if liquidity_usd > Decimal::from(10000) {
             0.5
-        } else if liquidity_usd > 5000.0 {
+        } else if liquidity_usd > Decimal::from(5000) {
             0.3
         } else {
             0.1

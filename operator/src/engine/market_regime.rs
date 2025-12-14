@@ -35,7 +35,7 @@ pub struct MarketRegimeDetector {
     /// Price history for trend analysis (last 24 hours)
     price_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>>,
     /// Volume history for trend analysis (weekly snapshots of total Solana DEX volume)
-    volume_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, f64)>>>,
+    volume_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, Decimal)>>>,
     /// SOL mint address
     sol_mint: String,
 }
@@ -115,7 +115,7 @@ impl MarketRegimeDetector {
     /// 
     /// # Arguments
     /// * `total_dex_volume_usd` - Total Solana DEX volume in USD for the period
-    pub fn update_volume_history(&self, total_dex_volume_usd: f64) {
+    pub fn update_volume_history(&self, total_dex_volume_usd: Decimal) {
         let mut history = self.volume_history.write();
         let now = chrono::Utc::now();
         
@@ -152,17 +152,17 @@ impl MarketRegimeDetector {
         let now = chrono::Utc::now();
         let one_week_ago = now - chrono::Duration::days(7);
         
-        let mut last_week_volume = 0.0;
+        let mut last_week_volume = Decimal::ZERO;
         let mut last_week_count = 0;
-        let mut previous_week_volume = 0.0;
+        let mut previous_week_volume = Decimal::ZERO;
         let mut previous_week_count = 0;
 
         for (timestamp, volume) in history.iter() {
             if *timestamp >= one_week_ago {
-                last_week_volume += volume;
+                last_week_volume += *volume;
                 last_week_count += 1;
             } else {
-                previous_week_volume += volume;
+                previous_week_volume += *volume;
                 previous_week_count += 1;
             }
         }
@@ -171,15 +171,15 @@ impl MarketRegimeDetector {
             return 1.0;
         }
 
-        let last_week_avg = last_week_volume / last_week_count as f64;
-        let previous_week_avg = previous_week_volume / previous_week_count as f64;
+        let last_week_avg = last_week_volume / Decimal::from(last_week_count);
+        let previous_week_avg = previous_week_volume / Decimal::from(previous_week_count);
 
-        if previous_week_avg == 0.0 {
+        if previous_week_avg == Decimal::ZERO {
             return 1.0;
         }
 
-        // Calculate week-over-week change
-        let volume_change_ratio = last_week_avg / previous_week_avg;
+        // Calculate week-over-week change (convert to f64 only for final multiplier)
+        let volume_change_ratio = (last_week_avg / previous_week_avg).to_f64().unwrap_or(1.0);
 
         // Return multiplier:
         // - If volume drops >20%, reduce position sizes by 30%

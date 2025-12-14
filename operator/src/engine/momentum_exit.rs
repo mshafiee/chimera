@@ -107,7 +107,7 @@ impl MomentumExit {
 
         // Check 2: Volume drop (>50% from 24h average)
         if let Some(ref volume_cache) = self.volume_cache {
-            if volume_cache.has_volume_drop(token_address, 50.0) {
+            if volume_cache.has_volume_drop(token_address, Decimal::from(50)) {
                 tracing::warn!(
                     trade_uuid = %trade_uuid,
                     token_address = token_address,

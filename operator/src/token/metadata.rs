@@ -221,7 +221,8 @@ impl TokenMetadataFetcher {
     /// 3. Orca pools (via RPC)
     ///
     /// Returns the total aggregated liquidity from all sources.
-    pub async fn get_liquidity(&self, token_address: &str) -> AppResult<f64> {
+    pub async fn get_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
+        use rust_decimal::Decimal;
         tracing::debug!(token = token_address, "Fetching liquidity from DEX pools");
 
         // Try Jupiter first (fastest, aggregated data)
@@ -233,18 +234,18 @@ impl TokenMetadataFetcher {
         // Try Orca pools
         let orca_liquidity = self.fetch_orca_liquidity(token_address).await.ok();
 
-        // Aggregate all sources
-        let total_liquidity = jupiter_liquidity.unwrap_or(0.0)
-            + raydium_liquidity.unwrap_or(0.0)
-            + orca_liquidity.unwrap_or(0.0);
+        // Aggregate all sources using Decimal for precision
+        let total_liquidity = jupiter_liquidity.unwrap_or(Decimal::ZERO)
+            + raydium_liquidity.unwrap_or(Decimal::ZERO)
+            + orca_liquidity.unwrap_or(Decimal::ZERO);
 
-        if total_liquidity > 0.0 {
+        if total_liquidity > Decimal::ZERO {
             tracing::debug!(
                 token = token_address,
-                total_liquidity_usd = total_liquidity,
-                jupiter = jupiter_liquidity,
-                raydium = raydium_liquidity,
-                orca = orca_liquidity,
+                total_liquidity_usd = %total_liquidity,
+                jupiter = ?jupiter_liquidity,
+                raydium = ?raydium_liquidity,
+                orca = ?orca_liquidity,
                 "Fetched liquidity from DEX pools"
             );
             Ok(total_liquidity)
@@ -252,16 +253,16 @@ impl TokenMetadataFetcher {
             // Fallback: use heuristic based on token metadata
             let metadata = self.get_metadata(token_address).await?;
             let estimated_liquidity = if metadata.supply > 1_000_000_000_000 {
-                50_000.0
+                Decimal::from(50_000)
             } else if metadata.supply > 1_000_000_000 {
-                20_000.0
+                Decimal::from(20_000)
             } else {
-                5_000.0
+                Decimal::from(5_000)
             };
 
             tracing::warn!(
                 token = token_address,
-                estimated_liquidity = estimated_liquidity,
+                estimated_liquidity = %estimated_liquidity,
                 "No liquidity found in DEX pools, using heuristic estimate"
             );
 
@@ -272,7 +273,8 @@ impl TokenMetadataFetcher {
     /// Fetch liquidity from Jupiter Price API
     ///
     /// Jupiter aggregates liquidity data from multiple DEXes.
-    async fn fetch_jupiter_liquidity(&self, token_address: &str) -> AppResult<f64> {
+    async fn fetch_jupiter_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
+        use rust_decimal::Decimal;
         let url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
 
         let response = reqwest::get(&url)
@@ -300,18 +302,18 @@ impl TokenMetadataFetcher {
         if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
             // Check for liquidity fields (may vary by API version)
             if let Some(liq) = token_data.get("liquidity").and_then(|l| l.as_f64()) {
-                return Ok(liq);
+                return Ok(Decimal::from_f64_retain(liq).unwrap_or(Decimal::ZERO));
             }
         }
 
         // If no liquidity field found, return 0 (will be aggregated with other sources)
-        Ok(0.0)
+        Ok(Decimal::ZERO)
     }
 
     /// Fetch liquidity from Raydium pools via RPC
     ///
     /// Queries Raydium pool accounts for the token and calculates total liquidity.
-    async fn fetch_raydium_liquidity(&self, token_address: &str) -> AppResult<f64> {
+    async fn fetch_raydium_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         if let Some(ref pool_enumerator) = self.pool_enumerator {
             pool_enumerator
                 .get_raydium_liquidity(token_address)
@@ -322,14 +324,14 @@ impl TokenMetadataFetcher {
                 token = token_address,
                 "Pool enumerator not available, returning 0.0 for Raydium liquidity"
             );
-            Ok(0.0)
+            Ok(Decimal::ZERO)
         }
     }
 
     /// Fetch liquidity from Orca pools via RPC
     ///
     /// Queries Orca pool accounts for the token and calculates total liquidity.
-    async fn fetch_orca_liquidity(&self, token_address: &str) -> AppResult<f64> {
+    async fn fetch_orca_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         if let Some(ref pool_enumerator) = self.pool_enumerator {
             pool_enumerator
                 .get_orca_liquidity(token_address)
@@ -340,7 +342,7 @@ impl TokenMetadataFetcher {
                 token = token_address,
                 "Pool enumerator not available, returning 0.0 for Orca liquidity"
             );
-            Ok(0.0)
+            Ok(Decimal::ZERO)
         }
     }
 
