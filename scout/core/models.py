@@ -7,6 +7,7 @@ for representing historical trades, simulation results, and validation outcomes.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import List, Optional
 
@@ -30,9 +31,9 @@ class TraderArchetype(Enum):
 class LiquidityData:
     """Snapshot of token liquidity at a point in time."""
     token_address: str
-    liquidity_usd: float
-    price_usd: float
-    volume_24h_usd: float
+    liquidity_usd: Decimal
+    price_usd: Decimal
+    volume_24h_usd: Decimal
     timestamp: datetime
     source: str = "unknown"
     # New: Token creation time for sniper checks
@@ -44,22 +45,22 @@ class WalletRecord:
     """Record of a wallet analyzed by the scout."""
     address: str
     status: str  # CANDIDATE, ACTIVE, REJECTED
-    wqs_score: float
-    roi_7d: float
-    roi_30d: float
+    wqs_score: float  # Statistical metric, float is acceptable
+    roi_7d: float  # Statistical metric, float is acceptable
+    roi_30d: float  # Statistical metric, float is acceptable
     trade_count_30d: int
-    win_rate: float
-    max_drawdown_30d: float
-    avg_trade_size_sol: float
-    avg_win_sol: Optional[float] = None
-    avg_loss_sol: Optional[float] = None
-    profit_factor: Optional[float] = None
-    realized_pnl_30d_sol: Optional[float] = None
+    win_rate: float  # Statistical metric, float is acceptable
+    max_drawdown_30d: float  # Statistical metric, float is acceptable
+    avg_trade_size_sol: Decimal
+    avg_win_sol: Optional[Decimal] = None
+    avg_loss_sol: Optional[Decimal] = None
+    profit_factor: Optional[float] = None  # Statistical metric, float is acceptable
+    realized_pnl_30d_sol: Optional[Decimal] = None
     last_trade_at: Optional[str] = None
     notes: Optional[str] = None
     created_at: str = datetime.utcnow().isoformat()
     # New fields for detailed records
-    avg_entry_delay_seconds: Optional[float] = None
+    avg_entry_delay_seconds: Optional[float] = None  # Time metric, float is acceptable
     archetype: Optional[str] = None  # TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
 
 
@@ -85,20 +86,20 @@ class HistoricalTrade:
     token_address: str
     token_symbol: str
     action: TradeAction
-    amount_sol: float
-    price_at_trade: float
+    amount_sol: Decimal
+    price_at_trade: Decimal
     timestamp: datetime
     tx_signature: str
     
     # Optional fields that may be populated from historical data
-    liquidity_at_trade_usd: Optional[float] = None
-    pnl_sol: Optional[float] = None  # Actual PnL if this was a closing trade
+    liquidity_at_trade_usd: Optional[Decimal] = None
+    pnl_sol: Optional[Decimal] = None  # Actual PnL if this was a closing trade
 
     # Additional optional fields for robust swap parsing / PnL derivation
-    token_amount: Optional[float] = None  # Token units bought/sold (UI units)
-    sol_amount: Optional[float] = None  # SOL spent/received for this swap (positive)
-    price_sol: Optional[float] = None  # SOL per token at execution time
-    price_usd: Optional[float] = None  # USD per token at execution time (if available)
+    token_amount: Optional[Decimal] = None  # Token units bought/sold (UI units)
+    sol_amount: Optional[Decimal] = None  # SOL spent/received for this swap (positive)
+    price_sol: Optional[Decimal] = None  # SOL per token at execution time
+    price_usd: Optional[Decimal] = None  # USD per token at execution time (if available)
     
     def __post_init__(self):
         """Convert string action to enum if needed."""
@@ -111,9 +112,9 @@ class LiquidityCheck:
     """Result of a liquidity check for a specific trade."""
     token_address: str
     token_symbol: str
-    historical_liquidity_usd: Optional[float]
-    current_liquidity_usd: Optional[float]
-    required_liquidity_usd: float
+    historical_liquidity_usd: Optional[Decimal]
+    current_liquidity_usd: Optional[Decimal]
+    required_liquidity_usd: Decimal
     passed: bool
     reason: Optional[str] = None
 
@@ -122,10 +123,10 @@ class LiquidityCheck:
 class SlippageEstimate:
     """Estimated slippage for a trade."""
     token_address: str
-    trade_size_sol: float
-    liquidity_usd: float
-    estimated_slippage_percent: float
-    slippage_cost_sol: float
+    trade_size_sol: Decimal
+    liquidity_usd: Decimal
+    estimated_slippage_percent: Decimal  # Percentage as Decimal for precision
+    slippage_cost_sol: Decimal
     acceptable: bool  # True if within max_slippage threshold
 
 
@@ -140,18 +141,18 @@ class SimulatedTrade:
     original_trade: HistoricalTrade
     
     # Liquidity analysis
-    current_liquidity_usd: float
+    current_liquidity_usd: Decimal
     liquidity_sufficient: bool
     
     # Slippage analysis
-    estimated_slippage_percent: float
-    slippage_cost_sol: float
+    estimated_slippage_percent: Decimal  # Percentage as Decimal for precision
+    slippage_cost_sol: Decimal
     
     # Fee analysis
-    fee_cost_sol: float
+    fee_cost_sol: Decimal
     
     # Final outcome
-    simulated_pnl_sol: float
+    simulated_pnl_sol: Decimal
     rejected: bool
     rejection_reason: Optional[str] = None
 
@@ -172,13 +173,13 @@ class SimulatedResult:
     rejected_trades: int
     
     # PnL analysis
-    original_pnl_sol: float
-    simulated_pnl_sol: float
-    pnl_difference_sol: float
+    original_pnl_sol: Decimal
+    simulated_pnl_sol: Decimal
+    pnl_difference_sol: Decimal
     
     # Cost breakdown
-    total_slippage_cost_sol: float
-    total_fee_cost_sol: float
+    total_slippage_cost_sol: Decimal
+    total_fee_cost_sol: Decimal
     
     # Rejected trade details
     rejected_trade_details: List[str] = field(default_factory=list)
@@ -190,9 +191,11 @@ class SimulatedResult:
     @property
     def pnl_reduction_percent(self) -> float:
         """Calculate percentage reduction in PnL due to simulation."""
-        if self.original_pnl_sol <= 0:
+        if self.original_pnl_sol <= Decimal('0'):
             return 0.0
-        return ((self.original_pnl_sol - self.simulated_pnl_sol) / self.original_pnl_sol) * 100
+        original = float(self.original_pnl_sol)
+        simulated = float(self.simulated_pnl_sol)
+        return ((original - simulated) / original) * 100
 
 
 @dataclass
@@ -226,22 +229,22 @@ class BacktestConfig:
     """Configuration for backtesting simulation."""
     
     # Liquidity thresholds (USD)
-    min_liquidity_shield_usd: float = 10000.0
-    min_liquidity_spear_usd: float = 5000.0
+    min_liquidity_shield_usd: Decimal = field(default_factory=lambda: Decimal('10000.0'))
+    min_liquidity_spear_usd: Decimal = field(default_factory=lambda: Decimal('5000.0'))
     
     # Fee configuration
-    dex_fee_percent: float = 0.003  # 0.3% typical DEX fee
+    dex_fee_percent: Decimal = field(default_factory=lambda: Decimal('0.003'))  # 0.3% typical DEX fee
 
     # Execution costs (SOL-denominated, per swap) to better match Operator reality.
     #
     # These are intentionally simple knobs; if you want a more accurate model,
     # wire in tip estimation (percentile) + RPC/compute-budget fee estimation.
     # Realistic execution costs for backtesting (critical for hype tokens)
-    priority_fee_sol_per_trade: float = 0.0005
-    jito_tip_sol_per_trade: float = 0.0005
+    priority_fee_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0005'))
+    jito_tip_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0005'))
     
     # Slippage configuration
-    max_slippage_percent: float = 0.05  # 5% max acceptable slippage
+    max_slippage_percent: Decimal = field(default_factory=lambda: Decimal('0.05'))  # 5% max acceptable slippage
     
     # Lookback period
     lookback_days: int = 30
@@ -250,8 +253,8 @@ class BacktestConfig:
     min_trades_required: int = 5
     
     # Strategy-specific settings
-    shield_multiplier: float = 1.0  # Conservative multiplier for Shield
-    spear_multiplier: float = 1.5  # More aggressive for Spear
+    shield_multiplier: Decimal = field(default_factory=lambda: Decimal('1.0'))  # Conservative multiplier for Shield
+    spear_multiplier: Decimal = field(default_factory=lambda: Decimal('1.5'))  # More aggressive for Spear
 
     # Copy-viability gate (PDD):
     # If enabled, reject wallets whose traded tokens no longer meet current liquidity
@@ -261,7 +264,7 @@ class BacktestConfig:
     # network calls in offline environments. Enable in production Scout runs.
     enforce_current_liquidity: bool = False
     
-    def get_min_liquidity(self, strategy: str) -> float:
+    def get_min_liquidity(self, strategy: str) -> Decimal:
         """Get minimum liquidity for a strategy type."""
         if strategy.upper() == "SHIELD":
             return self.min_liquidity_shield_usd
@@ -278,11 +281,11 @@ if __name__ == "__main__":
         token_address="DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
         token_symbol="BONK",
         action=TradeAction.BUY,
-        amount_sol=0.5,
-        price_at_trade=0.000012,
+        amount_sol=Decimal('0.5'),
+        price_at_trade=Decimal('0.000012'),
         timestamp=datetime.utcnow(),
         tx_signature="5xyzABC123...",
-        liquidity_at_trade_usd=150000.0,
+        liquidity_at_trade_usd=Decimal('150000.0'),
     )
     
     print(f"Trade: {trade.action.value} {trade.amount_sol} SOL of {trade.token_symbol}")

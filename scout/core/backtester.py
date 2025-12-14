@@ -18,6 +18,7 @@ A wallet FAILS backtest if:
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 import logging
 
@@ -30,6 +31,7 @@ from .models import (
     LiquidityData,
 )
 from .liquidity import LiquidityProvider
+from .decimal_utils import float_to_decimal, decimal_to_float, safe_decimal_divide
 
 
 logger = logging.getLogger(__name__)
@@ -109,28 +111,29 @@ class BacktestSimulator:
                 f"Insufficient trades: {len(sorted_trades)} < {self.config.min_trades_required}"
             )
         
-        # Get minimum liquidity threshold for strategy
-        min_liquidity = self.config.get_min_liquidity(strategy)
-        sol_price = self.liquidity.get_sol_price_usd()
+        # Get minimum liquidity threshold for strategy (convert to Decimal)
+        min_liquidity_decimal = self.config.get_min_liquidity(strategy)
+        sol_price_float = self.liquidity.get_sol_price_usd()
+        sol_price = float_to_decimal(sol_price_float)
         
-        # Round-trip position tracking: {token_address: {"qty": float, "cost_basis_sol": float}}
-        positions: Dict[str, Dict[str, float]] = {}
+        # Round-trip position tracking: {token_address: {"qty": Decimal, "cost_basis_sol": Decimal}}
+        positions: Dict[str, Dict[str, Decimal]] = {}
         
         # Track results
         simulated_trades: List[SimulatedTrade] = []
         rejected_details: List[str] = []
         
-        # Track original realized PnL (only from SELL trades with pnl_sol)
-        total_original_realized_pnl = 0.0
+        # Track original realized PnL (only from SELL trades with pnl_sol) - using Decimal
+        total_original_realized_pnl = Decimal('0')
         # Track simulated realized PnL (only from SELL trades)
-        total_simulated_realized_pnl = 0.0
-        total_slippage = 0.0
-        total_fees = 0.0
+        total_simulated_realized_pnl = Decimal('0')
+        total_slippage = Decimal('0')
+        total_fees = Decimal('0')
         rejected_count = 0
         
         for trade in sorted_trades:
             sim_trade, rejection_reason = self._simulate_trade_roundtrip(
-                trade, min_liquidity, sol_price, positions
+                trade, min_liquidity_decimal, sol_price, positions
             )
             simulated_trades.append(sim_trade)
             
@@ -181,16 +184,19 @@ class BacktestSimulator:
             failure_reason = f"Too many trades rejected: {rejection_rate*100:.0f}%"
         
         # Fail if simulated realized PnL is negative
-        elif passed and total_simulated_realized_pnl < 0:
+        elif passed and total_simulated_realized_pnl < Decimal('0'):
             passed = False
-            failure_reason = f"Negative simulated realized PnL: {total_simulated_realized_pnl:.4f} SOL"
+            failure_reason = f"Negative simulated realized PnL: {decimal_to_float(total_simulated_realized_pnl):.4f} SOL"
         
         # Fail if PnL reduction is too high (>80% reduction) - only if original was positive
-        elif passed and total_original_realized_pnl > 0:
-            pnl_reduction = (total_original_realized_pnl - total_simulated_realized_pnl) / total_original_realized_pnl
-            if pnl_reduction > 0.8:
+        elif passed and total_original_realized_pnl > Decimal('0'):
+            pnl_reduction = safe_decimal_divide(
+                total_original_realized_pnl - total_simulated_realized_pnl,
+                total_original_realized_pnl
+            )
+            if pnl_reduction > Decimal('0.8'):
                 passed = False
-                failure_reason = f"PnL reduction too high: {pnl_reduction*100:.0f}%"
+                failure_reason = f"PnL reduction too high: {decimal_to_float(pnl_reduction * Decimal('100')):.0f}%"
         
         # Warn about survivorship bias if significant portion of trades used low-confidence liquidity
         if low_confidence_trades_count > 0:
@@ -217,8 +223,8 @@ class BacktestSimulator:
             total_trades=len(sorted_trades),
             simulated_trades=len(sorted_trades) - rejected_count,
             rejected_trades=rejected_count,
-            original_pnl_sol=total_original_realized_pnl,  # Only realized PnL
-            simulated_pnl_sol=total_simulated_realized_pnl,  # Only realized PnL
+            original_pnl_sol=total_original_realized_pnl,  # Only realized PnL (Decimal)
+            simulated_pnl_sol=total_simulated_realized_pnl,  # Only realized PnL (Decimal)
             pnl_difference_sol=total_original_realized_pnl - total_simulated_realized_pnl,
             total_slippage_cost_sol=total_slippage,
             total_fee_cost_sol=total_fees,
@@ -230,9 +236,9 @@ class BacktestSimulator:
     def _simulate_trade_roundtrip(
         self,
         trade: HistoricalTrade,
-        min_liquidity: float,
-        sol_price: float,
-        positions: Dict[str, Dict[str, float]],
+        min_liquidity: Decimal,
+        sol_price: Decimal,
+        positions: Dict[str, Dict[str, Decimal]],
     ) -> Tuple[SimulatedTrade, Optional[str]]:
         """
         Simulate a single trade using round-trip cashflow model.
@@ -278,12 +284,12 @@ class BacktestSimulator:
         if not liquidity_data:
             return SimulatedTrade(
                 original_trade=trade,
-                current_liquidity_usd=0,
+                current_liquidity_usd=Decimal('0'),
                 liquidity_sufficient=False,
-                estimated_slippage_percent=1.0,
+                estimated_slippage_percent=Decimal('1.0'),
                 slippage_cost_sol=trade.amount_sol,
-                fee_cost_sol=0,
-                simulated_pnl_sol=0,
+                fee_cost_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
                 rejected=True,
                 rejection_reason="Could not fetch liquidity data",
             ), "Could not fetch liquidity data"
@@ -296,7 +302,7 @@ class BacktestSimulator:
         # In simulated mode, `get_current_liquidity()` is intentionally non-deterministic.
         # We therefore enforce the "current liquidity" gate only when the provider is
         # running in real mode (i.e., backed by real data sources).
-        historical_liquidity = float(liquidity_data.liquidity_usd or 0.0)
+        historical_liquidity = liquidity_data.liquidity_usd or Decimal('0')
 
         # Check historical liquidity requirement (at-trade)
         if historical_liquidity < min_liquidity:
@@ -304,13 +310,13 @@ class BacktestSimulator:
                 original_trade=trade,
                 current_liquidity_usd=historical_liquidity,
                 liquidity_sufficient=False,
-                estimated_slippage_percent=1.0,
+                estimated_slippage_percent=Decimal('1.0'),
                 slippage_cost_sol=trade.amount_sol,
-                fee_cost_sol=0,
-                simulated_pnl_sol=0,
+                fee_cost_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
                 rejected=True,
-                rejection_reason=f"Historical liquidity ${historical_liquidity:,.0f} < ${min_liquidity:,.0f}",
-            ), f"Insufficient historical liquidity: ${historical_liquidity:,.0f}"
+                rejection_reason=f"Historical liquidity ${decimal_to_float(historical_liquidity):,.0f} < ${decimal_to_float(min_liquidity):,.0f}",
+            ), f"Insufficient historical liquidity: ${decimal_to_float(historical_liquidity):,.0f}"
 
         # Check current liquidity requirement (copyable now) - only when explicitly enabled.
         if (
@@ -323,52 +329,54 @@ class BacktestSimulator:
                     original_trade=trade,
                     current_liquidity_usd=historical_liquidity,
                     liquidity_sufficient=False,
-                    estimated_slippage_percent=1.0,
+                    estimated_slippage_percent=Decimal('1.0'),
                     slippage_cost_sol=trade.amount_sol,
-                    fee_cost_sol=0,
-                    simulated_pnl_sol=0,
+                    fee_cost_sol=Decimal('0'),
+                    simulated_pnl_sol=Decimal('0'),
                     rejected=True,
                     rejection_reason="Could not fetch current liquidity",
                 ), "Could not fetch current liquidity"
 
-            current_liquidity_now = float(current_liq_data.liquidity_usd or 0.0)
+            current_liquidity_now = current_liq_data.liquidity_usd or Decimal('0')
             if current_liquidity_now < min_liquidity:
                 return SimulatedTrade(
                     original_trade=trade,
                     current_liquidity_usd=historical_liquidity,
                     liquidity_sufficient=False,
-                    estimated_slippage_percent=1.0,
+                    estimated_slippage_percent=Decimal('1.0'),
                     slippage_cost_sol=trade.amount_sol,
-                    fee_cost_sol=0,
-                    simulated_pnl_sol=0,
+                    fee_cost_sol=Decimal('0'),
+                    simulated_pnl_sol=Decimal('0'),
                     rejected=True,
-                    rejection_reason=f"Current liquidity ${current_liquidity_now:,.0f} < ${min_liquidity:,.0f}",
-                ), f"Insufficient current liquidity: ${current_liquidity_now:,.0f}"
+                    rejection_reason=f"Current liquidity ${decimal_to_float(current_liquidity_now):,.0f} < ${decimal_to_float(min_liquidity):,.0f}",
+                ), f"Insufficient current liquidity: ${decimal_to_float(current_liquidity_now):,.0f}"
         
         # Get trade size in SOL (use sol_amount if available, fallback to amount_sol)
         trade_size_sol = trade.sol_amount if trade.sol_amount is not None else trade.amount_sol
-        if trade_size_sol <= 0:
+        if trade_size_sol <= Decimal('0'):
             return SimulatedTrade(
                 original_trade=trade,
-                current_liquidity_usd=current_liquidity,
+                current_liquidity_usd=historical_liquidity,
                 liquidity_sufficient=True,
-                estimated_slippage_percent=0,
-                slippage_cost_sol=0,
-                fee_cost_sol=0,
-                simulated_pnl_sol=0,
+                estimated_slippage_percent=Decimal('0'),
+                slippage_cost_sol=Decimal('0'),
+                fee_cost_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
                 rejected=True,
                 rejection_reason="Invalid trade size",
             ), "Invalid trade size"
         
         # Estimate slippage using historical liquidity (trade-time conditions).
-        vol_24h = getattr(liquidity_data, 'volume_24h_usd', 0.0)
-        slippage = self.liquidity.estimate_slippage(
+        # Convert to float for estimate_slippage (it may still use float internally)
+        vol_24h = getattr(liquidity_data, 'volume_24h_usd', Decimal('0'))
+        slippage_float = self.liquidity.estimate_slippage(
             trade.token_address,
-            trade_size_sol,
-            historical_liquidity,
-            sol_price,
-            volume_24h_usd=vol_24h,
+            decimal_to_float(trade_size_sol),
+            decimal_to_float(historical_liquidity),
+            decimal_to_float(sol_price),
+            volume_24h_usd=decimal_to_float(vol_24h),
         )
+        slippage = float_to_decimal(slippage_float)
         
         # Check if slippage is acceptable
         if slippage > self.config.max_slippage_percent:
@@ -378,55 +386,55 @@ class BacktestSimulator:
                 liquidity_sufficient=True,
                 estimated_slippage_percent=slippage,
                 slippage_cost_sol=trade_size_sol * slippage,
-                fee_cost_sol=0,
-                simulated_pnl_sol=0,
+                fee_cost_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
                 rejected=True,
-                rejection_reason=f"Slippage {slippage*100:.1f}% > {self.config.max_slippage_percent*100:.1f}%",
-            ), f"Excessive slippage: {slippage*100:.1f}%"
+                rejection_reason=f"Slippage {decimal_to_float(slippage * Decimal('100')):.1f}% > {decimal_to_float(self.config.max_slippage_percent * Decimal('100')):.1f}%",
+            ), f"Excessive slippage: {decimal_to_float(slippage * Decimal('100')):.1f}%"
         
-        # Calculate costs per trade
+        # Calculate costs per trade using Decimal
         slippage_cost = trade_size_sol * slippage
         fee_cost = trade_size_sol * self.config.dex_fee_percent
-        priority_fee_cost = max(0.0, self.config.priority_fee_sol_per_trade)
-        jito_tip_cost = max(0.0, self.config.jito_tip_sol_per_trade)
+        priority_fee_cost = max(Decimal('0'), self.config.priority_fee_sol_per_trade)
+        jito_tip_cost = max(Decimal('0'), self.config.jito_tip_sol_per_trade)
         execution_cost = priority_fee_cost + jito_tip_cost
         total_cost = slippage_cost + fee_cost + execution_cost
         
-        # Round-trip position tracking
+        # Round-trip position tracking using Decimal
         token = trade.token_address
-        position = positions.setdefault(token, {"qty": 0.0, "cost_basis_sol": 0.0})
+        position = positions.setdefault(token, {"qty": Decimal('0'), "cost_basis_sol": Decimal('0')})
         
-        simulated_pnl = 0.0
+        simulated_pnl = Decimal('0')
         
         if trade.action == TradeAction.BUY:
             # BUY: apply costs, increase position
             net_sol_spent = trade_size_sol + total_cost
-            token_qty = trade.token_amount if trade.token_amount is not None else 0.0
+            token_qty = trade.token_amount if trade.token_amount is not None else Decimal('0')
             
             # If token_amount not available, estimate from price
-            if token_qty <= 0 and trade.price_sol and trade.price_sol > 0:
-                token_qty = trade_size_sol / trade.price_sol
+            if token_qty <= Decimal('0') and trade.price_sol and trade.price_sol > Decimal('0'):
+                token_qty = safe_decimal_divide(trade_size_sol, trade.price_sol)
             
-            if token_qty > 0:
+            if token_qty > Decimal('0'):
                 position["qty"] += token_qty
                 position["cost_basis_sol"] += net_sol_spent
                 # No realized PnL on BUY
-                simulated_pnl = 0.0
+                simulated_pnl = Decimal('0')
             else:
                 # Can't track position without token quantity
                 logger.warning(f"BUY trade missing token_amount for {token[:8]}...")
-                simulated_pnl = 0.0
+                simulated_pnl = Decimal('0')
         
         elif trade.action == TradeAction.SELL:
             # SELL: compute proceeds, realize PnL, reduce position
             net_sol_received = trade_size_sol - total_cost  # Costs reduce proceeds
-            token_qty = trade.token_amount if trade.token_amount is not None else 0.0
+            token_qty = trade.token_amount if trade.token_amount is not None else Decimal('0')
             
             # If token_amount not available, estimate from price
-            if token_qty <= 0 and trade.price_sol and trade.price_sol > 0:
-                token_qty = trade_size_sol / trade.price_sol
+            if token_qty <= Decimal('0') and trade.price_sol and trade.price_sol > Decimal('0'):
+                token_qty = safe_decimal_divide(trade_size_sol, trade.price_sol)
             
-            if token_qty <= 0:
+            if token_qty <= Decimal('0'):
                 return SimulatedTrade(
                     original_trade=trade,
                     current_liquidity_usd=historical_liquidity,
@@ -434,19 +442,19 @@ class BacktestSimulator:
                     estimated_slippage_percent=slippage,
                     slippage_cost_sol=slippage_cost,
                     fee_cost_sol=fee_cost + execution_cost,
-                    simulated_pnl_sol=0,
+                    simulated_pnl_sol=Decimal('0'),
                     rejected=True,
                     rejection_reason="Missing token quantity for SELL",
                 ), "Missing token quantity for SELL"
             
-            if position["qty"] <= 0:
+            if position["qty"] <= Decimal('0'):
                 # Can't sell what we don't have - this is a data issue
                 logger.warning(f"SELL trade without position for {token[:8]}...")
-                simulated_pnl = 0.0
+                simulated_pnl = Decimal('0')
             else:
                 # Calculate realized PnL
                 sell_qty = min(token_qty, position["qty"])
-                avg_cost_per_token = position["cost_basis_sol"] / position["qty"] if position["qty"] > 0 else 0.0
+                avg_cost_per_token = safe_decimal_divide(position["cost_basis_sol"], position["qty"])
                 allocated_cost_basis = avg_cost_per_token * sell_qty
                 
                 # Realized PnL = proceeds - allocated cost basis
@@ -455,7 +463,7 @@ class BacktestSimulator:
                 # Reduce position
                 position["qty"] -= sell_qty
                 position["cost_basis_sol"] -= allocated_cost_basis
-                if position["qty"] <= 1e-12:
+                if position["qty"] <= Decimal('0.000000000001'):  # Use Decimal comparison instead of 1e-12
                     positions.pop(token, None)
         
         return SimulatedTrade(
@@ -482,8 +490,11 @@ class BacktestSimulator:
         For new code, use _simulate_trade_roundtrip instead.
         This method uses a simple per-trade model without position tracking.
         """
+        # Convert float parameters to Decimal for internal use
+        min_liquidity_decimal = float_to_decimal(min_liquidity)
+        sol_price_decimal = float_to_decimal(sol_price)
         # Use empty positions dict for legacy behavior (no position tracking)
-        return self._simulate_trade_roundtrip(trade, min_liquidity, sol_price, {})
+        return self._simulate_trade_roundtrip(trade, min_liquidity_decimal, sol_price_decimal, {})
     
 
 
