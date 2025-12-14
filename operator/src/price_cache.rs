@@ -10,6 +10,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
+use rust_decimal::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use tokio::time::interval;
@@ -329,6 +330,7 @@ impl PriceCache {
     }
 
     /// Calculate unrealized PnL for a position
+    /// Uses Decimal for precision to avoid floating point errors
     pub fn calculate_unrealized_pnl(
         &self,
         token_address: &str,
@@ -337,9 +339,22 @@ impl PriceCache {
     ) -> Option<UnrealizedPnL> {
         let current_price = self.get_price_usd(token_address)?;
 
-        let pnl_usd = (current_price - entry_price) * position_size;
-        let pnl_percent = if entry_price > 0.0 {
-            ((current_price - entry_price) / entry_price) * 100.0
+        // Use Decimal for precise calculations
+        let current_price_dec = Decimal::from_f64_retain(current_price).unwrap_or(Decimal::ZERO);
+        let entry_price_dec = Decimal::from_f64_retain(entry_price).unwrap_or(Decimal::ZERO);
+        let position_size_dec = Decimal::from_f64_retain(position_size).unwrap_or(Decimal::ZERO);
+
+        let pnl_usd = if !entry_price_dec.is_zero() {
+            let price_diff = current_price_dec - entry_price_dec;
+            (price_diff * position_size_dec).to_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
+        let pnl_percent = if !entry_price_dec.is_zero() {
+            let price_diff = current_price_dec - entry_price_dec;
+            let ratio = price_diff / entry_price_dec;
+            (ratio * Decimal::from(100)).to_f64().unwrap_or(0.0)
         } else {
             0.0
         };

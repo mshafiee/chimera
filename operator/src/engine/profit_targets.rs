@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
+use rust_decimal::prelude::*;
 use crate::config::ProfitManagementConfig;
 use crate::db::DbPool;
 use crate::price_cache::PriceCache;
@@ -169,8 +170,19 @@ impl ProfitTargetManager {
             state.peak_price = current_price;
         }
 
-        // Calculate current profit
-        let profit_percent = ((current_price - state.entry_price) / state.entry_price) * 100.0;
+        // Calculate current profit using Decimal for precision
+        // Convert f64 to Decimal safely
+        let current_price_dec = Decimal::from_f64_retain(current_price).unwrap_or(Decimal::ZERO);
+        let entry_price_dec = Decimal::from_f64_retain(state.entry_price).unwrap_or(Decimal::ZERO);
+        
+        let profit_percent = if !entry_price_dec.is_zero() {
+            let diff = current_price_dec - entry_price_dec;
+            let ratio = diff / entry_price_dec;
+            (ratio * Decimal::from(100)).to_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
+
         state.peak_profit_percent = profit_percent.max(state.peak_profit_percent);
 
         // Get profit targets (dynamic based on market regime if available)
