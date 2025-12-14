@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
 /// Trading strategy types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,7 +73,7 @@ pub struct SignalPayload {
     /// Trade action
     pub action: Action,
     /// Amount in SOL
-    pub amount_sol: f64,
+    pub amount_sol: Decimal,
     /// Wallet address being copied
     pub wallet_address: String,
     /// Optional trade UUID from signal provider
@@ -92,7 +94,9 @@ impl SignalPayload {
         hasher.update(timestamp.to_be_bytes());
         hasher.update(self.token.as_bytes());
         hasher.update(self.action.to_string().as_bytes());
-        hasher.update(self.amount_sol.to_be_bytes());
+        // Convert Decimal to bytes for hashing (use to_string to ensure consistent representation)
+        let amount_str = self.amount_sol.to_string();
+        hasher.update(amount_str.as_bytes());
         hasher.update(self.wallet_address.as_bytes());
 
         let result = hasher.finalize();
@@ -112,11 +116,11 @@ impl SignalPayload {
         }
 
         // Check amount is positive and reasonable
-        if self.amount_sol <= 0.0 {
+        if self.amount_sol <= Decimal::ZERO {
             return Err("Amount must be positive".to_string());
         }
 
-        if self.amount_sol > 100.0 {
+        if self.amount_sol > Decimal::from(100) {
             return Err("Amount exceeds maximum (100 SOL)".to_string());
         }
 
@@ -180,7 +184,7 @@ mod tests {
             token: "BONK".to_string(),
             token_address: None,
             action: Action::Buy,
-            amount_sol: 0.5,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
         };
@@ -195,7 +199,7 @@ mod tests {
             token: "BONK".to_string(),
             token_address: None,
             action: Action::Buy,
-            amount_sol: 0.5,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
         };
@@ -218,7 +222,7 @@ mod tests {
             token: "BONK".to_string(),
             token_address: None,
             action: Action::Buy,
-            amount_sol: 0.5,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: Some("custom-uuid-123".to_string()),
         };

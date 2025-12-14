@@ -106,7 +106,7 @@ pub async fn insert_trade(
     token_symbol: Option<&str>,
     strategy: &str,
     side: &str,
-    amount_sol: f64,
+    amount_sol: Decimal,
     status: &str,
 ) -> AppResult<i64> {
     let result = sqlx::query(
@@ -123,7 +123,7 @@ pub async fn insert_trade(
     .bind(token_symbol)
     .bind(strategy)
     .bind(side)
-    .bind(amount_sol)
+    .bind(amount_sol.to_f64().unwrap_or(0.0))
     .bind(status)
     .execute(pool)
     .await?;
@@ -160,9 +160,9 @@ pub async fn update_trade_status(
 pub async fn update_trade_costs(
     pool: &DbPool,
     trade_uuid: &str,
-    jito_tip_sol: f64,
-    dex_fee_sol: f64,
-    slippage_cost_sol: f64,
+    jito_tip_sol: Decimal,
+    dex_fee_sol: Decimal,
+    slippage_cost_sol: Decimal,
 ) -> AppResult<()> {
     let total_cost_sol = jito_tip_sol + dex_fee_sol + slippage_cost_sol;
     
@@ -173,10 +173,10 @@ pub async fn update_trade_costs(
         WHERE trade_uuid = ?
         "#,
     )
-    .bind(jito_tip_sol)
-    .bind(dex_fee_sol)
-    .bind(slippage_cost_sol)
-    .bind(total_cost_sol)
+    .bind(jito_tip_sol.to_f64().unwrap_or(0.0))
+    .bind(dex_fee_sol.to_f64().unwrap_or(0.0))
+    .bind(slippage_cost_sol.to_f64().unwrap_or(0.0))
+    .bind(total_cost_sol.to_f64().unwrap_or(0.0))
     .bind(trade_uuid)
     .execute(pool)
     .await?;
@@ -188,7 +188,7 @@ pub async fn update_trade_costs(
 pub async fn update_trade_net_pnl(
     pool: &DbPool,
     trade_uuid: &str,
-    net_pnl_sol: f64,
+    net_pnl_sol: Decimal,
 ) -> AppResult<()> {
     sqlx::query(
         r#"
@@ -197,7 +197,7 @@ pub async fn update_trade_net_pnl(
         WHERE trade_uuid = ?
         "#,
     )
-    .bind(net_pnl_sol)
+    .bind(net_pnl_sol.to_f64().unwrap_or(0.0))
     .bind(trade_uuid)
     .execute(pool)
     .await?;
@@ -603,7 +603,7 @@ pub async fn open_position(
     token_address: &str,
     token_symbol: Option<&str>,
     strategy: &str,
-    amount_sol: f64,
+    amount_sol: Decimal,
     entry_price: f64,
     signature: &str,
 ) -> AppResult<i64> {
@@ -621,7 +621,7 @@ pub async fn open_position(
     .bind(token_address)
     .bind(token_symbol)
     .bind(strategy)
-    .bind(amount_sol)
+    .bind(amount_sol.to_f64().unwrap_or(0.0))
     .bind(entry_price)
     .bind(signature)
     .execute(pool)

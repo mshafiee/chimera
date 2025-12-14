@@ -3,6 +3,7 @@
 use super::{Action, Signal, Strategy};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use rust_decimal::Decimal;
 
 /// Trade status representing the state machine
 ///
@@ -132,7 +133,7 @@ pub struct Trade {
     /// Trade action
     pub side: Action,
     /// Amount in SOL
-    pub amount_sol: f64,
+    pub amount_sol: Decimal,
     /// Current status
     pub status: TradeStatus,
     /// Number of retry attempts
@@ -142,19 +143,19 @@ pub struct Trade {
     /// Error message (if failed)
     pub error_message: Option<String>,
     /// Realized PnL in SOL
-    pub pnl_sol: Option<f64>,
+    pub pnl_sol: Option<Decimal>,
     /// Realized PnL in USD
-    pub pnl_usd: Option<f64>,
+    pub pnl_usd: Option<Decimal>,
     /// Jito tip paid (in SOL)
-    pub jito_tip_sol: Option<f64>,
+    pub jito_tip_sol: Option<Decimal>,
     /// DEX fee paid (in SOL)
-    pub dex_fee_sol: Option<f64>,
+    pub dex_fee_sol: Option<Decimal>,
     /// Slippage cost (in SOL)
-    pub slippage_cost_sol: Option<f64>,
+    pub slippage_cost_sol: Option<Decimal>,
     /// Total cost (Jito tip + DEX fee + slippage) in SOL
-    pub total_cost_sol: Option<f64>,
+    pub total_cost_sol: Option<Decimal>,
     /// Net PnL after all costs (in SOL)
-    pub net_pnl_sol: Option<f64>,
+    pub net_pnl_sol: Option<Decimal>,
     /// Creation timestamp
     pub created_at: DateTime<Utc>,
     /// Last update timestamp

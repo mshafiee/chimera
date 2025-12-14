@@ -79,7 +79,7 @@ zeroize = { version = "1.7", features = ["derive"] }
 secrecy = { version = "0.8", features = ["serde"] }
 
 # Math
-rust_decimal = "1.33"
+rust_decimal = { version = "1.33", features = ["serde"] }
 
 [dev-dependencies]
 # Testing utilities

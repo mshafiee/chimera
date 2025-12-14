@@ -17,6 +17,7 @@ use crate::middleware::TIMESTAMP_HEADER;
 use crate::models::{Signal, SignalPayload, Strategy};
 use crate::monitoring::{HeliusClient, SignalAggregator};
 use crate::token::TokenParser;
+use rust_decimal::prelude::*;
 
 /// Webhook request - already validated by HMAC middleware
 /// Body is the SignalPayload
@@ -212,7 +213,7 @@ pub async fn webhook_handler(
                         &signal.payload.wallet_address,
                         token_address,
                         "BUY",
-                        signal.payload.amount_sol,
+                        signal.payload.amount_sol.to_f64().unwrap_or(0.0),
                     )
                     .await
                 {
@@ -317,11 +318,11 @@ pub async fn webhook_handler(
 
     // Check portfolio heat (if enabled)
     if let Some(ref portfolio_heat) = state.portfolio_heat {
-        match portfolio_heat.can_open_position(signal.payload.amount_sol).await {
+        match portfolio_heat.can_open_position(signal.payload.amount_sol.to_f64().unwrap_or(0.0)).await {
             Ok(false) => {
                 tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
-                    amount_sol = signal.payload.amount_sol,
+                    amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
                     "Signal rejected: portfolio heat limit reached"
                 );
 
@@ -376,8 +377,9 @@ pub async fn webhook_handler(
         trade_uuid = %signal.trade_uuid,
         strategy = %signal.payload.strategy,
         token = %signal.payload.token,
+        amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
         action = %signal.payload.action,
-        amount_sol = signal.payload.amount_sol,
+        amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
         "Signal received and validated"
     );
 

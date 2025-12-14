@@ -12,6 +12,7 @@ use crate::price_cache::PriceCache;
 use crate::engine::volume_cache::VolumeCache;
 use std::sync::Arc;
 use std::time::SystemTime;
+use rust_decimal::prelude::*;
 
 /// Momentum exit action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,24 +73,32 @@ impl MomentumExit {
         &self,
         trade_uuid: &str,
         token_address: &str,
-        entry_price: f64,
+        entry_price: Decimal,
         entry_time: SystemTime,
     ) -> MomentumExitAction {
         // Get current price
         let current_price = match self.price_cache.get_price_usd(token_address) {
-            Some(price) => price,
+            Some(price) => Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
             None => return MomentumExitAction::None, // No price data, skip check
         };
 
         // Check 1: Price drops 5% from entry within 5 minutes
-        let price_drop_percent = ((entry_price - current_price) / entry_price) * 100.0;
+        let price_drop_percent = if !entry_price.is_zero() {
+            let diff = entry_price - current_price;
+            let ratio = diff / entry_price;
+            ratio * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
         let elapsed = entry_time.elapsed().unwrap_or_default();
         let elapsed_minutes = elapsed.as_secs() / 60;
 
-        if elapsed_minutes <= 5 && price_drop_percent >= 5.0 {
+        let price_drop_threshold = Decimal::from(5);
+        if elapsed_minutes <= 5 && price_drop_percent >= price_drop_threshold {
+            let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
             tracing::warn!(
                 trade_uuid = %trade_uuid,
-                price_drop_percent = price_drop_percent,
+                price_drop_percent = price_drop_f64,
                 elapsed_minutes = elapsed_minutes,
                 "Negative momentum detected: price dropped 5% within 5 minutes"
             );
@@ -109,7 +118,8 @@ impl MomentumExit {
         }
 
         // Check 3: RSI declining (RSI < 40 and declining)
-        if let Some(rsi) = self.calculate_rsi(token_address, entry_price).await {
+        let entry_price_f64 = entry_price.to_f64().unwrap_or(0.0);
+        if let Some(rsi) = self.calculate_rsi(token_address, entry_price_f64).await {
             if rsi < 40.0 {
                 // Check if RSI was higher in previous period (declining)
                 // For simplicity, we'll check if current RSI is below threshold
@@ -184,7 +194,7 @@ impl MomentumExit {
         &self,
         trade_uuid: &str,
         token_address: &str,
-        entry_price: f64,
+        entry_price: Decimal,
         entry_time: SystemTime,
     ) -> bool {
         matches!(

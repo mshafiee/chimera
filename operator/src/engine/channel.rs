@@ -106,10 +106,11 @@ impl PriorityQueue {
                             // Fall through to regular SPEAR queue
                         } else {
                             // Add to high-WQS SPEAR queue
+                            let trade_uuid = signal.trade_uuid.clone();
                             drop(spear_high_wqs);
                             self.spear_high_wqs.lock().push_back(signal);
                             tracing::debug!(
-                                trade_uuid = %signal.trade_uuid,
+                                trade_uuid = %trade_uuid,
                                 wallet_wqs = wqs,
                                 "Routed high-WQS SPEAR signal to dedicated queue"
                             );

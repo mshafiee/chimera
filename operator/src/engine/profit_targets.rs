@@ -32,14 +32,14 @@ pub struct ProfitTargetManager {
 #[derive(Debug, Clone)]
 struct ProfitTargetState {
     trade_uuid: String,
-    entry_price: f64,
-    entry_amount_sol: f64,
-    current_price: f64,
-    peak_price: f64,
-    peak_profit_percent: f64,
-    targets_hit: Vec<f64>, // Which targets have been hit
+    entry_price: Decimal,
+    entry_amount_sol: Decimal,
+    current_price: Decimal,
+    peak_price: Decimal,
+    peak_profit_percent: Decimal,
+    targets_hit: Vec<Decimal>, // Which targets have been hit
     trailing_stop_active: bool,
-    trailing_stop_price: f64,
+    trailing_stop_price: Decimal,
     entry_time: SystemTime,
 }
 
@@ -126,12 +126,13 @@ impl ProfitTargetManager {
     pub async fn register_position(
         &self,
         trade_uuid: &str,
-        entry_price: f64,
-        entry_amount_sol: f64,
+        entry_price: Decimal,
+        entry_amount_sol: Decimal,
         token_address: &str,
     ) {
         let current_price = self.price_cache
             .get_price_usd(token_address)
+            .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
             .unwrap_or(entry_price);
 
         let state = ProfitTargetState {
@@ -140,10 +141,10 @@ impl ProfitTargetManager {
             entry_amount_sol,
             current_price,
             peak_price: current_price,
-            peak_profit_percent: 0.0,
+            peak_profit_percent: Decimal::ZERO,
             targets_hit: Vec::new(),
             trailing_stop_active: false,
-            trailing_stop_price: 0.0,
+            trailing_stop_price: Decimal::ZERO,
             entry_time: SystemTime::now(),
         };
 
@@ -154,7 +155,7 @@ impl ProfitTargetManager {
     /// Check profit targets and return action if needed
     pub async fn check_targets(&self, trade_uuid: &str, token_address: &str) -> ProfitTargetAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
-            Some(price) => price,
+            Some(price) => Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
             None => return ProfitTargetAction::None,
         };
 
@@ -171,16 +172,12 @@ impl ProfitTargetManager {
         }
 
         // Calculate current profit using Decimal for precision
-        // Convert f64 to Decimal safely
-        let current_price_dec = Decimal::from_f64_retain(current_price).unwrap_or(Decimal::ZERO);
-        let entry_price_dec = Decimal::from_f64_retain(state.entry_price).unwrap_or(Decimal::ZERO);
-        
-        let profit_percent = if !entry_price_dec.is_zero() {
-            let diff = current_price_dec - entry_price_dec;
-            let ratio = diff / entry_price_dec;
-            (ratio * Decimal::from(100)).to_f64().unwrap_or(0.0)
+        let profit_percent = if !state.entry_price.is_zero() {
+            let diff = state.current_price - state.entry_price;
+            let ratio = diff / state.entry_price;
+            ratio * Decimal::from(100)
         } else {
-            0.0
+            Decimal::ZERO
         };
 
         state.peak_profit_percent = profit_percent.max(state.peak_profit_percent);
@@ -194,52 +191,59 @@ impl ProfitTargetManager {
 
         // Check tiered profit targets
         for target in &targets {
-            if profit_percent >= *target && !state.targets_hit.contains(target) {
-                state.targets_hit.push(*target);
+            let target_dec = Decimal::from_f64_retain(*target).unwrap_or(Decimal::ZERO);
+            if profit_percent >= target_dec && !state.targets_hit.iter().any(|&hit| hit == target_dec) {
+                state.targets_hit.push(target_dec);
                 return ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent);
             }
         }
 
         // Check trailing stop (activate after trailing_stop_activation %)
-        if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
+        let trailing_activation_dec = Decimal::from_f64_retain(self.config.trailing_stop_activation).unwrap_or(Decimal::ZERO);
+        if profit_percent >= trailing_activation_dec && !state.trailing_stop_active {
             state.trailing_stop_active = true;
-            state.trailing_stop_price = state.peak_price * (1.0 - self.config.trailing_stop_distance / 100.0);
+            let trailing_distance_ratio = Decimal::from_f64_retain(self.config.trailing_stop_distance / 100.0).unwrap_or(Decimal::ZERO);
+            state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
         }
 
         // Check if trailing stop hit
-        if state.trailing_stop_active && current_price <= state.trailing_stop_price {
+        if state.trailing_stop_active && state.current_price <= state.trailing_stop_price {
             return ProfitTargetAction::FullExit;
         }
 
         // Update trailing stop price if price increases
-        if state.trailing_stop_active && current_price > state.peak_price {
-            state.trailing_stop_price = current_price * (1.0 - self.config.trailing_stop_distance / 100.0);
+        if state.trailing_stop_active && state.current_price > state.peak_price {
+            let trailing_distance_ratio = Decimal::from_f64_retain(self.config.trailing_stop_distance / 100.0).unwrap_or(Decimal::ZERO);
+            state.trailing_stop_price = state.current_price * (Decimal::ONE - trailing_distance_ratio);
         }
 
         // Refined time-based exit logic
         if let Ok(elapsed) = state.entry_time.elapsed() {
             let elapsed_hours = elapsed.as_secs() / 3600;
             
+            // Convert profit_percent to f64 for comparison (only for thresholds)
+            let profit_percent_f64 = profit_percent.to_f64().unwrap_or(0.0);
+            
             // If profitable >10%: Extend to 48h
-            if profit_percent > 10.0 {
+            if profit_percent_f64 > 10.0 {
                 if elapsed_hours >= 48 {
                     return ProfitTargetAction::FullExit;
                 }
             }
             // If profitable <5%: Exit after 12h (lock in small profits)
-            else if profit_percent > 0.0 && profit_percent < 5.0 {
+            else if profit_percent_f64 > 0.0 && profit_percent_f64 < 5.0 {
                 if elapsed_hours >= 12 {
                     return ProfitTargetAction::FullExit;
                 }
             }
             // If at loss: Exit after 6h (cut losses faster)
-            else if profit_percent < 0.0 {
+            else if profit_percent_f64 < 0.0 {
                 if elapsed_hours >= 6 {
                     return ProfitTargetAction::FullExit;
                 }
             }
             // Default: Original time_exit_hours for moderate profits (5-10%)
-            else if elapsed_hours >= self.config.time_exit_hours as u64 && profit_percent > 0.0 {
+            else if elapsed_hours >= self.config.time_exit_hours as u64 && profit_percent_f64 > 0.0 {
                 return ProfitTargetAction::FullExit;
             }
         }

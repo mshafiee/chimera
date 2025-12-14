@@ -16,6 +16,7 @@ use chrono::{DateTime, Timelike, Utc};
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -211,7 +212,7 @@ impl Executor {
                 strategy = %signal.payload.strategy,
                 token = %signal.payload.token,
                 action = %signal.payload.action,
-                amount_sol = signal.payload.amount_sol,
+                amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
                 rpc_mode = ?self.rpc_mode,
                 "Executing trade"
             );
@@ -232,16 +233,18 @@ impl Executor {
             }
 
             // Validate amount bounds
-            if signal.payload.amount_sol < self.config.strategy.min_position_sol {
+            let min_position = Decimal::from_f64_retain(self.config.strategy.min_position_sol).unwrap_or(Decimal::ZERO);
+            if signal.payload.amount_sol < min_position {
                 return Err(ExecutorError::AmountTooSmall(
-                    signal.payload.amount_sol,
+                    signal.payload.amount_sol.to_f64().unwrap_or(0.0),
                     self.config.strategy.min_position_sol,
                 ));
             }
 
-            if signal.payload.amount_sol > self.config.strategy.max_position_sol {
+            let max_position = Decimal::from_f64_retain(self.config.strategy.max_position_sol).unwrap_or(Decimal::ZERO);
+            if signal.payload.amount_sol > max_position {
                 return Err(ExecutorError::AmountTooLarge(
-                    signal.payload.amount_sol,
+                    signal.payload.amount_sol.to_f64().unwrap_or(0.0),
                     self.config.strategy.max_position_sol,
                 ));
             }
@@ -284,8 +287,9 @@ impl Executor {
                     let jito_tip = if self.rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal);
                         if let Some(ref tip_manager) = self.tip_manager {
+                            let tip_f64 = tip.to_f64().unwrap_or(0.0);
                             if let Err(e) = tip_manager.record_tip(
-                                tip,
+                                tip_f64,
                                 Some(sig),
                                 signal.payload.strategy,
                                 true, // success
@@ -298,16 +302,18 @@ impl Executor {
                         }
                         tip
                     } else {
-                        0.0
+                        Decimal::ZERO
                     };
 
                     // Track costs: Jito tip, DEX fee, slippage
-                    let dex_fee_sol = signal.payload.amount_sol * 0.003; // 0.3% DEX fee
+                    let dex_fee_rate = Decimal::from_str("0.003").unwrap(); // 0.3% DEX fee
+                    let dex_fee_sol = signal.payload.amount_sol * dex_fee_rate;
                     // Estimate slippage (conservative estimate: 0.5% for small trades, 1% for larger)
-                    let slippage_percent = if signal.payload.amount_sol < 0.5 {
-                        0.005 // 0.5% for trades < 0.5 SOL
+                    let half_sol = Decimal::from_str("0.5").unwrap();
+                    let slippage_percent = if signal.payload.amount_sol < half_sol {
+                        Decimal::from_str("0.005").unwrap() // 0.5% for trades < 0.5 SOL
                     } else {
-                        0.01 // 1% for larger trades
+                        Decimal::from_str("0.01").unwrap() // 1% for larger trades
                     };
                     let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
 
@@ -325,12 +331,13 @@ impl Executor {
                             "Failed to update trade costs"
                         );
                     } else {
+                        let total_cost = jito_tip + dex_fee_sol + slippage_cost_sol;
                         tracing::debug!(
                             trade_uuid = %signal.trade_uuid,
-                            jito_tip = jito_tip,
-                            dex_fee = dex_fee_sol,
-                            slippage = slippage_cost_sol,
-                            total_cost = jito_tip + dex_fee_sol + slippage_cost_sol,
+                            jito_tip = jito_tip.to_f64().unwrap_or(0.0),
+                            dex_fee = dex_fee_sol.to_f64().unwrap_or(0.0),
+                            slippage = slippage_cost_sol.to_f64().unwrap_or(0.0),
+                            total_cost = total_cost.to_f64().unwrap_or(0.0),
                             "Trade costs recorded"
                         );
                     }
@@ -348,8 +355,9 @@ impl Executor {
                     if self.rpc_mode == RpcMode::Jito {
                         if let Some(ref tip_manager) = self.tip_manager {
                             let tip = self.calculate_jito_tip(signal);
+                            let tip_f64 = tip.to_f64().unwrap_or(0.0);
                             if let Err(e) = tip_manager.record_tip(
-                                tip,
+                                tip_f64,
                                 None, // No signature for failed trades
                                 signal.payload.strategy,
                                 false, // failure
@@ -642,7 +650,7 @@ impl Executor {
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
         tracing::debug!(
-            tip_sol = tip,
+            tip_sol = tip.to_f64().unwrap_or(0.0),
             strategy = %signal.payload.strategy,
             "Calculated Jito tip"
         );
@@ -652,7 +660,7 @@ impl Executor {
         // Try direct Jito Searcher first if configured
         // Note: Jito bundles currently only support legacy transactions
         if let Some(ref jito_searcher) = self.jito_searcher {
-            let tip_lamports = (tip * 1_000_000_000.0) as u64; // Convert SOL to lamports
+            let tip_lamports = (tip * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0); // Convert SOL to lamports
             
             // Serialize based on transaction type using Legacy config for Solana wire compatibility
             let tx_bytes = match &built_tx {
@@ -704,8 +712,9 @@ impl Executor {
                     }
                 };
 
+                let tip_f64 = tip.to_f64().unwrap_or(0.0);
                 match self
-                    .submit_via_helius_sender(&tx_bytes, tip, helius_api_key)
+                    .submit_via_helius_sender(&tx_bytes, tip_f64, helius_api_key)
                     .await
                 {
                     Ok(signature) => {
@@ -1189,26 +1198,32 @@ impl Executor {
     }
 
     /// Calculate dynamic Jito tip based on strategy and history
-    pub fn calculate_jito_tip(&self, signal: &Signal) -> f64 {
+    pub fn calculate_jito_tip(&self, signal: &Signal) -> Decimal {
         // Use TipManager if available, otherwise fall back to simple strategy-based calculation
         if let Some(ref tip_manager) = self.tip_manager {
-            tip_manager.calculate_tip(signal.payload.strategy, signal.payload.amount_sol)
+            let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
+            Decimal::from_f64_retain(tip_manager.calculate_tip(signal.payload.strategy, amount_f64)).unwrap_or(Decimal::ZERO)
         } else {
             // Fallback to simple strategy-based tip calculation
             let base_tip = match signal.payload.strategy {
-                Strategy::Shield => self.config.jito.tip_floor_sol,
+                Strategy::Shield => Decimal::from_f64_retain(self.config.jito.tip_floor_sol).unwrap_or(Decimal::ZERO),
                 Strategy::Spear => {
                     // Use higher tip for Spear to ensure bundle inclusion
-                    (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol) / 2.0
+                    let floor = Decimal::from_f64_retain(self.config.jito.tip_floor_sol).unwrap_or(Decimal::ZERO);
+                    let ceiling = Decimal::from_f64_retain(self.config.jito.tip_ceiling_sol).unwrap_or(Decimal::ZERO);
+                    (floor + ceiling) / Decimal::from(2)
                 }
-                Strategy::Exit => self.config.jito.tip_ceiling_sol, // Max tip for exits
+                Strategy::Exit => Decimal::from_f64_retain(self.config.jito.tip_ceiling_sol).unwrap_or(Decimal::ZERO), // Max tip for exits
             };
 
             // Apply percentage cap
-            let max_by_percent = signal.payload.amount_sol * self.config.jito.tip_percent_max;
-            let tip = base_tip.min(max_by_percent).min(self.config.jito.tip_ceiling_sol);
+            let tip_percent_max = Decimal::from_f64_retain(self.config.jito.tip_percent_max).unwrap_or(Decimal::ZERO);
+            let max_by_percent = signal.payload.amount_sol * tip_percent_max;
+            let ceiling = Decimal::from_f64_retain(self.config.jito.tip_ceiling_sol).unwrap_or(Decimal::ZERO);
+            let floor = Decimal::from_f64_retain(self.config.jito.tip_floor_sol).unwrap_or(Decimal::ZERO);
+            let tip = base_tip.min(max_by_percent).min(ceiling);
 
-            tip.max(self.config.jito.tip_floor_sol)
+            tip.max(floor)
         }
     }
 
