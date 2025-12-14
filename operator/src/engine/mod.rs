@@ -9,6 +9,7 @@ mod jito_searcher;
 pub mod recovery;
 pub mod tips;
 mod transaction_builder;
+mod v0_reconstruction;
 pub mod profit_targets;
 pub mod stop_loss;
 pub mod mev_protection;

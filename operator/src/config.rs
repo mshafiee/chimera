@@ -336,10 +336,24 @@ pub struct JupiterConfig {
     /// Enable devnet simulation mode (skip Jupiter API, simulate trades)
     #[serde(default)]
     pub devnet_simulation_mode: bool,
+    /// Enable V0 message reconstruction on blockhash expiry
+    #[serde(default = "default_reconstruct_v0")]
+    pub reconstruct_v0_on_blockhash_expiry: bool,
+    /// Reject V0 transactions entirely (fallback if reconstruction fails)
+    #[serde(default = "default_reject_v0")]
+    pub reject_v0_transactions: bool,
 }
 
 fn default_jupiter_api_url() -> String {
     "https://lite-api.jup.ag/swap/v1".to_string()
+}
+
+fn default_reconstruct_v0() -> bool {
+    true
+}
+
+fn default_reject_v0() -> bool {
+    false
 }
 
 /// Queue configuration

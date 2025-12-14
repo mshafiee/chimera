@@ -259,15 +259,46 @@ impl Executor {
             match &result {
                 Err(ExecutorError::BlockhashExpired) => {
                     if attempts < 3 {
+                        // Exponential backoff: 200ms, 400ms, 800ms
+                        let backoff_ms = 200 * (1 << (attempts - 1));
                         tracing::warn!(
                             trade_uuid = %signal.trade_uuid,
                             attempt = attempts,
-                            "Blockhash expired/invalid. Re-requesting fresh quote and retrying..."
+                            backoff_ms = backoff_ms,
+                            "Blockhash expired/invalid. Re-requesting fresh quote and retrying with exponential backoff..."
                         );
                         // The loop will restart, causing TransactionBuilder to fetch a NEW quote 
                         // from Jupiter with a FRESH blockhash.
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         continue;
+                    } else {
+                        tracing::error!(
+                            trade_uuid = %signal.trade_uuid,
+                            attempts = attempts,
+                            "Blockhash expired after maximum retries. Transaction failed."
+                        );
+                    }
+                }
+                Err(ExecutorError::V0ReconstructionFailed(e)) => {
+                    // V0 reconstruction failed - try re-requesting from Jupiter
+                    if attempts < 3 {
+                        let backoff_ms = 200 * (1 << (attempts - 1));
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            attempt = attempts,
+                            error = %e,
+                            backoff_ms = backoff_ms,
+                            "V0 reconstruction failed. Re-requesting fresh quote from Jupiter with exponential backoff..."
+                        );
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    } else {
+                        tracing::error!(
+                            trade_uuid = %signal.trade_uuid,
+                            attempts = attempts,
+                            error = %e,
+                            "V0 reconstruction failed after maximum retries. Transaction failed."
+                        );
                     }
                 }
                 _ => {}
@@ -956,25 +987,8 @@ impl Executor {
             }
         };
 
-        if !is_valid {
-            // Check if this is a V0 transaction (uses ALTs)
-            let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
-            if is_v0 {
-                tracing::warn!(
-                    blockhash = %jupiter_blockhash,
-                    "V0 transaction blockhash expired/invalid. V0 transactions use Address Lookup Tables (ALTs) \
-                    and cannot be easily updated. Re-requesting fresh quote from Jupiter with new blockhash."
-                );
-            } else {
-                tracing::warn!(
-                    blockhash = %jupiter_blockhash,
-                    "Legacy transaction blockhash expired/invalid. Re-requesting fresh quote from Jupiter."
-                );
-            }
-            return Err(ExecutorError::BlockhashExpired);
-        }
-
         // Get recent blockhash (use active RPC client)
+        // We need this for both validation and reconstruction
         let recent_blockhash = active_client
             .get_latest_blockhash()
             .await
@@ -984,6 +998,24 @@ impl Executor {
             })?;
         
         tracing::debug!(blockhash = %recent_blockhash, "Got recent blockhash");
+
+        if !is_valid {
+            // Check if this is a V0 transaction (uses ALTs)
+            let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
+            if is_v0 {
+                tracing::warn!(
+                    blockhash = %jupiter_blockhash,
+                    "V0 transaction blockhash expired/invalid. Will attempt reconstruction with fresh blockhash."
+                );
+                // Continue processing - reconstruction will happen below
+            } else {
+                tracing::warn!(
+                    blockhash = %jupiter_blockhash,
+                    "Legacy transaction blockhash expired/invalid. Re-requesting fresh quote from Jupiter."
+                );
+                return Err(ExecutorError::BlockhashExpired);
+            }
+        }
         
         // For VersionedTransaction, we need to manually sign the message hash
         // The transaction from Jupiter is unsigned, so we need to:
@@ -993,26 +1025,56 @@ impl Executor {
         
         use solana_sdk::message::VersionedMessage;
         use solana_sdk::signature::Signer;
+        use crate::engine::v0_reconstruction;
         
         // Update the message's recent_blockhash
         // For VersionedMessage, we need to handle V0 and Legacy differently
         let updated_message = match &versioned_tx.message {
             VersionedMessage::V0(_v0_msg) => {
-                // V0 messages use Address Lookup Tables (ALTs) and have a complex structure.
-                // Properly updating the blockhash in a V0 message requires reconstructing
-                // the entire message with new header, which is non-trivial.
-                // 
-                // Strategy: Jupiter should provide recent blockhashes in their responses.
-                // We use the V0 message as-is, trusting Jupiter's blockhash is recent.
-                // If the blockhash is stale and the transaction fails, the error handling
-                // will catch it and we can retry or fall back.
-                //
-                // Future improvement: Implement proper V0 message reconstruction with
-                // updated blockhash, or use Solana SDK's built-in methods if available.
-                tracing::debug!(
-                    "V0 transaction detected: Using message as-is with Jupiter's blockhash. If transaction fails due to stale blockhash, consider implementing V0-to-Legacy conversion."
-                );
-                versioned_tx.message.clone()
+                // Check if V0 transactions should be rejected
+                if self.config.jupiter.reject_v0_transactions {
+                    tracing::error!("V0 transaction rejected due to configuration (reject_v0_transactions=true)");
+                    return Err(ExecutorError::TransactionFailed(
+                        "V0 transactions are disabled by configuration".to_string()
+                    ));
+                }
+                
+                // V0 messages use Address Lookup Tables (ALTs) and require reconstruction
+                // to update the blockhash. Attempt to reconstruct with fresh blockhash if enabled.
+                if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
+                    tracing::debug!(
+                        "V0 transaction detected: Attempting to reconstruct message with fresh blockhash"
+                    );
+                    
+                    match v0_reconstruction::reconstruct_v0_message_with_blockhash(
+                        &versioned_tx,
+                        recent_blockhash,
+                        &active_client,
+                    )
+                    .await
+                    {
+                        Ok(reconstructed) => {
+                            tracing::info!("Successfully reconstructed V0 message with fresh blockhash");
+                            reconstructed
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to reconstruct V0 message, falling back to original message. \
+                                Transaction may fail if blockhash is stale."
+                            );
+                            // Fallback to original message if reconstruction fails
+                            // This maintains backward compatibility
+                            versioned_tx.message.clone()
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "V0 transaction detected: Reconstruction disabled, using original message"
+                    );
+                    // Reconstruction disabled - use original message
+                    versioned_tx.message.clone()
+                }
             }
             VersionedMessage::Legacy(legacy_msg) => {
                 // For legacy message, update blockhash
@@ -1346,6 +1408,14 @@ pub enum ExecutorError {
     /// Market conditions unfavorable for trading
     #[error("Market conditions unfavorable: {0}")]
     MarketConditionsUnfavorable(String),
+
+    /// V0 message reconstruction failed
+    #[error("V0 message reconstruction failed: {0}")]
+    V0ReconstructionFailed(String),
+
+    /// Address Lookup Table unavailable
+    #[error("Address Lookup Table unavailable: {0}")]
+    AddressLookupTableUnavailable(String),
 }
 
 #[cfg(test)]

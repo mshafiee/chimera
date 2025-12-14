@@ -142,12 +142,48 @@ impl TransactionBuilder {
             // Check if Jupiter ignored our asLegacyTransaction request
             let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
             if is_v0 {
-                tracing::warn!(
-                    "Jupiter returned V0 transaction despite asLegacyTransaction=true. \
-                    V0 transactions use Address Lookup Tables (ALTs) and cannot have their \
-                    blockhash easily updated. This increases risk of blockhash expiration. \
-                    Consider using Jupiter's main API endpoint or implementing V0 message reconstruction."
-                );
+                // Check if V0 transactions should be rejected
+                if self.config.jupiter.reject_v0_transactions {
+                    return Err(crate::error::AppError::Validation(
+                        "V0 transactions are disabled by configuration (reject_v0_transactions=true)".to_string()
+                    ));
+                }
+                
+                if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
+                    tracing::warn!(
+                        "Jupiter returned V0 transaction despite asLegacyTransaction=true. \
+                        Attempting to reconstruct with fresh blockhash to reduce expiration risk."
+                    );
+                    
+                    // Attempt to reconstruct V0 message with fresh blockhash
+                    use crate::engine::v0_reconstruction;
+                    match v0_reconstruction::reconstruct_v0_message_with_blockhash(
+                        &versioned_tx,
+                        blockhash,
+                        &self.rpc_client,
+                    )
+                    .await
+                    {
+                        Ok(reconstructed_message) => {
+                            tracing::info!("Successfully reconstructed V0 message with fresh blockhash in transaction builder");
+                            // Update the transaction with reconstructed message
+                            versioned_tx.message = reconstructed_message;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to reconstruct V0 message in transaction builder. \
+                                Using original message - transaction may fail if blockhash expires."
+                            );
+                            // Continue with original message - executor will handle reconstruction if needed
+                        }
+                    }
+                } else {
+                    tracing::warn!(
+                        "Jupiter returned V0 transaction despite asLegacyTransaction=true. \
+                        V0 reconstruction is disabled. Transaction may fail if blockhash expires."
+                    );
+                }
             }
 
             // Sign with our keypair
