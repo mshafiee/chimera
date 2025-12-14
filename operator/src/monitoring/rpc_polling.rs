@@ -3,7 +3,8 @@
 //! Used when webhooks fail or for validation. Implements signature caching
 //! and prioritized polling to minimize credit usage.
 
-use std::collections::HashSet;
+use lru::LruCache;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use crate::monitoring::rate_limiter::RateLimiter;
@@ -11,14 +12,6 @@ use crate::monitoring::rate_limiter::RequestPriority;
 use crate::db::DbPool;
 use anyhow::{Context, Result};
 use solana_client::rpc_client::RpcClient;
-
-/// RPC polling state
-pub struct RpcPollingState {
-    /// Cached signatures to avoid duplicate processing
-    seen_signatures: Arc<tokio::sync::RwLock<HashSet<String>>>,
-    /// Last poll time per wallet
-    last_poll: Arc<tokio::sync::RwLock<std::collections::HashMap<String, SystemTime>>>,
-}
 
 /// Transaction information from polling
 #[derive(Debug, Clone)]
@@ -31,33 +24,33 @@ pub struct WalletTransaction {
     pub timestamp: i64,
 }
 
+pub struct RpcPollingState {
+    // Changed from HashSet to LruCache
+    seen_signatures: Arc<tokio::sync::RwLock<LruCache<String, ()>>>, 
+    last_poll: Arc<tokio::sync::RwLock<std::collections::HashMap<String, SystemTime>>>,
+}
+
 impl RpcPollingState {
     pub fn new() -> Self {
         Self {
-            seen_signatures: Arc::new(tokio::sync::RwLock::new(HashSet::new())),
+            // Cap at 10,000 signatures
+            seen_signatures: Arc::new(tokio::sync::RwLock::new(LruCache::new(
+                NonZeroUsize::new(10000).unwrap()
+            ))),
             last_poll: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
     }
 
-    /// Check if signature has been seen
     pub async fn has_seen(&self, signature: &str) -> bool {
-        let seen = self.seen_signatures.read().await;
-        seen.contains(signature)
+        let seen = self.seen_signatures.write().await;
+        // get updates LRU status, contains does not
+        seen.contains(signature) 
     }
 
-    /// Mark signature as seen
     pub async fn mark_seen(&self, signature: String) {
         let mut seen = self.seen_signatures.write().await;
-        seen.insert(signature);
-        
-        // Limit cache size to prevent memory growth
-        if seen.len() > 10000 {
-            // Remove oldest 20% (simple cleanup)
-            let to_remove: Vec<String> = seen.iter().take(2000).cloned().collect();
-            for sig in to_remove {
-                seen.remove(&sig);
-            }
-        }
+        seen.put(signature, ());
+        // No manual cleanup needed; LruCache handles it automatically
     }
 
     /// Update last poll time for wallet

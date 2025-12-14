@@ -14,6 +14,7 @@ use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Timelike, Utc};
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_client::rpc_config::CommitmentConfig;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
 use std::time::Duration;
@@ -196,159 +197,174 @@ impl Executor {
     ///
     /// Returns the transaction signature on success
     pub async fn execute(&mut self, signal: &Signal) -> Result<String, ExecutorError> {
-        // Check if we should try to recover to primary
-        if self.should_attempt_recovery() {
-            self.try_recover_to_primary().await;
-        }
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
 
-        tracing::info!(
-            trade_uuid = %signal.trade_uuid,
-            strategy = %signal.payload.strategy,
-            token = %signal.payload.token,
-            action = %signal.payload.action,
-            amount_sol = signal.payload.amount_sol,
-            rpc_mode = ?self.rpc_mode,
-            "Executing trade"
-        );
-
-        // Check if Spear is allowed in current mode
-        if signal.payload.strategy == Strategy::Spear && self.rpc_mode == RpcMode::Standard {
-            return Err(ExecutorError::SpearDisabled);
-        }
-
-        // Check market conditions before executing
-        if let Err(e) = self.check_market_conditions().await {
-            tracing::warn!(
-                trade_uuid = %signal.trade_uuid,
-                error = %e,
-                "Trade rejected due to market conditions"
-            );
-            return Err(ExecutorError::MarketConditionsUnfavorable(e.to_string()));
-        }
-
-        // Validate amount bounds
-        if signal.payload.amount_sol < self.config.strategy.min_position_sol {
-            return Err(ExecutorError::AmountTooSmall(
-                signal.payload.amount_sol,
-                self.config.strategy.min_position_sol,
-            ));
-        }
-
-        if signal.payload.amount_sol > self.config.strategy.max_position_sol {
-            return Err(ExecutorError::AmountTooLarge(
-                signal.payload.amount_sol,
-                self.config.strategy.max_position_sol,
-            ));
-        }
-
-        // Execute based on mode
-        let result = match self.rpc_mode {
-            RpcMode::Jito => self.execute_jito(signal).await,
-            RpcMode::Standard => self.execute_standard(signal).await,
-        };
-
-        // Handle result and track failures
-        match &result {
-            Ok(sig) => {
-                self.failure_count = 0;
-                tracing::info!(
-                    trade_uuid = %signal.trade_uuid,
-                    signature = %sig,
-                    "Trade executed successfully"
-                );
-
-                // Record tip if using Jito and tip manager is available
-                let jito_tip = if self.rpc_mode == RpcMode::Jito {
-                    let tip = self.calculate_jito_tip(signal);
-                    if let Some(ref tip_manager) = self.tip_manager {
-                        if let Err(e) = tip_manager.record_tip(
-                            tip,
-                            Some(sig),
-                            signal.payload.strategy,
-                            true, // success
-                        ).await {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to record tip in TipManager"
-                            );
-                        }
-                    }
-                    tip
-                } else {
-                    0.0
-                };
-
-                // Track costs: Jito tip, DEX fee, slippage
-                let dex_fee_sol = signal.payload.amount_sol * 0.003; // 0.3% DEX fee
-                // Estimate slippage (conservative estimate: 0.5% for small trades, 1% for larger)
-                let slippage_percent = if signal.payload.amount_sol < 0.5 {
-                    0.005 // 0.5% for trades < 0.5 SOL
-                } else {
-                    0.01 // 1% for larger trades
-                };
-                let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
-
-                // Update trade costs in database
-                if let Err(e) = crate::db::update_trade_costs(
-                    &self.db,
-                    &signal.trade_uuid,
-                    jito_tip,
-                    dex_fee_sol,
-                    slippage_cost_sol,
-                ).await {
-                    tracing::warn!(
-                        trade_uuid = %signal.trade_uuid,
-                        error = %e,
-                        "Failed to update trade costs"
-                    );
-                } else {
-                    tracing::debug!(
-                        trade_uuid = %signal.trade_uuid,
-                        jito_tip = jito_tip,
-                        dex_fee = dex_fee_sol,
-                        slippage = slippage_cost_sol,
-                        total_cost = jito_tip + dex_fee_sol + slippage_cost_sol,
-                        "Trade costs recorded"
-                    );
-                }
+            // Check if we should try to recover to primary
+            if self.should_attempt_recovery() {
+                self.try_recover_to_primary().await;
             }
-            Err(e) => {
-                self.failure_count += 1;
-                tracing::error!(
+
+            tracing::info!(
+                trade_uuid = %signal.trade_uuid,
+                strategy = %signal.payload.strategy,
+                token = %signal.payload.token,
+                action = %signal.payload.action,
+                amount_sol = signal.payload.amount_sol,
+                rpc_mode = ?self.rpc_mode,
+                "Executing trade"
+            );
+
+            // Check if Spear is allowed in current mode
+            if signal.payload.strategy == Strategy::Spear && self.rpc_mode == RpcMode::Standard {
+                return Err(ExecutorError::SpearDisabled);
+            }
+
+            // Check market conditions before executing
+            if let Err(e) = self.check_market_conditions().await {
+                tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
                     error = %e,
-                    failure_count = self.failure_count,
-                    "Trade execution failed"
+                    "Trade rejected due to market conditions"
                 );
+                return Err(ExecutorError::MarketConditionsUnfavorable(e.to_string()));
+            }
 
-                // Record failed tip if using Jito and tip manager is available
-                if self.rpc_mode == RpcMode::Jito {
-                    if let Some(ref tip_manager) = self.tip_manager {
+            // Validate amount bounds
+            if signal.payload.amount_sol < self.config.strategy.min_position_sol {
+                return Err(ExecutorError::AmountTooSmall(
+                    signal.payload.amount_sol,
+                    self.config.strategy.min_position_sol,
+                ));
+            }
+
+            if signal.payload.amount_sol > self.config.strategy.max_position_sol {
+                return Err(ExecutorError::AmountTooLarge(
+                    signal.payload.amount_sol,
+                    self.config.strategy.max_position_sol,
+                ));
+            }
+
+            // Execute based on mode
+            let result = match self.rpc_mode {
+                RpcMode::Jito => self.execute_jito(signal).await,
+                RpcMode::Standard => self.execute_standard(signal).await,
+            };
+
+            // Handle retry for expired blockhash
+            match &result {
+                Err(ExecutorError::BlockhashExpired) if attempts < 3 => {
+                    tracing::info!("Retrying execution with fresh quote due to expired blockhash...");
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+                _ => {}
+            }
+
+            // Handle result and track failures
+            match &result {
+                Ok(sig) => {
+                    self.failure_count = 0;
+                    tracing::info!(
+                        trade_uuid = %signal.trade_uuid,
+                        signature = %sig,
+                        "Trade executed successfully"
+                    );
+
+                    // Record tip if using Jito and tip manager is available
+                    let jito_tip = if self.rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal);
-                        if let Err(e) = tip_manager.record_tip(
-                            tip,
-                            None, // No signature for failed trades
-                            signal.payload.strategy,
-                            false, // failure
-                        ).await {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to record failed tip in TipManager"
-                            );
+                        if let Some(ref tip_manager) = self.tip_manager {
+                            if let Err(e) = tip_manager.record_tip(
+                                tip,
+                                Some(sig),
+                                signal.payload.strategy,
+                                true, // success
+                            ).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to record tip in TipManager"
+                                );
+                            }
                         }
+                        tip
+                    } else {
+                        0.0
+                    };
+
+                    // Track costs: Jito tip, DEX fee, slippage
+                    let dex_fee_sol = signal.payload.amount_sol * 0.003; // 0.3% DEX fee
+                    // Estimate slippage (conservative estimate: 0.5% for small trades, 1% for larger)
+                    let slippage_percent = if signal.payload.amount_sol < 0.5 {
+                        0.005 // 0.5% for trades < 0.5 SOL
+                    } else {
+                        0.01 // 1% for larger trades
+                    };
+                    let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
+
+                    // Update trade costs in database
+                    if let Err(e) = crate::db::update_trade_costs(
+                        &self.db,
+                        &signal.trade_uuid,
+                        jito_tip,
+                        dex_fee_sol,
+                        slippage_cost_sol,
+                    ).await {
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            error = %e,
+                            "Failed to update trade costs"
+                        );
+                    } else {
+                        tracing::debug!(
+                            trade_uuid = %signal.trade_uuid,
+                            jito_tip = jito_tip,
+                            dex_fee = dex_fee_sol,
+                            slippage = slippage_cost_sol,
+                            total_cost = jito_tip + dex_fee_sol + slippage_cost_sol,
+                            "Trade costs recorded"
+                        );
                     }
                 }
+                Err(e) => {
+                    self.failure_count += 1;
+                    tracing::error!(
+                        trade_uuid = %signal.trade_uuid,
+                        error = %e,
+                        failure_count = self.failure_count,
+                        "Trade execution failed"
+                    );
 
-                // Check if we need to switch to fallback
-                if self.failure_count >= self.config.rpc.max_consecutive_failures
-                    && self.rpc_mode == RpcMode::Jito
-                {
-                    self.switch_to_fallback().await;
+                    // Record failed tip if using Jito and tip manager is available
+                    if self.rpc_mode == RpcMode::Jito {
+                        if let Some(ref tip_manager) = self.tip_manager {
+                            let tip = self.calculate_jito_tip(signal);
+                            if let Err(e) = tip_manager.record_tip(
+                                tip,
+                                None, // No signature for failed trades
+                                signal.payload.strategy,
+                                false, // failure
+                            ).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Failed to record failed tip in TipManager"
+                                );
+                            }
+                        }
+                    }
+
+                    // Check if we need to switch to fallback
+                    if self.failure_count >= self.config.rpc.max_consecutive_failures
+                        && self.rpc_mode == RpcMode::Jito
+                    {
+                        self.switch_to_fallback().await;
+                    }
                 }
             }
-        }
 
-        result
+            return result;
+        }
     }
 
     /// Check market conditions before executing trades
@@ -888,8 +904,20 @@ impl Executor {
         
         tracing::debug!("Parsed VersionedTransaction successfully");
         
-        // Get recent blockhash (use active RPC client)
+        // Validate Jupiter's blockhash
+        let jupiter_blockhash = versioned_tx.message.recent_blockhash();
         let active_client = self.active_rpc_client();
+        let is_valid = active_client
+            .is_blockhash_valid(jupiter_blockhash, CommitmentConfig::processed())
+            .await
+            .unwrap_or(false);
+
+        if !is_valid {
+            tracing::warn!("Jupiter provided blockhash used in transaction is expired or invalid. Triggering re-quote.");
+            return Err(ExecutorError::BlockhashExpired);
+        }
+
+        // Get recent blockhash (use active RPC client)
         let recent_blockhash = active_client
             .get_latest_blockhash()
             .await
@@ -1192,6 +1220,9 @@ pub enum ExecutorError {
     /// Spear strategy disabled in fallback mode
     #[error("Spear strategy is disabled in fallback RPC mode")]
     SpearDisabled,
+
+    #[error("Blockhash expired, retry required")]
+    BlockhashExpired,
 
     /// Amount too small
     #[error("Amount {0} SOL is below minimum {1} SOL")]

@@ -21,6 +21,8 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
+use tokio_util::sync::CancellationToken;
+
 
 use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::AppConfig;
@@ -83,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     
     // Create WebSocket state
     let ws_state = Arc::new(WsState::new());
+    let cancel_token = CancellationToken::new();
     
     // Initialize circuit breaker
     let circuit_breaker = Arc::new(CircuitBreaker::new_with_ws(
@@ -152,12 +155,20 @@ async fn main() -> anyhow::Result<()> {
     
     // Spawn circuit breaker task
     let cb_clone = circuit_breaker.clone();
+    let cb_token = cancel_token.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
-            interval.tick().await;
-            if let Err(e) = cb_clone.evaluate().await {
-                tracing::error!(error = %e, "Circuit breaker evaluation failed");
+            tokio::select! {
+                _ = cb_token.cancelled() => {
+                    tracing::info!("Shutting down circuit breaker task");
+                    break;
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = cb_clone.evaluate().await {
+                        tracing::error!(error = %e, "Circuit breaker evaluation failed");
+                    }
+                }
             }
         }
     });
@@ -170,11 +181,16 @@ async fn main() -> anyhow::Result<()> {
     
     // Spawn periodic RPC health check task
     let engine_handle_rpc = _engine_handle.clone();
+    let rpc_token = cancel_token.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
-            interval.tick().await;
-            engine_handle_rpc.refresh_rpc_health().await;
+            tokio::select! {
+                _ = rpc_token.cancelled() => break,
+                _ = interval.tick() => {
+                    engine_handle_rpc.refresh_rpc_health().await;
+                }
+            }
         }
     });
     tracing::info!("RPC health check task started");
@@ -188,43 +204,47 @@ async fn main() -> anyhow::Result<()> {
     let db_pool_metrics = db_pool.clone();
     let engine_handle_metrics = _engine_handle.clone();
     let ws_state_metrics = ws_state.clone();
+    let metrics_token = cancel_token.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = metrics_token.cancelled() => break,
+                _ = interval.tick() => {
+                    // Update circuit breaker state
+                    let cb_state = circuit_breaker_clone.current_state();
+                    let is_active = cb_state == chimera_operator::circuit_breaker::CircuitBreakerState::Active;
+                    metrics_state_clone
+                        .circuit_breaker_state
+                        .set(if is_active { 1 } else { 0 });
 
-            // Update circuit breaker state
-            let cb_state = circuit_breaker_clone.current_state();
-            let is_active = cb_state == chimera_operator::circuit_breaker::CircuitBreakerState::Active;
-            metrics_state_clone
-                .circuit_breaker_state
-                .set(if is_active { 1 } else { 0 });
+                    // Update RPC health
+                    if let Some(rpc_health) = engine_handle_metrics.get_rpc_health().await {
+                        metrics_state_clone
+                            .rpc_health
+                            .set(if rpc_health.healthy { 1 } else { 0 });
+                    }
 
-            // Update RPC health
-            if let Some(rpc_health) = engine_handle_metrics.get_rpc_health().await {
-                metrics_state_clone
-                    .rpc_health
-                    .set(if rpc_health.healthy { 1 } else { 0 });
+                    // Update active positions count
+                    if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
+                        metrics_state_clone.active_positions.set(count as i64);
+                    }
+
+                    // Update total trades count
+                    if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
+                        metrics_state_clone.total_trades.set(count as i64);
+                    }
+
+                    // Broadcast health update via WebSocket
+                    ws_state_metrics.broadcast(chimera_operator::handlers::WsEvent::HealthUpdate(
+                        chimera_operator::handlers::HealthUpdateData {
+                            status: "healthy".to_string(), // Could be more sophisticated
+                            queue_depth: engine_handle_metrics.queue_depth(),
+                            trading_allowed: is_active,
+                        },
+                    ));
+                }
             }
-
-            // Update active positions count
-            if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
-                metrics_state_clone.active_positions.set(count as i64);
-            }
-
-            // Update total trades count
-            if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
-                metrics_state_clone.total_trades.set(count as i64);
-            }
-
-            // Broadcast health update via WebSocket
-            ws_state_metrics.broadcast(chimera_operator::handlers::WsEvent::HealthUpdate(
-                chimera_operator::handlers::HealthUpdateData {
-                    status: "healthy".to_string(), // Could be more sophisticated
-                    queue_depth: engine_handle_metrics.queue_depth(),
-                    trading_allowed: is_active,
-                },
-            ));
         }
     });
     tracing::info!("Metrics update task started");
@@ -498,10 +518,25 @@ async fn main() -> anyhow::Result<()> {
     
     tracing::info!(%addr, "Starting server with FULL router");
     
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Server listening on {}", addr);
-    
-    axum::serve(listener, app).await?;
+    let shutdown_token = cancel_token.clone();
+    let server_handle = tokio::spawn(async move {
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                shutdown_token.cancelled().await;
+            })
+            .await
+            .unwrap();
+    });
+
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!("Shutdown signal received"),
+        Err(err) => tracing::error!("Unable to listen for shutdown signal: {}", err),
+    }
+
+    cancel_token.cancel();
+    let _ = server_handle.await;
+    tracing::info!("Chimera Operator shut down successfully");
     
     Ok(())
 }
