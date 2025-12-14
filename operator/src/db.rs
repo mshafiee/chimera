@@ -499,9 +499,10 @@ pub async fn get_strategy_performance(
 /// Get count of consecutive losses
 pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
     // Get the most recent trades and count consecutive losses
-    let trades: Vec<(f64,)> = sqlx::query_as(
+    // Convert f64 from database to Decimal immediately for precise comparison
+    let trades: Vec<(Option<f64>,)> = sqlx::query_as(
         r#"
-        SELECT CAST(COALESCE(pnl_usd, 0) AS REAL)
+        SELECT pnl_usd
         FROM trades
         WHERE status = 'CLOSED'
         ORDER BY created_at DESC
@@ -512,8 +513,16 @@ pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
     .await?;
 
     let mut consecutive = 0u32;
-    for (pnl,) in trades {
-        if pnl < 0.0 {
+    for (pnl_opt,) in trades {
+        // Convert f64 to Decimal for precise financial comparison
+        let pnl = if let Some(pnl_f64) = pnl_opt {
+            Decimal::from_f64_retain(pnl_f64).unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+        
+        // Use Decimal comparison to avoid floating point precision issues
+        if pnl < Decimal::ZERO {
             consecutive += 1;
         } else {
             break;
