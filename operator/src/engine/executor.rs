@@ -14,7 +14,7 @@ use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Timelike, Utc};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_config::CommitmentConfig;
+use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
 use std::time::Duration;
@@ -254,10 +254,18 @@ impl Executor {
 
             // Handle retry for expired blockhash
             match &result {
-                Err(ExecutorError::BlockhashExpired) if attempts < 3 => {
-                    tracing::info!("Retrying execution with fresh quote due to expired blockhash...");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
+                Err(ExecutorError::BlockhashExpired) => {
+                    if attempts < 3 {
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            attempt = attempts,
+                            "Blockhash expired/invalid. Re-requesting fresh quote and retrying..."
+                        );
+                        // The loop will restart, causing TransactionBuilder to fetch a NEW quote 
+                        // from Jupiter with a FRESH blockhash.
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        continue;
+                    }
                 }
                 _ => {}
             }
@@ -645,15 +653,21 @@ impl Executor {
         // Note: Jito bundles currently only support legacy transactions
         if let Some(ref jito_searcher) = self.jito_searcher {
             let tip_lamports = (tip * 1_000_000_000.0) as u64; // Convert SOL to lamports
-            let transaction = match &built_tx {
-                crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => transaction,
-                crate::engine::transaction_builder::BuiltTransaction::Versioned { .. } => {
-                    tracing::warn!("VersionedTransaction not supported for Jito bundles, falling back to standard TPU");
-                    return self.execute_standard(signal).await;
+            
+            // Serialize based on transaction type using Legacy config for Solana wire compatibility
+            let tx_bytes = match &built_tx {
+                crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
+                    bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+                        .map_err(|e| ExecutorError::TransactionFailed(format!("Serialization error: {}", e)))?
+                },
+                crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
+                     // Already serialized and signed by transaction_builder
+                     transaction_bytes.clone()
                 }
             };
+
             match jito_searcher
-                .submit_bundle(transaction, tip_lamports, &wallet_keypair)
+                .submit_bundle(&tx_bytes, tip_lamports, &wallet_keypair)
                 .await
             {
                 Ok(signature) => {
@@ -679,15 +693,19 @@ impl Executor {
         // Note: Helius Sender currently only supports legacy transactions
         if self.config.jito.helius_fallback {
             if let Some(helius_api_key) = secrets.rpc_api_key.as_ref() {
-                let transaction = match &built_tx {
-                    crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => transaction,
-                    crate::engine::transaction_builder::BuiltTransaction::Versioned { .. } => {
-                        tracing::warn!("VersionedTransaction not supported for Helius Sender, falling back to standard TPU");
-                        return self.execute_standard(signal).await;
+                // Serialize transaction to bytes for Helius Sender
+                let tx_bytes = match &built_tx {
+                    crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
+                        bincode1::serialize(transaction)
+                            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?
+                    },
+                    crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
+                        transaction_bytes.clone()
                     }
                 };
+
                 match self
-                    .submit_via_helius_sender(transaction, tip, helius_api_key)
+                    .submit_via_helius_sender(&tx_bytes, tip, helius_api_key)
                     .await
                 {
                     Ok(signature) => {
@@ -731,17 +749,15 @@ impl Executor {
     /// Submit transaction via Helius Sender API (Jito bundles)
     async fn submit_via_helius_sender(
         &self,
-        transaction: &Transaction,
+        tx_bytes: &[u8],
         tip_sol: f64,
         api_key: &str,
     ) -> Result<String, ExecutorError> {
         // Helius Sender API endpoint
         let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
 
-        // Convert transaction to base64 using legacy bincode format for Solana compatibility
-        let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
-        let tx_base64 = BASE64.encode(&tx_bytes);
+        // Encode transaction bytes to base64
+        let tx_base64 = BASE64.encode(tx_bytes);
 
         // Create bundle payload
         // Note: Helius Sender API expects a specific format
@@ -763,7 +779,17 @@ impl Executor {
 
         let status = response.status();
         if !status.is_success() {
-            let error_text = response.text().await.unwrap_or_default();
+            // Attempt to extract error text, but log if extraction fails
+            let error_text = match response.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to extract error text from Helius response"
+                    );
+                    format!("Failed to extract error text: {}", e)
+                }
+            };
             return Err(ExecutorError::Rpc(format!(
                 "Helius Sender API error: {} - {}",
                 status,
@@ -907,10 +933,20 @@ impl Executor {
         // Validate Jupiter's blockhash
         let jupiter_blockhash = versioned_tx.message.recent_blockhash();
         let active_client = self.active_rpc_client();
-        let is_valid = active_client
+        let is_valid = match active_client
             .is_blockhash_valid(jupiter_blockhash, CommitmentConfig::processed())
             .await
-            .unwrap_or(false);
+        {
+            Ok(valid) => valid,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    blockhash = %jupiter_blockhash,
+                    "Failed to validate blockhash, assuming invalid for safety"
+                );
+                false
+            }
+        };
 
         if !is_valid {
             tracing::warn!("Jupiter provided blockhash used in transaction is expired or invalid. Triggering re-quote.");
@@ -998,15 +1034,11 @@ impl Executor {
         
         tracing::debug!("Created signed VersionedTransaction");
         
-        // Serialize the signed transaction using bincode legacy format for Solana wire compatibility
-        // bincode 2.x standard() is NOT compatible with Solana's expected format
-        // legacy() produces bincode 1.x compatible output that Solana RPC expects
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        let signed_bytes = bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy())
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to serialize signed transaction");
-                ExecutorError::TransactionFailed(format!("Failed to serialize signed transaction: {}", e))
-            })?;
+        // Serialize the signed transaction using bincode 1.3 for Solana compatibility
+        // bincode 2.0 (standard) uses u64 for lengths, but Solana requires u16/u32 logic 
+        // consistent with bincode 1.3
+        let signed_bytes = bincode1::serialize(&signed_tx)
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize versioned transaction: {}", e)))?;
         
         // Validate signed transaction size before submission
         self.validate_transaction_size(&signed_bytes)?;
@@ -1071,11 +1103,29 @@ impl Executor {
         // Handle both success and error responses
         let signature = if let Some(err) = response.get("error") {
             let error_code = err.get("code").and_then(|c| c.as_i64());
+            // Extract error message with better error handling
+            // Store as String to avoid lifetime issues
             let error_msg = err.get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown RPC error");
+                .and_then(|m| m.as_str().map(|s| s.to_string()))
+                .or_else(|| {
+                    // Try to extract error as JSON string if message is not a string
+                    err.get("message").and_then(|m| serde_json::to_string(m).ok())
+                })
+                .unwrap_or_else(|| {
+                    // If all else fails, format the entire error object
+                    tracing::warn!(
+                        error_obj = ?err,
+                        "RPC error object missing 'message' field, using full error object"
+                    );
+                    "Unknown RPC error (see logs for details)".to_string()
+                });
             
-            tracing::error!(error_code = ?error_code, error = %error_msg, "RPC returned error");
+            tracing::error!(
+                error_code = ?error_code,
+                error = %error_msg,
+                error_obj = ?err,
+                "RPC returned error"
+            );
             
             // Check for address lookup table error specifically
             // V0 transactions use Address Lookup Tables (ALTs) which are mainnet-specific

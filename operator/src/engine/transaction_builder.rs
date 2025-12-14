@@ -134,15 +134,30 @@ impl TransactionBuilder {
         // Check the first byte to determine transaction type
         if tx_bytes.len() > 0 && tx_bytes[0] == 0x01 {
             // VersionedTransaction (version 1)
-            // Store raw bytes - executor will handle submission via RPC
-            // Note: The transaction from Jupiter is unsigned and needs to be signed
-            // For now, we'll submit it and let RPC handle it (may fail if unsigned)
-            tracing::debug!(
-                tx_len = tx_bytes.len(),
-                "Storing VersionedTransaction bytes for RPC submission"
-            );
+            // Parse to sign
+            // Use bincode 1.3 (bincode1) to match Solana wire format
+            let mut versioned_tx: VersionedTransaction = bincode1::deserialize(&tx_bytes)
+                .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize V0 tx: {}", e)))?;
+
+            // Sign with our keypair
+            let message_hash = versioned_tx.message.hash();
+            let signature = wallet_keypair.try_sign_message(&message_hash.to_bytes())
+                .map_err(|e| crate::error::AppError::Validation(format!("Signing failed: {}", e)))?;
+
+            // Replace signature (Jupiter sends placeholder or empty)
+            if versioned_tx.signatures.is_empty() {
+                versioned_tx.signatures.push(signature);
+            } else {
+                versioned_tx.signatures[0] = signature;
+            }
+
+            // Re-serialize signed transaction
+            // Use bincode 1.3 (bincode1) to ensure correct wire format for RPC
+            let signed_bytes = bincode1::serialize(&versioned_tx)
+                .map_err(|e| crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e)))?;
+
             Ok(BuiltTransaction::Versioned {
-                transaction_bytes: tx_bytes,
+                transaction_bytes: signed_bytes, // Return signed bytes
                 blockhash,
             })
         } else {
@@ -151,9 +166,9 @@ impl TransactionBuilder {
                 return Err(crate::error::AppError::Parse("Transaction bytes are empty".to_string()));
             }
             
-            let mut tx: Transaction = bincode::serde::decode_from_slice(&tx_bytes, bincode::config::standard())
-                .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize legacy transaction: {}", e)))?
-                .0;
+            // Use bincode 1.3 (bincode1) for legacy transactions as well
+            let mut tx: Transaction = bincode1::deserialize(&tx_bytes)
+                .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize legacy transaction: {}", e)))?;
 
             // Update blockhash and re-sign
             tx.message.recent_blockhash = blockhash;
@@ -287,14 +302,23 @@ pub struct JupiterSwapResponse {
 
 /// Load wallet keypair from vault
 pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
-    let key_bytes = secrets
+    use secrecy::ExposeSecret; 
+
+    let key_secret = secrets
         .wallet_private_key
         .as_ref()
         .ok_or_else(|| crate::error::AppError::Validation("Wallet private key not found in vault".to_string()))?;
 
+    // Expose secret safely only for this operation
+    let key_hex = key_secret.expose_secret();
+    
+    // Decode hex string to bytes
+    let key_bytes = hex::decode(key_hex.trim())
+        .map_err(|e| crate::error::AppError::Validation(format!("Invalid private key hex: {}", e)))?;
+
     if key_bytes.len() != 64 {
         return Err(crate::error::AppError::Validation(
-            "Invalid keypair length (expected 64 bytes)".to_string(),
+            format!("Invalid keypair length (expected 64 bytes, got {})", key_bytes.len())
         ));
     }
 
@@ -303,7 +327,7 @@ pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
     let keypair_bytes: [u8; 64] = key_bytes
         .as_slice()
         .try_into()
-        .map_err(|_| crate::error::AppError::Validation("Invalid keypair length (expected 64 bytes)".to_string()))?;
+        .map_err(|_| crate::error::AppError::Validation("Invalid keypair length".to_string()))?;
     
     // Use try_from with the full 64-byte array
     let keypair = Keypair::try_from(keypair_bytes.as_slice())
@@ -314,6 +338,10 @@ pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
                 e
             ))
         })?;
+
+    // The secrets struct will zeroize itself when dropped (out of scope), 
+    // but the Keypair (Solana SDK) persists. This is unavoidable as we need it 
+    // for signing, but at least the source buffer is cleaned.
 
     Ok(keypair)
 }

@@ -144,6 +144,8 @@ pub struct Engine {
     ws_state: Option<Arc<WsState>>,
     /// Token parser for slow-path safety checks
     token_parser: Option<Arc<TokenParser>>,
+    /// Price cache for real-time pricing
+    price_cache: Option<Arc<PriceCache>>,
 }
 
 impl Engine {
@@ -291,6 +293,7 @@ impl Engine {
             metrics,
             ws_state,
             token_parser,
+            price_cache,
         };
 
         (engine, handle)
@@ -511,7 +514,7 @@ impl Engine {
                     "Trade executed successfully"
                 );
 
-                // Update status to ACTIVE with signature
+                // 1. Update Trade Status to ACTIVE (Confirmed on-chain)
                 if let Err(e) = crate::db::update_trade_status(
                     &self.db,
                     &trade_uuid,
@@ -531,6 +534,51 @@ impl Engine {
                             token_symbol: Some(signal.payload.token.clone()),
                             strategy: signal.payload.strategy.to_string(),
                         }));
+                    }
+                }
+
+                // 2. Manage Position Lifecycle
+                if signal.payload.action == Action::Buy {
+                    // Calculate entry price (from cache or default to 0.0)
+                    let entry_price = self.price_cache.as_ref()
+                        .and_then(|c| c.get_price_usd(signal.token_address()))
+                        .unwrap_or(0.0);
+
+                    // Open Position
+                    if let Err(e) = crate::db::open_position(
+                        &self.db,
+                        &trade_uuid,
+                        &signal.payload.wallet_address,
+                        signal.token_address(),
+                        Some(&signal.payload.token),
+                        &signal.payload.strategy.to_string(),
+                        signal.payload.amount_sol,
+                        entry_price,
+                        &tx_signature
+                    ).await {
+                         tracing::error!(error = %e, "Failed to open position");
+                    }
+                } else if signal.payload.action == Action::Sell {
+                    let exit_price = self.price_cache.as_ref()
+                        .and_then(|c| c.get_price_usd(signal.token_address()))
+                        .unwrap_or(0.0);
+
+                    // Close Position
+                    if let Err(e) = crate::db::close_position(
+                        &self.db,
+                        signal.token_address(),
+                        &signal.payload.wallet_address,
+                        exit_price,
+                        &tx_signature
+                    ).await {
+                         tracing::error!(error = %e, "Failed to close position");
+                    }
+                    
+                    // Update trade status to CLOSED
+                    if let Err(e) = crate::db::update_trade_status(
+                        &self.db, &trade_uuid, "CLOSED", Some(&tx_signature), None
+                    ).await {
+                        tracing::error!(error = %e, "Failed to update trade status to CLOSED");
                     }
                 }
             }

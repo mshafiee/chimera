@@ -47,9 +47,16 @@ impl JitoSearcherClient {
     /// 2. Swap transaction (the actual trade)
     ///
     /// Returns the bundle signature
+    /// Submit a bundle to Jito Searcher
+    ///
+    /// Creates a bundle with:
+    /// 1. Tip transaction (to tip account)
+    /// 2. Swap transaction (the actual trade)
+    ///
+    /// Returns the bundle signature
     pub async fn submit_bundle(
         &self,
-        swap_transaction: &Transaction,
+        swap_tx_bytes: &[u8],
         tip_lamports: u64,
         tip_keypair: &Keypair,
     ) -> Result<String, ExecutorError> {
@@ -60,13 +67,12 @@ impl JitoSearcherClient {
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to create tip transaction: {}", e)))?;
 
         // Build bundle: tip transaction first, then swap transaction
-        let tip_tx_bytes = bincode::serde::encode_to_vec(&tip_transaction, bincode::config::standard())
+        let tip_tx_bytes = bincode::serde::encode_to_vec(&tip_transaction, bincode::config::legacy())
             .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e)))?;
         let tip_tx_base64 = BASE64.encode(&tip_tx_bytes);
 
-        let swap_tx_bytes = bincode::serde::encode_to_vec(swap_transaction, bincode::config::standard())
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize swap tx: {}", e)))?;
-        let swap_tx_base64 = BASE64.encode(&swap_tx_bytes);
+        // Encode the pre-serialized swap transaction
+        let swap_tx_base64 = BASE64.encode(swap_tx_bytes);
 
         // Jito Searcher API expects bundle in specific format
         let bundle = vec![tip_tx_base64, swap_tx_base64];
