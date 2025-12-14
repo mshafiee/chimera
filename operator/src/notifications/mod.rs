@@ -16,6 +16,8 @@ pub use telegram::TelegramNotifier;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use rust_decimal::prelude::*;
+use std::str::FromStr;
 
 /// Alert level for notifications
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,15 +47,15 @@ pub enum NotificationEvent {
     /// Circuit breaker was triggered
     CircuitBreakerTriggered { reason: String },
     /// Wallet balance dropped significantly
-    WalletDrained { delta_sol: f64, timeframe: String },
+    WalletDrained { delta_sol: Decimal, timeframe: String },
     /// System component crashed
     SystemCrash { component: String },
     /// Position was exited
     PositionExited {
         token: String,
         strategy: String,
-        pnl_percent: f64,
-        pnl_sol: f64,
+        pnl_percent: Decimal,
+        pnl_sol: Decimal,
     },
     /// Switched to fallback RPC
     RpcFallback { reason: String },
@@ -61,7 +63,7 @@ pub enum NotificationEvent {
     WalletPromoted { address: String, wqs_score: f64 },
     /// Daily trading summary
     DailySummary {
-        pnl_usd: f64,
+        pnl_usd: Decimal,
         trade_count: u32,
         win_rate: f64,
     },
@@ -102,10 +104,11 @@ impl NotificationEvent {
                 pnl_percent,
                 pnl_sol,
             } => {
-                let emoji = if *pnl_percent >= 0.0 { "💰" } else { "📉" };
+                let pnl_percent_f64 = pnl_percent.to_f64().unwrap_or(0.0);
+                let emoji = if *pnl_percent >= Decimal::ZERO { "💰" } else { "📉" };
                 format!(
                     "{} {} {}: {:+.2}% ({:+.4} SOL)",
-                    emoji, token, strategy, pnl_percent, pnl_sol
+                    emoji, token, strategy, pnl_percent_f64, pnl_sol
                 )
             }
             NotificationEvent::RpcFallback { reason } => {
@@ -124,10 +127,11 @@ impl NotificationEvent {
                 trade_count,
                 win_rate,
             } => {
-                let emoji = if *pnl_usd >= 0.0 { "📈" } else { "📉" };
+                let pnl_usd_f64 = pnl_usd.to_f64().unwrap_or(0.0);
+                let emoji = if *pnl_usd >= Decimal::ZERO { "📈" } else { "📉" };
                 format!(
                     "{} Daily: {:+.2} USD | Trades: {} | Win: {:.1}%",
-                    emoji, pnl_usd, trade_count, win_rate
+                    emoji, pnl_usd_f64, trade_count, win_rate
                 )
             }
         }
@@ -218,8 +222,8 @@ mod tests {
             NotificationEvent::PositionExited {
                 token: "TEST".to_string(),
                 strategy: "SHIELD".to_string(),
-                pnl_percent: 10.0,
-                pnl_sol: 0.1
+                pnl_percent: Decimal::from(10),
+                pnl_sol: Decimal::from_str("0.1").unwrap()
             }
             .level(),
             AlertLevel::Important
@@ -227,7 +231,7 @@ mod tests {
 
         assert_eq!(
             NotificationEvent::DailySummary {
-                pnl_usd: 100.0,
+                pnl_usd: Decimal::from(100),
                 trade_count: 10,
                 win_rate: 70.0
             }

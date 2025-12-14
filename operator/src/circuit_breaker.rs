@@ -13,6 +13,7 @@ use crate::db::{self, DbPool};
 use crate::error::AppResult;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 
 /// Circuit breaker state
@@ -174,9 +175,10 @@ impl CircuitBreaker {
 
         // Check 24h loss
         let pnl_24h = db::get_pnl_24h(&self.db).await?;
-        if pnl_24h < 0.0 && pnl_24h.abs() >= self.config.max_loss_24h_usd {
+        let max_loss_threshold = Decimal::from_f64_retain(self.config.max_loss_24h_usd).unwrap_or(Decimal::ZERO);
+        if pnl_24h < Decimal::ZERO && pnl_24h.abs() >= max_loss_threshold {
             self.trip(TripReason::MaxLoss24h {
-                loss: pnl_24h.abs(),
+                loss: pnl_24h.abs().to_f64().unwrap_or(0.0),
                 threshold: self.config.max_loss_24h_usd,
             })
             .await?;
@@ -196,9 +198,10 @@ impl CircuitBreaker {
 
         // Check drawdown
         let drawdown = db::get_max_drawdown_percent(&self.db).await?;
-        if drawdown >= self.config.max_drawdown_percent {
+        let max_drawdown_threshold = Decimal::from_f64_retain(self.config.max_drawdown_percent).unwrap_or(Decimal::ZERO);
+        if drawdown >= max_drawdown_threshold {
             self.trip(TripReason::MaxDrawdown {
-                drawdown,
+                drawdown: drawdown.to_f64().unwrap_or(0.0),
                 threshold: self.config.max_drawdown_percent,
             })
             .await?;
