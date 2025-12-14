@@ -6,7 +6,7 @@
 use crate::config::DatabaseConfig;
 use crate::error::{AppError, AppResult};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Pool, Sqlite};
+use sqlx::{Pool, Row, Sqlite};
 // Path removed
 
 use std::str::FromStr;
@@ -390,8 +390,8 @@ pub async fn count_trades_by_status(pool: &DbPool, status: &str) -> AppResult<i6
 }
 
 /// Get total PnL for the last 24 hours
-pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<f64> {
-    let result: (f64,) = sqlx::query_as(
+pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<Decimal> {
+    let result: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
         FROM trades
@@ -402,12 +402,12 @@ pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<f64> {
     .fetch_one(pool)
     .await?;
 
-    Ok(result.0)
+    Ok(Decimal::from_f64_retain(result.0.unwrap_or(0.0)).unwrap_or(Decimal::ZERO))
 }
 
 /// Get total PnL for the last 7 days
-pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<f64> {
-    let result: (f64,) = sqlx::query_as(
+pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<Decimal> {
+    let result: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
         FROM trades
@@ -418,12 +418,12 @@ pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<f64> {
     .fetch_one(pool)
     .await?;
 
-    Ok(result.0)
+    Ok(Decimal::from_f64_retain(result.0.unwrap_or(0.0)).unwrap_or(Decimal::ZERO))
 }
 
 /// Get total PnL for the last 30 days
-pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<f64> {
-    let result: (f64,) = sqlx::query_as(
+pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<Decimal> {
+    let result: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
         FROM trades
@@ -434,7 +434,7 @@ pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<f64> {
     .fetch_one(pool)
     .await?;
 
-    Ok(result.0)
+    Ok(Decimal::from_f64_retain(result.0.unwrap_or(0.0)).unwrap_or(Decimal::ZERO))
 }
 
 /// Get strategy performance metrics (win rate, avg return, trade count)
@@ -442,7 +442,7 @@ pub async fn get_strategy_performance(
     pool: &DbPool,
     strategy: &str,
     days: i64,
-) -> AppResult<(f64, f64, u32)> {
+) -> AppResult<(f64, Decimal, u32)> {
     // Get trades for the strategy in the time period
     // Use parameterized query to avoid SQL injection
     let query_str = format!(
@@ -463,18 +463,19 @@ pub async fn get_strategy_performance(
         .await?;
 
     if trades.is_empty() {
-        return Ok((0.0, 0.0, 0));
+        return Ok((0.0, Decimal::ZERO, 0));
     }
 
-    let mut total_pnl = 0.0;
+    let mut total_pnl = Decimal::ZERO;
     let mut winning_trades = 0u32;
     let mut total_trades = 0u32;
 
     for (pnl_opt,) in trades {
         if let Some(pnl) = pnl_opt {
             total_trades += 1;
-            total_pnl += pnl;
-            if pnl > 0.0 {
+            let pnl_dec = Decimal::from_f64_retain(pnl).unwrap_or(Decimal::ZERO);
+            total_pnl += pnl_dec;
+            if pnl_dec > Decimal::ZERO {
                 winning_trades += 1;
             }
         }
@@ -487,9 +488,9 @@ pub async fn get_strategy_performance(
     };
 
     let avg_return = if total_trades > 0 {
-        total_pnl / total_trades as f64
+        total_pnl / Decimal::from(total_trades)
     } else {
-        0.0
+        Decimal::ZERO
     };
 
     Ok((win_rate, avg_return, total_trades))
@@ -529,7 +530,7 @@ pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
 /// Insert a Jito tip record
 pub async fn insert_jito_tip(
     pool: &DbPool,
-    tip_amount_sol: f64,
+    tip_amount_sol: Decimal,
     bundle_signature: Option<&str>,
     strategy: &str,
     success: bool,
@@ -540,7 +541,7 @@ pub async fn insert_jito_tip(
         VALUES (?, ?, ?, ?)
         "#,
     )
-    .bind(tip_amount_sol)
+    .bind(tip_amount_sol.to_f64().unwrap_or(0.0))
     .bind(bundle_signature)
     .bind(strategy)
     .bind(if success { 1 } else { 0 })
@@ -552,7 +553,7 @@ pub async fn insert_jito_tip(
 
 /// Get recent successful tips for percentile calculation
 /// Returns tip amounts in descending order (most recent first)
-pub async fn get_recent_tips(pool: &DbPool, limit: u32) -> AppResult<Vec<f64>> {
+pub async fn get_recent_tips(pool: &DbPool, limit: u32) -> AppResult<Vec<Decimal>> {
     let tips: Vec<(f64,)> = sqlx::query_as(
         r#"
         SELECT tip_amount_sol
@@ -566,7 +567,7 @@ pub async fn get_recent_tips(pool: &DbPool, limit: u32) -> AppResult<Vec<f64>> {
     .fetch_all(pool)
     .await?;
 
-    Ok(tips.into_iter().map(|(t,)| t).collect())
+    Ok(tips.into_iter().map(|(t,)| Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO)).collect())
 }
 
 /// Get count of successful tips (for cold start detection)
@@ -604,7 +605,7 @@ pub async fn open_position(
     token_symbol: Option<&str>,
     strategy: &str,
     amount_sol: Decimal,
-    entry_price: f64,
+    entry_price: Decimal,
     signature: &str,
 ) -> AppResult<i64> {
     let result = sqlx::query(
@@ -622,7 +623,7 @@ pub async fn open_position(
     .bind(token_symbol)
     .bind(strategy)
     .bind(amount_sol.to_f64().unwrap_or(0.0))
-    .bind(entry_price)
+    .bind(entry_price.to_f64().unwrap_or(0.0))
     .bind(signature)
     .execute(pool)
     .await?;
@@ -635,7 +636,7 @@ pub async fn close_position(
     pool: &DbPool,
     token_address: &str,
     wallet_address: &str,
-    exit_price: f64,
+    exit_price: Decimal,
     signature: &str,
 ) -> AppResult<()> {
     // Calculate realized PnL based on entry vs exit
@@ -661,25 +662,22 @@ pub async fn close_position(
         return Ok(());
     }
 
-    for (id, entry_price, entry_amount_sol) in active_positions {
+    for (id, entry_price_f64, entry_amount_sol_f64) in active_positions {
+        // Convert from database f64 to Decimal for precision
+        let entry_price_dec = Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
+        let entry_amount_dec = Decimal::from_f64_retain(entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
+        
         // Calculate PnL using Decimal for precision
-        let pnl_sol = if entry_price > 0.0 {
-            let exit_price_dec = Decimal::from_f64_retain(exit_price).unwrap_or(Decimal::ZERO);
-            let entry_price_dec = Decimal::from_f64_retain(entry_price).unwrap_or(Decimal::ZERO);
-            let entry_amount_dec = Decimal::from_f64_retain(entry_amount_sol).unwrap_or(Decimal::ZERO);
-            
-            if !entry_price_dec.is_zero() {
-                let diff = exit_price_dec - entry_price_dec;
-                let ratio = diff / entry_price_dec;
-                (ratio * entry_amount_dec).to_f64().unwrap_or(0.0)
-            } else {
-                0.0
-            }
+        let pnl_sol = if !entry_price_dec.is_zero() {
+            let diff = exit_price - entry_price_dec;
+            let ratio = diff / entry_price_dec;
+            ratio * entry_amount_dec
         } else {
-            0.0
+            Decimal::ZERO
         };
-        // pnl_usd placeholder
-        let _pnl_usd = 0.0;
+        
+        // pnl_usd placeholder (convert to f64 only for database storage)
+        let _pnl_usd = Decimal::ZERO;
         
         sqlx::query(
             r#"
@@ -695,10 +693,10 @@ pub async fn close_position(
             WHERE id = ?
             "#
         )
-        .bind(exit_price)
+        .bind(exit_price.to_f64().unwrap_or(0.0))
         .bind(signature)
         .bind(0.0) // exit_value_usd
-        .bind(pnl_sol)
+        .bind(pnl_sol.to_f64().unwrap_or(0.0))
         .bind(0.0) // realized_pnl_usd
         .bind(id)
         .execute(pool)
@@ -809,9 +807,9 @@ pub async fn insert_reconciliation_log(
 // =============================================================================
 
 /// Get maximum drawdown from peak (for circuit breaker)
-pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<f64> {
+pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
     // Calculate drawdown from highest cumulative PnL to current
-    let result: (f64,) = sqlx::query_as(
+    let result: (Option<f64>,) = sqlx::query_as(
         r#"
         WITH cumulative_pnl AS (
             SELECT 
@@ -836,9 +834,10 @@ pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<f64> {
     )
     .fetch_one(pool)
     .await
-    .unwrap_or((0.0,));
+    .unwrap_or((Some(0.0),));
 
-    Ok(result.0.max(0.0))
+    let drawdown = Decimal::from_f64_retain(result.0.unwrap_or(0.0)).unwrap_or(Decimal::ZERO);
+    Ok(drawdown.max(Decimal::ZERO))
 }
 
 /// Get active positions count
@@ -857,7 +856,7 @@ pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
 // =============================================================================
 
 /// Position with full details for API response
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PositionDetail {
     pub id: i64,
     pub trade_uuid: String,
@@ -865,20 +864,52 @@ pub struct PositionDetail {
     pub token_address: String,
     pub token_symbol: Option<String>,
     pub strategy: String,
-    pub entry_amount_sol: f64,
-    pub entry_price: f64,
+    pub entry_amount_sol: Decimal,
+    pub entry_price: Decimal,
     pub entry_tx_signature: String,
-    pub current_price: Option<f64>,
-    pub unrealized_pnl_sol: Option<f64>,
-    pub unrealized_pnl_percent: Option<f64>,
+    pub current_price: Option<Decimal>,
+    pub unrealized_pnl_sol: Option<Decimal>,
+    pub unrealized_pnl_percent: Option<Decimal>,
     pub state: String,
-    pub exit_price: Option<f64>,
+    pub exit_price: Option<Decimal>,
     pub exit_tx_signature: Option<String>,
-    pub realized_pnl_sol: Option<f64>,
-    pub realized_pnl_usd: Option<f64>,
+    pub realized_pnl_sol: Option<Decimal>,
+    pub realized_pnl_usd: Option<Decimal>,
     pub opened_at: String,
     pub last_updated: String,
     pub closed_at: Option<String>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for PositionDetail {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        // Helper function to convert Option<f64> to Option<Decimal>
+        fn f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
+            val.map(|v| Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO))
+        }
+
+        Ok(PositionDetail {
+            id: row.try_get("id")?,
+            trade_uuid: row.try_get("trade_uuid")?,
+            wallet_address: row.try_get("wallet_address")?,
+            token_address: row.try_get("token_address")?,
+            token_symbol: row.try_get("token_symbol")?,
+            strategy: row.try_get("strategy")?,
+            entry_amount_sol: f64_to_decimal(row.try_get("entry_amount_sol")?).unwrap_or(Decimal::ZERO),
+            entry_price: f64_to_decimal(row.try_get("entry_price")?).unwrap_or(Decimal::ZERO),
+            entry_tx_signature: row.try_get("entry_tx_signature")?,
+            current_price: f64_to_decimal(row.try_get("current_price")?),
+            unrealized_pnl_sol: f64_to_decimal(row.try_get("unrealized_pnl_sol")?),
+            unrealized_pnl_percent: f64_to_decimal(row.try_get("unrealized_pnl_percent")?),
+            state: row.try_get("state")?,
+            exit_price: f64_to_decimal(row.try_get("exit_price")?),
+            exit_tx_signature: row.try_get("exit_tx_signature")?,
+            realized_pnl_sol: f64_to_decimal(row.try_get("realized_pnl_sol")?),
+            realized_pnl_usd: f64_to_decimal(row.try_get("realized_pnl_usd")?),
+            opened_at: row.try_get("opened_at")?,
+            last_updated: row.try_get("last_updated")?,
+            closed_at: row.try_get("closed_at")?,
+        })
+    }
 }
 
 /// Get all positions with optional state filter
@@ -968,7 +999,7 @@ pub async fn get_position_by_uuid(pool: &DbPool, trade_uuid: &str) -> AppResult<
 // =============================================================================
 
 /// Wallet with full details for API response
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalletDetail {
     pub id: i64,
     pub address: String,
@@ -979,11 +1010,11 @@ pub struct WalletDetail {
     pub trade_count_30d: Option<i32>,
     pub win_rate: Option<f64>,
     pub max_drawdown_30d: Option<f64>,
-    pub avg_trade_size_sol: Option<f64>,
-    pub avg_win_sol: Option<f64>,
-    pub avg_loss_sol: Option<f64>,
+    pub avg_trade_size_sol: Option<Decimal>,
+    pub avg_win_sol: Option<Decimal>,
+    pub avg_loss_sol: Option<Decimal>,
     pub profit_factor: Option<f64>,
-    pub realized_pnl_30d_sol: Option<f64>,
+    pub realized_pnl_30d_sol: Option<Decimal>,
     pub last_trade_at: Option<String>,
     pub promoted_at: Option<String>,
     pub ttl_expires_at: Option<String>,
@@ -992,11 +1023,43 @@ pub struct WalletDetail {
     pub updated_at: String,
 }
 
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WalletDetail {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        // Helper function to convert Option<f64> to Option<Decimal>
+        fn f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
+            val.map(|v| Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO))
+        }
+
+        Ok(WalletDetail {
+            id: row.try_get("id")?,
+            address: row.try_get("address")?,
+            status: row.try_get("status")?,
+            wqs_score: row.try_get("wqs_score")?,
+            roi_7d: row.try_get("roi_7d")?,
+            roi_30d: row.try_get("roi_30d")?,
+            trade_count_30d: row.try_get("trade_count_30d")?,
+            win_rate: row.try_get("win_rate")?,
+            max_drawdown_30d: row.try_get("max_drawdown_30d")?,
+            avg_trade_size_sol: f64_to_decimal(row.try_get("avg_trade_size_sol")?),
+            avg_win_sol: f64_to_decimal(row.try_get("avg_win_sol")?),
+            avg_loss_sol: f64_to_decimal(row.try_get("avg_loss_sol")?),
+            profit_factor: row.try_get("profit_factor")?,
+            realized_pnl_30d_sol: f64_to_decimal(row.try_get("realized_pnl_30d_sol")?),
+            last_trade_at: row.try_get("last_trade_at")?,
+            promoted_at: row.try_get("promoted_at")?,
+            ttl_expires_at: row.try_get("ttl_expires_at")?,
+            notes: row.try_get("notes")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+}
+
 /// Get all wallets with optional status filter
 pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>> {
     let wallets = match status_filter {
         Some(status) => {
-            sqlx::query_as::<_, WalletDetail>(
+            sqlx::query(
                 r#"
                 SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
                        win_rate, max_drawdown_30d, avg_trade_size_sol,
@@ -1009,11 +1072,12 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
                 "#
             )
             .bind(status)
+            .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
             .fetch_all(pool)
             .await?
         }
         None => {
-            sqlx::query_as::<_, WalletDetail>(
+            sqlx::query(
                 r#"
                 SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
                        win_rate, max_drawdown_30d, avg_trade_size_sol,
@@ -1024,6 +1088,7 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
                 ORDER BY wqs_score DESC NULLS LAST
                 "#
             )
+            .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
             .fetch_all(pool)
             .await?
         }
@@ -1034,7 +1099,7 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
 
 /// Get a single wallet by address
 pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Option<WalletDetail>> {
-    let wallet = sqlx::query_as::<_, WalletDetail>(
+    let wallet = sqlx::query(
         r#"
         SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
                win_rate, max_drawdown_30d, avg_trade_size_sol,
@@ -1046,6 +1111,7 @@ pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Op
         "#
     )
     .bind(address)
+    .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
     .fetch_optional(pool)
     .await?;
 
@@ -1065,7 +1131,7 @@ pub async fn upsert_wallet(
     trade_count_30d: Option<i32>,
     win_rate: Option<f64>,
     max_drawdown_30d: Option<f64>,
-    avg_trade_size_sol: Option<f64>,
+    avg_trade_size_sol: Option<Decimal>,
     last_trade_at: Option<&str>,
     notes: Option<&str>,
 ) -> AppResult<bool> {
@@ -1101,7 +1167,7 @@ pub async fn upsert_wallet(
         .bind(trade_count_30d)
         .bind(win_rate)
         .bind(max_drawdown_30d)
-        .bind(avg_trade_size_sol)
+        .bind(avg_trade_size_sol.map(|d| d.to_f64().unwrap_or(0.0)))
         .bind(last_trade_at)
         .bind(notes)
         .bind(address)
@@ -1129,7 +1195,7 @@ pub async fn upsert_wallet(
         .bind(trade_count_30d)
         .bind(win_rate)
         .bind(max_drawdown_30d)
-        .bind(avg_trade_size_sol)
+        .bind(avg_trade_size_sol.map(|d| d.to_f64().unwrap_or(0.0)))
         .bind(last_trade_at)
         .bind(notes)
         .execute(pool)
@@ -1218,7 +1284,7 @@ pub async fn get_wallet_copy_performance(
     pool: &DbPool,
     wallet_address: &str,
 ) -> AppResult<Option<WalletCopyPerformance>> {
-    let result = sqlx::query_as::<_, WalletCopyPerformance>(
+    let result = sqlx::query(
         r#"
         SELECT 
             wallet_address,
@@ -1234,6 +1300,7 @@ pub async fn get_wallet_copy_performance(
         "#
     )
     .bind(wallet_address)
+    .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
     .fetch_optional(pool)
     .await?;
 
@@ -1241,16 +1308,36 @@ pub async fn get_wallet_copy_performance(
 }
 
 /// Wallet copy performance metrics from database
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct WalletCopyPerformance {
     pub wallet_address: String,
-    pub copy_pnl_7d: f64,
-    pub copy_pnl_30d: f64,
+    pub copy_pnl_7d: Decimal,
+    pub copy_pnl_30d: Decimal,
     pub signal_success_rate: f64,
-    pub avg_return_per_trade: f64,
+    pub avg_return_per_trade: Decimal,
     pub total_trades: i32,
     pub winning_trades: i32,
     pub last_updated: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WalletCopyPerformance {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        // Helper function to convert Option<f64> to Option<Decimal>
+        fn f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
+            val.map(|v| Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO))
+        }
+
+        Ok(WalletCopyPerformance {
+            wallet_address: row.try_get("wallet_address")?,
+            copy_pnl_7d: f64_to_decimal(row.try_get("copy_pnl_7d")?).unwrap_or(Decimal::ZERO),
+            copy_pnl_30d: f64_to_decimal(row.try_get("copy_pnl_30d")?).unwrap_or(Decimal::ZERO),
+            signal_success_rate: row.try_get("signal_success_rate")?,
+            avg_return_per_trade: f64_to_decimal(row.try_get("avg_return_per_trade")?).unwrap_or(Decimal::ZERO),
+            total_trades: row.try_get("total_trades")?,
+            winning_trades: row.try_get("winning_trades")?,
+            last_updated: row.try_get("last_updated")?,
+        })
+    }
 }
 
 /// Get wallet monitoring information
@@ -1378,7 +1465,7 @@ pub async fn get_wallet_monitoring_by_address(
 // =============================================================================
 
 /// Trade record for API response
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct TradeDetail {
     pub id: i64,
     pub trade_uuid: String,
@@ -1387,21 +1474,55 @@ pub struct TradeDetail {
     pub token_symbol: Option<String>,
     pub strategy: String,
     pub side: String,
-    pub amount_sol: f64,
-    pub price_at_signal: Option<f64>,
+    pub amount_sol: Decimal,
+    pub price_at_signal: Option<Decimal>,
     pub tx_signature: Option<String>,
     pub status: String,
     pub retry_count: i32,
     pub error_message: Option<String>,
-    pub pnl_sol: Option<f64>,
-    pub pnl_usd: Option<f64>,
-    pub jito_tip_sol: Option<f64>,
-    pub dex_fee_sol: Option<f64>,
-    pub slippage_cost_sol: Option<f64>,
-    pub total_cost_sol: Option<f64>,
-    pub net_pnl_sol: Option<f64>,
+    pub pnl_sol: Option<Decimal>,
+    pub pnl_usd: Option<Decimal>,
+    pub jito_tip_sol: Option<Decimal>,
+    pub dex_fee_sol: Option<Decimal>,
+    pub slippage_cost_sol: Option<Decimal>,
+    pub total_cost_sol: Option<Decimal>,
+    pub net_pnl_sol: Option<Decimal>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for TradeDetail {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        // Helper function to convert Option<f64> to Option<Decimal>
+        fn f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
+            val.map(|v| Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO))
+        }
+
+        Ok(TradeDetail {
+            id: row.try_get("id")?,
+            trade_uuid: row.try_get("trade_uuid")?,
+            wallet_address: row.try_get("wallet_address")?,
+            token_address: row.try_get("token_address")?,
+            token_symbol: row.try_get("token_symbol")?,
+            strategy: row.try_get("strategy")?,
+            side: row.try_get("side")?,
+            amount_sol: f64_to_decimal(row.try_get("amount_sol")?).unwrap_or(Decimal::ZERO),
+            price_at_signal: f64_to_decimal(row.try_get("price_at_signal")?),
+            tx_signature: row.try_get("tx_signature")?,
+            status: row.try_get("status")?,
+            retry_count: row.try_get("retry_count")?,
+            error_message: row.try_get("error_message")?,
+            pnl_sol: f64_to_decimal(row.try_get("pnl_sol")?),
+            pnl_usd: f64_to_decimal(row.try_get("pnl_usd")?),
+            jito_tip_sol: f64_to_decimal(row.try_get("jito_tip_sol")?),
+            dex_fee_sol: f64_to_decimal(row.try_get("dex_fee_sol")?),
+            slippage_cost_sol: f64_to_decimal(row.try_get("slippage_cost_sol")?),
+            total_cost_sol: f64_to_decimal(row.try_get("total_cost_sol")?),
+            net_pnl_sol: f64_to_decimal(row.try_get("net_pnl_sol")?),
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
 }
 
 /// Get trades with optional filters for API and export
@@ -1540,7 +1661,7 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.token_symbol.as_deref().unwrap_or(""),
             trade.strategy,
             trade.side,
-            trade.amount_sol,
+            trade.amount_sol.to_string(),
             trade.price_at_signal.map(|p| p.to_string()).unwrap_or_default(),
             trade.tx_signature.as_deref().unwrap_or(""),
             trade.status,
@@ -1671,9 +1792,9 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
                 .unwrap_or_else(|| trade.token_address.chars().take(8).collect()),
             trade.strategy,
             trade.side,
-            trade.amount_sol,
+            trade.amount_sol.to_f64().unwrap_or(0.0),
             trade.status,
-            trade.pnl_usd.map(|p| p).unwrap_or(0.0),
+            trade.pnl_usd.and_then(|p| p.to_f64()).unwrap_or(0.0),
             &trade.created_at[..10.min(trade.created_at.len())], // Just date part
         );
         
