@@ -104,11 +104,18 @@ pub async fn helius_webhook_handler(
                     Strategy::Spear
                 };
 
+
+                let target_token = if direction == Action::Buy {
+                    swap.token_out.clone()
+                } else {
+                    swap.token_in.clone()
+                };
+
                 let signal_payload = SignalPayload {
                     wallet_address: wallet_address.clone(),
                     strategy,
-                    token: swap.token_out.clone(),
-                    token_address: Some(swap.token_out.clone()),
+                    token: target_token.clone(),
+                    token_address: Some(target_token),
                     action: direction,
                     amount_sol: swap.amount_in,
                     trade_uuid: None,

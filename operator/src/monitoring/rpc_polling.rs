@@ -35,7 +35,7 @@ impl RpcPollingState {
         Self {
             // Cap at 10,000 signatures
             seen_signatures: Arc::new(tokio::sync::RwLock::new(LruCache::new(
-                NonZeroUsize::new(10000).unwrap()
+                NonZeroUsize::new(10000).expect("Cache capacity must be > 0")
             ))),
             last_poll: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
