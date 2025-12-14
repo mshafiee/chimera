@@ -5,7 +5,6 @@
 use chimera_operator::roster;
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Pool, Sqlite};
-use std::time::Duration;
 use tempfile::TempDir;
 
 /// Create a test database pool
@@ -25,9 +24,38 @@ async fn create_test_pool() -> (Pool<Sqlite>, TempDir) {
         .await
         .unwrap();
     
-    // Run schema
-    let schema = include_str!("../../../database/schema.sql");
-    sqlx::raw_sql(schema).execute(&pool).await.unwrap();
+    // Create wallets table (must match database/schema/wallets.sql)
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS wallets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'CANDIDATE',
+            wqs_score REAL,
+            roi_7d REAL,
+            roi_30d REAL,
+            trade_count_30d INTEGER,
+            win_rate REAL,
+            max_drawdown_30d REAL,
+            avg_trade_size_sol REAL,
+            avg_win_sol REAL,
+            avg_loss_sol REAL,
+            profit_factor REAL,
+            realized_pnl_30d_sol REAL,
+            last_trade_at TIMESTAMP,
+            promoted_at TIMESTAMP,
+            ttl_expires_at TIMESTAMP,
+            notes TEXT,
+            archetype TEXT,
+            avg_entry_delay_seconds REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     
     (pool, temp_dir)
 }
@@ -49,7 +77,7 @@ async fn test_roster_merge_valid() {
         .await
         .unwrap();
     
-    // Create wallets table in roster
+    // Create wallets table in roster (must match database/schema/wallets.sql)
     sqlx::query(
         r#"
         CREATE TABLE wallets (
@@ -63,10 +91,16 @@ async fn test_roster_merge_valid() {
             win_rate REAL,
             max_drawdown_30d REAL,
             avg_trade_size_sol REAL,
+            avg_win_sol REAL,
+            avg_loss_sol REAL,
+            profit_factor REAL,
+            realized_pnl_30d_sol REAL,
             last_trade_at TIMESTAMP,
             promoted_at TIMESTAMP,
             ttl_expires_at TIMESTAMP,
             notes TEXT,
+            archetype TEXT,
+            avg_entry_delay_seconds REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -148,9 +182,48 @@ async fn test_roster_merge_missing_table() {
     assert!(result.is_err(), "Merge should fail when wallets table missing");
 }
 
-use std::time::Duration;
-
-
-
-
+/// Test roster merge with schema mismatch
+#[tokio::test]
+async fn test_roster_merge_schema_mismatch() {
+    let (pool, temp_dir) = create_test_pool().await;
+    
+    // Create roster with missing column
+    let roster_path = temp_dir.path().join("roster_new.db");
+    let roster_pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&roster_path)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    
+    // Create wallets table missing a required column (e.g., wqs_score)
+    sqlx::query(
+        r#"
+        CREATE TABLE wallets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'CANDIDATE'
+        )
+        "#,
+    )
+    .execute(&roster_pool)
+    .await
+    .unwrap();
+    
+    drop(roster_pool);
+    
+    // Merge should fail with schema validation error
+    let result = roster::merge_roster(&pool, &roster_path).await;
+    assert!(result.is_err(), "Merge should fail on schema mismatch");
+    
+    let error_msg = format!("{}", result.unwrap_err());
+    assert!(
+        error_msg.contains("Schema mismatch") || error_msg.contains("Missing columns"),
+        "Error should mention schema mismatch, got: {}",
+        error_msg
+    );
+}
 
