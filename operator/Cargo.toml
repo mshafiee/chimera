@@ -6,6 +6,8 @@ edition = "2021"
 [dependencies]
 # Core Async Runtime
 tokio = { version = "1.40", features = ["full", "sync"] }
+tokio-util = "0.7"
+
 
 # Web Framework (Ingress)
 axum = { version = "0.8", features = ["macros", "ws"] }
@@ -31,6 +33,7 @@ solana-client = "3.1.4"
 solana-sdk = "3.0.0"
 solana-transaction-status = "3.0"
 solana-system-interface = { version = "3.0.0", features = ["bincode"] }
+solana-program = "3.0.0"
 # Note: You will need the specific Jito searcher crate or build from their SDK
 # jito-searcher-client = { git = "..." } 
 
