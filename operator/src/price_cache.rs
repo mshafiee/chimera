@@ -12,6 +12,7 @@ use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use std::collections::{HashMap, VecDeque};
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::time::interval;
 
@@ -24,8 +25,8 @@ const PRICE_UPDATE_INTERVAL_SECS: u64 = 5;
 /// Price entry in cache
 #[derive(Debug, Clone)]
 pub struct PriceEntry {
-    /// Price in USD
-    pub price_usd: f64,
+    /// Price in USD (using Decimal for precision)
+    pub price_usd: Decimal,
     /// When this price was fetched
     pub fetched_at: DateTime<Utc>,
     /// Price source
@@ -64,7 +65,7 @@ pub struct PriceCache {
     /// Whether the updater is running
     updater_running: Arc<RwLock<bool>>,
     /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
-    pub price_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, f64)>>>>,
+    pub price_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>>>,
     /// SOL mint address (for market condition filtering)
     sol_mint: String,
 }
@@ -109,12 +110,12 @@ impl PriceCache {
     }
 
     /// Get price in USD (convenience method)
-    pub fn get_price_usd(&self, token_address: &str) -> Option<f64> {
+    pub fn get_price_usd(&self, token_address: &str) -> Option<Decimal> {
         self.get_price(token_address).map(|e| e.price_usd)
     }
 
     /// Set price for a token
-    pub fn set_price(&self, token_address: &str, price_usd: f64, source: PriceSource) {
+    pub fn set_price(&self, token_address: &str, price_usd: Decimal, source: PriceSource) {
         let now = Utc::now();
         let mut prices = self.prices.write();
         prices.insert(
@@ -154,28 +155,38 @@ impl PriceCache {
             return None;
         }
         
-        // Calculate price changes
-        let prices: Vec<f64> = token_history.iter().map(|(_, price)| *price).collect();
+        // Calculate price changes using Decimal for precision
+        let prices: Vec<Decimal> = token_history.iter().map(|(_, price)| *price).collect();
         let mut price_changes = Vec::new();
         
         for i in 1..prices.len() {
-            let change = ((prices[i] - prices[i - 1]) / prices[i - 1]) * 100.0;
-            price_changes.push(change);
+            if prices[i - 1] > Decimal::ZERO {
+                let change = ((prices[i] - prices[i - 1]) / prices[i - 1]) * Decimal::from(100);
+                price_changes.push(change);
+            }
         }
         
         if price_changes.is_empty() {
             return None;
         }
         
-        // Calculate mean
-        let mean: f64 = price_changes.iter().sum::<f64>() / price_changes.len() as f64;
+        // Calculate mean using Decimal
+        let sum: Decimal = price_changes.iter().sum();
+        let count = Decimal::from(price_changes.len());
+        let mean = sum / count;
         
-        // Calculate standard deviation
-        let variance: f64 = price_changes
+        // Calculate standard deviation using Decimal
+        let variance: Decimal = price_changes
             .iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / price_changes.len() as f64;
-        let std_dev = variance.sqrt();
+            .map(|x| {
+                let diff = *x - mean;
+                diff * diff
+            })
+            .sum::<Decimal>() / count;
+        
+        // Convert to f64 for sqrt (volatility is a statistical metric, not a financial amount)
+        let variance_f64 = variance.to_f64().unwrap_or(0.0);
+        let std_dev = variance_f64.sqrt();
         
         // Return absolute volatility (as percentage)
         Some(std_dev.abs())
@@ -259,7 +270,7 @@ impl PriceCache {
     async fn fetch_prices_jupiter(
         &self,
         tokens: &[String],
-    ) -> Result<Vec<(String, f64)>, PriceCacheError> {
+    ) -> Result<Vec<(String, Decimal)>, PriceCacheError> {
         if tokens.is_empty() {
             return Ok(Vec::new());
         }
@@ -304,12 +315,13 @@ impl PriceCache {
             .await
             .map_err(|e| PriceCacheError::ParseError(format!("Failed to parse Jupiter response: {}", e)))?;
 
-        // Extract prices from response
+        // Extract prices from response and convert to Decimal
         let mut results = Vec::new();
         for token in tokens {
             if let Some(price_data) = data.data.get(token) {
-                // Jupiter returns price in USD
-                let price = price_data.price;
+                // Jupiter returns price in USD as f64, convert to Decimal for precision
+                let price = Decimal::from_f64_retain(price_data.price)
+                    .unwrap_or_else(|| Decimal::from_str(&price_data.price.to_string()).unwrap_or(Decimal::ZERO));
                 results.push((token.clone(), price));
             } else {
                 tracing::warn!(
@@ -334,33 +346,29 @@ impl PriceCache {
     pub fn calculate_unrealized_pnl(
         &self,
         token_address: &str,
-        entry_price: f64,
-        position_size: f64,
+        entry_price: Decimal,
+        position_size: Decimal,
     ) -> Option<UnrealizedPnL> {
-        let current_price = self.get_price_usd(token_address)?;
+        let current_price_dec = self.get_price_usd(token_address)?;
 
         // Use Decimal for precise calculations
-        let current_price_dec = Decimal::from_f64_retain(current_price).unwrap_or(Decimal::ZERO);
-        let entry_price_dec = Decimal::from_f64_retain(entry_price).unwrap_or(Decimal::ZERO);
-        let position_size_dec = Decimal::from_f64_retain(position_size).unwrap_or(Decimal::ZERO);
-
-        let pnl_usd = if !entry_price_dec.is_zero() {
-            let price_diff = current_price_dec - entry_price_dec;
-            (price_diff * position_size_dec).to_f64().unwrap_or(0.0)
+        let pnl_usd = if !entry_price.is_zero() {
+            let price_diff = current_price_dec - entry_price;
+            price_diff * position_size
         } else {
-            0.0
+            Decimal::ZERO
         };
 
-        let pnl_percent = if !entry_price_dec.is_zero() {
-            let price_diff = current_price_dec - entry_price_dec;
-            let ratio = price_diff / entry_price_dec;
-            (ratio * Decimal::from(100)).to_f64().unwrap_or(0.0)
+        let pnl_percent = if !entry_price.is_zero() {
+            let price_diff = current_price_dec - entry_price;
+            let ratio = price_diff / entry_price;
+            ratio * Decimal::from(100)
         } else {
-            0.0
+            Decimal::ZERO
         };
 
         Some(UnrealizedPnL {
-            current_price,
+            current_price: current_price_dec,
             entry_price,
             pnl_usd,
             pnl_percent,
@@ -414,13 +422,13 @@ impl Default for PriceCache {
 #[derive(Debug, Clone)]
 pub struct UnrealizedPnL {
     /// Current price
-    pub current_price: f64,
+    pub current_price: Decimal,
     /// Entry price
-    pub entry_price: f64,
+    pub entry_price: Decimal,
     /// PnL in USD
-    pub pnl_usd: f64,
+    pub pnl_usd: Decimal,
     /// PnL as percentage
-    pub pnl_percent: f64,
+    pub pnl_percent: Decimal,
 }
 
 /// Price cache statistics
@@ -475,11 +483,11 @@ mod tests {
     #[test]
     fn test_price_cache_set_get() {
         let cache = PriceCache::new();
-        cache.set_price("token1", 1.5, PriceSource::Jupiter);
+        cache.set_price("token1", Decimal::from_str("1.5").unwrap(), PriceSource::Jupiter);
 
         let price = cache.get_price_usd("token1");
         assert!(price.is_some());
-        assert!((price.unwrap() - 1.5).abs() < 0.001);
+        assert_eq!(price.unwrap(), Decimal::from_str("1.5").unwrap());
     }
 
     #[test]
@@ -502,20 +510,24 @@ mod tests {
     #[test]
     fn test_unrealized_pnl_calculation() {
         let cache = PriceCache::new();
-        cache.set_price("token1", 2.0, PriceSource::Jupiter);
+        cache.set_price("token1", Decimal::from_str("2.0").unwrap(), PriceSource::Jupiter);
 
-        let pnl = cache.calculate_unrealized_pnl("token1", 1.0, 100.0);
+        let pnl = cache.calculate_unrealized_pnl(
+            "token1",
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::from_str("100.0").unwrap(),
+        );
         assert!(pnl.is_some());
 
         let pnl = pnl.unwrap();
-        assert!((pnl.pnl_usd - 100.0).abs() < 0.001); // (2.0 - 1.0) * 100 = 100
-        assert!((pnl.pnl_percent - 100.0).abs() < 0.001); // 100% gain
+        assert_eq!(pnl.pnl_usd, Decimal::from_str("100.0").unwrap()); // (2.0 - 1.0) * 100 = 100
+        assert_eq!(pnl.pnl_percent, Decimal::from_str("100.0").unwrap()); // 100% gain
     }
 
     #[test]
     fn test_stats() {
         let cache = PriceCache::new();
-        cache.set_price("token1", 1.0, PriceSource::Jupiter);
+        cache.set_price("token1", Decimal::from_str("1.0").unwrap(), PriceSource::Jupiter);
         cache.track_token("token1");
         cache.track_token("token2");
 
