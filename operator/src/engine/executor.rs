@@ -182,8 +182,8 @@ impl Executor {
         &self,
         token: &str,
         strategy: &str,
-        pnl_percent: f64,
-        pnl_sol: f64,
+        pnl_percent: Decimal,
+        pnl_sol: Decimal,
     ) {
         self.notify(NotificationEvent::PositionExited {
             token: token.to_string(),
@@ -236,16 +236,16 @@ impl Executor {
             let min_position = Decimal::from_f64_retain(self.config.strategy.min_position_sol).unwrap_or(Decimal::ZERO);
             if signal.payload.amount_sol < min_position {
                 return Err(ExecutorError::AmountTooSmall(
-                    signal.payload.amount_sol.to_f64().unwrap_or(0.0),
-                    self.config.strategy.min_position_sol,
+                    signal.payload.amount_sol,
+                    min_position,
                 ));
             }
 
             let max_position = Decimal::from_f64_retain(self.config.strategy.max_position_sol).unwrap_or(Decimal::ZERO);
             if signal.payload.amount_sol > max_position {
                 return Err(ExecutorError::AmountTooLarge(
-                    signal.payload.amount_sol.to_f64().unwrap_or(0.0),
-                    self.config.strategy.max_position_sol,
+                    signal.payload.amount_sol,
+                    max_position,
                 ));
             }
 
@@ -287,9 +287,8 @@ impl Executor {
                     let jito_tip = if self.rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal);
                         if let Some(ref tip_manager) = self.tip_manager {
-                            let tip_f64 = tip.to_f64().unwrap_or(0.0);
                             if let Err(e) = tip_manager.record_tip(
-                                tip_f64,
+                                tip,
                                 Some(sig),
                                 signal.payload.strategy,
                                 true, // success
@@ -355,9 +354,8 @@ impl Executor {
                     if self.rpc_mode == RpcMode::Jito {
                         if let Some(ref tip_manager) = self.tip_manager {
                             let tip = self.calculate_jito_tip(signal);
-                            let tip_f64 = tip.to_f64().unwrap_or(0.0);
                             if let Err(e) = tip_manager.record_tip(
-                                tip_f64,
+                                tip,
                                 None, // No signature for failed trades
                                 signal.payload.strategy,
                                 false, // failure
@@ -410,9 +408,9 @@ impl Executor {
                     }
                     
                     if let (Some(old_price), Some(new_price)) = (price_1h_ago, current_price) {
-                        if old_price > 0.0 {
-                            let drop_percent = ((old_price - new_price) / old_price) * 100.0;
-                            if drop_percent > 10.0 {
+                        if old_price > Decimal::ZERO {
+                            let drop_percent = ((old_price - new_price) / old_price) * Decimal::from(100);
+                            if drop_percent > Decimal::from(10) {
                                 return Err(format!(
                                     "SOL price crash detected: {:.2}% drop in last hour ({} -> {})",
                                     drop_percent, old_price, new_price
@@ -712,9 +710,8 @@ impl Executor {
                     }
                 };
 
-                let tip_f64 = tip.to_f64().unwrap_or(0.0);
                 match self
-                    .submit_via_helius_sender(&tx_bytes, tip_f64, helius_api_key)
+                    .submit_via_helius_sender(&tx_bytes, tip, helius_api_key)
                     .await
                 {
                     Ok(signature) => {
@@ -759,7 +756,7 @@ impl Executor {
     async fn submit_via_helius_sender(
         &self,
         tx_bytes: &[u8],
-        tip_sol: f64,
+        tip_sol: Decimal,
         api_key: &str,
     ) -> Result<String, ExecutorError> {
         // Helius Sender API endpoint
@@ -773,9 +770,11 @@ impl Executor {
         // For now, we'll submit the transaction directly
         // In production, you would create a proper bundle with tip transaction
         
+        // Convert Decimal SOL to lamports (1 SOL = 1_000_000_000 lamports)
+        let tip_lamports = (tip_sol * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0);
         let payload = serde_json::json!({
             "transactions": [tx_base64],
-            "tip": (tip_sol * 1_000_000_000.0) as u64, // Convert SOL to lamports
+            "tip": tip_lamports,
         });
 
         let client = reqwest::Client::new();
@@ -1201,8 +1200,8 @@ impl Executor {
     pub fn calculate_jito_tip(&self, signal: &Signal) -> Decimal {
         // Use TipManager if available, otherwise fall back to simple strategy-based calculation
         if let Some(ref tip_manager) = self.tip_manager {
-            let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
-            Decimal::from_f64_retain(tip_manager.calculate_tip(signal.payload.strategy, amount_f64)).unwrap_or(Decimal::ZERO)
+            // Pass Decimal directly - no conversion needed
+            tip_manager.calculate_tip(signal.payload.strategy, signal.payload.amount_sol)
         } else {
             // Fallback to simple strategy-based tip calculation
             let base_tip = match signal.payload.strategy {
@@ -1319,11 +1318,11 @@ pub enum ExecutorError {
 
     /// Amount too small
     #[error("Amount {0} SOL is below minimum {1} SOL")]
-    AmountTooSmall(f64, f64),
+    AmountTooSmall(Decimal, Decimal),
 
     /// Amount too large
     #[error("Amount {0} SOL exceeds maximum {1} SOL")]
-    AmountTooLarge(f64, f64),
+    AmountTooLarge(Decimal, Decimal),
 
     /// RPC error
     #[error("RPC error: {0}")]
@@ -1339,7 +1338,7 @@ pub enum ExecutorError {
 
     /// Insufficient balance
     #[error("Insufficient balance: required {required} SOL, available {available} SOL")]
-    InsufficientBalance { required: f64, available: f64 },
+    InsufficientBalance { required: Decimal, available: Decimal },
 
     /// Circuit breaker tripped
     #[error("Circuit breaker tripped: {0}")]
@@ -1360,7 +1359,12 @@ mod tests {
 
     #[test]
     fn test_executor_error_display() {
-        let err = ExecutorError::AmountTooSmall(0.001, 0.01);
+        use rust_decimal::Decimal;
+        use std::str::FromStr;
+        let err = ExecutorError::AmountTooSmall(
+            Decimal::from_str("0.001").unwrap(),
+            Decimal::from_str("0.01").unwrap()
+        );
         assert!(err.to_string().contains("0.001"));
         assert!(err.to_string().contains("0.01"));
     }

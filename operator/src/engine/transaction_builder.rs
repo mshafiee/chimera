@@ -16,7 +16,6 @@ use solana_sdk::{
 use rust_decimal::prelude::*;
 use std::str::FromStr;
 use std::sync::Arc;
-use crate::utils::sol_to_lamports;
 
 /// Transaction builder for swap operations
 pub struct TransactionBuilder {
@@ -90,7 +89,7 @@ impl TransactionBuilder {
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid token mint: {}", e)))?;
                 
                 // Convert SOL amount to lamports
-                let amount_lamports = sol_to_lamports(signal.payload.amount_sol.to_f64().unwrap_or(0.0));
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
                 (sol_mint, token_mint, amount_lamports)
             }
             Action::Sell => {
@@ -102,7 +101,7 @@ impl TransactionBuilder {
                 
                 // For sell, we need to get token balance first
                 // For now, use a placeholder - in production, fetch actual token balance
-                let amount_lamports = sol_to_lamports(signal.payload.amount_sol.to_f64().unwrap_or(0.0));
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
                 (token_mint, sol_mint, amount_lamports)
             }
         };
