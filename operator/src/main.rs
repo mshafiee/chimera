@@ -46,13 +46,13 @@ use chimera_operator::monitoring::{HeliusClient, SignalAggregator, MonitoringSta
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 
-/// TEST 4: Add engine + recovery manager tasks
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     init_tracing();
     
-    tracing::info!("TEST 4: Adding engine + recovery manager tasks");
+
     
     // Load configuration
     let mut config = load_config()?;
@@ -104,7 +104,36 @@ async fn main() -> anyhow::Result<()> {
     let _ = tip_manager.init().await;
     
     // Initialize notification service
-    let notifier = Arc::new(notifications::CompositeNotifier::new());
+    let notifier = {
+        let mut composite = notifications::CompositeNotifier::new();
+
+        // Add Discord notifier if configured via environment variable
+        if let Some(discord) = notifications::DiscordNotifier::from_env() {
+            composite.add_service(Arc::new(discord));
+            tracing::info!("Discord notifications enabled");
+        }
+
+        // Add Telegram notifier if configured
+        if config.notifications.telegram.enabled {
+            let telegram_config = notifications::telegram::TelegramConfig {
+                bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
+                    .unwrap_or_else(|_| config.notifications.telegram.bot_token.clone()),
+                chat_id: std::env::var("TELEGRAM_CHAT_ID")
+                    .unwrap_or_else(|_| config.notifications.telegram.chat_id.clone()),
+                enabled: true,
+                rate_limit_seconds: config.notifications.telegram.rate_limit_seconds,
+            };
+
+            if !telegram_config.bot_token.is_empty() && !telegram_config.chat_id.is_empty() {
+                composite.add_service(Arc::new(notifications::TelegramNotifier::new(telegram_config)));
+                tracing::info!("Telegram notifications enabled");
+            } else {
+                tracing::warn!("Telegram notifications enabled in config but bot_token/chat_id not set");
+            }
+        }
+
+        Arc::new(composite)
+    };
     
     // Initialize token parser (needed for slow-path safety checks in engine)
     let token_cache = Arc::new(TokenCache::new(
@@ -153,11 +182,16 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Recovery manager task spawned");
     
-    // Spawn circuit breaker task
-    let cb_clone = circuit_breaker.clone();
+    // Spawn circuit breaker evaluation task with notification support
+    let circuit_breaker_clone = circuit_breaker.clone();
+    let notifier_cb = notifier.clone();
+    let notify_rules = config.notifications.rules.clone();
     let cb_token = cancel_token.clone();
+
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut was_tripped = false;
+
         loop {
             tokio::select! {
                 _ = cb_token.cancelled() => {
@@ -165,8 +199,28 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
-                    if let Err(e) = cb_clone.evaluate().await {
+                    let was_active = circuit_breaker_clone.is_trading_allowed();
+
+                    if let Err(e) = circuit_breaker_clone.evaluate().await {
                         tracing::error!(error = %e, "Circuit breaker evaluation failed");
+                    }
+
+                    // Check if circuit breaker just tripped
+                    let is_active = circuit_breaker_clone.is_trading_allowed();
+                    if was_active && !is_active && !was_tripped {
+                        was_tripped = true;
+                        if notify_rules.circuit_breaker_triggered {
+                            let reason = circuit_breaker_clone
+                                .trip_reason()
+                                .map(|r| r.to_string())
+                                .unwrap_or_else(|| "Unknown reason".to_string());
+
+                            notifier_cb
+                                .notify(NotificationEvent::CircuitBreakerTriggered { reason })
+                                .await;
+                        }
+                    } else if is_active {
+                        was_tripped = false;
                     }
                 }
             }
@@ -178,6 +232,145 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         price_cache_clone.start_updater().await;
     });
+
+    // Spawn daily summary notification task
+    let notifier_daily = notifier.clone();
+    let db_pool_daily = db_pool.clone();
+    let daily_config = config.notifications.daily_summary.clone();
+    let notify_daily_enabled = config.notifications.rules.daily_summary;
+    
+    // Create a specific cancellation token for this if needed, or rely on main process exit
+    tokio::spawn(async move {
+        if !daily_config.enabled || !notify_daily_enabled {
+            return;
+        }
+
+        tracing::info!("Daily summary task started");
+
+        loop {
+            let now = Utc::now();
+            let target_hour = daily_config.hour_utc as u32;
+            let target_minute = daily_config.minute as u32;
+
+            let mut next_run = now
+                .date_naive()
+                .and_hms_opt(target_hour, target_minute, 0)
+                .unwrap()
+                .and_utc();
+
+            if next_run <= now {
+                next_run = next_run + chrono::Duration::days(1);
+            }
+
+            let sleep_duration = (next_run - now).to_std().unwrap_or(std::time::Duration::from_secs(3600));
+            tokio::time::sleep(sleep_duration).await;
+
+            match generate_daily_summary(&db_pool_daily).await {
+                Ok((pnl_usd, trade_count, win_rate)) => {
+                    notifier_daily
+                        .notify(NotificationEvent::DailySummary {
+                            pnl_usd,
+                            trade_count,
+                            win_rate,
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to generate daily summary");
+                }
+            }
+        }
+    });
+
+    // Spawn TTL expiration background task
+    let db_pool_ttl = db_pool.clone();
+    let ttl_token = cancel_token.clone();
+    
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = ttl_token.cancelled() => break,
+                _ = interval.tick() => {
+                    match db::get_expired_ttl_wallets(&db_pool_ttl).await {
+                        Ok(expired_wallets) => {
+                            for address in expired_wallets {
+                                tracing::info!(wallet = %address, "Demoting wallet due to TTL expiration");
+                                if let Err(e) = db::demote_wallet(
+                                    &db_pool_ttl,
+                                    &address,
+                                    "Auto-demoted: TTL expired",
+                                )
+                                .await
+                                {
+                                    tracing::error!(wallet = %address, error = %e, "Failed to demote wallet");
+                                } else {
+                                    let _ = db::log_config_change(
+                                        &db_pool_ttl,
+                                        &format!("wallet:{}", address),
+                                        Some("ACTIVE"),
+                                        "CANDIDATE",
+                                        "SYSTEM_TTL",
+                                        Some("TTL expired"),
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to check TTL expirations");
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    // Spawn SIGHUP handler for roster merge (Unix only)
+    #[cfg(unix)]
+    {
+        let db_pool_sighup = db_pool.clone();
+        let roster_path = config
+            .database
+            .path
+            .parent()
+            .map(|p| p.join("roster_new.db"))
+            .unwrap_or_else(|| PathBuf::from("roster_new.db"));
+
+        tokio::spawn(async move {
+            let mut sighup = match signal(SignalKind::hangup()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to register SIGHUP handler");
+                    return;
+                }
+            };
+
+            tracing::info!(
+                roster_path = %roster_path.display(),
+                "SIGHUP handler registered for roster merge"
+            );
+
+            loop {
+                sighup.recv().await;
+                tracing::info!("Received SIGHUP, triggering roster merge");
+
+                match roster::merge_roster(&db_pool_sighup, &roster_path).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            wallets_merged = result.wallets_merged,
+                            wallets_removed = result.wallets_removed,
+                            "Roster merge completed successfully"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "Roster merge failed");
+                    }
+                }
+            }
+        });
+        tracing::info!("SIGHUP roster merge handler started");
+    }
     
     // Spawn periodic RPC health check task
     let engine_handle_rpc = _engine_handle.clone();
@@ -294,7 +487,13 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     
-    let auth_state = Arc::new(AuthState::with_auth_config(api_keys_map, admin_wallets_map));
+    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
+    
+    let auth_state = Arc::new(AuthState::with_auth_config(
+        api_keys_map, 
+        admin_wallets_map,
+        jwt_secret.clone()
+    ));
     tracing::warn!(
         api_key_count = config.security.api_keys.len(),
         admin_wallet_count = config.security.admin_wallets.len(),
@@ -406,7 +605,8 @@ async fn main() -> anyhow::Result<()> {
         .key_extractor(middleware::ProxyAwareKeyExtractor)
         .finish()
         .unwrap();
-    let governor_layer = tower_governor::GovernorLayer::new(governor_conf);
+    let governor_conf = std::sync::Arc::new(governor_conf);
+    let governor_layer = tower_governor::GovernorLayer { config: governor_conf };
     
     // Build webhook routes with rate limiting and HMAC middleware
     let webhook_routes = Router::new()
@@ -438,7 +638,7 @@ async fn main() -> anyhow::Result<()> {
     };
     
     // Build auth routes
-    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
+    // jwt_secret already defined above
     let auth_routes = Router::new()
         .route("/auth/wallet", post(wallet_auth))
         .with_state(Arc::new(WalletAuthState { db: db_pool.clone(), jwt_secret }));
@@ -541,644 +741,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-async fn main_full() -> anyhow::Result<()> {
-    // Initialize tracing
-    init_tracing();
-
-    tracing::info!("Starting Chimera Operator v{}", env!("CARGO_PKG_VERSION"));
-
-    // Load configuration
-    let config = load_config()?;
-    tracing::info!(
-        host = %config.server.host,
-        port = config.server.port,
-        "Configuration loaded"
-    );
-
-    // Try to load secrets from vault, fall back to env vars
-    let secrets = vault::load_secrets_with_fallback().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "Failed to load vault secrets, using env vars only");
-        vault::VaultSecrets {
-            webhook_secret: config.security.webhook_secret.clone(),
-            webhook_secret_previous: config.security.webhook_secret_previous.clone(),
-            wallet_private_key: None,
-            rpc_api_key: None,
-            fallback_rpc_api_key: None,
-        }
-    });
-
-    // Initialize database
-    let db_pool = db::init_pool(&config.database).await?;
-    db::run_migrations(&db_pool).await?;
-    tracing::info!("Database initialized");
-
-    // Create WebSocket state for real-time updates (needed for circuit breaker)
-    let ws_state = Arc::new(WsState::new());
-
-    // Initialize circuit breaker with WebSocket support
-    let circuit_breaker = Arc::new(CircuitBreaker::new_with_ws(
-        config.circuit_breakers.clone(),
-        db_pool.clone(),
-        Some(ws_state.clone()),
-    ));
-    tracing::info!("Circuit breaker initialized");
-
-    // Initialize price cache
-    let price_cache = Arc::new(PriceCache::new());
-    // Track SOL for volatility calculation
-    price_cache.track_token("So11111111111111111111111111111111111111112");
-    tracing::info!("Price cache initialized");
-
-    // Initialize Jito tip manager
-    let tip_manager = Arc::new(TipManager::new(config.jito.clone(), db_pool.clone()));
-    if let Err(e) = tip_manager.init().await {
-        tracing::warn!(error = %e, "Failed to initialize tip manager from history");
-    }
-    tracing::info!(
-        cold_start = tip_manager.is_cold_start(),
-        "Tip manager initialized"
-    );
-
-    // Initialize token parser
-    let token_cache = Arc::new(TokenCache::new(
-        config.token_safety.cache_capacity,
-        config.token_safety.cache_ttl_seconds,
-    ));
-
-    let token_fetcher = Arc::new(TokenMetadataFetcher::new(&config.rpc.primary_url));
-
-    let token_safety_config = TokenSafetyConfig {
-        freeze_authority_whitelist: config
-            .token_safety
-            .freeze_authority_whitelist
-            .iter()
-            .cloned()
-            .collect(),
-        mint_authority_whitelist: config
-            .token_safety
-            .mint_authority_whitelist
-            .iter()
-            .cloned()
-            .collect(),
-        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
-        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
-        honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
-    };
-
-    let token_parser = Arc::new(TokenParser::new(
-        token_safety_config,
-        token_cache.clone(),
-        token_fetcher,
-    ));
-    tracing::info!("Token parser initialized");
-
-    // Initialize notification service
-    let notifier = {
-        let mut composite = CompositeNotifier::new();
-
-        // Add Discord notifier if configured
-        if let Some(discord) = DiscordNotifier::from_env() {
-            composite.add_service(Arc::new(discord));
-            tracing::info!("Discord notifications enabled");
-        }
-
-        // Add Telegram notifier if configured
-        if config.notifications.telegram.enabled {
-            let telegram_config = notifications::telegram::TelegramConfig {
-                bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
-                    .unwrap_or_else(|_| config.notifications.telegram.bot_token.clone()),
-                chat_id: std::env::var("TELEGRAM_CHAT_ID")
-                    .unwrap_or_else(|_| config.notifications.telegram.chat_id.clone()),
-                enabled: true,
-                rate_limit_seconds: config.notifications.telegram.rate_limit_seconds,
-            };
-
-            if !telegram_config.bot_token.is_empty() && !telegram_config.chat_id.is_empty() {
-                composite.add_service(Arc::new(TelegramNotifier::new(telegram_config)));
-                tracing::info!("Telegram notifications enabled");
-            } else {
-                tracing::warn!(
-                    "Telegram notifications enabled in config but bot_token/chat_id not set"
-                );
-            }
-        }
-
-        // Add Discord notifier if configured via environment variable
-        if let Some(discord) = DiscordNotifier::from_env() {
-            composite.add_service(Arc::new(discord));
-            tracing::info!("Discord notifications enabled");
-        }
-
-        Arc::new(composite)
-    };
-    tracing::info!("Notification service initialized");
-
-    // Initialize stuck-state recovery manager with WebSocket support
-    let recovery_manager = Arc::new(RecoveryManager::new_with_ws(
-        db_pool.clone(),
-        config.rpc.primary_url.clone(),
-        Some(ws_state.clone()),
-    ));
-
-    // Spawn recovery background task
-    let recovery_manager_clone = recovery_manager.clone();
-    tokio::spawn(async move {
-        recovery_manager_clone.start_background_task().await;
-    });
-    tracing::info!("Stuck-state recovery manager started");
-
-    // Spawn price cache updater
-    let price_cache_clone = price_cache.clone();
-    tokio::spawn(async move {
-        price_cache_clone.start_updater().await;
-    });
-    tracing::info!("Price cache updater started");
-
-    // Spawn circuit breaker evaluation task with notification support
-    let circuit_breaker_clone = circuit_breaker.clone();
-    let notifier_cb = notifier.clone();
-    let notify_rules = config.notifications.rules.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        let mut was_tripped = false;
-
-        loop {
-            interval.tick().await;
-            let was_active = circuit_breaker_clone.is_trading_allowed();
-
-            if let Err(e) = circuit_breaker_clone.evaluate().await {
-                tracing::error!(error = %e, "Circuit breaker evaluation failed");
-            }
-
-            // Check if circuit breaker just tripped
-            let is_active = circuit_breaker_clone.is_trading_allowed();
-            if was_active && !is_active && !was_tripped {
-                was_tripped = true;
-                if notify_rules.circuit_breaker_triggered {
-                    let reason = circuit_breaker_clone
-                        .trip_reason()
-                        .map(|r| r.to_string())
-                        .unwrap_or_else(|| "Unknown reason".to_string());
-
-                    notifier_cb
-                        .notify(NotificationEvent::CircuitBreakerTriggered { reason })
-                        .await;
-                }
-            } else if is_active {
-                was_tripped = false;
-            }
-        }
-    });
-    tracing::info!("Circuit breaker evaluation task started");
-
-    // Spawn daily summary notification task
-    let notifier_daily = notifier.clone();
-    let db_pool_daily = db_pool.clone();
-    let daily_config = config.notifications.daily_summary.clone();
-    let notify_daily_enabled = config.notifications.rules.daily_summary;
-    tokio::spawn(async move {
-        if !daily_config.enabled || !notify_daily_enabled {
-            tracing::info!("Daily summary notifications disabled");
-            return;
-        }
-
-        tracing::info!(
-            hour = daily_config.hour_utc,
-            minute = daily_config.minute,
-            "Daily summary task started"
-        );
-
-        loop {
-            // Calculate time until next summary
-            let now = Utc::now();
-            let target_hour = daily_config.hour_utc as u32;
-            let target_minute = daily_config.minute as u32;
-
-            let mut next_run = now
-                .date_naive()
-                .and_hms_opt(target_hour, target_minute, 0)
-                .unwrap()
-                .and_utc();
-
-            if next_run <= now {
-                next_run = next_run + chrono::Duration::days(1);
-            }
-
-            let sleep_duration = (next_run - now).to_std().unwrap_or(std::time::Duration::from_secs(3600));
-            tracing::debug!(
-                sleep_seconds = sleep_duration.as_secs(),
-                "Sleeping until next daily summary"
-            );
-            tokio::time::sleep(sleep_duration).await;
-
-            // Generate and send daily summary
-            match generate_daily_summary(&db_pool_daily).await {
-                Ok((pnl_usd, trade_count, win_rate)) => {
-                    notifier_daily
-                        .notify(NotificationEvent::DailySummary {
-                            pnl_usd,
-                            trade_count,
-                            win_rate,
-                        })
-                        .await;
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to generate daily summary");
-                }
-            }
-        }
-    });
-    tracing::info!("Daily summary notification task started");
-
-    // Spawn SIGHUP handler for roster merge (Unix only)
-    #[cfg(unix)]
-    {
-        let db_pool_sighup = db_pool.clone();
-        let roster_path = config
-            .database
-            .path
-            .parent()
-            .map(|p| p.join("roster_new.db"))
-            .unwrap_or_else(|| PathBuf::from("roster_new.db"));
-
-        tokio::spawn(async move {
-            let mut sighup = match signal(SignalKind::hangup()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to register SIGHUP handler");
-                    return;
-                }
-            };
-
-            tracing::info!(
-                roster_path = %roster_path.display(),
-                "SIGHUP handler registered for roster merge"
-            );
-
-            loop {
-                sighup.recv().await;
-                tracing::info!("Received SIGHUP, triggering roster merge");
-
-                match roster::merge_roster(&db_pool_sighup, &roster_path).await {
-                    Ok(result) => {
-                        tracing::info!(
-                            wallets_merged = result.wallets_merged,
-                            wallets_removed = result.wallets_removed,
-                            "Roster merge completed successfully"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Roster merge failed");
-                    }
-                }
-            }
-        });
-        tracing::info!("SIGHUP roster merge handler started");
-    }
-
-    // Create metrics state
-    let metrics_state = Arc::new(MetricsState::new());
-
-    // Create engine with notification, metrics, WebSocket support, tip manager, and token parser
-    // (ws_state already created above)
-    let (engine, engine_handle) = engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
-        config.clone(),
-        db_pool.clone(),
-        notifier.clone(),
-        Some(metrics_state.clone()),
-        Some(ws_state.clone()),
-        Some(tip_manager.clone()),
-        Some(price_cache.clone()),
-        Some(token_parser.clone()),
-    );
-
-    // Spawn engine processing loop
-    tokio::spawn(async move {
-        engine.run().await;
-    });
-    tracing::info!("Engine started");
-
-    // Spawn metrics update task
-    let metrics_state_clone = metrics_state.clone();
-    let circuit_breaker_clone = circuit_breaker.clone();
-    let db_pool_metrics = db_pool.clone();
-    // Spawn periodic RPC health check task
-    let engine_handle_rpc = engine_handle.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            engine_handle_rpc.refresh_rpc_health().await;
-        }
-    });
-    tracing::info!("RPC health check task started");
-
-    let engine_handle_metrics = engine_handle.clone();
-    let ws_state_metrics = ws_state.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-        loop {
-            interval.tick().await;
-
-            // Update circuit breaker state
-            let cb_state = circuit_breaker_clone.current_state();
-            let is_active = cb_state == chimera_operator::circuit_breaker::CircuitBreakerState::Active;
-            metrics_state_clone
-                .circuit_breaker_state
-                .set(if is_active { 1 } else { 0 });
-
-            // Update RPC health
-            if let Some(rpc_health) = engine_handle_metrics.get_rpc_health().await {
-                metrics_state_clone
-                    .rpc_health
-                    .set(if rpc_health.healthy { 1 } else { 0 });
-            }
-
-            // Update active positions count
-            if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
-                metrics_state_clone.active_positions.set(count as i64);
-            }
-
-            // Update total trades count
-            if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
-                metrics_state_clone.total_trades.set(count as i64);
-            }
-
-            // Broadcast health update via WebSocket
-            ws_state_metrics.broadcast(chimera_operator::handlers::WsEvent::HealthUpdate(
-                chimera_operator::handlers::HealthUpdateData {
-                    status: "healthy".to_string(), // Could be more sophisticated
-                    queue_depth: engine_handle_metrics.queue_depth(),
-                    trading_allowed: is_active,
-                },
-            ));
-        }
-    });
-    tracing::info!("Metrics update task started");
-
-    // Clone engine handle for all states that need it
-    let engine_handle_for_app = engine_handle.clone();
-    let engine_handle_for_webhook = engine_handle.clone();
-    let engine_handle_for_api = engine_handle.clone();
-    let engine_handle_for_monitoring = engine_handle.clone();
-    
-    // Create shared state
-    let app_state = Arc::new(AppState {
-        db: db_pool.clone(),
-        engine: engine_handle_for_app,
-        started_at: Utc::now(),
-        circuit_breaker: circuit_breaker.clone(),
-        price_cache: price_cache.clone(),
-    });
-
-    // Create SignalAggregator and HeliusClient for signal quality enhancements
-    let signal_aggregator_full = Arc::new(SignalAggregator::new(db_pool.clone()));
-    let helius_client_full = Arc::new(
-        HeliusClient::new(
-            config.monitoring.as_ref()
-                .and_then(|m| m.helius_api_key.clone())
-                .unwrap_or_default(),
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to create HeliusClient, signal quality will be limited");
-            // Create a dummy client with empty API key (will fail gracefully)
-            HeliusClient::new(String::new()).unwrap()
-        })
-    );
-    
-    let webhook_state = Arc::new(WebhookState {
-        db: db_pool.clone(),
-        engine: engine_handle_for_webhook,
-        token_parser,
-        circuit_breaker: circuit_breaker.clone(),
-        portfolio_heat: None, // Optional - can be enabled later
-        signal_aggregator: Some(signal_aggregator_full.clone()),
-        helius_client: Some(helius_client_full.clone()),
-    });
-
-    // Create roster state
-    let roster_path = config
-        .database
-        .path
-        .parent()
-        .map(|p| p.join("roster_new.db"))
-        .unwrap_or_else(|| PathBuf::from("roster_new.db"));
-
-    let roster_state = Arc::new(RosterState {
-        db: db_pool.clone(),
-        default_roster_path: roster_path,
-    });
-
-    // Create API state with shared config
-    let shared_config = Arc::new(tokio::sync::RwLock::new(config.clone()));
-    let api_state = Arc::new(ApiState {
-        db: db_pool.clone(),
-        circuit_breaker: circuit_breaker.clone(),
-        config: shared_config.clone(),
-        notifier: notifier.clone(),
-        engine: Some(Arc::new(engine_handle_for_api)),
-        metrics: metrics_state.clone(),
-    });
-
-    // WebSocket state is created above with engine
-    tracing::info!("WebSocket broadcast channel initialized");
-
-    // Create auth state with API keys and admin wallets from config
-    let mut api_keys_map = std::collections::HashMap::new();
-    for key_config in &config.security.api_keys {
-        if let Ok(role) = key_config.role.parse::<Role>() {
-            api_keys_map.insert(key_config.key.clone(), role);
-            tracing::debug!(role = %role, "API key configured");
-        } else {
-            tracing::warn!(role = %key_config.role, "Invalid role in API key config");
-        }
-    }
-    
-    let mut admin_wallets_map = std::collections::HashMap::new();
-    for wallet_config in &config.security.admin_wallets {
-        if let Ok(role) = wallet_config.role.parse::<Role>() {
-            admin_wallets_map.insert(wallet_config.address.clone(), role);
-            tracing::debug!(wallet = %wallet_config.address, role = %role, "Admin wallet configured");
-        } else {
-            tracing::warn!(wallet = %wallet_config.address, role = %wallet_config.role, "Invalid role in admin wallet config");
-        }
-    }
-    
-    let auth_state = Arc::new(AuthState::with_auth_config(api_keys_map, admin_wallets_map));
-    tracing::info!(
-        api_key_count = config.security.api_keys.len(),
-        admin_wallet_count = config.security.admin_wallets.len(),
-        "Auth state initialized"
-    );
-
-    // Spawn TTL expiration background task
-    let db_pool_ttl = db_pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            match db::get_expired_ttl_wallets(&db_pool_ttl).await {
-                Ok(expired_wallets) => {
-                    for address in expired_wallets {
-                        tracing::info!(wallet = %address, "Demoting wallet due to TTL expiration");
-                        if let Err(e) = db::demote_wallet(
-                            &db_pool_ttl,
-                            &address,
-                            "Auto-demoted: TTL expired",
-                        )
-                        .await
-                        {
-                            tracing::error!(wallet = %address, error = %e, "Failed to demote wallet");
-                        } else {
-                            // Log to config_audit
-                            let _ = db::log_config_change(
-                                &db_pool_ttl,
-                                &format!("wallet:{}", address),
-                                Some("ACTIVE"),
-                                "CANDIDATE",
-                                "SYSTEM_TTL",
-                                Some("TTL expired"),
-                            )
-                            .await;
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to check TTL expirations");
-                }
-            }
-        }
-    });
-    tracing::info!("Wallet TTL expiration task started");
-
-    // STEP A: Comment out middleware for minimal test
-    /*
-    // Build HMAC secrets for webhook verification
-    let hmac_secrets = build_hmac_secrets(&secrets, &config);
-    let hmac_state = Arc::new(HmacState::with_rotation(hmac_secrets, 300)); // 5 minute drift window
-
-    // Build rate limiter
-    let governor_conf = GovernorConfigBuilder::default()
-        .per_second(100)
-        .burst_size(200)
-        .finish()
-        .unwrap();
-    let governor_layer = GovernorLayer::new(governor_conf);
-
-    // Build CORS layer
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
-    */
-
-    // STEP A: Comment out all complex routes for minimal test
-    // Build API routes (health check needs AppState, others need ApiState)
-    /*
-    let health_routes = Router::new()
-        .route("/health", get(health_check))
-        .with_state(app_state.clone());
-    
-    let api_routes = Router::new()
-        .route("/positions", get(list_positions))
-        .route("/positions/{trade_uuid}", get(get_position))
-        .route("/wallets", get(list_wallets))
-        .route("/wallets/{address}", get(get_wallet).put(update_wallet))
-        .route("/trades", get(list_trades))
-        .route("/trades/export", get(export_trades))
-        .route("/config", get(get_config).put(update_config))
-        .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
-        .route("/config/circuit-breaker/trip", post(trip_circuit_breaker))
-        .route("/metrics/performance", get(get_performance_metrics))
-        .route("/metrics/costs", get(get_cost_metrics))
-        .route("/metrics/strategy/{strategy}", get(get_strategy_performance))
-        .route("/metrics/reconciliation", post(update_reconciliation_metrics))
-        .route("/metrics/secret-rotation", post(update_secret_rotation_metrics))
-        .route("/incidents/dead-letter", get(list_dead_letter_queue))
-        .route("/incidents/config-audit", get(list_config_audit))
-        .with_state(api_state.clone())
-        .layer(axum_middleware::from_fn_with_state(
-            auth_state.clone(),
-            bearer_auth,
-        ));
-
-    // Build webhook routes with HMAC middleware
-    let webhook_routes = Router::new()
-        .route("/webhook", post(webhook_handler))
-        .with_state(webhook_state.clone())
-        .layer(axum_middleware::from_fn_with_state(
-            hmac_state.clone(),
-            middleware::hmac_verify,
-        ));
-
-    // Build roster routes
-    // In devnet, allow roster merge without auth for easier testing
-    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
-    let is_devnet = chimera_env == "devnet" || config.database.path.to_string_lossy().contains("devnet");
-    
-    let roster_routes = if is_devnet {
-        tracing::info!("Devnet mode: roster merge endpoint does not require authentication");
-        Router::new()
-            .route("/roster/merge", post(roster_merge))
-            .route("/roster/validate", get(roster_validate))
-            .with_state(roster_state.clone())
-    } else {
-        Router::new()
-            .route("/roster/merge", post(roster_merge))
-            .route("/roster/validate", get(roster_validate))
-            .with_state(roster_state.clone())
-            .layer(axum_middleware::from_fn_with_state(
-                auth_state.clone(),
-                bearer_auth,
-            ))
-    };
-
-    // Build auth routes
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "dev-secret-change-in-production".to_string());
-    let auth_routes = Router::new()
-        .route("/auth/wallet", post(wallet_auth))
-        .with_state(Arc::new(WalletAuthState {
-            db: db_pool.clone(),
-            jwt_secret,
-        }));
-
-    // Build WebSocket routes
-    let ws_routes = Router::new()
-        .route("/ws", get(ws_handler))
-        .with_state(ws_state.clone());
-
-    // Build metrics routes
-    let metrics_routes = metrics_router().with_state(metrics_state.clone());
-    */
-
-
-    // Start server
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
-        .parse()
-        .expect("Invalid server address");
-
-    tracing::info!(%addr, "Starting Chimera Operator server");
-    
-    // Add a simple test to verify the runtime is working
-    tokio::spawn(async {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            tracing::debug!("Runtime heartbeat - server should be processing requests");
-        }
-    });
-    
-    tracing::info!("Binding TCP listener");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Server listening on {}", addr);
-    
-    // Note: This is dead code in main_full() - the actual main() function serves the app above
-    // This code path is not used
-
-    Ok(())
-}
 
 /// Build list of HMAC secrets from vault and config
 fn build_hmac_secrets(secrets: &vault::VaultSecrets, config: &AppConfig) -> Vec<String> {
