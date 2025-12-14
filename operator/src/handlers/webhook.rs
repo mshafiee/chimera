@@ -381,8 +381,18 @@ pub async fn webhook_handler(
         "Signal received and validated"
     );
 
+    // Get wallet WQS for queue routing (if available)
+    let wallet_wqs = if signal.payload.action == crate::models::Action::Buy {
+        match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
+            Ok(Some(wallet)) => wallet.wqs_score,
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     // Queue for execution
-    match state.engine.queue_signal(signal.clone()).await {
+    match state.engine.queue_signal(signal.clone(), wallet_wqs).await {
         Ok(()) => {
             // Update status to QUEUED
             db::update_trade_status(&state.db, &signal.trade_uuid, "QUEUED", None, None).await?;

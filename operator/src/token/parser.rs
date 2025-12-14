@@ -277,6 +277,54 @@ impl TokenParser {
             });
         }
 
+        // Check liquidity/market cap ratio (Liquidity vs FDV)
+        // High FDV with low liquidity = "Ghost Chain" scenario - high slippage on exit
+        // Reject tokens with Liq/FDV < 0.05 (5%)
+        if let Ok(fdv_usd) = self.fetcher.get_market_cap_fdv(token_address).await {
+            if fdv_usd > 0.0 {
+                let liquidity_ratio = liquidity_usd / fdv_usd;
+                const MIN_LIQUIDITY_RATIO: f64 = 0.05; // 5% minimum
+
+                if liquidity_ratio < MIN_LIQUIDITY_RATIO {
+                    tracing::warn!(
+                        token = token_address,
+                        liquidity_usd = liquidity_usd,
+                        fdv_usd = fdv_usd,
+                        liquidity_ratio = liquidity_ratio,
+                        "Token rejected: Liquidity/FDV ratio too low (Ghost Chain scenario)"
+                    );
+                    return Ok(TokenSafetyResult {
+                        safe: false,
+                        rejection_reason: Some(format!(
+                            "Liquidity/FDV ratio too low: {:.2}% < {:.0}% (liquidity: ${:.2}, FDV: ${:.2})",
+                            liquidity_ratio * 100.0,
+                            MIN_LIQUIDITY_RATIO * 100.0,
+                            liquidity_usd,
+                            fdv_usd
+                        )),
+                        honeypot_checked: false,
+                        liquidity_checked: true,
+                        liquidity_usd: Some(liquidity_usd),
+                    });
+                }
+
+                tracing::debug!(
+                    token = token_address,
+                    liquidity_usd = liquidity_usd,
+                    fdv_usd = fdv_usd,
+                    liquidity_ratio = liquidity_ratio,
+                    "Liquidity/FDV ratio check passed"
+                );
+            }
+        } else {
+            // If we can't fetch FDV, log warning but don't reject (fail open for now)
+            // In production, you might want to reject if FDV fetch fails
+            tracing::warn!(
+                token = token_address,
+                "Failed to fetch market cap (FDV), skipping liquidity ratio check"
+            );
+        }
+
         // Honeypot detection via sell simulation
         if self.config.honeypot_detection_enabled {
             match self.fetcher.simulate_sell(token_address).await {

@@ -32,7 +32,7 @@ async fn test_queue_accepts_signals_under_threshold() {
     
     // Add 50 signals (under 80% threshold)
     for i in 0..50 {
-        let result = queue.push(make_signal(Strategy::Shield, i)).await;
+        let result = queue.push(make_signal(Strategy::Shield, i), None).await;
         assert!(result.is_ok(), "Signal {} should be accepted", i);
     }
     
@@ -45,7 +45,7 @@ async fn test_queue_full_rejects_all() {
     
     // Fill to capacity
     for i in 0..10 {
-        let result = queue.push(make_signal(Strategy::Shield, i)).await;
+        let result = queue.push(make_signal(Strategy::Shield, i), None).await;
         assert!(result.is_ok(), "Signal {} should be accepted", i);
     }
     
@@ -67,14 +67,14 @@ async fn test_load_shedding_at_80_percent() {
     
     // Fill to 80% (8 items)
     for i in 0..8 {
-        let result = queue.push(make_signal(Strategy::Shield, i)).await;
+        let result = queue.push(make_signal(Strategy::Shield, i), None).await;
         assert!(result.is_ok(), "Should accept signal {} before threshold", i);
     }
     
     assert_eq!(queue.len(), 8);
     
     // Now Spear should be rejected (load shedding active)
-    let spear_result = queue.push(make_signal(Strategy::Spear, 100)).await;
+    let spear_result = queue.push(make_signal(Strategy::Spear, 100), Some(50.0)).await;
     assert!(spear_result.is_err(), "Spear should be rejected at 80% capacity");
     assert!(spear_result.unwrap_err().contains("Load shedding"));
 }
@@ -107,7 +107,7 @@ async fn test_exit_accepted_during_load_shedding() {
     }
     
     // Exit should be accepted (highest priority)
-    let exit = queue.push(make_signal(Strategy::Exit, 102)).await;
+    let exit = queue.push(make_signal(Strategy::Exit, 102), None).await;
     assert!(exit.is_ok(), "Exit should be accepted during load shedding");
 }
 
@@ -123,7 +123,7 @@ async fn test_only_spear_dropped() {
     let initial_len = queue.len();
     
     // Try to add all three strategies
-    let spear_result = queue.push(make_signal(Strategy::Spear, 100)).await;
+    let spear_result = queue.push(make_signal(Strategy::Spear, 100), Some(50.0)).await;
     let shield_result = queue.push(make_signal(Strategy::Shield, 101)).await;
     let exit_result = queue.push(make_signal(Strategy::Exit, 102)).await;
     
@@ -145,9 +145,9 @@ async fn test_priority_order_exit_first() {
     let queue = PriorityQueue::new(100, 100);
     
     // Add in reverse priority order
-    queue.push(make_signal(Strategy::Spear, 1)).await.unwrap();
-    queue.push(make_signal(Strategy::Shield, 2)).await.unwrap();
-    queue.push(make_signal(Strategy::Exit, 3)).await.unwrap();
+    queue.push(make_signal(Strategy::Spear, 1), Some(50.0)).await.unwrap();
+    queue.push(make_signal(Strategy::Shield, 2), None).await.unwrap();
+    queue.push(make_signal(Strategy::Exit, 3), None).await.unwrap();
     
     // Pop should return Exit first
     let first = queue.pop().await.unwrap();
@@ -159,8 +159,8 @@ async fn test_priority_order_shield_before_spear() {
     let queue = PriorityQueue::new(100, 100);
     
     // Add Spear first, then Shield
-    queue.push(make_signal(Strategy::Spear, 1)).await.unwrap();
-    queue.push(make_signal(Strategy::Shield, 2)).await.unwrap();
+    queue.push(make_signal(Strategy::Spear, 1), Some(50.0)).await.unwrap();
+    queue.push(make_signal(Strategy::Shield, 2), None).await.unwrap();
     
     // Pop should return Shield first
     let first = queue.pop().await.unwrap();
@@ -172,12 +172,12 @@ async fn test_full_priority_ordering() {
     let queue = PriorityQueue::new(100, 100);
     
     // Add multiple of each strategy in mixed order
-    queue.push(make_signal(Strategy::Spear, 1)).await.unwrap();
-    queue.push(make_signal(Strategy::Exit, 2)).await.unwrap();
-    queue.push(make_signal(Strategy::Shield, 3)).await.unwrap();
-    queue.push(make_signal(Strategy::Spear, 4)).await.unwrap();
-    queue.push(make_signal(Strategy::Exit, 5)).await.unwrap();
-    queue.push(make_signal(Strategy::Shield, 6)).await.unwrap();
+    queue.push(make_signal(Strategy::Spear, 1), Some(50.0)).await.unwrap();
+    queue.push(make_signal(Strategy::Exit, 2), None).await.unwrap();
+    queue.push(make_signal(Strategy::Shield, 3), None).await.unwrap();
+    queue.push(make_signal(Strategy::Spear, 4), Some(50.0)).await.unwrap();
+    queue.push(make_signal(Strategy::Exit, 5), None).await.unwrap();
+    queue.push(make_signal(Strategy::Shield, 6), None).await.unwrap();
     
     // Should pop: Exit, Exit, Shield, Shield, Spear, Spear
     let s1 = queue.pop().await.unwrap();
@@ -211,7 +211,7 @@ async fn test_high_load_spear_rejection_rate() {
     // Try to push 100 Spear signals - all should be rejected
     let mut rejected = 0;
     for i in 0..100 {
-        let result = queue.push(make_signal(Strategy::Spear, 1000 + i)).await;
+        let result = queue.push(make_signal(Strategy::Spear, 1000 + i), Some(50.0)).await;
         if result.is_err() {
             rejected += 1;
         }
@@ -232,7 +232,7 @@ async fn test_high_load_shield_acceptance_rate() {
     // Try to push 100 Shield signals - all should be accepted (until full)
     let mut accepted = 0;
     for i in 0..100 {
-        let result = queue.push(make_signal(Strategy::Shield, 1000 + i)).await;
+        let result = queue.push(make_signal(Strategy::Shield, 1000 + i), None).await;
         if result.is_ok() {
             accepted += 1;
         }

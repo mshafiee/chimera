@@ -96,7 +96,7 @@ impl StopLossManager {
             }
         };
 
-        // Calculate dynamic stop-loss threshold
+        // Calculate base dynamic stop-loss threshold
         // For consensus signals, use wider stops (lower risk of false signal)
         let mut stop_loss_threshold: f64 = if wqs >= 70.0 {
             // High WQS: wider stop (-20%)
@@ -108,6 +108,38 @@ impl StopLossManager {
             // Low WQS: tighter stop (-10%)
             -10.0
         };
+        
+        // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation)
+        // If token is highly volatile, widen stops to avoid getting wicked out
+        if let Some(volatility) = self.price_cache.calculate_volatility(token_address) {
+            // Volatility is returned as percentage (e.g., 15.0 = 15%)
+            // If volatility > 20%, widen stop by 1.5x
+            // If volatility > 30%, widen stop by 2x
+            // If volatility < 10%, tighten stop by 0.9x (but never below -5%)
+            let volatility_multiplier = if volatility > 30.0 {
+                2.0
+            } else if volatility > 20.0 {
+                1.5
+            } else if volatility < 10.0 {
+                0.9
+            } else {
+                1.0
+            };
+            
+            stop_loss_threshold *= volatility_multiplier;
+            
+            // Ensure stop never goes below -5% (too tight) or above -50% (too wide)
+            stop_loss_threshold = stop_loss_threshold.max(-50.0).min(-5.0);
+            
+            tracing::debug!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                volatility_percent = volatility,
+                volatility_multiplier = volatility_multiplier,
+                adjusted_threshold = stop_loss_threshold,
+                "Adaptive stop-loss adjusted based on volatility"
+            );
+        }
         
         // Widen stop-loss by 5% for consensus signals
         if is_consensus {

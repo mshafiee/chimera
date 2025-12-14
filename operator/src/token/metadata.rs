@@ -166,6 +166,53 @@ impl TokenMetadataFetcher {
         Ok(metadata)
     }
 
+    /// Get market cap (FDV - Fully Diluted Valuation) for a token in USD
+    ///
+    /// Calculates FDV = price * total_supply
+    /// Uses Jupiter Price API for price and on-chain supply data
+    pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<f64> {
+        // Get token metadata (includes supply and decimals)
+        let metadata = self.get_metadata(token_address).await?;
+        
+        // Get current price from Jupiter
+        let price_url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
+        let response = reqwest::get(&price_url)
+            .await
+            .map_err(|e| AppError::Http(format!("Jupiter price request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(AppError::Http(format!(
+                "Jupiter API returned error: {}",
+                response.status()
+            )));
+        }
+
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter response: {}", e)))?;
+
+        // Extract price
+        let price_usd = if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
+            if let Some(price) = token_data.get("price").and_then(|p| p.as_f64()) {
+                price
+            } else {
+                // Try alternative field names
+                token_data.get("priceUsd")
+                    .and_then(|p| p.as_f64())
+                    .ok_or_else(|| AppError::Parse("No price found in Jupiter response".to_string()))?
+            }
+        } else {
+            return Err(AppError::Parse("Token not found in Jupiter response".to_string()));
+        };
+
+        // Calculate FDV = price * total_supply (adjusted for decimals)
+        let supply_adjusted = metadata.supply as f64 / (10.0_f64.powi(metadata.decimals as i32));
+        let fdv_usd = price_usd * supply_adjusted;
+
+        Ok(fdv_usd)
+    }
+
     /// Get estimated liquidity for a token in USD
     ///
     /// Queries multiple sources:

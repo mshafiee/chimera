@@ -127,8 +127,9 @@ pub async fn helius_webhook_handler(
                     None, // source_ip
                 );
 
-                // Queue signal
-                if let Err(e) = state.engine.queue_signal(signal).await {
+                // Queue signal with wallet WQS
+                let wallet_wqs = wallet.wqs_score;
+                if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
                     tracing::error!(error = %e, "Failed to queue signal from webhook");
                     return StatusCode::INTERNAL_SERVER_ERROR;
                 }

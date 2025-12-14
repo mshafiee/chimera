@@ -65,8 +65,12 @@ pub struct EngineHandle {
 
 impl EngineHandle {
     /// Queue a signal for processing
-    pub async fn queue_signal(&self, signal: Signal) -> Result<(), String> {
-        self.queue.push(signal).await
+    ///
+    /// # Arguments
+    /// * `signal` - Signal to queue
+    /// * `wallet_wqs` - Optional wallet WQS score (used to route high-WQS SPEAR signals)
+    pub async fn queue_signal(&self, signal: Signal, wallet_wqs: Option<f64>) -> Result<(), String> {
+        self.queue.push(signal, wallet_wqs).await
     }
 
     /// Get current queue depth
