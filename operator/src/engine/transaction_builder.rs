@@ -83,7 +83,7 @@ impl TransactionBuilder {
         let (input_mint, output_mint, amount) = match signal.payload.action {
             Action::Buy => {
                 // Buying token with SOL
-                let sol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112")
+                let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
                 let token_mint = Pubkey::from_str(signal.token_address())
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid token mint: {}", e)))?;
@@ -96,7 +96,7 @@ impl TransactionBuilder {
                 // Selling token for SOL
                 let token_mint = Pubkey::from_str(signal.token_address())
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid token mint: {}", e)))?;
-                let sol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112")
+                let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
                 
                 // For sell, we need to get token balance first
@@ -133,11 +133,22 @@ impl TransactionBuilder {
         // Jupiter v1 API returns VersionedTransaction (starts with version byte 0x01)
         // Check the first byte to determine transaction type
         if tx_bytes.len() > 0 && tx_bytes[0] == 0x01 {
-            // VersionedTransaction (version 1)
+            // VersionedTransaction (version 1) - may be V0 or Legacy
             // Parse to sign
             // Use bincode 1.3 (bincode1) to match Solana wire format
             let mut versioned_tx: VersionedTransaction = bincode1::deserialize(&tx_bytes)
                 .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize V0 tx: {}", e)))?;
+            
+            // Check if Jupiter ignored our asLegacyTransaction request
+            let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
+            if is_v0 {
+                tracing::warn!(
+                    "Jupiter returned V0 transaction despite asLegacyTransaction=true. \
+                    V0 transactions use Address Lookup Tables (ALTs) and cannot have their \
+                    blockhash easily updated. This increases risk of blockhash expiration. \
+                    Consider using Jupiter's main API endpoint or implementing V0 message reconstruction."
+                );
+            }
 
             // Sign with our keypair
             let message_hash = versioned_tx.message.hash();
@@ -185,7 +196,7 @@ impl TransactionBuilder {
     /// This creates a minimal transaction that won't be submitted to RPC
     async fn build_simulated_transaction(
         &self,
-        signal: &Signal,
+        _signal: &Signal,
         wallet_keypair: &Keypair,
     ) -> AppResult<BuiltTransaction> {
         // Get recent blockhash (still needed for transaction structure)

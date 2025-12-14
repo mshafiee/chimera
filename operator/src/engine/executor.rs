@@ -382,7 +382,7 @@ impl Executor {
         // This requires price history - check if we have sufficient data
         if let Some(ref price_cache) = self.price_cache {
             // Get SOL price history to check for crash
-            let sol_mint = "So11111111111111111111111111111111111111112";
+            let sol_mint = crate::constants::mints::SOL;
             let history = price_cache.price_history.read();
             if let Some(sol_history) = history.get(sol_mint) {
                 if sol_history.len() >= 2 {
@@ -949,7 +949,20 @@ impl Executor {
         };
 
         if !is_valid {
-            tracing::warn!("Jupiter provided blockhash used in transaction is expired or invalid. Triggering re-quote.");
+            // Check if this is a V0 transaction (uses ALTs)
+            let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
+            if is_v0 {
+                tracing::warn!(
+                    blockhash = %jupiter_blockhash,
+                    "V0 transaction blockhash expired/invalid. V0 transactions use Address Lookup Tables (ALTs) \
+                    and cannot be easily updated. Re-requesting fresh quote from Jupiter with new blockhash."
+                );
+            } else {
+                tracing::warn!(
+                    blockhash = %jupiter_blockhash,
+                    "Legacy transaction blockhash expired/invalid. Re-requesting fresh quote from Jupiter."
+                );
+            }
             return Err(ExecutorError::BlockhashExpired);
         }
 
@@ -1126,6 +1139,21 @@ impl Executor {
                 error_obj = ?err,
                 "RPC returned error"
             );
+            
+            // Check for blockhash not found error (common with V0 transactions)
+            // This can happen if Jupiter's blockhash expires between quote and submission
+            // Error code -32004 is "Blockhash not found" in Solana RPC
+            if error_code == Some(-32004) || 
+               error_msg.to_lowercase().contains("blockhash not found") ||
+               error_msg.to_lowercase().contains("blockhash expired") {
+                tracing::warn!(
+                    error_code = ?error_code,
+                    error = %error_msg,
+                    "Blockhash not found/expired error detected. This is common with V0 transactions. \
+                    Triggering re-quote from Jupiter with fresh blockhash."
+                );
+                return Err(ExecutorError::BlockhashExpired);
+            }
             
             // Check for address lookup table error specifically
             // V0 transactions use Address Lookup Tables (ALTs) which are mainnet-specific

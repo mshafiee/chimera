@@ -347,15 +347,22 @@ class LiquidityProvider:
             current = self.get_current_liquidity(token_address)
             if current:
                 # Use current liquidity as fallback but CAP it to avoid "Survivorship Bias"
-                # If a token mooned (10k -> 10M), assuming 10M historical is dangerous.
-                # If a token rugged (1M -> 1k), assuming 1k is strict/safe.
-                # We cap at $50k to allow testing small caps but filter out mooners.
+                # 
+                # CRITICAL WARNING: Using current liquidity for historical backtesting
+                # introduces survivorship bias:
+                # - Tokens that rugged (1M -> 0) will show 0 historical liquidity (safe, but filters them out)
+                # - Tokens that mooned (10k -> 10M) will show 10M historical (dangerous, inflates backtest results)
+                # 
+                # We cap at $50k to mitigate mooner bias, but this is still imperfect.
+                # Prioritize Birdeye historical data and treat fallback results with low confidence.
                 safe_fallback_liquidity = min(current.liquidity_usd, 50000.0)
                 
                 logger.warning(
-                    f"Historical liquidity not available for {token_address[:8]}... "
-                    f"at {timestamp.isoformat()}. Using CAPPED current liquidity "
-                    f"(${safe_fallback_liquidity:,.0f}) as fallback."
+                    f"⚠️  SURVIVORSHIP BIAS RISK: Historical liquidity not available for "
+                    f"{token_address[:8]}... at {timestamp.isoformat()}. "
+                    f"Using CAPPED current liquidity (${safe_fallback_liquidity:,.0f}) as fallback. "
+                    f"This may inflate backtest results for tokens that mooned, or filter out "
+                    f"tokens that rugged. Backtest confidence: LOW."
                 )
                 return LiquidityData(
                     token_address=current.token_address,
@@ -363,7 +370,7 @@ class LiquidityProvider:
                     price_usd=current.price_usd,
                     volume_24h_usd=current.volume_24h_usd,
                     timestamp=timestamp,  # Use historical timestamp
-                    source=f"{current.source}_fallback_capped",
+                    source=f"{current.source}_fallback_capped_low_confidence",
                 )
         
         return None

@@ -12,6 +12,21 @@ Pattern:
 
 This ensures that roster_new.db is always in a valid state, even if
 the Scout crashes mid-write.
+
+# Schema Consistency
+
+**CRITICAL**: The `wallets` table schema MUST match the schema defined in
+`database/schema/wallets.sql`. This file is the shared source of truth used by:
+- Rust (Operator): Used by sqlx migrations and roster merge function
+- Python (Scout): Used by this RosterWriter class
+
+When updating the schema:
+1. Update `database/schema/wallets.sql` (source of truth)
+2. Update Rust migrations in `operator/migrations/`
+3. Update this RosterWriter.WALLETS_SCHEMA to match (loaded from schema file)
+4. Test merge operation to ensure compatibility
+
+The schema is automatically loaded from the shared file to prevent drift.
 """
 
 import os
@@ -53,19 +68,29 @@ def _load_wallet_schema() -> str:
     
     The schema is defined in database/schema/wallets.sql and is used by both
     Rust (sqlx) and Python (RosterWriter) to ensure consistency.
+    
+    Supports both local development (schema at project root) and Docker
+    (schema copied to /app/database/schema/wallets.sql).
     """
-    # Find the shared schema file relative to this module
-    # scout/core/db_writer.py -> database/schema/wallets.sql
-    current_file = Path(__file__)
-    scout_dir = current_file.parent.parent
-    project_root = scout_dir.parent
-    schema_path = project_root / "database" / "schema" / "wallets.sql"
+    # Try Docker path first (when running in container)
+    docker_schema_path = Path("/app/database/schema/wallets.sql")
+    if docker_schema_path.exists():
+        schema_path = docker_schema_path
+    else:
+        # Find the shared schema file relative to this module (local development)
+        # scout/core/db_writer.py -> database/schema/wallets.sql
+        current_file = Path(__file__)
+        scout_dir = current_file.parent.parent
+        project_root = scout_dir.parent
+        schema_path = project_root / "database" / "schema" / "wallets.sql"
     
     if not schema_path.exists():
         raise FileNotFoundError(
-            f"Wallet schema file not found: {schema_path}\n"
-            f"Expected location: {schema_path.absolute()}\n"
-            f"Please ensure the shared schema file exists."
+            f"Wallet schema file not found at any expected location.\n"
+            f"Tried:\n"
+            f"  - Docker path: /app/database/schema/wallets.sql\n"
+            f"  - Local path: {schema_path.absolute()}\n"
+            f"Please ensure the shared schema file exists in one of these locations."
         )
     
     with open(schema_path, 'r') as f:
@@ -95,10 +120,15 @@ class RosterWriter:
         writer = RosterWriter('/path/to/roster_new.db')
         wallets = [WalletRecord(address='...', status='ACTIVE', ...)]
         writer.write_roster(wallets)
+    
+    The schema is automatically loaded from database/schema/wallets.sql to ensure
+    consistency with the Rust Operator's expectations. See module docstring for
+    schema consistency requirements.
     """
     
     # Schema for the wallets table (loaded from shared source of truth)
     # Schema source of truth: database/schema/wallets.sql
+    # This MUST match the schema used by Rust's roster merge function
     WALLETS_SCHEMA = _load_wallet_schema()
     
     def __init__(self, output_path: str):

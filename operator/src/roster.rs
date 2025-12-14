@@ -5,6 +5,23 @@
 //!
 //! The Scout writes to `roster_new.db` and the Operator merges it into
 //! the main database using this module.
+//!
+//! # Schema Consistency
+//!
+//! **CRITICAL**: The `wallets` table schema in `roster_new.db` MUST match
+//! the schema defined in `database/schema/wallets.sql`. This file is the
+//! shared source of truth used by both:
+//! - Rust (Operator): Used by sqlx migrations and this merge function
+//! - Python (Scout): Used by `scout/core/db_writer.py::RosterWriter`
+//!
+//! When updating the schema:
+//! 1. Update `database/schema/wallets.sql` (source of truth)
+//! 2. Update Rust migrations in `operator/migrations/`
+//! 3. Update Python `RosterWriter.WALLETS_SCHEMA` to match
+//! 4. Test merge operation to ensure compatibility
+//!
+//! Schema validation: This function checks for table existence but does NOT
+//! validate column structure. Column mismatches will cause merge failures.
 
 use crate::db::DbPool;
 use crate::error::AppResult;
@@ -60,8 +77,30 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
     let mut conn = pool.acquire().await?;
 
     // Step 1: Attach the new roster database
+    // Retry on SQLITE_BUSY errors (can occur during heavy concurrent load)
     let attach_sql = format!("ATTACH DATABASE '{}' AS new_roster", roster_path_str);
-    sqlx::query(&attach_sql).execute(&mut *conn).await?;
+    let mut retries = 3;
+    loop {
+        match sqlx::query(&attach_sql).execute(&mut *conn).await {
+            Ok(_) => break,
+            Err(e) if retries > 0 => {
+                if let Some(sqlite_err) = e.as_database_error() {
+                    if sqlite_err.message().contains("database is locked") || 
+                       sqlite_err.message().contains("SQLITE_BUSY") {
+                        retries -= 1;
+                        warn!(
+                            retries_left = retries,
+                            "Database busy during ATTACH, retrying..."
+                        );
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                }
+                return Err(crate::error::AppError::Database(e));
+            }
+            Err(e) => return Err(crate::error::AppError::Database(e)),
+        }
+    }
 
     info!("Attached roster database");
 
@@ -91,6 +130,8 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
     info!("Roster integrity check passed");
 
     // Step 3: Check if new_roster has wallets table
+    // NOTE: This only checks for table existence, not schema compatibility.
+    // Schema must match database/schema/wallets.sql (see module-level docs).
     let table_check: Result<(i32,), _> = sqlx::query_as(
         "SELECT COUNT(*) FROM new_roster.sqlite_master WHERE type='table' AND name='wallets'"
     )
@@ -103,7 +144,8 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
             .await;
 
         return Err(crate::error::AppError::Internal(
-            "Roster database missing 'wallets' table".to_string(),
+            "Roster database missing 'wallets' table. Ensure Scout's RosterWriter \
+            creates the table using the schema from database/schema/wallets.sql".to_string(),
         ));
     }
 

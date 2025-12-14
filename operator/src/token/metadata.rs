@@ -359,7 +359,7 @@ impl TokenMetadataFetcher {
 
         let token_mint = Pubkey::from_str(token_address)
             .map_err(|e| AppError::Validation(format!("Invalid token mint: {}", e)))?;
-        let sol_mint = Pubkey::from_str("So11111111111111111111111111111111111111112")
+        let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
             .map_err(|e| AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
 
         // Get a swap transaction from Jupiter (minimal amount)

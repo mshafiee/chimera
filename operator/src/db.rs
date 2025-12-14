@@ -36,8 +36,11 @@ pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
         .map_err(AppError::Database)?
         // Enable WAL mode for concurrent reads
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        // Set busy timeout to 5 seconds
-        .busy_timeout(std::time::Duration::from_secs(5))
+        // Set busy timeout to 30 seconds (increased from 5s for heavy concurrent load)
+        // This handles cases where Python Scout is merging roster while Operator is
+        // updating trade statuses. WAL mode helps, but ATTACH DATABASE operations
+        // can still cause brief locks during merge.
+        .busy_timeout(std::time::Duration::from_secs(30))
         // Enable foreign keys
         .foreign_keys(true)
         // Create if not exists

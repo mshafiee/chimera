@@ -99,6 +99,9 @@ class BacktestSimulator:
         # Sort trades chronologically for position tracking
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
         
+        # Track low-confidence liquidity usage (survivorship bias risk)
+        low_confidence_trades_count = 0
+        
         # Check minimum trades
         insufficient_trades_failure: Optional[str] = None
         if len(sorted_trades) < self.config.min_trades_required:
@@ -130,6 +133,17 @@ class BacktestSimulator:
                 trade, min_liquidity, sol_price, positions
             )
             simulated_trades.append(sim_trade)
+            
+            # Track low-confidence liquidity usage (check if liquidity was from fallback)
+            # We check the original trade's liquidity source by re-fetching if needed
+            if not trade.liquidity_at_trade_usd:
+                # Only check if we had to fetch liquidity (not from trade data)
+                liquidity_check = self.liquidity.get_historical_liquidity_or_current(
+                    trade.token_address,
+                    trade.timestamp,
+                )
+                if liquidity_check and "fallback_capped" in liquidity_check.source:
+                    low_confidence_trades_count += 1
             
             # Track original realized PnL (only SELL trades with pnl_sol)
             if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
@@ -178,6 +192,26 @@ class BacktestSimulator:
                 passed = False
                 failure_reason = f"PnL reduction too high: {pnl_reduction*100:.0f}%"
         
+        # Warn about survivorship bias if significant portion of trades used low-confidence liquidity
+        if low_confidence_trades_count > 0:
+            low_confidence_ratio = low_confidence_trades_count / len(sorted_trades)
+            if low_confidence_ratio > 0.3:  # More than 30% of trades
+                logger.warning(
+                    f"⚠️  SURVIVORSHIP BIAS RISK: {low_confidence_trades_count}/{len(sorted_trades)} "
+                    f"({low_confidence_ratio*100:.0f}%) trades used fallback liquidity data. "
+                    f"Backtest results may be inflated for tokens that mooned or filtered for tokens that rugged. "
+                    f"Backtest confidence: LOW."
+                )
+                # Add warning to failure reason if it exists, or create a note
+                if failure_reason:
+                    failure_reason += f" (Also: {low_confidence_ratio*100:.0f}% trades used low-confidence liquidity)"
+                else:
+                    # Don't fail, but note the risk
+                    logger.info(
+                        f"Backtest passed but with survivorship bias risk. "
+                        f"Consider requiring Birdeye historical data for production."
+                    )
+        
         return SimulatedResult(
             wallet_address=wallet_address,
             total_trades=len(sorted_trades),
@@ -217,6 +251,7 @@ class BacktestSimulator:
         """
         # Get liquidity data (historical-at-trade if available).
         liquidity_data = None
+        low_confidence_liquidity = False
         if trade.liquidity_at_trade_usd is not None:
             liquidity_data = LiquidityData(
                 token_address=trade.token_address,
@@ -231,6 +266,14 @@ class BacktestSimulator:
                 trade.token_address,
                 trade.timestamp,
             )
+            # Check if liquidity data is from fallback (low confidence)
+            if liquidity_data and "fallback_capped" in liquidity_data.source:
+                low_confidence_liquidity = True
+                logger.warning(
+                    f"Using low-confidence fallback liquidity for trade simulation: "
+                    f"{trade.token_address[:8]}... at {trade.timestamp.isoformat()}. "
+                    f"Backtest results may be affected by survivorship bias."
+                )
         
         if not liquidity_data:
             return SimulatedTrade(

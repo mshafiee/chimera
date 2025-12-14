@@ -36,8 +36,8 @@ services:
   # Chimera Scout - Wallet intelligence layer
   scout:
     build:
-      context: ./scout
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: scout/Dockerfile
     container_name: chimera-scout
     restart: unless-stopped
     volumes:

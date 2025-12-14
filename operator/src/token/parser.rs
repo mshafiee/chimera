@@ -13,13 +13,17 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Known safe token mints that are allowed to have freeze/mint authority
+/// 
+/// These should match the constants in crate::constants::mints
 pub mod known_tokens {
+    use crate::constants;
+    
     /// USDC mint address
-    pub const USDC: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    pub const USDC: &str = constants::mints::USDC;
     /// USDT mint address
-    pub const USDT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+    pub const USDT: &str = constants::mints::USDT;
     /// Wrapped SOL mint address
-    pub const WSOL: &str = "So11111111111111111111111111111111111111112";
+    pub const WSOL: &str = constants::mints::SOL;
 }
 
 /// Result of a token safety check

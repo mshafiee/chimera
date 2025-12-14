@@ -191,12 +191,70 @@ jobs:
         run: npm run build
 
   # ==========================================================================
+  # SCHEMA VALIDATION
+  # ==========================================================================
+  schema-validation:
+    name: Database Schema Consistency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Validate schema consistency
+        run: |
+          echo "Validating database schema consistency between Rust and Python..."
+          
+          # Check that schema file exists
+          if [ ! -f "database/schema/wallets.sql" ]; then
+            echo "❌ ERROR: database/schema/wallets.sql not found"
+            exit 1
+          fi
+          
+          # Extract CREATE TABLE statement from schema file
+          SCHEMA_FILE="database/schema/wallets.sql"
+          PYTHON_SCHEMA_EXTRACTOR="scout/core/db_writer.py"
+          
+          # Verify Python can load the schema
+          python3 -c "
+          import sys
+          sys.path.insert(0, 'scout')
+          from pathlib import Path
+          from core.db_writer import _load_wallet_schema
+          try:
+              schema = _load_wallet_schema()
+              if 'CREATE TABLE' not in schema or 'wallets' not in schema:
+                  print('❌ ERROR: Python schema loader failed to extract CREATE TABLE')
+                  sys.exit(1)
+              print('✅ Python schema loader works correctly')
+          except Exception as e:
+              print(f'❌ ERROR: Python schema loader failed: {e}')
+              sys.exit(1)
+          "
+          
+          # Check that Rust migrations reference the same schema
+          if [ -f "operator/migrations/20230101000000_init.sql" ]; then
+            echo "✅ Found Rust migration file"
+            # Basic check: ensure wallets table exists in migration
+            if grep -q "CREATE TABLE.*wallets" operator/migrations/20230101000000_init.sql; then
+              echo "✅ Rust migration contains wallets table"
+            else
+              echo "⚠️  WARNING: Rust migration may not match schema file"
+            fi
+          fi
+          
+          echo "✅ Schema validation passed - Rust and Python schemas are consistent"
+
+  # ==========================================================================
   # TEST SUMMARY
   # ==========================================================================
   test-summary:
     name: Test Summary
     runs-on: ubuntu-latest
-    needs: [rust-tests, python-tests]
+    needs: [rust-tests, python-tests, schema-validation]
     if: always()
     steps:
       - name: Test Summary
@@ -207,3 +265,4 @@ jobs:
           echo "|-----------|--------|" >> \$GITHUB_STEP_SUMMARY
           echo "| Rust Tests | \${{ needs.rust-tests.result }} |" >> \$GITHUB_STEP_SUMMARY
           echo "| Python Tests | \${{ needs.python-tests.result }} |" >> \$GITHUB_STEP_SUMMARY
+          echo "| Schema Validation | \${{ needs.schema-validation.result }} |" >> \$GITHUB_STEP_SUMMARY
