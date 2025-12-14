@@ -4,6 +4,7 @@
 //! lowest total cost is selected.
 
 use chimera_operator::engine::dex_comparator::DexComparator;
+use rust_decimal::Decimal;
 
 #[tokio::test]
 #[ignore] // Requires network access - run with: cargo test -- --ignored
@@ -12,7 +13,7 @@ async fn test_dex_comparison_jupiter() {
     
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let amount_sol = 1.0;
+    let amount_sol = Decimal::from(1u64);
 
     // Query Jupiter (should work)
     let result = comparator
@@ -22,13 +23,13 @@ async fn test_dex_comparison_jupiter() {
     match result {
         Ok(dex_result) => {
             println!("Selected DEX: {}", dex_result.selected_dex);
-            println!("Total cost: {:.6} SOL", dex_result.total_cost_sol);
-            println!("Fee: {:.6} SOL", dex_result.fee_sol);
-            println!("Slippage: {:.6} SOL", dex_result.slippage_sol);
+            println!("Total cost: {} SOL", dex_result.total_cost_sol);
+            println!("Fee: {} SOL", dex_result.fee_sol);
+            println!("Slippage: {} SOL", dex_result.slippage_sol);
             
             assert_eq!(dex_result.selected_dex, "Jupiter");
-            assert!(dex_result.total_cost_sol > 0.0);
-            assert!(dex_result.fee_sol > 0.0);
+            assert!(dex_result.total_cost_sol > Decimal::ZERO);
+            assert!(dex_result.fee_sol > Decimal::ZERO);
         }
         Err(e) => {
             println!("DEX comparison error (expected in CI): {}", e);
@@ -44,7 +45,7 @@ async fn test_dex_comparison_caching() {
     
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let amount_sol = 1.0;
+    let amount_sol = Decimal::from(1u64);
 
     // First call should query API
     let result1 = comparator
@@ -70,7 +71,7 @@ async fn test_dex_comparison_multiple_dexs() {
     
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let amount_sol = 1.0;
+    let amount_sol = Decimal::from(1u64);
 
     // This should query Jupiter, Raydium, Orca, and Meteora in parallel
     let result = comparator
@@ -80,7 +81,7 @@ async fn test_dex_comparison_multiple_dexs() {
     match result {
         Ok(dex_result) => {
             println!("Selected DEX: {}", dex_result.selected_dex);
-            println!("Total cost: {:.6} SOL", dex_result.total_cost_sol);
+            println!("Total cost: {} SOL", dex_result.total_cost_sol);
             
             // Should select one of the DEXs
             assert!(
@@ -104,7 +105,7 @@ async fn test_dex_comparison_fallback() {
     // Use invalid token addresses to trigger fallback
     let invalid_token1 = "InvalidToken111111111111111111111111111111";
     let invalid_token2 = "InvalidToken222222222222222222222222222222";
-    let amount_sol = 1.0;
+    let amount_sol = Decimal::from(1u64);
 
     // Should fallback to default Jupiter result if all queries fail
     let result = comparator
