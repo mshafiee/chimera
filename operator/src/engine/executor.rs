@@ -232,8 +232,8 @@ impl Executor {
                 return Err(ExecutorError::MarketConditionsUnfavorable(e.to_string()));
             }
 
-            // Validate amount bounds
-            let min_position = Decimal::from_f64_retain(self.config.strategy.min_position_sol).unwrap_or(Decimal::ZERO);
+            // Validate amount bounds (config values are already Decimal)
+            let min_position = self.config.strategy.min_position_sol;
             if signal.payload.amount_sol < min_position {
                 return Err(ExecutorError::AmountTooSmall(
                     signal.payload.amount_sol,
@@ -241,7 +241,7 @@ impl Executor {
                 ));
             }
 
-            let max_position = Decimal::from_f64_retain(self.config.strategy.max_position_sol).unwrap_or(Decimal::ZERO);
+            let max_position = self.config.strategy.max_position_sol;
             if signal.payload.amount_sol > max_position {
                 return Err(ExecutorError::AmountTooLarge(
                     signal.payload.amount_sol,

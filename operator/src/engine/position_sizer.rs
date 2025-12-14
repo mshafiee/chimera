@@ -56,69 +56,80 @@ impl PositionSizer {
             Decimal::ONE
         };
 
-        // High WQS multiplier (>80)
-        let wqs_mult = Decimal::from_f64_retain(if factors.wallet_wqs >= 80.0 {
-            1.2
+        // High WQS multiplier (>80) - use Decimal constants to avoid f64 precision issues
+        let wqs_mult = if factors.wallet_wqs >= 80.0 {
+            Decimal::from_str("1.2").unwrap_or(Decimal::ONE)
         } else {
-            1.0
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE
+        };
 
         // Wallet performance multiplier (based on success rate)
-        let performance_mult = Decimal::from_f64_retain(if factors.wallet_success_rate >= 0.6 {
-            1.1
+        let performance_mult = if factors.wallet_success_rate >= 0.6 {
+            Decimal::from_str("1.1").unwrap_or(Decimal::ONE)
         } else if factors.wallet_success_rate < 0.4 {
-            0.8
+            Decimal::from_str("0.8").unwrap_or(Decimal::ONE)
         } else {
-            1.0
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE
+        };
 
         // New token penalty (<24h old)
-        let token_age_mult = Decimal::from_f64_retain(if let Some(age) = factors.token_age_hours {
+        let token_age_mult = if let Some(age) = factors.token_age_hours {
             if age < 24.0 {
-                0.5
+                Decimal::from_str("0.5").unwrap_or(Decimal::ONE)
             } else {
-                1.0
+                Decimal::ONE
             }
         } else {
-            1.0
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE
+        };
 
         // High slippage penalty (>2%)
-        let slippage_mult = Decimal::from_f64_retain(if factors.estimated_slippage > 2.0 {
-            0.7
+        let slippage_mult = if factors.estimated_slippage > 2.0 {
+            Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
         } else {
-            1.0
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE
+        };
 
         // Signal quality multiplier
         // High quality (>0.9): 1.3x
         // Medium quality (0.7-0.9): 1.0x
         // Low quality (<0.7): 0.7x (shouldn't reach here due to filter)
-        let quality_mult = Decimal::from_f64_retain(if let Some(quality) = factors.signal_quality {
+        let quality_mult = if let Some(quality) = factors.signal_quality {
             if quality >= 0.9 {
-                1.3
+                Decimal::from_str("1.3").unwrap_or(Decimal::ONE)
             } else if quality >= 0.7 {
-                1.0
+                Decimal::ONE
             } else {
-                0.7
+                Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
             }
         } else {
-            1.0  // Default if quality not provided
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE  // Default if quality not provided
+        };
 
         // Volatility multiplier (reduce size for high volatility)
         // If volatility > 30%, reduce size proportionally
-        let volatility_mult = Decimal::from_f64_retain(if let Some(volatility) = factors.token_volatility_24h {
+        // Use Decimal arithmetic to avoid f64 precision issues
+        let volatility_mult = if let Some(volatility) = factors.token_volatility_24h {
             if volatility > 30.0 {
-                // Reduce by 30% for every 10% above 30%
-                let reduction = ((volatility - 30.0) / 10.0) * 0.3;
-                (1.0 - reduction).max(0.5) // Minimum 50% of base size
+                // Convert volatility to Decimal for calculation
+                let volatility_dec = Decimal::from_f64_retain(volatility).unwrap_or(Decimal::ZERO);
+                let threshold = Decimal::from_str("30.0").unwrap_or(Decimal::ZERO);
+                let step = Decimal::from_str("10.0").unwrap_or(Decimal::ONE);
+                let reduction_rate = Decimal::from_str("0.3").unwrap_or(Decimal::ZERO);
+                let min_mult = Decimal::from_str("0.5").unwrap_or(Decimal::ONE);
+                
+                // Calculate: (volatility - 30) / 10 * 0.3
+                let excess = volatility_dec - threshold;
+                let steps = excess / step;
+                let reduction = steps * reduction_rate;
+                let multiplier = Decimal::ONE - reduction;
+                multiplier.max(min_mult) // Minimum 50% of base size
             } else {
-                1.0
+                Decimal::ONE
             }
         } else {
-            1.0  // Default if volatility unknown
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE  // Default if volatility unknown
+        };
 
         // Apply all multipliers using Decimal arithmetic
         size = size * confidence_mult;

@@ -24,7 +24,10 @@ use std::sync::Arc;
 const MIN_SAMPLES_FOR_PERCENTILE: u32 = 10;
 
 /// Cold start multiplier (tip_floor * this value)
-const COLD_START_MULTIPLIER: Decimal = Decimal::from(2);
+/// Note: Using a function instead of const because Decimal::from_str is not const
+fn cold_start_multiplier() -> Decimal {
+    Decimal::from_str("2.0").unwrap_or(Decimal::from(2))
+}
 
 /// Tip entry for in-memory history
 #[derive(Debug, Clone)]
@@ -118,8 +121,8 @@ impl TipManager {
     /// Cold start tip calculation
     fn cold_start_tip(&self, strategy: Strategy) -> Decimal {
         match strategy {
-            Strategy::Shield => self.config.tip_floor_sol * COLD_START_MULTIPLIER,
-            Strategy::Spear => self.config.tip_floor_sol * COLD_START_MULTIPLIER * Decimal::from_str("1.5").unwrap(),
+            Strategy::Shield => self.config.tip_floor_sol * cold_start_multiplier(),
+            Strategy::Spear => self.config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap(),
             Strategy::Exit => self.config.tip_ceiling_sol, // Max tip for exits
         }
     }
@@ -162,9 +165,9 @@ impl TipManager {
     /// Get success rate for a given tip amount range
     /// Returns success rate (0.0-1.0) for tips within ±10% of the given amount
     pub async fn get_tip_success_rate(&self, tip_amount_sol: Decimal) -> AppResult<f64> {
-        // Calculate range using Decimal for precision
-        let min_tip = tip_amount_sol * Decimal::from_f64_retain(0.9).unwrap_or(Decimal::ZERO);
-        let max_tip = tip_amount_sol * Decimal::from_f64_retain(1.1).unwrap_or(Decimal::ZERO);
+        // Calculate range using Decimal for precision (avoid f64 constants)
+        let min_tip = tip_amount_sol * Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
+        let max_tip = tip_amount_sol * Decimal::from_str("1.1").unwrap_or(Decimal::ZERO);
         
         // Convert to f64 only for database query (database stores as f64)
         let min_tip_f64 = min_tip.to_f64().unwrap_or(0.0);
@@ -332,30 +335,34 @@ mod tests {
 
     #[test]
     fn test_cold_start_multiplier_value() {
-        assert_eq!(COLD_START_MULTIPLIER, 2.0, "Cold start multiplier should be 2.0");
+        let expected = Decimal::from_str("2.0").unwrap();
+        assert_eq!(cold_start_multiplier(), expected, "Cold start multiplier should be 2.0");
     }
 
     #[test]
     fn test_cold_start_tip_calculation() {
         let config = test_config();
-        let cold_tip = config.tip_floor_sol * COLD_START_MULTIPLIER;
-        assert!((cold_tip - 0.002).abs() < 0.0001, "Cold start tip should be 0.002 SOL");
+        let cold_tip = config.tip_floor_sol * cold_start_multiplier();
+        let expected = Decimal::from_str("0.002").unwrap();
+        assert!((cold_tip - expected).abs() < Decimal::from_str("0.0001").unwrap(), "Cold start tip should be 0.002 SOL");
     }
 
     #[test]
     fn test_cold_start_shield_tip() {
         let config = test_config();
         // Shield uses floor * 2
-        let tip = config.tip_floor_sol * COLD_START_MULTIPLIER;
-        assert!((tip - 0.002).abs() < 0.0001, "Shield cold start tip should be 0.002");
+        let tip = config.tip_floor_sol * cold_start_multiplier();
+        let expected = Decimal::from_str("0.002").unwrap();
+        assert!((tip - expected).abs() < Decimal::from_str("0.0001").unwrap(), "Shield cold start tip should be 0.002");
     }
 
     #[test]
     fn test_cold_start_spear_tip() {
         let config = test_config();
         // Spear uses floor * 2 * 1.5
-        let tip = config.tip_floor_sol * COLD_START_MULTIPLIER * 1.5;
-        assert!((tip - 0.003).abs() < 0.0001, "Spear cold start tip should be 0.003");
+        let tip = config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap();
+        let expected = Decimal::from_str("0.003").unwrap();
+        assert!((tip - expected).abs() < Decimal::from_str("0.0001").unwrap(), "Spear cold start tip should be 0.003");
     }
 
     #[test]
@@ -552,8 +559,8 @@ mod tests {
     fn test_strategy_tip_ordering() {
         let config = test_config();
         
-        let shield_tip = config.tip_floor_sol * COLD_START_MULTIPLIER;
-        let spear_tip = config.tip_floor_sol * COLD_START_MULTIPLIER * 1.5;
+        let shield_tip = config.tip_floor_sol * cold_start_multiplier();
+        let spear_tip = config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap();
         let exit_tip = config.tip_ceiling_sol;
         
         assert!(shield_tip < spear_tip, "Shield tip should be less than Spear");

@@ -105,15 +105,16 @@ impl StopLossManager {
 
         // Calculate base dynamic stop-loss threshold using Decimal for precision
         // For consensus signals, use wider stops (lower risk of false signal)
+        // Use Decimal constants to avoid f64 precision issues
         let mut stop_loss_threshold = if wqs >= 70.0 {
             // High WQS: wider stop (-20%)
-            Decimal::from_f64_retain(-20.0).unwrap_or(Decimal::ZERO)
+            Decimal::from_str("-20.0").unwrap_or(Decimal::ZERO)
         } else if wqs >= 40.0 {
             // Medium WQS: standard stop (-15%)
-            Decimal::from_f64_retain(-15.0).unwrap_or(Decimal::ZERO)
+            Decimal::from_str("-15.0").unwrap_or(Decimal::ZERO)
         } else {
             // Low WQS: tighter stop (-10%)
-            Decimal::from_f64_retain(-10.0).unwrap_or(Decimal::ZERO)
+            Decimal::from_str("-10.0").unwrap_or(Decimal::ZERO)
         };
         
         // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation)
@@ -123,12 +124,13 @@ impl StopLossManager {
             // If volatility > 20%, widen stop by 1.5x
             // If volatility > 30%, widen stop by 2x
             // If volatility < 10%, tighten stop by 0.9x (but never below -5%)
+            // Use Decimal constants to avoid f64 precision issues
             let volatility_multiplier = if volatility > 30.0 {
-                Decimal::from_f64_retain(2.0).unwrap_or(Decimal::ONE)
+                Decimal::from_str("2.0").unwrap_or(Decimal::ONE)
             } else if volatility > 20.0 {
-                Decimal::from_f64_retain(1.5).unwrap_or(Decimal::ONE)
+                Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
             } else if volatility < 10.0 {
-                Decimal::from_f64_retain(0.9).unwrap_or(Decimal::ONE)
+                Decimal::from_str("0.9").unwrap_or(Decimal::ONE)
             } else {
                 Decimal::ONE
             };
@@ -136,8 +138,8 @@ impl StopLossManager {
             stop_loss_threshold = stop_loss_threshold * volatility_multiplier;
             
             // Ensure stop never goes below -5% (too tight) or above -50% (too wide)
-            let min_threshold = Decimal::from_f64_retain(-50.0).unwrap_or(Decimal::ZERO);
-            let max_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            let min_threshold = Decimal::from_str("-50.0").unwrap_or(Decimal::ZERO);
+            let max_threshold = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
             stop_loss_threshold = stop_loss_threshold.max(min_threshold).min(max_threshold);
             
             tracing::debug!(
@@ -151,7 +153,7 @@ impl StopLossManager {
         
         // Widen stop-loss by 5% for consensus signals
         if is_consensus {
-            let consensus_adjustment = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            let consensus_adjustment = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
             stop_loss_threshold = stop_loss_threshold + consensus_adjustment; // Make it wider (e.g., -15% -> -20%)
             tracing::debug!(
                 trade_uuid = %trade_uuid,
@@ -168,8 +170,8 @@ impl StopLossManager {
             return StopLossAction::Exit;
         }
 
-        // Check hard stop-loss (never exceed -15%)
-        let hard_stop = Decimal::from_f64_retain(self.config.hard_stop_loss).unwrap_or(Decimal::ZERO);
+        // Check hard stop-loss (config value is already Decimal)
+        let hard_stop = self.config.hard_stop_loss;
         if loss_percent <= hard_stop {
             return StopLossAction::Exit;
         }
@@ -220,7 +222,7 @@ impl StopLossManager {
 
         // Calculate daily loss percentage using Decimal for precision
         // Only check if we have meaningful exposure (>0.1 SOL)
-        let min_exposure = Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO);
+        let min_exposure = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
         if total_exposure > min_exposure {
             let daily_loss_percent = if !total_exposure.is_zero() {
                 (daily_pnl / total_exposure) * Decimal::from(100)

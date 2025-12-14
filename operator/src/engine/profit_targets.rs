@@ -182,8 +182,12 @@ impl ProfitTargetManager {
         state.peak_profit_percent = profit_percent.max(state.peak_profit_percent);
 
         // Get profit targets (dynamic based on market regime if available)
-        let targets = if let Some(ref regime_detector) = self.market_regime {
+        let targets: Vec<Decimal> = if let Some(ref regime_detector) = self.market_regime {
+            // Convert f64 targets to Decimal for precision
             regime_detector.get_profit_targets()
+                .iter()
+                .map(|&t| Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO))
+                .collect()
         } else {
             self.config.targets.clone()
         };
@@ -218,29 +222,31 @@ impl ProfitTargetManager {
         if let Ok(elapsed) = state.entry_time.elapsed() {
             let elapsed_hours = elapsed.as_secs() / 3600;
             
-            // Convert profit_percent to f64 for comparison (only for thresholds)
-            let profit_percent_f64 = profit_percent.to_f64().unwrap_or(0.0);
+            // Use Decimal for threshold comparisons to avoid f64 precision issues
+            let ten_percent = Decimal::from_str("10.0").unwrap_or(Decimal::ZERO);
+            let five_percent = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
+            let zero = Decimal::ZERO;
             
             // If profitable >10%: Extend to 48h
-            if profit_percent_f64 > 10.0 {
+            if profit_percent > ten_percent {
                 if elapsed_hours >= 48 {
                     return ProfitTargetAction::FullExit;
                 }
             }
             // If profitable <5%: Exit after 12h (lock in small profits)
-            else if profit_percent_f64 > 0.0 && profit_percent_f64 < 5.0 {
+            else if profit_percent > zero && profit_percent < five_percent {
                 if elapsed_hours >= 12 {
                     return ProfitTargetAction::FullExit;
                 }
             }
             // If at loss: Exit after 6h (cut losses faster)
-            else if profit_percent_f64 < 0.0 {
+            else if profit_percent < zero {
                 if elapsed_hours >= 6 {
                     return ProfitTargetAction::FullExit;
                 }
             }
             // Default: Original time_exit_hours for moderate profits (5-10%)
-            else if elapsed_hours >= self.config.time_exit_hours as u64 && profit_percent_f64 > 0.0 {
+            else if elapsed_hours >= self.config.time_exit_hours as u64 && profit_percent > zero {
                 return ProfitTargetAction::FullExit;
             }
         }

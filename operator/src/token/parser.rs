@@ -272,54 +272,56 @@ impl TokenParser {
         // Convert to Decimal for precise comparison
         let liquidity_usd = Decimal::from_f64_retain(liquidity_usd_f64).unwrap_or(Decimal::ZERO);
         if liquidity_usd < min_liquidity {
-            return Ok(TokenSafetyResult {
-                safe: false,
-                rejection_reason: Some(format!(
-                    "Insufficient liquidity: ${:.2} < ${:.2} minimum",
-                    liquidity_usd, min_liquidity
-                )),
-                honeypot_checked: false,
-                liquidity_checked: true,
-                liquidity_usd: Some(liquidity_usd),
-            });
+                    return Ok(TokenSafetyResult {
+                        safe: false,
+                        rejection_reason: Some(format!(
+                            "Insufficient liquidity: ${:.2} < ${:.2} minimum",
+                            liquidity_usd, min_liquidity
+                        )),
+                        honeypot_checked: false,
+                        liquidity_checked: true,
+                        liquidity_usd: liquidity_usd.to_f64(),
+                    });
         }
 
         // Check liquidity/market cap ratio (Liquidity vs FDV)
         // High FDV with low liquidity = "Ghost Chain" scenario - high slippage on exit
         // Reject tokens with Liq/FDV < 0.05 (5%)
+        // Use Decimal for calculation, convert to f64 only for comparison and logging
         if let Ok(fdv_usd) = self.fetcher.get_market_cap_fdv(token_address).await {
             if fdv_usd > 0.0 {
-                let liquidity_ratio = liquidity_usd / fdv_usd;
-                const MIN_LIQUIDITY_RATIO: f64 = 0.05; // 5% minimum
+                let fdv_usd_dec = Decimal::from_f64_retain(fdv_usd).unwrap_or(Decimal::ZERO);
+                let liquidity_ratio = liquidity_usd / fdv_usd_dec;
+                let min_liquidity_ratio = Decimal::from_str("0.05").unwrap_or(Decimal::ZERO); // 5% minimum
 
-                if liquidity_ratio < MIN_LIQUIDITY_RATIO {
+                if liquidity_ratio < min_liquidity_ratio {
                     tracing::warn!(
                         token = token_address,
-                        liquidity_usd = liquidity_usd,
+                        liquidity_usd = %liquidity_usd,
                         fdv_usd = fdv_usd,
-                        liquidity_ratio = liquidity_ratio,
+                        liquidity_ratio = %liquidity_ratio,
                         "Token rejected: Liquidity/FDV ratio too low (Ghost Chain scenario)"
                     );
                     return Ok(TokenSafetyResult {
                         safe: false,
                         rejection_reason: Some(format!(
                             "Liquidity/FDV ratio too low: {:.2}% < {:.0}% (liquidity: ${:.2}, FDV: ${:.2})",
-                            liquidity_ratio * 100.0,
-                            MIN_LIQUIDITY_RATIO * 100.0,
+                            liquidity_ratio * Decimal::from(100),
+                            min_liquidity_ratio * Decimal::from(100),
                             liquidity_usd,
                             fdv_usd
                         )),
                         honeypot_checked: false,
                         liquidity_checked: true,
-                        liquidity_usd: Some(liquidity_usd),
+                        liquidity_usd: liquidity_usd.to_f64(),
                     });
                 }
 
                 tracing::debug!(
                     token = token_address,
-                    liquidity_usd = liquidity_usd,
+                    liquidity_usd = %liquidity_usd,
                     fdv_usd = fdv_usd,
-                    liquidity_ratio = liquidity_ratio,
+                    liquidity_ratio = %liquidity_ratio,
                     "Liquidity/FDV ratio check passed"
                 );
             }
@@ -339,10 +341,10 @@ impl TokenParser {
                     if !can_sell {
                         return Ok(TokenSafetyResult {
                             safe: false,
-                            rejection_reason: Some("Honeypot detected: sell simulation failed".to_string()),
-                            honeypot_checked: true,
-                            liquidity_checked: true,
-                            liquidity_usd: Some(liquidity_usd),
+                        rejection_reason: Some("Honeypot detected: sell simulation failed".to_string()),
+                        honeypot_checked: true,
+                        liquidity_checked: true,
+                        liquidity_usd: liquidity_usd.to_f64(),
                         });
                     }
                 }
@@ -365,7 +367,7 @@ impl TokenParser {
             rejection_reason: None,
             honeypot_checked: self.config.honeypot_detection_enabled,
             liquidity_checked: true,
-            liquidity_usd: Some(liquidity_usd),
+            liquidity_usd: liquidity_usd.to_f64(),
         };
 
         // Cache the full result
@@ -374,7 +376,7 @@ impl TokenParser {
         tracing::info!(
             token = token_address,
             strategy = %strategy,
-            liquidity_usd = liquidity_usd,
+            liquidity_usd = %liquidity_usd,
             "Slow check passed"
         );
 

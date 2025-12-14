@@ -1489,9 +1489,10 @@ pub async fn trip_circuit_breaker(
 
     // First, set extreme circuit breaker config values
     let mut config = state.config.write().await;
-    config.circuit_breakers.max_loss_24h_usd = 0.01;
+    use rust_decimal::prelude::*;
+    config.circuit_breakers.max_loss_24h_usd = Decimal::from_str("0.01").unwrap_or(Decimal::ZERO);
     config.circuit_breakers.max_consecutive_losses = 1;
-    config.circuit_breakers.max_drawdown_percent = 0.1;
+    config.circuit_breakers.max_drawdown_percent = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
     config.circuit_breakers.cooldown_minutes = 999999;
     drop(config);
 

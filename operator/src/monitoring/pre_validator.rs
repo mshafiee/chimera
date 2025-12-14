@@ -58,7 +58,7 @@ impl PreValidator {
                     let diff = (current - tracked).abs();
                     let ratio = diff / tracked;
                     let drift = ratio * Decimal::from(100);
-                    let max_drift = Decimal::from_f64_retain(5.0).unwrap_or(Decimal::ZERO);
+                    let max_drift = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
                     if drift > max_drift {
                         return ValidationResult {
                             valid: false,
@@ -85,7 +85,7 @@ impl PreValidator {
         let estimated_slippage = self.estimate_slippage(token_address, amount_sol, price_cache.clone()).await;
 
         // Check slippage threshold (3%)
-        let slippage_threshold = Decimal::from_f64_retain(3.0).unwrap_or(Decimal::ZERO);
+        let slippage_threshold = Decimal::from_str("3.0").unwrap_or(Decimal::ZERO);
         if estimated_slippage > slippage_threshold {
             return ValidationResult {
                 valid: false,
@@ -123,11 +123,12 @@ impl PreValidator {
         // 3. Account for DEX fees
 
         // Rough estimate: 0.5% base + 0.1% per 0.1 SOL
-        let base_slippage = Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO);
-        let size_unit = Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ONE);
-        let size_slippage_per_unit = Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO);
+        // Use Decimal constants to avoid f64 precision issues
+        let base_slippage = Decimal::from_str("0.5").unwrap_or(Decimal::ZERO);
+        let size_unit = Decimal::from_str("0.1").unwrap_or(Decimal::ONE);
+        let size_slippage_per_unit = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
         let size_slippage = (amount_sol / size_unit) * size_slippage_per_unit;
-        let max_slippage = Decimal::from_f64_retain(5.0).unwrap_or(Decimal::ZERO);
+        let max_slippage = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
         (base_slippage + size_slippage).min(max_slippage) // Cap at 5%
     }
 
