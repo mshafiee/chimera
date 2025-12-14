@@ -213,7 +213,7 @@ pub async fn webhook_handler(
                         &signal.payload.wallet_address,
                         token_address,
                         "BUY",
-                        signal.payload.amount_sol.to_f64().unwrap_or(0.0),
+                        signal.payload.amount_sol,
                     )
                     .await
                 {
@@ -318,11 +318,11 @@ pub async fn webhook_handler(
 
     // Check portfolio heat (if enabled)
     if let Some(ref portfolio_heat) = state.portfolio_heat {
-        match portfolio_heat.can_open_position(signal.payload.amount_sol.to_f64().unwrap_or(0.0)).await {
+        match portfolio_heat.can_open_position(signal.payload.amount_sol).await {
             Ok(false) => {
                 tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
-                    amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
+                    amount_sol = %signal.payload.amount_sol,
                     "Signal rejected: portfolio heat limit reached"
                 );
 

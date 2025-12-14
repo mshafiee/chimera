@@ -21,6 +21,7 @@ use crate::db::{self, ConfigAuditItem, DeadLetterItem, DbPool, PositionDetail, T
 use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
+use rust_decimal::prelude::*;
 
 // =============================================================================
 // API STATE
@@ -1677,9 +1678,9 @@ pub async fn export_trades(
 /// Performance metrics response
 #[derive(Debug, Serialize)]
 pub struct PerformanceMetricsResponse {
-    pub pnl_24h: f64,
-    pub pnl_7d: f64,
-    pub pnl_30d: f64,
+    pub pnl_24h: Decimal,
+    pub pnl_7d: Decimal,
+    pub pnl_30d: Decimal,
     pub pnl_24h_change_percent: Option<f64>,
     pub pnl_7d_change_percent: Option<f64>,
     pub pnl_30d_change_percent: Option<f64>,
@@ -1689,17 +1690,17 @@ pub struct PerformanceMetricsResponse {
 #[derive(Debug, Serialize)]
 pub struct CostMetricsResponse {
     /// Average Jito tip per trade (SOL)
-    pub avg_jito_tip_sol: f64,
+    pub avg_jito_tip_sol: Decimal,
     /// Average DEX fee per trade (SOL)
-    pub avg_dex_fee_sol: f64,
+    pub avg_dex_fee_sol: Decimal,
     /// Average slippage cost per trade (SOL)
-    pub avg_slippage_cost_sol: f64,
+    pub avg_slippage_cost_sol: Decimal,
     /// Total costs in last 30 days (SOL)
-    pub total_costs_30d_sol: f64,
+    pub total_costs_30d_sol: Decimal,
     /// Net profit in last 30 days (SOL) - after all costs
-    pub net_profit_30d_sol: f64,
+    pub net_profit_30d_sol: Decimal,
     /// ROI percentage (net profit / total costs * 100)
-    pub roi_percent: f64,
+    pub roi_percent: Decimal,
 }
 
 /// Strategy performance response
@@ -1707,9 +1708,9 @@ pub struct CostMetricsResponse {
 pub struct StrategyPerformanceResponse {
     pub strategy: String,
     pub win_rate: f64,
-    pub avg_return: f64,
+    pub avg_return: Decimal,
     pub trade_count: u32,
-    pub total_pnl: f64,
+    pub total_pnl: Decimal,
 }
 
 /// Get performance metrics (24H, 7D, 30D PnL)
@@ -1759,21 +1760,21 @@ pub async fn get_cost_metrics(
     )
     .await?;
 
-    // Calculate averages and totals
-    let mut total_jito_tip = 0.0;
-    let mut total_dex_fee = 0.0;
-    let mut total_slippage = 0.0;
-    let mut total_costs = 0.0;
-    let mut total_net_pnl = 0.0;
+    // Calculate averages and totals using Decimal for precision
+    let mut total_jito_tip = Decimal::ZERO;
+    let mut total_dex_fee = Decimal::ZERO;
+    let mut total_slippage = Decimal::ZERO;
+    let mut total_costs = Decimal::ZERO;
+    let mut total_net_pnl = Decimal::ZERO;
     let mut trade_count = 0;
 
     for trade in &trades {
         if let Some(cost) = trade.total_cost_sol {
-            if cost > 0.0 {
+            if cost > rust_decimal::Decimal::ZERO {
                 trade_count += 1;
-                total_jito_tip += trade.jito_tip_sol.unwrap_or(0.0);
-                total_dex_fee += trade.dex_fee_sol.unwrap_or(0.0);
-                total_slippage += trade.slippage_cost_sol.unwrap_or(0.0);
+                total_jito_tip += trade.jito_tip_sol.unwrap_or(Decimal::ZERO);
+                total_dex_fee += trade.dex_fee_sol.unwrap_or(Decimal::ZERO);
+                total_slippage += trade.slippage_cost_sol.unwrap_or(Decimal::ZERO);
                 total_costs += cost;
             }
         }
@@ -1782,28 +1783,29 @@ pub async fn get_cost_metrics(
         }
     }
 
+    let trade_count_dec = Decimal::from(trade_count);
     let avg_jito_tip = if trade_count > 0 {
-        total_jito_tip / trade_count as f64
+        total_jito_tip / trade_count_dec
     } else {
-        0.0
+        Decimal::ZERO
     };
 
     let avg_dex_fee = if trade_count > 0 {
-        total_dex_fee / trade_count as f64
+        total_dex_fee / trade_count_dec
     } else {
-        0.0
+        Decimal::ZERO
     };
 
     let avg_slippage = if trade_count > 0 {
-        total_slippage / trade_count as f64
+        total_slippage / trade_count_dec
     } else {
-        0.0
+        Decimal::ZERO
     };
 
-    let roi_percent = if total_costs > 0.0 {
-        (total_net_pnl / total_costs) * 100.0
+    let roi_percent = if total_costs > Decimal::ZERO {
+        (total_net_pnl / total_costs) * Decimal::from(100)
     } else {
-        0.0
+        Decimal::ZERO
     };
 
     Ok(Json(CostMetricsResponse {
@@ -1854,7 +1856,7 @@ pub async fn get_strategy_performance(
     let total_pnl = trades
         .iter()
         .filter_map(|t| t.pnl_usd)
-        .sum::<f64>();
+        .fold(rust_decimal::Decimal::ZERO, |acc, p| acc + p);
 
     Ok(Json(StrategyPerformanceResponse {
         strategy: strategy.clone(),

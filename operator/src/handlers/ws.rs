@@ -14,6 +14,8 @@ use axum::{
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
+use rust_decimal::Decimal;
+use rust_decimal::prelude::*;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -68,7 +70,18 @@ pub enum WsEvent {
 pub struct PositionUpdateData {
     pub trade_uuid: String,
     pub state: String,
-    pub unrealized_pnl_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_decimal_option")]
+    pub unrealized_pnl_percent: Option<Decimal>,
+}
+
+fn serialize_decimal_option<S>(value: &Option<Decimal>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(decimal) => serializer.serialize_f64(decimal.to_f64().unwrap_or(0.0)),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -168,7 +181,7 @@ mod tests {
         let event = WsEvent::PositionUpdate(PositionUpdateData {
             trade_uuid: "test-uuid".to_string(),
             state: "ACTIVE".to_string(),
-            unrealized_pnl_percent: Some(10.5),
+            unrealized_pnl_percent: Some(Decimal::from_str("10.5").unwrap()),
         });
 
         let json = serde_json::to_string(&event).unwrap();

@@ -117,7 +117,7 @@ pub async fn helius_webhook_handler(
                     token: target_token.clone(),
                     token_address: Some(target_token),
                     action: direction,
-                    amount_sol: rust_decimal::Decimal::from_f64_retain(swap.amount_in).unwrap_or(rust_decimal::Decimal::ZERO),
+                    amount_sol: swap.amount_in,
                     trade_uuid: None,
                 };
 
