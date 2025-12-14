@@ -145,14 +145,13 @@ impl MarketRegimeDetector {
     /// - < 1.0 if volume is decreasing (bearish, reduce position sizes)
     /// - 1.0 if no clear trend or insufficient data
     ///
-    /// Note: Returns f64 for compatibility with position sizing multipliers,
-    /// but all internal calculations use Decimal for precision.
-    pub fn get_volume_trend_multiplier(&self) -> f64 {
+    /// Returns Decimal for precision in financial calculations.
+    pub fn get_volume_trend_multiplier(&self) -> Decimal {
         let history = self.volume_history.read();
         
         if history.len() < 7 {
             // Need at least 7 days of data (1 week)
-            return 1.0;
+            return Decimal::ONE;
         }
 
         // Get volumes from last week and previous week
@@ -175,14 +174,14 @@ impl MarketRegimeDetector {
         }
 
         if last_week_count == 0 || previous_week_count == 0 {
-            return 1.0;
+            return Decimal::ONE;
         }
 
         let last_week_avg = last_week_volume / Decimal::from(last_week_count);
         let previous_week_avg = previous_week_volume / Decimal::from(previous_week_count);
 
         if previous_week_avg == Decimal::ZERO {
-            return 1.0;
+            return Decimal::ONE;
         }
 
         // Calculate week-over-week change using Decimal for precision
@@ -199,29 +198,31 @@ impl MarketRegimeDetector {
         
         if volume_change_ratio < threshold_80 {
             // Volume dropped >20%
-            0.7
+            Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
         } else if volume_change_ratio < threshold_90 {
             // Volume dropped 10-20%
-            0.85
+            Decimal::from_str("0.85").unwrap_or(Decimal::ONE)
         } else if volume_change_ratio > threshold_120 {
             // Volume increased >20%
-            1.1
+            Decimal::from_str("1.1").unwrap_or(Decimal::ONE)
         } else {
             // Neutral
-            1.0
+            Decimal::ONE
         }
     }
 
     /// Get position sizing multiplier based on market regime and volume trend
     ///
     /// # Returns
-    /// Multiplier to apply to base position size (0.0 - 2.0)
-    pub fn get_position_sizing_multiplier(&self) -> f64 {
+    /// Multiplier to apply to base position size (0.5 - 2.0) as Decimal for precision
+    pub fn get_position_sizing_multiplier(&self) -> Decimal {
         let volume_multiplier = self.get_volume_trend_multiplier();
         
         // In low volume regimes, reduce position sizes globally
         // This prevents getting stuck in illiquid positions
-        volume_multiplier.max(0.5).min(2.0) // Clamp between 0.5x and 2.0x
+        let min_mult = Decimal::from_str("0.5").unwrap_or(Decimal::ONE);
+        let max_mult = Decimal::from_str("2.0").unwrap_or(Decimal::ONE);
+        volume_multiplier.max(min_mult).min(max_mult) // Clamp between 0.5x and 2.0x
     }
 
     /// Get profit targets for current regime
