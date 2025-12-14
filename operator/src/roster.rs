@@ -119,74 +119,147 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         warn!("New roster contains zero wallets - proceeding with merge anyway");
     }
 
-    // Step 5: Get current wallet count (for removed count)
+    // Step 5: Get current wallet count (for statistics)
+    // Note: With upsert strategy, we don't remove wallets that aren't in Scout's roster.
+    // Wallets are only updated/inserted, not deleted. This preserves Operator's ability
+    // to ban/demote wallets without Scout immediately reviving them.
     let current_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wallets")
         .fetch_one(&mut *conn)
         .await?;
 
-    let wallets_removed = current_count.0 as u32;
+    // With upsert, we don't actually remove wallets, so this is 0
+    // (wallets not in Scout's roster remain in the DB)
+    let wallets_removed = 0u32;
 
-    // Step 6: Merge in a transaction
-    // Using a simple replace strategy: delete all, insert all from new
-    // This preserves the last-known-good state if merge fails mid-way
-    sqlx::query("BEGIN TRANSACTION")
-        .execute(&mut *conn)
+    let batch_size = 500;
+    let mut offset = 0;
+    
+    // Step 6: Merge in batches to prevent locking the DB for too long
+    // Using a limit/offset strategy
+    
+    // Define a struct to hold the row data (sqlx only supports tuples up to 9-16 elements)
+    #[derive(sqlx::FromRow)]
+    struct RosterTransferRow {
+        address: String,
+        status: String,
+        wqs_score: Option<f64>,
+        roi_7d: Option<f64>,
+        roi_30d: Option<f64>,
+        trade_count_30d: Option<i64>,
+        win_rate: Option<f64>,
+        max_drawdown_30d: Option<f64>,
+        avg_trade_size_sol: Option<f64>,
+        avg_win_sol: Option<f64>,
+        avg_loss_sol: Option<f64>,
+        profit_factor: Option<f64>,
+        realized_pnl_30d_sol: Option<f64>,
+        last_trade_at: Option<String>, // Read as string to avoid parsing issues during transfer
+        promoted_at: Option<String>,
+        ttl_expires_at: Option<String>,
+        notes: Option<String>,
+        archetype: Option<String>,
+        avg_entry_delay_seconds: Option<f64>,
+        created_at: Option<String>,
+        updated_at: Option<String>, // Scout's updated_at timestamp
+    }
+
+    loop {
+        // Read batch from attached roster
+        let rows: Vec<RosterTransferRow> = sqlx::query_as(
+            &format!(r#"
+                SELECT 
+                    address, status, wqs_score, roi_7d, roi_30d,
+                    trade_count_30d, win_rate, max_drawdown_30d,
+                    avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                    last_trade_at, promoted_at,
+                    ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
+                FROM new_roster.wallets 
+                LIMIT {} OFFSET {}
+            "#, batch_size, offset)
+        )
+        .fetch_all(&mut *conn)
         .await?;
 
-    // Delete existing wallets
-    let delete_result = sqlx::query("DELETE FROM wallets")
-        .execute(&mut *conn)
-        .await;
-
-    if let Err(e) = delete_result {
-        let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-        let _ = sqlx::query("DETACH DATABASE new_roster")
-            .execute(&mut *conn)
-            .await;
-        return Err(e.into());
-    }
-
-    // Insert from new roster
-    // Note: Column list must match the wallets table schema
-    let insert_result = sqlx::query(
-        r#"
-        INSERT INTO wallets (
-            address, status, wqs_score, roi_7d, roi_30d,
-            trade_count_30d, win_rate, max_drawdown_30d,
-            avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
-            last_trade_at, promoted_at,
-            ttl_expires_at, notes, created_at, updated_at
-        )
-        SELECT 
-            address, status, wqs_score, roi_7d, roi_30d,
-            trade_count_30d, win_rate, max_drawdown_30d,
-            avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
-            last_trade_at, promoted_at,
-            ttl_expires_at, notes, created_at, CURRENT_TIMESTAMP
-        FROM new_roster.wallets
-        "#,
-    )
-    .execute(&mut *conn)
-    .await;
-
-    match insert_result {
-        Ok(_) => {
-            sqlx::query("COMMIT").execute(&mut *conn).await?;
-            info!(
-                wallets_merged = new_count,
-                wallets_removed = wallets_removed,
-                "Roster merge committed"
-            );
+        if rows.is_empty() {
+            break;
         }
-        Err(e) => {
-            let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-            let _ = sqlx::query("DETACH DATABASE new_roster")
-                .execute(&mut *conn)
-                .await;
-            error!(error = %e, "Roster merge failed during insert");
-            return Err(e.into());
+
+        // Upsert batch into main DB with updated_at preservation logic
+        // This prevents Scout from "reviving" wallets the Operator just banned/demoted
+        let mut tx = pool.begin().await?;
+        for row in rows {
+            // Use INSERT with ON CONFLICT to upsert, preserving Operator's updated_at
+            // and status if they're newer than Scout's. This prevents race conditions
+            // where Operator bans/demotes a wallet just before Scout writes its roster.
+            sqlx::query(
+                r#"
+                INSERT INTO wallets (
+                    address, status, wqs_score, roi_7d, roi_30d,
+                    trade_count_30d, win_rate, max_drawdown_30d,
+                    avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                    last_trade_at, promoted_at,
+                    ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+                ON CONFLICT(address) DO UPDATE SET
+                    status = CASE 
+                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01') 
+                        THEN wallets.status  -- Preserve Operator's status if newer
+                        ELSE excluded.status
+                    END,
+                    wqs_score = excluded.wqs_score,
+                    roi_7d = excluded.roi_7d,
+                    roi_30d = excluded.roi_30d,
+                    trade_count_30d = excluded.trade_count_30d,
+                    win_rate = excluded.win_rate,
+                    max_drawdown_30d = excluded.max_drawdown_30d,
+                    avg_trade_size_sol = excluded.avg_trade_size_sol,
+                    avg_win_sol = excluded.avg_win_sol,
+                    avg_loss_sol = excluded.avg_loss_sol,
+                    profit_factor = excluded.profit_factor,
+                    realized_pnl_30d_sol = excluded.realized_pnl_30d_sol,
+                    last_trade_at = excluded.last_trade_at,
+                    promoted_at = excluded.promoted_at,
+                    ttl_expires_at = excluded.ttl_expires_at,
+                    notes = excluded.notes,
+                    archetype = excluded.archetype,
+                    avg_entry_delay_seconds = excluded.avg_entry_delay_seconds,
+                    updated_at = CASE 
+                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01') 
+                        THEN wallets.updated_at  -- Preserve Operator's updated_at if newer
+                        ELSE excluded.updated_at
+                    END
+                "#
+            )
+            .bind(&row.address).bind(&row.status).bind(row.wqs_score).bind(row.roi_7d).bind(row.roi_30d)
+            .bind(row.trade_count_30d).bind(row.win_rate).bind(row.max_drawdown_30d)
+            .bind(row.avg_trade_size_sol).bind(row.avg_win_sol).bind(row.avg_loss_sol).bind(row.profit_factor).bind(row.realized_pnl_30d_sol)
+            .bind(&row.last_trade_at).bind(&row.promoted_at)
+            .bind(&row.ttl_expires_at).bind(&row.notes).bind(&row.archetype).bind(row.avg_entry_delay_seconds).bind(&row.created_at)
+            .bind(&row.updated_at)
+            .execute(&mut *tx)
+            .await?;
         }
+        
+        tx.commit().await?;
+        
+        offset += batch_size;
+        
+        // Yield to allow other readers/writers
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        
+        info!(
+            merged = offset.min(new_count),
+            total = new_count,
+            "Roster merge progress"
+        );
     }
+    
+    // Log success (no single result object anymore, since we batched)
+    info!(
+        wallets_merged = new_count,
+        wallets_removed = wallets_removed,
+        "Roster merge completed"
+    );
 
     // Step 7: Detach the database
     sqlx::query("DETACH DATABASE new_roster")
