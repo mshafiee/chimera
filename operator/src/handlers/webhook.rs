@@ -240,7 +240,7 @@ pub async fn webhook_handler(
             // Try to get liquidity from token parser cache or metadata
             // For now, use a conservative estimate - will be checked in slow path
             match state.token_parser.fast_check(token_address, signal.payload.strategy).await {
-                Ok(result) => result.liquidity_usd.unwrap_or(0.0),
+                Ok(result) => result.liquidity_usd.map(|d| d.to_f64().unwrap_or(0.0)).unwrap_or(0.0),
                 Err(_) => 0.0,
             }
         } else {

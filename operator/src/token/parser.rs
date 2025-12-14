@@ -39,7 +39,7 @@ pub struct TokenSafetyResult {
     /// Whether liquidity check was performed
     pub liquidity_checked: bool,
     /// Current liquidity in USD (if checked)
-    pub liquidity_usd: Option<f64>,
+    pub liquidity_usd: Option<Decimal>,
 }
 
 impl TokenSafetyResult {
@@ -280,7 +280,7 @@ impl TokenParser {
                         )),
                         honeypot_checked: false,
                         liquidity_checked: true,
-                        liquidity_usd: liquidity_usd.to_f64(),
+                        liquidity_usd: Some(liquidity_usd),
                     });
         }
 
@@ -313,7 +313,7 @@ impl TokenParser {
                         )),
                         honeypot_checked: false,
                         liquidity_checked: true,
-                        liquidity_usd: liquidity_usd.to_f64(),
+                        liquidity_usd: Some(liquidity_usd),
                     });
                 }
 
@@ -344,7 +344,7 @@ impl TokenParser {
                         rejection_reason: Some("Honeypot detected: sell simulation failed".to_string()),
                         honeypot_checked: true,
                         liquidity_checked: true,
-                        liquidity_usd: liquidity_usd.to_f64(),
+                        liquidity_usd: Some(liquidity_usd),
                         });
                     }
                 }
@@ -367,7 +367,7 @@ impl TokenParser {
             rejection_reason: None,
             honeypot_checked: self.config.honeypot_detection_enabled,
             liquidity_checked: true,
-            liquidity_usd: liquidity_usd.to_f64(),
+            liquidity_usd: Some(liquidity_usd),
         };
 
         // Cache the full result
