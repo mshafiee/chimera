@@ -14,7 +14,6 @@ use sqlx;
 use crate::monitoring::HeliusWebhookPayload;
 use crate::monitoring::MonitoringState;
 use crate::monitoring::transaction_parser::parse_helius_webhook;
-use crate::monitoring::rate_limiter::RequestPriority;
 use crate::models::{Signal, SignalPayload, Strategy, Action};
 
 /// Helius webhook endpoint

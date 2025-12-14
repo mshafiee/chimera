@@ -7,6 +7,7 @@
 
 use crate::error::{AppError, AppResult};
 use crate::token::pools::PoolEnumerator;
+use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority, RequestWeight};
 use parking_lot::RwLock;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
@@ -53,11 +54,18 @@ pub struct TokenMetadataFetcher {
     metadata_cache: RwLock<HashMap<String, TokenMetadata>>,
     /// Pool enumerator for DEX liquidity
     pool_enumerator: Option<Arc<PoolEnumerator>>,
+    /// Optional rate limiter for RPC calls (simulation calls use higher weight)
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl TokenMetadataFetcher {
     /// Create a new metadata fetcher
     pub fn new(rpc_url: &str) -> Self {
+        Self::new_with_rate_limiter(rpc_url, None)
+    }
+    
+    /// Create a new metadata fetcher with optional rate limiter
+    pub fn new_with_rate_limiter(rpc_url: &str, rate_limiter: Option<Arc<RateLimiter>>) -> Self {
         let rpc_client = RpcClient::new_with_timeout(rpc_url.to_string(), Duration::from_secs(10));
         let rpc_client_arc = Arc::new(rpc_client);
 
@@ -69,11 +77,20 @@ impl TokenMetadataFetcher {
                 100,  // cache capacity
                 300,  // cache TTL seconds
             ))),
+            rate_limiter,
         }
     }
 
     /// Create from an existing RPC client
     pub fn with_client(rpc_client: Arc<RpcClient>) -> Self {
+        Self::with_client_and_rate_limiter(rpc_client, None)
+    }
+    
+    /// Create from an existing RPC client with optional rate limiter
+    pub fn with_client_and_rate_limiter(
+        rpc_client: Arc<RpcClient>,
+        rate_limiter: Option<Arc<RateLimiter>>,
+    ) -> Self {
         let pool_enumerator = Some(Arc::new(PoolEnumerator::new(
             rpc_client.clone(),
             100,
@@ -84,6 +101,7 @@ impl TokenMetadataFetcher {
             rpc_client,
             metadata_cache: RwLock::new(HashMap::new()),
             pool_enumerator,
+            rate_limiter,
         }
     }
 
@@ -508,6 +526,14 @@ impl TokenMetadataFetcher {
 
     /// Simulate a transaction via RPC
     async fn simulate_transaction_rpc(&self, transaction_base64: &str) -> AppResult<SimulationResult> {
+        // Rate limit simulation calls (they are heavier than standard RPC calls)
+        // Simulation calls typically count 5-10x more towards rate limits on Helius/RPC providers
+        if let Some(ref rate_limiter) = self.rate_limiter {
+            rate_limiter
+                .acquire(RequestPriority::Entry, RequestWeight::SIMULATION)
+                .await;
+        }
+
         // Decode base64 transaction
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         let tx_bytes = BASE64

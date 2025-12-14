@@ -88,7 +88,7 @@ pub async fn poll_wallet_transactions(
     db: Option<&DbPool>,
 ) -> Result<Vec<WalletTransaction>> {
     // Rate limit before polling
-    rate_limiter.acquire(RequestPriority::Polling).await;
+    rate_limiter.acquire_standard(RequestPriority::Polling).await;
 
     // Get recent signatures for the wallet
     let signatures = rpc_client
@@ -125,7 +125,7 @@ pub async fn poll_wallet_transactions(
     
     for sig_str in new_signatures.iter().take(5) {
         // Limit to 5 transactions per poll
-        rate_limiter.acquire(RequestPriority::Polling).await;
+        rate_limiter.acquire_standard(RequestPriority::Polling).await;
 
         // Parse signature string to Signature type
         if let Ok(sig) = sig_str.parse::<solana_sdk::signature::Signature>() {

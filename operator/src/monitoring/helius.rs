@@ -225,7 +225,7 @@ impl HeliusClient {
 
         for chunk in wallets.chunks(batch_size) {
             // Rate limit before each batch
-            rate_limiter.acquire(RequestPriority::Polling).await;
+            rate_limiter.acquire_standard(RequestPriority::Polling).await;
 
             let webhook_id = self
                 .register_webhook(chunk, webhook_url)

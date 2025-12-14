@@ -42,7 +42,7 @@ use chimera_operator::metrics::{MetricsState, metrics_router};
 use chimera_operator::notifications::{self, CompositeNotifier, DiscordNotifier, NotificationEvent, TelegramNotifier};
 use chimera_operator::price_cache::PriceCache;
 use chimera_operator::roster;
-use chimera_operator::monitoring::{HeliusClient, SignalAggregator, MonitoringState};
+use chimera_operator::monitoring::{HeliusClient, SignalAggregator, MonitoringState, rate_limiter};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 use rust_decimal::prelude::*;
@@ -137,11 +137,19 @@ async fn main() -> anyhow::Result<()> {
     };
     
     // Initialize token parser (needed for slow-path safety checks in engine)
+    // Create RPC rate limiter for token metadata fetching (simulation calls are weighted)
+    let rpc_rate_limiter = Arc::new(rate_limiter::RateLimiter::new(
+        config.rpc.rate_limit_per_second,
+        1,
+    ));
     let token_cache = Arc::new(TokenCache::new(
         config.token_safety.cache_capacity,
         config.token_safety.cache_ttl_seconds,
     ));
-    let token_fetcher = Arc::new(TokenMetadataFetcher::new(&config.rpc.primary_url));
+    let token_fetcher = Arc::new(TokenMetadataFetcher::new_with_rate_limiter(
+        &config.rpc.primary_url,
+        Some(rpc_rate_limiter.clone()),
+    ));
     let token_safety_config = TokenSafetyConfig {
         freeze_authority_whitelist: config.token_safety.freeze_authority_whitelist.iter().cloned().collect(),
         mint_authority_whitelist: config.token_safety.mint_authority_whitelist.iter().cloned().collect(),
