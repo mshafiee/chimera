@@ -48,8 +48,8 @@ struct ProfitTargetState {
 pub enum ProfitTargetAction {
     /// No action needed
     None,
-    /// Exit percentage of position
-    ExitPercent(f64),
+    /// Exit percentage of position (using Decimal for precision)
+    ExitPercent(Decimal),
     /// Full exit
     FullExit,
 }
@@ -132,7 +132,6 @@ impl ProfitTargetManager {
     ) {
         let current_price = self.price_cache
             .get_price_usd(token_address)
-            .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
             .unwrap_or(entry_price);
 
         let state = ProfitTargetState {
@@ -155,7 +154,7 @@ impl ProfitTargetManager {
     /// Check profit targets and return action if needed
     pub async fn check_targets(&self, trade_uuid: &str, token_address: &str) -> ProfitTargetAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
-            Some(price) => Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+            Some(price) => price,
             None => return ProfitTargetAction::None,
         };
 
@@ -194,7 +193,8 @@ impl ProfitTargetManager {
             let target_dec = Decimal::from_f64_retain(*target).unwrap_or(Decimal::ZERO);
             if profit_percent >= target_dec && !state.targets_hit.iter().any(|&hit| hit == target_dec) {
                 state.targets_hit.push(target_dec);
-                return ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent);
+                let exit_percent = Decimal::from_f64_retain(self.config.tiered_exit_percent).unwrap_or(Decimal::ZERO);
+                return ProfitTargetAction::ExitPercent(exit_percent);
             }
         }
 

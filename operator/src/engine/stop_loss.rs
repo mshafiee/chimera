@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::config::ProfitManagementConfig;
 use crate::db::{DbPool, get_wallet_by_address};
 use crate::price_cache::PriceCache;
+use rust_decimal::prelude::*;
 use sqlx;
 
 /// Stop-loss manager
@@ -47,7 +48,7 @@ impl StopLossManager {
     /// # Arguments
     /// * `trade_uuid` - Trade UUID
     /// * `wallet_address` - Wallet address (for WQS-based dynamic stops)
-    /// * `entry_price` - Entry price
+    /// * `entry_price` - Entry price (using Decimal for precision)
     /// * `token_address` - Token address
     ///
     /// # Returns
@@ -56,7 +57,7 @@ impl StopLossManager {
         &self,
         trade_uuid: &str,
         wallet_address: &str,
-        entry_price: f64,
+        entry_price: Decimal,
         token_address: &str,
     ) -> StopLossAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
@@ -64,8 +65,14 @@ impl StopLossManager {
             None => return StopLossAction::None,
         };
 
-        // Calculate loss percentage
-        let loss_percent = ((entry_price - current_price) / entry_price) * 100.0;
+        // Calculate loss percentage using Decimal for precision
+        let loss_percent = if !entry_price.is_zero() {
+            let diff = entry_price - current_price;
+            let ratio = diff / entry_price;
+            ratio * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
 
         // Get wallet WQS for dynamic stop calculation
         let wallet_opt = get_wallet_by_address(&self.db, wallet_address).await;
@@ -96,17 +103,17 @@ impl StopLossManager {
             }
         };
 
-        // Calculate base dynamic stop-loss threshold
+        // Calculate base dynamic stop-loss threshold using Decimal for precision
         // For consensus signals, use wider stops (lower risk of false signal)
-        let mut stop_loss_threshold: f64 = if wqs >= 70.0 {
+        let mut stop_loss_threshold = if wqs >= 70.0 {
             // High WQS: wider stop (-20%)
-            -20.0
+            Decimal::from_f64_retain(-20.0).unwrap_or(Decimal::ZERO)
         } else if wqs >= 40.0 {
             // Medium WQS: standard stop (-15%)
-            -15.0
+            Decimal::from_f64_retain(-15.0).unwrap_or(Decimal::ZERO)
         } else {
             // Low WQS: tighter stop (-10%)
-            -10.0
+            Decimal::from_f64_retain(-10.0).unwrap_or(Decimal::ZERO)
         };
         
         // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation)
@@ -117,49 +124,53 @@ impl StopLossManager {
             // If volatility > 30%, widen stop by 2x
             // If volatility < 10%, tighten stop by 0.9x (but never below -5%)
             let volatility_multiplier = if volatility > 30.0 {
-                2.0
+                Decimal::from_f64_retain(2.0).unwrap_or(Decimal::ONE)
             } else if volatility > 20.0 {
-                1.5
+                Decimal::from_f64_retain(1.5).unwrap_or(Decimal::ONE)
             } else if volatility < 10.0 {
-                0.9
+                Decimal::from_f64_retain(0.9).unwrap_or(Decimal::ONE)
             } else {
-                1.0
+                Decimal::ONE
             };
             
-            stop_loss_threshold *= volatility_multiplier;
+            stop_loss_threshold = stop_loss_threshold * volatility_multiplier;
             
             // Ensure stop never goes below -5% (too tight) or above -50% (too wide)
-            stop_loss_threshold = stop_loss_threshold.max(-50.0).min(-5.0);
+            let min_threshold = Decimal::from_f64_retain(-50.0).unwrap_or(Decimal::ZERO);
+            let max_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            stop_loss_threshold = stop_loss_threshold.max(min_threshold).min(max_threshold);
             
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
                 volatility_percent = volatility,
-                volatility_multiplier = volatility_multiplier,
-                adjusted_threshold = stop_loss_threshold,
+                adjusted_threshold = %stop_loss_threshold,
                 "Adaptive stop-loss adjusted based on volatility"
             );
         }
         
         // Widen stop-loss by 5% for consensus signals
         if is_consensus {
-            stop_loss_threshold -= 5.0; // Make it wider (e.g., -15% -> -20%)
+            let consensus_adjustment = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            stop_loss_threshold = stop_loss_threshold + consensus_adjustment; // Make it wider (e.g., -15% -> -20%)
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
-                original_threshold = stop_loss_threshold + 5.0,
-                consensus_threshold = stop_loss_threshold,
+                consensus_threshold = %stop_loss_threshold,
                 "Consensus signal detected, widening stop-loss by 5%"
             );
         }
 
-        // Check if stop-loss hit
-        if loss_percent >= stop_loss_threshold.abs() {
+        // Check if stop-loss hit (compare using Decimal for precision)
+        // loss_percent is negative when losing, stop_loss_threshold is also negative
+        // We want to exit when loss_percent <= stop_loss_threshold (more negative)
+        if loss_percent <= stop_loss_threshold {
             return StopLossAction::Exit;
         }
 
         // Check hard stop-loss (never exceed -15%)
-        if loss_percent >= self.config.hard_stop_loss {
+        let hard_stop = Decimal::from_f64_retain(self.config.hard_stop_loss).unwrap_or(Decimal::ZERO);
+        if loss_percent <= hard_stop {
             return StopLossAction::Exit;
         }
 
@@ -168,8 +179,8 @@ impl StopLossManager {
 
     /// Check portfolio-level stop (pause all trading if daily loss >5%)
     pub async fn check_portfolio_stop(&self) -> StopLossAction {
-        // Get daily realized PnL
-        let daily_pnl: f64 = match sqlx::query_scalar::<_, f64>(
+        // Get daily realized PnL (convert from database f64 to Decimal)
+        let daily_pnl_f64: f64 = match sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
             FROM positions
@@ -185,10 +196,11 @@ impl StopLossManager {
                 return StopLossAction::None;
             }
         };
+        let daily_pnl = Decimal::from_f64_retain(daily_pnl_f64).unwrap_or(Decimal::ZERO);
 
-        // Get total exposure from active positions
+        // Get total exposure from active positions (convert from database f64 to Decimal)
         // Note: For accurate calculation, you'd need total capital including available balance
-        let total_exposure: f64 = match sqlx::query_scalar::<_, f64>(
+        let total_exposure_f64: f64 = match sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
@@ -204,17 +216,24 @@ impl StopLossManager {
                 return StopLossAction::None;
             }
         };
+        let total_exposure = Decimal::from_f64_retain(total_exposure_f64).unwrap_or(Decimal::ZERO);
 
-        // Calculate daily loss percentage
+        // Calculate daily loss percentage using Decimal for precision
         // Only check if we have meaningful exposure (>0.1 SOL)
-        if total_exposure > 0.1 {
-            let daily_loss_percent = (daily_pnl / total_exposure) * 100.0;
+        let min_exposure = Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO);
+        if total_exposure > min_exposure {
+            let daily_loss_percent = if !total_exposure.is_zero() {
+                (daily_pnl / total_exposure) * Decimal::from(100)
+            } else {
+                Decimal::ZERO
+            };
             
-            if daily_loss_percent < -5.0 {
+            let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            if daily_loss_percent < loss_threshold {
                 tracing::warn!(
-                    daily_loss_percent = daily_loss_percent,
-                    daily_pnl = daily_pnl,
-                    total_exposure = total_exposure,
+                    daily_loss_percent = %daily_loss_percent,
+                    daily_pnl = %daily_pnl,
+                    total_exposure = %total_exposure,
                     "Portfolio-level stop triggered: daily loss exceeds 5%"
                 );
                 return StopLossAction::PauseAll;
