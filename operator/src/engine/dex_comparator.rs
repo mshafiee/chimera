@@ -6,7 +6,9 @@
 
 use crate::error::AppResult;
 use parking_lot::RwLock;
+use rust_decimal::prelude::*;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -16,11 +18,11 @@ pub struct DexComparisonResult {
     /// Selected DEX name
     pub selected_dex: String,
     /// Total cost (fee + slippage) in SOL
-    pub total_cost_sol: f64,
+    pub total_cost_sol: Decimal,
     /// Fee amount in SOL
-    pub fee_sol: f64,
+    pub fee_sol: Decimal,
     /// Estimated slippage in SOL
-    pub slippage_sol: f64,
+    pub slippage_sol: Decimal,
     /// DEX API endpoint used
     pub dex_url: String,
 }
@@ -68,10 +70,11 @@ impl DexComparator {
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: f64,
+        amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
-        // Check cache first
-        let cache_key = format!("{}:{}:{}", token_in, token_out, amount_sol);
+        // Check cache first (use string representation for cache key)
+        let amount_str = amount_sol.to_string();
+        let cache_key = format!("{}:{}:{}", token_in, token_out, amount_str);
         {
             let cache = self.cache.read();
             if let Some(cached) = cache.get(&cache_key) {
@@ -108,14 +111,17 @@ impl DexComparator {
         // Select DEX with lowest total cost
         let result = results
             .into_iter()
-            .min_by(|a, b| a.total_cost_sol.partial_cmp(&b.total_cost_sol).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|a, b| a.total_cost_sol.cmp(&b.total_cost_sol))
             .unwrap_or_else(|| {
                 // Fallback to Jupiter if all queries failed
+                let default_total_cost = amount_sol * Decimal::from_str("0.008").unwrap(); // Default 0.8% total cost
+                let default_fee = amount_sol * Decimal::from_str("0.003").unwrap();
+                let default_slippage = amount_sol * Decimal::from_str("0.005").unwrap();
                 DexComparisonResult {
                     selected_dex: "Jupiter".to_string(),
-                    total_cost_sol: amount_sol * 0.008, // Default 0.8% total cost
-                    fee_sol: amount_sol * 0.003,
-                    slippage_sol: amount_sol * 0.005,
+                    total_cost_sol: default_total_cost,
+                    fee_sol: default_fee,
+                    slippage_sol: default_slippage,
                     dex_url: "https://quote-api.jup.ag/v6".to_string(),
                 }
             });
@@ -140,14 +146,19 @@ impl DexComparator {
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: f64,
+        amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
+        // Convert Decimal to lamports for API call
+        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(0);
+        
         // Jupiter API endpoint
         let url = format!(
             "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
             token_in,
             token_out,
-            (amount_sol * 1e9) as u64 // Convert SOL to lamports
+            lamports
         );
 
         let response = self
@@ -169,11 +180,12 @@ impl DexComparator {
             .await
             .map_err(|e| crate::error::AppError::Internal(format!("Failed to parse Jupiter response: {}", e)))?;
 
-        // Extract fee and slippage from quote
+        // Extract fee and slippage from quote, convert to Decimal
         let fee_percent = quote
             .get("fee")
             .and_then(|f| f.as_f64())
-            .unwrap_or(0.003); // Default 0.3% fee
+            .map(|f| Decimal::from_f64_retain(f).unwrap_or(Decimal::ZERO))
+            .unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Default 0.3% fee
 
         let fee_sol = amount_sol * fee_percent;
 
@@ -181,7 +193,8 @@ impl DexComparator {
         let slippage_percent = quote
             .get("priceImpactPct")
             .and_then(|p| p.as_f64())
-            .unwrap_or(0.005); // Default 0.5% slippage
+            .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
+            .unwrap_or_else(|| Decimal::from_str("0.005").unwrap()); // Default 0.5% slippage
 
         let slippage_sol = amount_sol * slippage_percent;
         let total_cost_sol = fee_sol + slippage_sol;
@@ -200,14 +213,19 @@ impl DexComparator {
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: f64,
+        amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
+        // Convert Decimal to lamports for API call
+        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(0);
+        
         // Raydium API endpoint (v2)
         let url = format!(
             "https://api.raydium.io/v2/swap/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
             token_in,
             token_out,
-            (amount_sol * 1e9) as u64
+            lamports
         );
 
         let response = self
@@ -227,13 +245,15 @@ impl DexComparator {
                 let fee_percent = quote
                     .get("fee")
                     .and_then(|f| f.as_f64())
-                    .unwrap_or(0.0025); // Raydium default 0.25% fee
+                    .map(|f| Decimal::from_f64_retain(f).unwrap_or(Decimal::ZERO))
+                    .unwrap_or_else(|| Decimal::from_str("0.0025").unwrap()); // Raydium default 0.25% fee
 
                 let fee_sol = amount_sol * fee_percent;
                 let slippage_percent = quote
                     .get("priceImpact")
                     .and_then(|p| p.as_f64())
-                    .unwrap_or(0.005);
+                    .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
+                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap());
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -254,14 +274,19 @@ impl DexComparator {
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: f64,
+        amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
+        // Convert Decimal to lamports for API call
+        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(0);
+        
         // Orca API endpoint
         let url = format!(
             "https://api.orca.so/v1/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
             token_in,
             token_out,
-            (amount_sol * 1e9) as u64
+            lamports
         );
 
         let response = self
@@ -281,13 +306,15 @@ impl DexComparator {
                 let fee_percent = quote
                     .get("fee")
                     .and_then(|f| f.as_f64())
-                    .unwrap_or(0.003); // Orca default 0.3% fee
+                    .map(|f| Decimal::from_f64_retain(f).unwrap_or(Decimal::ZERO))
+                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Orca default 0.3% fee
 
                 let fee_sol = amount_sol * fee_percent;
                 let slippage_percent = quote
                     .get("priceImpact")
                     .and_then(|p| p.as_f64())
-                    .unwrap_or(0.005);
+                    .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
+                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap());
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -308,14 +335,19 @@ impl DexComparator {
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: f64,
+        amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
+        // Convert Decimal to lamports for API call
+        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(0);
+        
         // Meteora DLMM API endpoint
         let url = format!(
             "https://dlmm-api.meteora.ag/pair/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
             token_in,
             token_out,
-            (amount_sol * 1e9) as u64
+            lamports
         );
 
         let response = self
@@ -335,13 +367,15 @@ impl DexComparator {
                 let fee_percent = quote
                     .get("fee")
                     .and_then(|f| f.as_f64())
-                    .unwrap_or(0.003); // Meteora default 0.3% fee
+                    .map(|f| Decimal::from_f64_retain(f).unwrap_or(Decimal::ZERO))
+                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Meteora default 0.3% fee
 
                 let fee_sol = amount_sol * fee_percent;
                 let slippage_percent = quote
                     .get("priceImpact")
                     .and_then(|p| p.as_f64())
-                    .unwrap_or(0.005);
+                    .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
+                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap());
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -385,7 +419,7 @@ mod tests {
             .compare_and_select(
                 "So11111111111111111111111111111111111111112", // SOL
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-                1.0,
+                Decimal::from(1u64),
             )
             .await;
 

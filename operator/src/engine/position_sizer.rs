@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use crate::config::PositionSizingConfig;
 use crate::db::DbPool;
+use rust_decimal::prelude::*;
 use sqlx;
 
 /// Position sizer
@@ -44,35 +45,35 @@ impl PositionSizer {
     /// * `factors` - Sizing factors
     ///
     /// # Returns
-    /// Position size in SOL
-    pub async fn calculate_size(&self, factors: SizingFactors) -> f64 {
-        let mut size = self.config.base_size_sol;
+    /// Position size in SOL (using Decimal for precision)
+    pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
+        let mut size = Decimal::from_f64_retain(self.config.base_size_sol).unwrap_or(Decimal::ZERO);
 
-        // Confidence multiplier
-        let confidence_mult = if factors.is_consensus {
+        // Confidence multiplier (using Decimal)
+        let confidence_mult = Decimal::from_f64_retain(if factors.is_consensus {
             self.config.consensus_multiplier
         } else {
             1.0
-        };
+        }).unwrap_or(Decimal::ONE);
 
         // High WQS multiplier (>80)
-        let wqs_mult = if factors.wallet_wqs >= 80.0 {
+        let wqs_mult = Decimal::from_f64_retain(if factors.wallet_wqs >= 80.0 {
             1.2
         } else {
             1.0
-        };
+        }).unwrap_or(Decimal::ONE);
 
         // Wallet performance multiplier (based on success rate)
-        let performance_mult = if factors.wallet_success_rate >= 0.6 {
+        let performance_mult = Decimal::from_f64_retain(if factors.wallet_success_rate >= 0.6 {
             1.1
         } else if factors.wallet_success_rate < 0.4 {
             0.8
         } else {
             1.0
-        };
+        }).unwrap_or(Decimal::ONE);
 
         // New token penalty (<24h old)
-        let token_age_mult = if let Some(age) = factors.token_age_hours {
+        let token_age_mult = Decimal::from_f64_retain(if let Some(age) = factors.token_age_hours {
             if age < 24.0 {
                 0.5
             } else {
@@ -80,20 +81,20 @@ impl PositionSizer {
             }
         } else {
             1.0
-        };
+        }).unwrap_or(Decimal::ONE);
 
         // High slippage penalty (>2%)
-        let slippage_mult = if factors.estimated_slippage > 2.0 {
+        let slippage_mult = Decimal::from_f64_retain(if factors.estimated_slippage > 2.0 {
             0.7
         } else {
             1.0
-        };
+        }).unwrap_or(Decimal::ONE);
 
         // Signal quality multiplier
         // High quality (>0.9): 1.3x
         // Medium quality (0.7-0.9): 1.0x
         // Low quality (<0.7): 0.7x (shouldn't reach here due to filter)
-        let quality_mult = if let Some(quality) = factors.signal_quality {
+        let quality_mult = Decimal::from_f64_retain(if let Some(quality) = factors.signal_quality {
             if quality >= 0.9 {
                 1.3
             } else if quality >= 0.7 {
@@ -103,11 +104,11 @@ impl PositionSizer {
             }
         } else {
             1.0  // Default if quality not provided
-        };
+        }).unwrap_or(Decimal::ONE);
 
         // Volatility multiplier (reduce size for high volatility)
         // If volatility > 30%, reduce size proportionally
-        let volatility_mult = if let Some(volatility) = factors.token_volatility_24h {
+        let volatility_mult = Decimal::from_f64_retain(if let Some(volatility) = factors.token_volatility_24h {
             if volatility > 30.0 {
                 // Reduce by 30% for every 10% above 30%
                 let reduction = ((volatility - 30.0) / 10.0) * 0.3;
@@ -117,20 +118,22 @@ impl PositionSizer {
             }
         } else {
             1.0  // Default if volatility unknown
-        };
+        }).unwrap_or(Decimal::ONE);
 
-        // Apply all multipliers
-        size *= confidence_mult;
-        size *= wqs_mult;
-        size *= performance_mult;
-        size *= token_age_mult;
-        size *= slippage_mult;
-        size *= quality_mult;
-        size *= volatility_mult;
+        // Apply all multipliers using Decimal arithmetic
+        size = size * confidence_mult;
+        size = size * wqs_mult;
+        size = size * performance_mult;
+        size = size * token_age_mult;
+        size = size * slippage_mult;
+        size = size * quality_mult;
+        size = size * volatility_mult;
 
         // Apply min/max bounds
-        size = size.max(self.config.min_size_sol);
-        size = size.min(self.config.max_size_sol);
+        let min_size = Decimal::from_f64_retain(self.config.min_size_sol).unwrap_or(Decimal::ZERO);
+        let max_size = Decimal::from_f64_retain(self.config.max_size_sol).unwrap_or(Decimal::ZERO);
+        size = size.max(min_size);
+        size = size.min(max_size);
 
         size
     }

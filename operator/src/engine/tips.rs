@@ -17,6 +17,7 @@ use crate::db::{self, DbPool};
 use crate::error::AppResult;
 use crate::models::Strategy;
 use parking_lot::RwLock;
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 
 /// Minimum samples required for percentile calculation
@@ -28,7 +29,7 @@ const COLD_START_MULTIPLIER: f64 = 2.0;
 /// Tip entry for in-memory history
 #[derive(Debug, Clone)]
 struct TipEntry {
-    amount_sol: f64,
+    amount_sol: Decimal,
     #[allow(dead_code)] // Reserved for future strategy-specific tip tracking
     strategy: Strategy,
 }
@@ -94,23 +95,27 @@ impl TipManager {
     }
 
     /// Calculate optimal tip for a given strategy and trade size
-    pub fn calculate_tip(&self, strategy: Strategy, trade_size_sol: f64) -> f64 {
+    /// Uses Decimal for precision in financial calculations
+    pub fn calculate_tip(&self, strategy: Strategy, trade_size_sol: rust_decimal::Decimal) -> rust_decimal::Decimal {
         let is_cold_start = *self.cold_start.read();
 
         let base_tip = if is_cold_start {
-            self.cold_start_tip(strategy)
+            Decimal::from_f64_retain(self.cold_start_tip(strategy)).unwrap_or(Decimal::ZERO)
         } else {
-            self.percentile_tip(strategy)
+            Decimal::from_f64_retain(self.percentile_tip(strategy)).unwrap_or(Decimal::ZERO)
         };
 
-        // Apply percentage cap
-        let max_by_percent = trade_size_sol * self.config.tip_percent_max;
+        // Apply percentage cap using Decimal
+        let tip_percent_max = Decimal::from_f64_retain(self.config.tip_percent_max).unwrap_or(Decimal::ZERO);
+        let max_by_percent = trade_size_sol * tip_percent_max;
 
-        // Apply ceiling
-        let tip = base_tip.min(max_by_percent).min(self.config.tip_ceiling_sol);
+        // Apply ceiling using Decimal
+        let ceiling = Decimal::from_f64_retain(self.config.tip_ceiling_sol).unwrap_or(Decimal::ZERO);
+        let floor = Decimal::from_f64_retain(self.config.tip_floor_sol).unwrap_or(Decimal::ZERO);
+        let tip = base_tip.min(max_by_percent).min(ceiling);
 
         // Ensure minimum
-        tip.max(self.config.tip_floor_sol)
+        tip.max(floor)
     }
 
     /// Cold start tip calculation
@@ -130,9 +135,9 @@ impl TipManager {
             return self.cold_start_tip(strategy);
         }
 
-        // Get all tip amounts sorted
-        let mut tips: Vec<f64> = history.iter().map(|e| e.amount_sol).collect();
-        tips.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Get all tip amounts sorted (using Decimal for precision)
+        let mut tips: Vec<Decimal> = history.iter().map(|e| e.amount_sol).collect();
+        tips.sort();
 
         // Calculate percentile index
         let percentile = match strategy {
@@ -145,20 +150,31 @@ impl TipManager {
         let percentile_tip = tips[index];
 
         // For Spear/Exit, use max of percentile and config floor
-        match strategy {
-            Strategy::Shield => percentile_tip.max(self.config.tip_floor_sol),
-            Strategy::Spear => percentile_tip.max(self.config.tip_floor_sol),
-            Strategy::Exit => percentile_tip.max(
-                (self.config.tip_floor_sol + self.config.tip_ceiling_sol) / 2.0
-            ),
-        }
+        // Convert to f64 for comparison with config values (which are f64)
+        let floor = Decimal::from_f64_retain(self.config.tip_floor_sol).unwrap_or(Decimal::ZERO);
+        let result = match strategy {
+            Strategy::Shield => percentile_tip.max(floor),
+            Strategy::Spear => percentile_tip.max(floor),
+            Strategy::Exit => {
+                let mid = Decimal::from_f64_retain((self.config.tip_floor_sol + self.config.tip_ceiling_sol) / 2.0)
+                    .unwrap_or(Decimal::ZERO);
+                percentile_tip.max(mid)
+            },
+        };
+        
+        result.to_f64().unwrap_or(0.0)
     }
 
     /// Get success rate for a given tip amount range
     /// Returns success rate (0.0-1.0) for tips within ±10% of the given amount
-    pub async fn get_tip_success_rate(&self, tip_amount_sol: f64) -> AppResult<f64> {
-        let min_tip = tip_amount_sol * 0.9;
-        let max_tip = tip_amount_sol * 1.1;
+    pub async fn get_tip_success_rate(&self, tip_amount_sol: Decimal) -> AppResult<f64> {
+        // Calculate range using Decimal for precision
+        let min_tip = tip_amount_sol * Decimal::from_f64_retain(0.9).unwrap_or(Decimal::ZERO);
+        let max_tip = tip_amount_sol * Decimal::from_f64_retain(1.1).unwrap_or(Decimal::ZERO);
+        
+        // Convert to f64 only for database query (database stores as f64)
+        let min_tip_f64 = min_tip.to_f64().unwrap_or(0.0);
+        let max_tip_f64 = max_tip.to_f64().unwrap_or(0.0);
 
         let stats: Vec<(i64,)> = sqlx::query_as(
             r#"
@@ -170,8 +186,8 @@ impl TipManager {
             AND created_at >= datetime('now', '-7 days')
             "#,
         )
-        .bind(min_tip)
-        .bind(max_tip)
+        .bind(min_tip_f64)
+        .bind(max_tip_f64)
         .fetch_all(&self.db)
         .await?;
 
@@ -187,8 +203,8 @@ impl TipManager {
                     AND created_at >= datetime('now', '-7 days')
                     "#,
                 )
-                .bind(min_tip)
-                .bind(max_tip)
+                .bind(min_tip_f64)
+                .bind(max_tip_f64)
                 .fetch_all(&self.db)
                 .await?;
 
@@ -201,7 +217,7 @@ impl TipManager {
     }
 
     /// Check if tip success rate is acceptable (>= 90%)
-    pub async fn is_tip_success_rate_acceptable(&self, tip_amount_sol: f64) -> AppResult<bool> {
+    pub async fn is_tip_success_rate_acceptable(&self, tip_amount_sol: Decimal) -> AppResult<bool> {
         let rate = self.get_tip_success_rate(tip_amount_sol).await?;
         Ok(rate >= 0.9)
     }
@@ -209,7 +225,7 @@ impl TipManager {
     /// Record a tip (after successful bundle)
     pub async fn record_tip(
         &self,
-        tip_amount_sol: f64,
+        tip_amount_sol: Decimal,
         bundle_signature: Option<&str>,
         strategy: Strategy,
         success: bool,
@@ -225,7 +241,7 @@ impl TipManager {
         .await?;
 
         if success {
-            // Update in-memory history
+            // Update in-memory history (store as Decimal)
             {
                 let mut history = self.history.write();
                 history.push(TipEntry {
@@ -263,11 +279,12 @@ impl TipManager {
             return TipStats::default();
         }
 
-        let tips: Vec<f64> = history.iter().map(|e| e.amount_sol).collect();
-        let sum: f64 = tips.iter().sum();
-        let avg = sum / tips.len() as f64;
-        let min = tips.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = tips.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let tips: Vec<Decimal> = history.iter().map(|e| e.amount_sol).collect();
+        let sum: Decimal = tips.iter().sum();
+        let count = Decimal::from(tips.len());
+        let avg = sum / count;
+        let min = tips.iter().cloned().min().unwrap_or(Decimal::ZERO);
+        let max = tips.iter().cloned().max().unwrap_or(Decimal::ZERO);
 
         TipStats {
             count: tips.len(),
@@ -289,12 +306,12 @@ impl TipManager {
 pub struct TipStats {
     /// Number of tips in history
     pub count: usize,
-    /// Average tip amount
-    pub avg_tip_sol: f64,
-    /// Minimum tip
-    pub min_tip_sol: f64,
-    /// Maximum tip
-    pub max_tip_sol: f64,
+    /// Average tip amount (using Decimal for precision)
+    pub avg_tip_sol: Decimal,
+    /// Minimum tip (using Decimal for precision)
+    pub min_tip_sol: Decimal,
+    /// Maximum tip (using Decimal for precision)
+    pub max_tip_sol: Decimal,
     /// Whether in cold start mode
     pub is_cold_start: bool,
 }
@@ -487,21 +504,28 @@ mod tests {
         assert_eq!(stats.count, 0);
         // Default TipStats has is_cold_start=false, cold start is managed by TipManager
         assert!(!stats.is_cold_start);
-        assert_eq!(stats.avg_tip_sol, 0.0);
+        assert_eq!(stats.avg_tip_sol, Decimal::ZERO);
     }
 
     #[test]
     fn test_tip_stats_calculation() {
-        let tips: Vec<f64> = vec![0.001, 0.002, 0.003, 0.004, 0.005];
+        let tips: Vec<Decimal> = vec![
+            Decimal::from_str("0.001").unwrap(),
+            Decimal::from_str("0.002").unwrap(),
+            Decimal::from_str("0.003").unwrap(),
+            Decimal::from_str("0.004").unwrap(),
+            Decimal::from_str("0.005").unwrap(),
+        ];
         
-        let sum: f64 = tips.iter().sum();
-        let avg = sum / tips.len() as f64;
-        let min = tips.iter().cloned().fold(f64::INFINITY, f64::min);
-        let max = tips.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let sum: Decimal = tips.iter().sum();
+        let count = Decimal::from(tips.len());
+        let avg = sum / count;
+        let min = tips.iter().cloned().min().unwrap_or(Decimal::ZERO);
+        let max = tips.iter().cloned().max().unwrap_or(Decimal::ZERO);
         
-        assert!((avg - 0.003).abs() < 0.0001, "Average should be 0.003");
-        assert!((min - 0.001).abs() < 0.0001, "Min should be 0.001");
-        assert!((max - 0.005).abs() < 0.0001, "Max should be 0.005");
+        assert_eq!(avg, Decimal::from_str("0.003").unwrap(), "Average should be 0.003");
+        assert_eq!(min, Decimal::from_str("0.001").unwrap(), "Min should be 0.001");
+        assert_eq!(max, Decimal::from_str("0.005").unwrap(), "Max should be 0.005");
     }
 
     // ==========================================================================

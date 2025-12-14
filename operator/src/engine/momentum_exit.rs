@@ -35,9 +35,9 @@ pub struct MomentumExit {
 struct PositionEntry {
     trade_uuid: String,
     token_address: String,
-    entry_price: f64,
+    entry_price: Decimal,
     entry_time: SystemTime,
-    entry_amount_sol: f64,
+    entry_amount_sol: Decimal,
 }
 
 impl MomentumExit {
@@ -78,7 +78,7 @@ impl MomentumExit {
     ) -> MomentumExitAction {
         // Get current price
         let current_price = match self.price_cache.get_price_usd(token_address) {
-            Some(price) => Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+            Some(price) => price,
             None => return MomentumExitAction::None, // No price data, skip check
         };
 
@@ -118,6 +118,7 @@ impl MomentumExit {
         }
 
         // Check 3: RSI declining (RSI < 40 and declining)
+        // Note: RSI calculation uses f64 for statistical calculations, but entry_price is Decimal
         let entry_price_f64 = entry_price.to_f64().unwrap_or(0.0);
         if let Some(rsi) = self.calculate_rsi(token_address, entry_price_f64).await {
             if rsi < 40.0 {
@@ -151,8 +152,10 @@ impl MomentumExit {
             return None;
         }
         
-        // Get last 14 price changes
-        let prices: Vec<f64> = token_history.iter().rev().take(15).map(|(_, price)| *price).collect();
+        // Get last 14 price changes (convert Decimal to f64 for RSI calculation - RSI is a statistical metric)
+        let prices: Vec<f64> = token_history.iter().rev().take(15)
+            .map(|(_, price)| price.to_f64().unwrap_or(0.0))
+            .collect();
         let mut gains = Vec::new();
         let mut losses = Vec::new();
         

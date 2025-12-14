@@ -4,6 +4,7 @@
 //! and adjusts profit targets accordingly.
 
 use crate::price_cache::PriceCache;
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 use std::collections::VecDeque;
 
@@ -32,7 +33,7 @@ impl std::fmt::Display for MarketRegime {
 pub struct MarketRegimeDetector {
     price_cache: Arc<PriceCache>,
     /// Price history for trend analysis (last 24 hours)
-    price_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, f64)>>>,
+    price_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>>,
     /// Volume history for trend analysis (weekly snapshots of total Solana DEX volume)
     volume_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, f64)>>>,
     /// SOL mint address
@@ -83,16 +84,22 @@ impl MarketRegimeDetector {
             return MarketRegime::Sideways;
         }
 
-        // Calculate price change over last 24 hours
-        let prices: Vec<f64> = history.iter().map(|(_, price)| *price).collect();
-        let first_price = prices.first().unwrap_or(&0.0);
-        let last_price = prices.last().unwrap_or(&0.0);
+        // Calculate price change over last 24 hours (convert Decimal to f64 for percentage calculation)
+        let prices: Vec<rust_decimal::Decimal> = history.iter().map(|(_, price)| *price).collect();
+        let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
+        let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
         
-        if *first_price == 0.0 || *last_price == 0.0 {
+        if first_price.is_zero() || last_price.is_zero() {
             return MarketRegime::Sideways;
         }
 
-        let price_change_percent = ((last_price - first_price) / first_price) * 100.0;
+        let price_change_percent = if !first_price.is_zero() {
+            let diff = last_price - first_price;
+            let ratio = diff / first_price;
+            (ratio * rust_decimal::Decimal::from(100)).to_f64().unwrap_or(0.0)
+        } else {
+            0.0
+        };
 
         // Classify regime based on price change
         if price_change_percent > 5.0 {
