@@ -10,6 +10,7 @@ use sqlx::{Pool, Sqlite};
 // Path removed
 
 use std::str::FromStr;
+use rust_decimal::prelude::*;
 use tracing::info;
 
 /// Type alias for the SQLite connection pool
@@ -590,6 +591,119 @@ pub async fn prune_old_tips(pool: &DbPool) -> AppResult<u64> {
 // =============================================================================
 // POSITIONS & STUCK STATE RECOVERY
 // =============================================================================
+
+/// Create a new position from a successful buy trade
+pub async fn open_position(
+    pool: &DbPool,
+    trade_uuid: &str,
+    wallet_address: &str,
+    token_address: &str,
+    token_symbol: Option<&str>,
+    strategy: &str,
+    amount_sol: f64,
+    entry_price: f64,
+    signature: &str,
+) -> AppResult<i64> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO positions (
+            trade_uuid, wallet_address, token_address, token_symbol, strategy,
+            entry_amount_sol, entry_price, entry_tx_signature, 
+            state, unrealized_pnl_sol, unrealized_pnl_percent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
+        "#
+    )
+    .bind(trade_uuid)
+    .bind(wallet_address)
+    .bind(token_address)
+    .bind(token_symbol)
+    .bind(strategy)
+    .bind(amount_sol)
+    .bind(entry_price)
+    .bind(signature)
+    .execute(pool)
+    .await?;
+
+    Ok(result.last_insert_rowid())
+}
+
+/// Close a position from a successful sell trade
+pub async fn close_position(
+    pool: &DbPool,
+    token_address: &str,
+    wallet_address: &str,
+    exit_price: f64,
+    signature: &str,
+) -> AppResult<()> {
+    // Calculate realized PnL based on entry vs exit
+    // Find ALL active positions for this wallet and token
+    let active_positions: Vec<(i64, f64, f64)> = sqlx::query_as(
+        r#"
+        SELECT id, entry_price, entry_amount_sol 
+        FROM positions 
+        WHERE wallet_address = ? AND token_address = ? AND state = 'ACTIVE'
+        "#
+    )
+    .bind(wallet_address)
+    .bind(token_address)
+    .fetch_all(pool)
+    .await?;
+
+    if active_positions.is_empty() {
+        tracing::warn!(
+            wallet = %wallet_address,
+            token = %token_address,
+            "No active positions found to close"
+        );
+        return Ok(());
+    }
+
+    for (id, entry_price, entry_amount_sol) in active_positions {
+        // Calculate PnL using Decimal for precision
+        let pnl_sol = if entry_price > 0.0 {
+            let exit_price_dec = Decimal::from_f64_retain(exit_price).unwrap_or(Decimal::ZERO);
+            let entry_price_dec = Decimal::from_f64_retain(entry_price).unwrap_or(Decimal::ZERO);
+            let entry_amount_dec = Decimal::from_f64_retain(entry_amount_sol).unwrap_or(Decimal::ZERO);
+            
+            if !entry_price_dec.is_zero() {
+                let diff = exit_price_dec - entry_price_dec;
+                let ratio = diff / entry_price_dec;
+                (ratio * entry_amount_dec).to_f64().unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        // pnl_usd placeholder
+        let _pnl_usd = 0.0;
+        
+        sqlx::query(
+            r#"
+            UPDATE positions 
+            SET 
+                exit_price = ?, 
+                exit_tx_signature = ?,
+                exit_value_usd = ?, 
+                realized_pnl_sol = ?, 
+                realized_pnl_usd = ?, 
+                closed_at = CURRENT_TIMESTAMP, 
+                state = 'CLOSED' 
+            WHERE id = ?
+            "#
+        )
+        .bind(exit_price)
+        .bind(signature)
+        .bind(0.0) // exit_value_usd
+        .bind(pnl_sol)
+        .bind(0.0) // realized_pnl_usd
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
+}
 
 /// Position record from database
 #[derive(Debug, Clone)]
