@@ -77,6 +77,8 @@ CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address);
 -- =============================================================================
 
 -- Wallets table: Tracked wallets with WQS scores (managed by Scout)
+-- Schema source of truth: database/schema/wallets.sql
+-- This table definition should match the shared schema file
 CREATE TABLE IF NOT EXISTS wallets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     address TEXT NOT NULL UNIQUE,
@@ -97,6 +99,8 @@ CREATE TABLE IF NOT EXISTS wallets (
     promoted_at TIMESTAMP,
     ttl_expires_at TIMESTAMP,  -- For temporary promotions
     notes TEXT,
+    archetype TEXT,  -- TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
+    avg_entry_delay_seconds REAL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

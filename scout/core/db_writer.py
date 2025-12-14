@@ -47,6 +47,46 @@ class WalletRecord:
     avg_entry_delay_seconds: Optional[float] = None
 
 
+def _load_wallet_schema() -> str:
+    """
+    Load wallet schema from shared source of truth file.
+    
+    The schema is defined in database/schema/wallets.sql and is used by both
+    Rust (sqlx) and Python (RosterWriter) to ensure consistency.
+    """
+    # Find the shared schema file relative to this module
+    # scout/core/db_writer.py -> database/schema/wallets.sql
+    current_file = Path(__file__)
+    scout_dir = current_file.parent.parent
+    project_root = scout_dir.parent
+    schema_path = project_root / "database" / "schema" / "wallets.sql"
+    
+    if not schema_path.exists():
+        raise FileNotFoundError(
+            f"Wallet schema file not found: {schema_path}\n"
+            f"Expected location: {schema_path.absolute()}\n"
+            f"Please ensure the shared schema file exists."
+        )
+    
+    with open(schema_path, 'r') as f:
+        schema_content = f.read()
+    
+    # Extract just the CREATE TABLE statement (skip comments and indexes)
+    # The schema file contains the full CREATE TABLE statement
+    lines = []
+    in_create_table = False
+    for line in schema_content.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('CREATE TABLE'):
+            in_create_table = True
+        if in_create_table:
+            lines.append(line)
+            if stripped.endswith(');'):
+                break
+    
+    return '\n'.join(lines)
+
+
 class RosterWriter:
     """
     Atomic SQLite writer for Scout roster output.
@@ -57,33 +97,9 @@ class RosterWriter:
         writer.write_roster(wallets)
     """
     
-    # Schema for the wallets table (must match Operator's schema)
-    WALLETS_SCHEMA = """
-    CREATE TABLE IF NOT EXISTS wallets (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        address TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL DEFAULT 'CANDIDATE'
-            CHECK(status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')),
-        wqs_score REAL,
-        roi_7d REAL,
-        roi_30d REAL,
-        trade_count_30d INTEGER,
-        win_rate REAL,
-        max_drawdown_30d REAL,
-        avg_trade_size_sol REAL,
-        avg_win_sol REAL,
-        avg_loss_sol REAL,
-        profit_factor REAL,
-        realized_pnl_30d_sol REAL,
-        last_trade_at TIMESTAMP,
-        promoted_at TIMESTAMP,
-        ttl_expires_at TIMESTAMP,
-        notes TEXT,
-        archetype TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """
+    # Schema for the wallets table (loaded from shared source of truth)
+    # Schema source of truth: database/schema/wallets.sql
+    WALLETS_SCHEMA = _load_wallet_schema()
     
     def __init__(self, output_path: str):
         """
