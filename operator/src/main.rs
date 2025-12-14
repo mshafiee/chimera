@@ -45,6 +45,7 @@ use chimera_operator::roster;
 use chimera_operator::monitoring::{HeliusClient, SignalAggregator, MonitoringState};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
+use rust_decimal::prelude::*;
 
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -802,7 +803,7 @@ fn load_config() -> anyhow::Result<AppConfig> {
 }
 
 /// Generate daily trading summary from database
-async fn generate_daily_summary(db: &db::DbPool) -> anyhow::Result<(f64, u32, f64)> {
+async fn generate_daily_summary(db: &db::DbPool) -> anyhow::Result<(rust_decimal::Decimal, u32, f64)> {
     // Get yesterday's date range
     let now = Utc::now();
     let yesterday_start = (now - chrono::Duration::days(1))
@@ -826,18 +827,17 @@ async fn generate_daily_summary(db: &db::DbPool) -> anyhow::Result<(f64, u32, f6
     .await?;
 
     if trades.is_empty() {
-        return Ok((0.0, 0, 0.0));
+        return Ok((rust_decimal::Decimal::ZERO, 0, 0.0));
     }
 
     let trade_count = trades.len() as u32;
-    let mut total_pnl_usd = 0.0;
+    let mut total_pnl_usd = rust_decimal::Decimal::ZERO;
     let mut winning_trades = 0u32;
 
     for trade in &trades {
-        if let Some(pnl) = trade.pnl_sol {
-            // Convert SOL to USD (using approximate rate, should use price cache in production)
-            total_pnl_usd += pnl * 100.0; // Approximate SOL price
-            if pnl > 0.0 {
+        if let Some(pnl_usd) = trade.pnl_usd {
+            total_pnl_usd += pnl_usd;
+            if pnl_usd > rust_decimal::Decimal::ZERO {
                 winning_trades += 1;
             }
         }

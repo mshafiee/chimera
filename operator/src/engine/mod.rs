@@ -48,6 +48,7 @@ use crate::models::{Signal, Action, Strategy};
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -543,10 +544,10 @@ impl Engine {
 
                 // 2. Manage Position Lifecycle
                 if signal.payload.action == Action::Buy {
-                    // Calculate entry price (from cache or default to 0.0)
+                    // Calculate entry price (from cache or default to Decimal::ZERO)
                     let entry_price = self.price_cache.as_ref()
                         .and_then(|c| c.get_price_usd(signal.token_address()))
-                        .unwrap_or(0.0);
+                        .unwrap_or(Decimal::ZERO);
 
                     // Open Position
                     if let Err(e) = crate::db::open_position(
@@ -565,7 +566,7 @@ impl Engine {
                 } else if signal.payload.action == Action::Sell {
                     let exit_price = self.price_cache.as_ref()
                         .and_then(|c| c.get_price_usd(signal.token_address()))
-                        .unwrap_or(0.0);
+                        .unwrap_or(Decimal::ZERO);
 
                     // Close Position
                     if let Err(e) = crate::db::close_position(
