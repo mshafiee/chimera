@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::db::DbPool;
+use rust_decimal::prelude::*;
 
 /// Wallet performance tracker
 pub struct WalletPerformanceTracker {
@@ -19,13 +20,15 @@ pub struct WalletPerformanceTracker {
     auto_demote_enabled: bool,
 }
 
+use rust_decimal::prelude::*;
+
 /// Wallet copy trading metrics
 #[derive(Debug, Clone)]
 pub struct WalletCopyMetrics {
     pub wallet_address: String,
-    pub copy_pnl_7d: f64,
+    pub copy_pnl_7d: Decimal,
     pub signal_success_rate: f64,
-    pub avg_return_per_trade: f64,
+    pub avg_return_per_trade: Decimal,
     pub total_trades: u32,
     pub winning_trades: u32,
     pub last_updated: std::time::SystemTime,
@@ -53,16 +56,16 @@ impl WalletPerformanceTracker {
     pub async fn record_trade_result(
         &self,
         wallet_address: &str,
-        pnl_sol: f64,
+        pnl_sol: Decimal,
     ) -> Result<(), String> {
         // Get or create metrics
         let mut cache = self.metrics_cache.write().await;
         let metrics = cache.entry(wallet_address.to_string()).or_insert_with(|| {
             WalletCopyMetrics {
                 wallet_address: wallet_address.to_string(),
-                copy_pnl_7d: 0.0,
+                copy_pnl_7d: Decimal::ZERO,
                 signal_success_rate: 0.0,
-                avg_return_per_trade: 0.0,
+                avg_return_per_trade: Decimal::ZERO,
                 total_trades: 0,
                 winning_trades: 0,
                 last_updated: std::time::SystemTime::now(),
@@ -71,7 +74,7 @@ impl WalletPerformanceTracker {
 
         // Update metrics
         metrics.total_trades += 1;
-        if pnl_sol > 0.0 {
+        if pnl_sol > Decimal::ZERO {
             metrics.winning_trades += 1;
         }
 
@@ -95,16 +98,16 @@ impl WalletPerformanceTracker {
         .await
         .map_err(|e| format!("Failed to query trades: {}", e))?;
 
-        let copy_pnl_7d: f64 = trades
+        let copy_pnl_7d: Decimal = trades
             .iter()
             .filter_map(|t| t.net_pnl_sol)
-            .sum();
+            .fold(Decimal::ZERO, |acc, p| acc + p);
 
         metrics.copy_pnl_7d = copy_pnl_7d;
         metrics.avg_return_per_trade = if metrics.total_trades > 0 {
-            copy_pnl_7d / metrics.total_trades as f64
+            copy_pnl_7d / Decimal::from(metrics.total_trades)
         } else {
-            0.0
+            Decimal::ZERO
         };
         metrics.last_updated = std::time::SystemTime::now();
 
@@ -224,10 +227,11 @@ impl WalletPerformanceTracker {
                 
                 // Calculate expected copy PnL (simplified: assume same ROI)
                 // In reality, we'd need to track original wallet's actual PnL
-                let expected_copy_pnl = original_roi_7d * 0.01; // Rough estimate
+                let expected_copy_pnl = Decimal::from_f64_retain(original_roi_7d * 0.01).unwrap_or(Decimal::ZERO); // Rough estimate
                 
                 // If copy PnL is significantly worse than expected (less than 70% of expected)
-                if metrics.copy_pnl_7d < expected_copy_pnl * 0.7 {
+                let threshold = expected_copy_pnl * Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
+                if metrics.copy_pnl_7d < threshold {
                     // Check if this has been the case for 7+ days
                     if let Ok(elapsed) = metrics.last_updated.elapsed() {
                         if elapsed.as_secs() >= 7 * 24 * 3600 {

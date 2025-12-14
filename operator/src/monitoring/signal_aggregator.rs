@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
+use rust_decimal::prelude::*;
 use crate::db::DbPool;
 
 /// Signal aggregator state
@@ -22,11 +23,12 @@ pub struct SignalAggregator {
 
 /// Token signal from a wallet
 #[derive(Debug, Clone)]
+
 struct TokenSignal {
     wallet_address: String,
     token_address: String,
     direction: String, // BUY or SELL
-    amount_sol: f64,
+    amount_sol: Decimal,
     timestamp: SystemTime,
 }
 
@@ -35,7 +37,7 @@ struct TokenSignal {
 pub struct ConsensusSignal {
     pub token_address: String,
     pub wallet_count: usize,
-    pub total_amount_sol: f64,
+    pub total_amount_sol: Decimal,
     pub wallets: Vec<String>,
     pub confidence: f64, // 0.0 to 1.0
 }
@@ -64,7 +66,7 @@ impl SignalAggregator {
         wallet_address: &str,
         token_address: &str,
         direction: &str,
-        amount_sol: f64,
+        amount_sol: Decimal,
     ) -> Option<ConsensusSignal> {
         // Only check consensus for BUY signals
         if direction != "BUY" {
@@ -95,7 +97,7 @@ impl SignalAggregator {
         // Check for consensus (2+ wallets buying same token within 5 minutes)
         if token_signals.len() >= 2 {
             let wallets: Vec<String> = token_signals.iter().map(|s| s.wallet_address.clone()).collect();
-            let total_amount: f64 = token_signals.iter().map(|s| s.amount_sol).sum();
+            let total_amount: Decimal = token_signals.iter().map(|s| s.amount_sol).sum();
             let confidence = (token_signals.len() as f64 / 5.0).min(1.0); // Max confidence at 5+ wallets
 
             // Update wallet clusters

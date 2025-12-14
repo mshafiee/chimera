@@ -11,6 +11,7 @@ use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
 use crate::db::DbPool;
 use anyhow::{Context, Result};
+use rust_decimal::Decimal;
 use solana_client::rpc_client::RpcClient;
 
 /// Transaction information from polling
@@ -20,7 +21,7 @@ pub struct WalletTransaction {
     pub signature: String,
     pub token_address: Option<String>,
     pub direction: Option<String>, // BUY or SELL
-    pub amount_sol: Option<f64>,
+    pub amount_sol: Option<Decimal>,
     pub timestamp: i64,
 }
 
