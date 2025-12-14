@@ -83,16 +83,19 @@ pub struct AuthState {
     api_keys: Arc<RwLock<HashMap<String, Role>>>,
     /// In-memory cache of admin wallets to roles
     admin_wallets: Arc<RwLock<HashMap<String, Role>>>,
+    /// Secret for verifying JWT tokens
+    jwt_secret: String,
     /// Whether to allow unauthenticated readonly access
     pub allow_anonymous_readonly: bool,
 }
 
 impl AuthState {
     /// Create a new auth state
-    pub fn new() -> Self {
+    pub fn new(jwt_secret: String) -> Self {
         Self {
             api_keys: Arc::new(RwLock::new(HashMap::new())),
             admin_wallets: Arc::new(RwLock::new(HashMap::new())),
+            jwt_secret,
             allow_anonymous_readonly: false,
         }
     }
@@ -101,10 +104,12 @@ impl AuthState {
     pub fn with_auth_config(
         api_keys: HashMap<String, Role>,
         admin_wallets: HashMap<String, Role>,
+        jwt_secret: String,
     ) -> Self {
         Self {
             api_keys: Arc::new(RwLock::new(api_keys)),
             admin_wallets: Arc::new(RwLock::new(admin_wallets)),
+            jwt_secret,
             allow_anonymous_readonly: false,
         }
     }
@@ -133,7 +138,7 @@ impl AuthState {
         wallets.get(address).copied()
     }
 
-    /// Authenticate a token (tries API key first, then admin_wallets)
+    /// Authenticate a token (tries API key first, then admin_wallets, then JWT)
     pub async fn authenticate(&self, token: &str) -> Option<AuthenticatedUser> {
         // First check in-memory API keys
         if let Some(role) = self.check_api_key(token).await {
@@ -149,6 +154,36 @@ impl AuthState {
                 identifier: token.to_string(),
                 role,
             });
+        }
+
+        // Finally try to decode as JWT
+        use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+        
+        // Define minimal claims struct for verification
+        #[derive(Debug, Deserialize)]
+        struct Claims {
+            sub: String,
+            role: String,
+            // exp field is validated automatically by jsonwebtoken
+        }
+
+        let validation = Validation::new(Algorithm::HS256);
+        match decode::<Claims>(
+            token, 
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
+            &validation
+        ) {
+            Ok(token_data) => {
+                if let Ok(role) = token_data.claims.role.parse::<Role>() {
+                    return Some(AuthenticatedUser {
+                        identifier: token_data.claims.sub,
+                        role,
+                    });
+                }
+            }
+            Err(_) => {
+                // Not a valid JWT or signature mismatch
+            }
         }
 
         None

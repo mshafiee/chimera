@@ -3,7 +3,7 @@
 //! Authenticates users via Solana wallet signature verification.
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine};
 use chrono::{TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -126,34 +126,37 @@ async fn check_wallet_role(db: &SqlitePool, wallet_address: &str) -> Result<Stri
     }
 }
 
-/// Generate a simple JWT token
-/// In production, use a proper JWT library like jsonwebtoken
+/// JWT Claims
+#[derive(Debug, Serialize, Deserialize)]
+struct Claims {
+    sub: String,
+    role: String,
+    exp: usize,
+    iat: usize,
+}
+
+/// Generate a JWT token using jsonwebtoken crate
 fn generate_jwt(wallet_address: &str, role: &str, secret: &str) -> Result<String, AppError> {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
+    use jsonwebtoken::{encode, Header, EncodingKey};
+    
+    let expiration = Utc::now()
+        .checked_add_signed(TimeDelta::hours(24))
+        .expect("valid timestamp")
+        .timestamp() as usize;
 
-    // Simple JWT structure (header.payload.signature)
-    let header = BASE64.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+    let claims = Claims {
+        sub: wallet_address.to_owned(),
+        role: role.to_owned(),
+        exp: expiration,
+        iat: Utc::now().timestamp() as usize,
+    };
 
-    let exp = Utc::now() + TimeDelta::hours(24);
-    let payload = serde_json::json!({
-        "sub": wallet_address,
-        "role": role,
-        "exp": exp.timestamp(),
-        "iat": Utc::now().timestamp(),
-    });
-    let payload_b64 = BASE64.encode(payload.to_string());
-
-    let message = format!("{}.{}", header, payload_b64);
-
-    // Create signature
-    type HmacSha256 = Hmac<Sha256>;
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .map_err(|_| AppError::Internal("Failed to create HMAC".to_string()))?;
-    mac.update(message.as_bytes());
-    let signature = BASE64.encode(mac.finalize().into_bytes());
-
-    Ok(format!("{}.{}", message, signature))
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| AppError::Internal(format!("Failed to generate JWT: {}", e)))
 }
 
 #[cfg(test)]
@@ -163,7 +166,8 @@ mod tests {
     #[test]
     fn test_generate_jwt() {
         let token = generate_jwt("7xKXtg...gAsU", "admin", "test-secret").unwrap();
-        assert!(token.contains('.'));
+        assert!(!token.is_empty());
+        // Basic JWT format check
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
     }
