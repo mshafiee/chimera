@@ -14,24 +14,47 @@ use aes_gcm::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+use secrecy::{Secret, ExposeSecret}; // Import Secret
 
 /// Secrets stored in the encrypted vault
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct VaultSecrets {
     /// Primary webhook HMAC secret
     pub webhook_secret: String,
     /// Previous webhook secret (for rotation grace period)
     #[serde(default)]
     pub webhook_secret_previous: Option<String>,
-    /// Wallet private key (as byte array)
-    #[serde(default)]
-    pub wallet_private_key: Option<Vec<u8>>,
+    /// Wallet private key (hex string)
+    #[serde(default, serialize_with = "serialize_secret", deserialize_with = "deserialize_secret")]
+    #[zeroize(skip)] // Secrecy handles this internal zeroization
+    pub wallet_private_key: Option<Secret<String>>,
+
     /// RPC API key
     #[serde(default)]
     pub rpc_api_key: Option<String>,
     /// Fallback RPC API key
     #[serde(default)]
     pub fallback_rpc_api_key: Option<String>,
+}
+
+fn serialize_secret<S>(secret: &Option<Secret<String>>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use secrecy::ExposeSecret;
+    match secret {
+        Some(s) => serializer.serialize_str(s.expose_secret()),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_secret<'de, D>(deserializer: D) -> Result<Option<Secret<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    Ok(s.map(Secret::new))
 }
 
 /// Vault for encrypted secrets
@@ -183,7 +206,7 @@ impl Vault {
 /// Generate random bytes using getrandom (cryptographically secure)
 fn rand_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    getrandom::fill(&mut bytes).expect("Failed to generate random bytes");
+    getrandom::getrandom(&mut bytes).expect("Failed to generate random bytes");
     bytes
 }
 
@@ -221,9 +244,16 @@ pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
     let wallet_private_key = std::env::var("CHIMERA_WALLET__PRIVATE_KEY")
         .ok()
         .and_then(|hex_str| {
-            hex::decode(hex_str.trim())
-                .ok()
-                .filter(|bytes| bytes.len() == 64)
+            let trim_str = hex_str.trim();
+            // Validate hex length (64 chars = 32 bytes, OR 128 chars = 64 bytes for full keypair)
+            // But usually we allow whatever if it decodes. 
+            // Here checking if it LOOKS like hex is good enough or let load_wallet_keypair handle it.
+            // But consistent with previous logic:
+            if trim_str.len() == 128 || trim_str.len() == 64 { // Accept 32 or 64 bytes
+                Some(Secret::new(trim_str.to_string()))
+            } else {
+                None
+            }
         });
 
     Ok(VaultSecrets {
@@ -253,7 +283,7 @@ mod tests {
         let secrets = VaultSecrets {
             webhook_secret: "test-secret-123".to_string(),
             webhook_secret_previous: Some("old-secret".to_string()),
-            wallet_private_key: Some(vec![1, 2, 3, 4, 5]),
+            wallet_private_key: Some(Secret::new("0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".repeat(2))), // 64 bytes hex
             rpc_api_key: Some("rpc-key".to_string()),
             fallback_rpc_api_key: None,
         };
@@ -266,7 +296,11 @@ mod tests {
             decrypted.webhook_secret_previous,
             secrets.webhook_secret_previous
         );
-        assert_eq!(decrypted.wallet_private_key, secrets.wallet_private_key);
+        // Compare exposed secrets
+        assert_eq!(
+            decrypted.wallet_private_key.as_ref().map(|s| s.expose_secret()), 
+            secrets.wallet_private_key.as_ref().map(|s| s.expose_secret())
+        );
         assert_eq!(decrypted.rpc_api_key, secrets.rpc_api_key);
     }
 
@@ -280,5 +314,17 @@ mod tests {
     fn test_invalid_key_hex() {
         let result = Vault::new("not-valid-hex-string-definitely-not-64-chars-of-hex-here-nope!");
         assert!(result.is_err());
+    }
+}
+
+impl std::fmt::Debug for VaultSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultSecrets")
+            .field("webhook_secret", &"[REDACTED]")
+            .field("webhook_secret_previous", &"[REDACTED]")
+            .field("wallet_private_key", &"[REDACTED]")
+            .field("rpc_api_key", &"[REDACTED]")
+            .field("fallback_rpc_api_key", &"[REDACTED]")
+            .finish()
     }
 }
