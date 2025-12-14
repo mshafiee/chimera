@@ -15,6 +15,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use reqwest;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use bincode;
 
@@ -170,7 +171,8 @@ impl TokenMetadataFetcher {
     ///
     /// Calculates FDV = price * total_supply
     /// Uses Jupiter Price API for price and on-chain supply data
-    pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<f64> {
+    /// Returns Decimal for precision in financial calculations
+    pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<Decimal> {
         // Get token metadata (includes supply and decimals)
         let metadata = self.get_metadata(token_address).await?;
         
@@ -192,8 +194,8 @@ impl TokenMetadataFetcher {
             .await
             .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter response: {}", e)))?;
 
-        // Extract price
-        let price_usd = if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
+        // Extract price and convert to Decimal immediately
+        let price_usd_f64 = if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
             if let Some(price) = token_data.get("price").and_then(|p| p.as_f64()) {
                 price
             } else {
@@ -206,8 +208,23 @@ impl TokenMetadataFetcher {
             return Err(AppError::Parse("Token not found in Jupiter response".to_string()));
         };
 
+        // Convert price to Decimal immediately to avoid precision loss
+        let price_usd = Decimal::from_f64_retain(price_usd_f64)
+            .unwrap_or(Decimal::ZERO);
+
         // Calculate FDV = price * total_supply (adjusted for decimals)
-        let supply_adjusted = metadata.supply as f64 / (10.0_f64.powi(metadata.decimals as i32));
+        // Use Decimal for all calculations to maintain precision
+        let supply = Decimal::from(metadata.supply);
+        // Calculate 10^decimals using Decimal::from_str for precision
+        // For typical token decimals (0-18), this is safe
+        let decimals_power = if metadata.decimals == 0 {
+            Decimal::ONE
+        } else {
+            // Build string representation of 10^decimals (e.g., "1000000" for 6 decimals)
+            let power_str = format!("1{}", "0".repeat(metadata.decimals as usize));
+            Decimal::from_str(&power_str).unwrap_or(Decimal::ONE)
+        };
+        let supply_adjusted = supply / decimals_power;
         let fdv_usd = price_usd * supply_adjusted;
 
         Ok(fdv_usd)
@@ -222,7 +239,6 @@ impl TokenMetadataFetcher {
     ///
     /// Returns the total aggregated liquidity from all sources.
     pub async fn get_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
-        use rust_decimal::Decimal;
         tracing::debug!(token = token_address, "Fetching liquidity from DEX pools");
 
         // Try Jupiter first (fastest, aggregated data)
@@ -274,7 +290,6 @@ impl TokenMetadataFetcher {
     ///
     /// Jupiter aggregates liquidity data from multiple DEXes.
     async fn fetch_jupiter_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
-        use rust_decimal::Decimal;
         let url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
 
         let response = reqwest::get(&url)

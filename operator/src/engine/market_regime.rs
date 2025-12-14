@@ -84,7 +84,7 @@ impl MarketRegimeDetector {
             return MarketRegime::Sideways;
         }
 
-        // Calculate price change over last 24 hours (convert Decimal to f64 for percentage calculation)
+        // Calculate price change over last 24 hours using Decimal for precision
         let prices: Vec<rust_decimal::Decimal> = history.iter().map(|(_, price)| *price).collect();
         let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
         let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
@@ -93,18 +93,22 @@ impl MarketRegimeDetector {
             return MarketRegime::Sideways;
         }
 
+        // Calculate percentage change using Decimal to avoid floating-point precision errors
         let price_change_percent = if !first_price.is_zero() {
             let diff = last_price - first_price;
             let ratio = diff / first_price;
-            (ratio * rust_decimal::Decimal::from(100)).to_f64().unwrap_or(0.0)
+            ratio * rust_decimal::Decimal::from(100)
         } else {
-            0.0
+            rust_decimal::Decimal::ZERO
         };
 
-        // Classify regime based on price change
-        if price_change_percent > 5.0 {
+        // Classify regime based on price change (using Decimal comparisons)
+        let five_percent = rust_decimal::Decimal::from_str("5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+        let neg_five_percent = rust_decimal::Decimal::from_str("-5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+        
+        if price_change_percent > five_percent {
             MarketRegime::Bull
-        } else if price_change_percent < -5.0 {
+        } else if price_change_percent < neg_five_percent {
             MarketRegime::Bear
         } else {
             MarketRegime::Sideways
@@ -140,6 +144,9 @@ impl MarketRegimeDetector {
     /// - > 1.0 if volume is increasing (bullish)
     /// - < 1.0 if volume is decreasing (bearish, reduce position sizes)
     /// - 1.0 if no clear trend or insufficient data
+    ///
+    /// Note: Returns f64 for compatibility with position sizing multipliers,
+    /// but all internal calculations use Decimal for precision.
     pub fn get_volume_trend_multiplier(&self) -> f64 {
         let history = self.volume_history.read();
         
@@ -178,21 +185,25 @@ impl MarketRegimeDetector {
             return 1.0;
         }
 
-        // Calculate week-over-week change (convert to f64 only for final multiplier)
-        let volume_change_ratio = (last_week_avg / previous_week_avg).to_f64().unwrap_or(1.0);
+        // Calculate week-over-week change using Decimal for precision
+        let volume_change_ratio = last_week_avg / previous_week_avg;
 
-        // Return multiplier:
+        // Return multiplier based on Decimal comparisons:
         // - If volume drops >20%, reduce position sizes by 30%
         // - If volume drops 10-20%, reduce by 15%
         // - If volume increases >20%, increase by 10% (but cap at 1.2x)
         // - Otherwise, neutral (1.0)
-        if volume_change_ratio < 0.8 {
+        let threshold_80 = Decimal::from_str("0.8").unwrap_or(Decimal::ZERO);
+        let threshold_90 = Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
+        let threshold_120 = Decimal::from_str("1.2").unwrap_or(Decimal::ZERO);
+        
+        if volume_change_ratio < threshold_80 {
             // Volume dropped >20%
             0.7
-        } else if volume_change_ratio < 0.9 {
+        } else if volume_change_ratio < threshold_90 {
             // Volume dropped 10-20%
             0.85
-        } else if volume_change_ratio > 1.2 {
+        } else if volume_change_ratio > threshold_120 {
             // Volume increased >20%
             1.1
         } else {
@@ -216,12 +227,26 @@ impl MarketRegimeDetector {
     /// Get profit targets for current regime
     ///
     /// # Returns
-    /// Vector of profit target percentages
-    pub fn get_profit_targets(&self) -> Vec<f64> {
+    /// Vector of profit target percentages (using Decimal for precision)
+    pub fn get_profit_targets(&self) -> Vec<Decimal> {
         match self.detect_regime() {
-            MarketRegime::Bull => vec![50.0, 100.0, 200.0, 500.0],  // Higher targets in bull
-            MarketRegime::Bear => vec![15.0, 30.0, 50.0, 100.0],   // Lower targets in bear
-            MarketRegime::Sideways => vec![10.0, 20.0, 30.0],      // Quick scalps in sideways
+            MarketRegime::Bull => vec![
+                Decimal::from_str("50.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("100.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("200.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("500.0").unwrap_or(Decimal::ZERO),
+            ],  // Higher targets in bull
+            MarketRegime::Bear => vec![
+                Decimal::from_str("15.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("30.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("50.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("100.0").unwrap_or(Decimal::ZERO),
+            ],   // Lower targets in bear
+            MarketRegime::Sideways => vec![
+                Decimal::from_str("10.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("20.0").unwrap_or(Decimal::ZERO),
+                Decimal::from_str("30.0").unwrap_or(Decimal::ZERO),
+            ],      // Quick scalps in sideways
         }
     }
 }

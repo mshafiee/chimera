@@ -284,18 +284,17 @@ impl TokenParser {
         // Check liquidity/market cap ratio (Liquidity vs FDV)
         // High FDV with low liquidity = "Ghost Chain" scenario - high slippage on exit
         // Reject tokens with Liq/FDV < 0.05 (5%)
-        // Use Decimal for calculation, convert to f64 only for comparison and logging
+        // Use Decimal for all calculations to maintain precision
         if let Ok(fdv_usd) = self.fetcher.get_market_cap_fdv(token_address).await {
-            if fdv_usd > 0.0 {
-                let fdv_usd_dec = Decimal::from_f64_retain(fdv_usd).unwrap_or(Decimal::ZERO);
-                let liquidity_ratio = liquidity_usd / fdv_usd_dec;
+            if fdv_usd > Decimal::ZERO {
+                let liquidity_ratio = liquidity_usd / fdv_usd;
                 let min_liquidity_ratio = Decimal::from_str("0.05").unwrap_or(Decimal::ZERO); // 5% minimum
 
                 if liquidity_ratio < min_liquidity_ratio {
                     tracing::warn!(
                         token = token_address,
                         liquidity_usd = %liquidity_usd,
-                        fdv_usd = fdv_usd,
+                        fdv_usd = %fdv_usd,
                         liquidity_ratio = %liquidity_ratio,
                         "Token rejected: Liquidity/FDV ratio too low (Ghost Chain scenario)"
                     );
@@ -317,7 +316,7 @@ impl TokenParser {
                 tracing::debug!(
                     token = token_address,
                     liquidity_usd = %liquidity_usd,
-                    fdv_usd = fdv_usd,
+                    fdv_usd = %fdv_usd,
                     liquidity_ratio = %liquidity_ratio,
                     "Liquidity/FDV ratio check passed"
                 );
