@@ -190,19 +190,16 @@ impl ProfitTargetManager {
 
         // Check tiered profit targets
         for target in &targets {
-            let target_dec = Decimal::from_f64_retain(*target).unwrap_or(Decimal::ZERO);
-            if profit_percent >= target_dec && !state.targets_hit.iter().any(|&hit| hit == target_dec) {
-                state.targets_hit.push(target_dec);
-                let exit_percent = Decimal::from_f64_retain(self.config.tiered_exit_percent).unwrap_or(Decimal::ZERO);
-                return ProfitTargetAction::ExitPercent(exit_percent);
+            if profit_percent >= *target && !state.targets_hit.iter().any(|&hit| hit == *target) {
+                state.targets_hit.push(*target);
+                return ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent);
             }
         }
 
         // Check trailing stop (activate after trailing_stop_activation %)
-        let trailing_activation_dec = Decimal::from_f64_retain(self.config.trailing_stop_activation).unwrap_or(Decimal::ZERO);
-        if profit_percent >= trailing_activation_dec && !state.trailing_stop_active {
+        if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;
-            let trailing_distance_ratio = Decimal::from_f64_retain(self.config.trailing_stop_distance / 100.0).unwrap_or(Decimal::ZERO);
+            let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
         }
 
@@ -213,7 +210,7 @@ impl ProfitTargetManager {
 
         // Update trailing stop price if price increases
         if state.trailing_stop_active && state.current_price > state.peak_price {
-            let trailing_distance_ratio = Decimal::from_f64_retain(self.config.trailing_stop_distance / 100.0).unwrap_or(Decimal::ZERO);
+            let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price = state.current_price * (Decimal::ONE - trailing_distance_ratio);
         }
 

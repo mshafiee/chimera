@@ -6,6 +6,8 @@
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
 use std::path::PathBuf;
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize)]
@@ -210,28 +212,28 @@ fn default_webhook_burst() -> u32 {
 pub struct CircuitBreakerConfig {
     /// Maximum loss in 24h (USD) before halting
     #[serde(default = "default_max_loss")]
-    pub max_loss_24h_usd: f64,
+    pub max_loss_24h_usd: Decimal,
     /// Maximum consecutive losses before pausing Spear
     #[serde(default = "default_max_consecutive_losses")]
     pub max_consecutive_losses: u32,
     /// Maximum drawdown percentage before emergency exit
     #[serde(default = "default_max_drawdown")]
-    pub max_drawdown_percent: f64,
+    pub max_drawdown_percent: Decimal,
     /// Cooldown period in minutes after circuit trips
     #[serde(default = "default_cooldown")]
     pub cooldown_minutes: u32,
 }
 
-fn default_max_loss() -> f64 {
-    500.0
+fn default_max_loss() -> Decimal {
+    Decimal::from_str("500.0").unwrap()
 }
 
 fn default_max_consecutive_losses() -> u32 {
     5
 }
 
-fn default_max_drawdown() -> f64 {
-    15.0
+fn default_max_drawdown() -> Decimal {
+    Decimal::from_str("15.0").unwrap()
 }
 
 fn default_cooldown() -> u32 {
@@ -249,10 +251,10 @@ pub struct StrategyConfig {
     pub spear_percent: u32,
     /// Maximum position size in SOL
     #[serde(default = "default_max_position")]
-    pub max_position_sol: f64,
+    pub max_position_sol: Decimal,
     /// Minimum position size in SOL
     #[serde(default = "default_min_position")]
-    pub min_position_sol: f64,
+    pub min_position_sol: Decimal,
 }
 
 fn default_shield_percent() -> u32 {
@@ -263,12 +265,12 @@ fn default_spear_percent() -> u32 {
     30
 }
 
-fn default_max_position() -> f64 {
-    1.0
+fn default_max_position() -> Decimal {
+    Decimal::from_str("1.0").unwrap()
 }
 
-fn default_min_position() -> f64 {
-    0.01
+fn default_min_position() -> Decimal {
+    Decimal::from_str("0.01").unwrap()
 }
 
 /// Jito bundle tip configuration
@@ -285,16 +287,16 @@ pub struct JitoConfig {
     pub helius_fallback: bool,
     /// Minimum tip in SOL
     #[serde(default = "default_tip_floor")]
-    pub tip_floor_sol: f64,
+    pub tip_floor_sol: Decimal,
     /// Maximum tip in SOL
     #[serde(default = "default_tip_ceiling")]
-    pub tip_ceiling_sol: f64,
+    pub tip_ceiling_sol: Decimal,
     /// Percentile of recent tips to use
     #[serde(default = "default_tip_percentile")]
     pub tip_percentile: u32,
     /// Maximum tip as percentage of trade size
     #[serde(default = "default_tip_percent_max")]
-    pub tip_percent_max: f64,
+    pub tip_percent_max: Decimal,
 }
 
 fn default_jito_enabled() -> bool {
@@ -309,20 +311,20 @@ fn default_helius_fallback() -> bool {
     true
 }
 
-fn default_tip_floor() -> f64 {
-    0.001
+fn default_tip_floor() -> Decimal {
+    Decimal::from_str("0.001").unwrap()
 }
 
-fn default_tip_ceiling() -> f64 {
-    0.01
+fn default_tip_ceiling() -> Decimal {
+    Decimal::from_str("0.01").unwrap()
 }
 
 fn default_tip_percentile() -> u32 {
     50
 }
 
-fn default_tip_percent_max() -> f64 {
-    0.10
+fn default_tip_percent_max() -> Decimal {
+    Decimal::from_str("0.10").unwrap()
 }
 
 /// Jupiter API configuration
@@ -370,10 +372,10 @@ pub struct TokenSafetyConfig {
     pub mint_authority_whitelist: Vec<String>,
     /// Minimum liquidity for Shield strategy (USD)
     #[serde(default = "default_min_liquidity_shield")]
-    pub min_liquidity_shield_usd: f64,
+    pub min_liquidity_shield_usd: Decimal,
     /// Minimum liquidity for Spear strategy (USD)
     #[serde(default = "default_min_liquidity_spear")]
-    pub min_liquidity_spear_usd: f64,
+    pub min_liquidity_spear_usd: Decimal,
     /// Enable honeypot detection
     #[serde(default = "default_honeypot_detection")]
     pub honeypot_detection_enabled: bool,
@@ -396,12 +398,12 @@ fn default_authority_whitelist() -> Vec<String> {
     ]
 }
 
-fn default_min_liquidity_shield() -> f64 {
-    10_000.0
+fn default_min_liquidity_shield() -> Decimal {
+    Decimal::from_str("10000.0").unwrap()
 }
 
-fn default_min_liquidity_spear() -> f64 {
-    5_000.0
+fn default_min_liquidity_spear() -> Decimal {
+    Decimal::from_str("5000.0").unwrap()
 }
 
 fn default_honeypot_detection() -> bool {
@@ -641,42 +643,47 @@ impl Default for MonitoringConfig {
 pub struct ProfitManagementConfig {
     /// Profit targets (percentages)
     #[serde(default = "default_profit_targets")]
-    pub targets: Vec<f64>,
+    pub targets: Vec<Decimal>,
     /// Percentage to sell at each target
     #[serde(default = "default_tiered_exit_percent")]
-    pub tiered_exit_percent: f64,
+    pub tiered_exit_percent: Decimal,
     /// Activate trailing stop after this profit %
     #[serde(default = "default_trailing_stop_activation")]
-    pub trailing_stop_activation: f64,
+    pub trailing_stop_activation: Decimal,
     /// Trailing stop distance from peak (%)
     #[serde(default = "default_trailing_stop_distance")]
-    pub trailing_stop_distance: f64,
+    pub trailing_stop_distance: Decimal,
     /// Hard stop loss (%)
     #[serde(default = "default_hard_stop_loss")]
-    pub hard_stop_loss: f64,
+    pub hard_stop_loss: Decimal,
     /// Time-based exit (hours)
     #[serde(default = "default_time_exit_hours")]
     pub time_exit_hours: u64,
 }
 
-fn default_profit_targets() -> Vec<f64> {
-    vec![25.0, 50.0, 100.0, 200.0]
+fn default_profit_targets() -> Vec<Decimal> {
+    vec![
+        Decimal::from_str("25.0").unwrap(),
+        Decimal::from_str("50.0").unwrap(),
+        Decimal::from_str("100.0").unwrap(),
+        Decimal::from_str("200.0").unwrap(),
+    ]
 }
 
-fn default_tiered_exit_percent() -> f64 {
-    25.0
+fn default_tiered_exit_percent() -> Decimal {
+    Decimal::from_str("25.0").unwrap()
 }
 
-fn default_trailing_stop_activation() -> f64 {
-    50.0
+fn default_trailing_stop_activation() -> Decimal {
+    Decimal::from_str("50.0").unwrap()
 }
 
-fn default_trailing_stop_distance() -> f64 {
-    20.0
+fn default_trailing_stop_distance() -> Decimal {
+    Decimal::from_str("20.0").unwrap()
 }
 
-fn default_hard_stop_loss() -> f64 {
-    15.0
+fn default_hard_stop_loss() -> Decimal {
+    Decimal::from_str("15.0").unwrap()
 }
 
 fn default_time_exit_hours() -> u64 {
@@ -701,16 +708,16 @@ impl Default for ProfitManagementConfig {
 pub struct PositionSizingConfig {
     /// Base position size in SOL
     #[serde(default = "default_base_size_sol")]
-    pub base_size_sol: f64,
+    pub base_size_sol: Decimal,
     /// Maximum position size in SOL
     #[serde(default = "default_max_size_sol")]
-    pub max_size_sol: f64,
+    pub max_size_sol: Decimal,
     /// Minimum position size in SOL
     #[serde(default = "default_min_size_sol")]
-    pub min_size_sol: f64,
+    pub min_size_sol: Decimal,
     /// Consensus multiplier (when multiple wallets buy same token)
     #[serde(default = "default_consensus_multiplier")]
-    pub consensus_multiplier: f64,
+    pub consensus_multiplier: Decimal,
     /// Maximum concurrent positions
     #[serde(default = "default_max_concurrent_positions")]
     pub max_concurrent_positions: usize,
@@ -719,20 +726,20 @@ pub struct PositionSizingConfig {
     pub use_kelly_sizing: bool,
 }
 
-fn default_base_size_sol() -> f64 {
-    0.1
+fn default_base_size_sol() -> Decimal {
+    Decimal::from_str("0.1").unwrap()
 }
 
-fn default_max_size_sol() -> f64 {
-    2.0
+fn default_max_size_sol() -> Decimal {
+    Decimal::from_str("2.0").unwrap()
 }
 
-fn default_min_size_sol() -> f64 {
-    0.02
+fn default_min_size_sol() -> Decimal {
+    Decimal::from_str("0.02").unwrap()
 }
 
-fn default_consensus_multiplier() -> f64 {
-    1.5
+fn default_consensus_multiplier() -> Decimal {
+    Decimal::from_str("1.5").unwrap()
 }
 
 fn default_max_concurrent_positions() -> usize {
@@ -764,29 +771,29 @@ pub struct MevProtectionConfig {
     pub always_use_jito: bool,
     /// Tip for exit signals (SOL)
     #[serde(default = "default_exit_tip_sol")]
-    pub exit_tip_sol: f64,
+    pub exit_tip_sol: Decimal,
     /// Tip for consensus signals (SOL)
     #[serde(default = "default_consensus_tip_sol")]
-    pub consensus_tip_sol: f64,
+    pub consensus_tip_sol: Decimal,
     /// Tip for standard signals (SOL)
     #[serde(default = "default_standard_tip_sol")]
-    pub standard_tip_sol: f64,
+    pub standard_tip_sol: Decimal,
 }
 
 fn default_always_use_jito() -> bool {
     true
 }
 
-fn default_exit_tip_sol() -> f64 {
-    0.007
+fn default_exit_tip_sol() -> Decimal {
+    Decimal::from_str("0.007").unwrap()
 }
 
-fn default_consensus_tip_sol() -> f64 {
-    0.003
+fn default_consensus_tip_sol() -> Decimal {
+    Decimal::from_str("0.003").unwrap()
 }
 
-fn default_standard_tip_sol() -> f64 {
-    0.0015
+fn default_standard_tip_sol() -> Decimal {
+    Decimal::from_str("0.0015").unwrap()
 }
 
 impl Default for MevProtectionConfig {
@@ -870,6 +877,19 @@ impl AppConfig {
         if self.jito.tip_floor_sol >= self.jito.tip_ceiling_sol {
             return Err(ConfigError::Message(
                 "Jito tip floor must be less than ceiling".to_string(),
+            ));
+        }
+
+        // Validate position size bounds
+        if self.strategy.max_position_sol <= self.strategy.min_position_sol {
+            return Err(ConfigError::Message(
+                "Max position size must be greater than min position size".to_string(),
+            ));
+        }
+
+        if self.position_sizing.max_size_sol <= self.position_sizing.min_size_sol {
+            return Err(ConfigError::Message(
+                "Max position size must be greater than min position size".to_string(),
             ));
         }
 

@@ -6,6 +6,7 @@
 //! - Single BUY: Low tip (0.001-0.002 SOL)
 
 use std::sync::Arc;
+use rust_decimal::prelude::*;
 use crate::config::MevProtectionConfig;
 use crate::models::{Signal, Strategy};
 
@@ -26,8 +27,8 @@ impl MevProtection {
     /// * `is_consensus` - Whether this is a consensus signal (multiple wallets)
     ///
     /// # Returns
-    /// Tip amount in SOL
-    pub fn calculate_tip(&self, signal: &Signal, is_consensus: bool) -> f64 {
+    /// Tip amount in SOL (using Decimal for precision)
+    pub fn calculate_tip(&self, signal: &Signal, is_consensus: bool) -> Decimal {
         // EXIT signals get highest priority
         if signal.payload.strategy == Strategy::Exit {
             return self.config.exit_tip_sol;
@@ -36,7 +37,7 @@ impl MevProtection {
         // Consensus signals get higher priority (increased tip for consensus)
         if is_consensus {
             // Use higher tip for consensus (1.5x the standard consensus tip)
-            return self.config.consensus_tip_sol * 1.5;
+            return self.config.consensus_tip_sol * Decimal::from_str("1.5").unwrap();
         }
 
         // Standard signals get low priority

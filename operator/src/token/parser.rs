@@ -9,6 +9,7 @@
 use super::{TokenCache, TokenMetadataFetcher};
 use crate::error::AppResult;
 use crate::models::Strategy;
+use rust_decimal::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -73,9 +74,9 @@ pub struct TokenSafetyConfig {
     /// Token mints allowed to have mint authority
     pub mint_authority_whitelist: HashSet<String>,
     /// Minimum liquidity for Shield strategy (USD)
-    pub min_liquidity_shield_usd: f64,
+    pub min_liquidity_shield_usd: Decimal,
     /// Minimum liquidity for Spear strategy (USD)
-    pub min_liquidity_spear_usd: f64,
+    pub min_liquidity_spear_usd: Decimal,
     /// Whether to enable honeypot detection
     pub honeypot_detection_enabled: bool,
 }
@@ -94,8 +95,8 @@ impl Default for TokenSafetyConfig {
         Self {
             freeze_authority_whitelist: freeze_whitelist,
             mint_authority_whitelist: mint_whitelist,
-            min_liquidity_shield_usd: 12_000.0,  // 20% buffer over 10k
-            min_liquidity_spear_usd: 6_000.0,    // 20% buffer over 5k
+            min_liquidity_shield_usd: Decimal::from_str("12000.0").unwrap(),  // 20% buffer over 10k
+            min_liquidity_spear_usd: Decimal::from_str("6000.0").unwrap(),    // 20% buffer over 5k
             honeypot_detection_enabled: true,
         }
     }
@@ -250,11 +251,11 @@ impl TokenParser {
         let min_liquidity = match strategy {
             Strategy::Shield => self.config.min_liquidity_shield_usd,
             Strategy::Spear => self.config.min_liquidity_spear_usd,
-            Strategy::Exit => 0.0, // No liquidity check for exits
+            Strategy::Exit => Decimal::ZERO, // No liquidity check for exits
         };
 
         // Check liquidity
-        let liquidity_usd = match self.fetcher.get_liquidity(token_address).await {
+        let liquidity_usd_f64 = match self.fetcher.get_liquidity(token_address).await {
             Ok(liq) => liq,
             Err(e) => {
                 tracing::warn!(
@@ -268,6 +269,8 @@ impl TokenParser {
             }
         };
 
+        // Convert to Decimal for precise comparison
+        let liquidity_usd = Decimal::from_f64_retain(liquidity_usd_f64).unwrap_or(Decimal::ZERO);
         if liquidity_usd < min_liquidity {
             return Ok(TokenSafetyResult {
                 safe: false,

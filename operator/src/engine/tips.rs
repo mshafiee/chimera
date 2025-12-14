@@ -24,7 +24,7 @@ use std::sync::Arc;
 const MIN_SAMPLES_FOR_PERCENTILE: u32 = 10;
 
 /// Cold start multiplier (tip_floor * this value)
-const COLD_START_MULTIPLIER: f64 = 2.0;
+const COLD_START_MULTIPLIER: Decimal = Decimal::from(2);
 
 /// Tip entry for in-memory history
 #[derive(Debug, Clone)]
@@ -100,35 +100,32 @@ impl TipManager {
         let is_cold_start = *self.cold_start.read();
 
         let base_tip = if is_cold_start {
-            Decimal::from_f64_retain(self.cold_start_tip(strategy)).unwrap_or(Decimal::ZERO)
+            self.cold_start_tip(strategy)
         } else {
-            Decimal::from_f64_retain(self.percentile_tip(strategy)).unwrap_or(Decimal::ZERO)
+            self.percentile_tip(strategy)
         };
 
         // Apply percentage cap using Decimal
-        let tip_percent_max = Decimal::from_f64_retain(self.config.tip_percent_max).unwrap_or(Decimal::ZERO);
-        let max_by_percent = trade_size_sol * tip_percent_max;
+        let max_by_percent = trade_size_sol * self.config.tip_percent_max;
 
         // Apply ceiling using Decimal
-        let ceiling = Decimal::from_f64_retain(self.config.tip_ceiling_sol).unwrap_or(Decimal::ZERO);
-        let floor = Decimal::from_f64_retain(self.config.tip_floor_sol).unwrap_or(Decimal::ZERO);
-        let tip = base_tip.min(max_by_percent).min(ceiling);
+        let tip = base_tip.min(max_by_percent).min(self.config.tip_ceiling_sol);
 
         // Ensure minimum
-        tip.max(floor)
+        tip.max(self.config.tip_floor_sol)
     }
 
     /// Cold start tip calculation
-    fn cold_start_tip(&self, strategy: Strategy) -> f64 {
+    fn cold_start_tip(&self, strategy: Strategy) -> Decimal {
         match strategy {
             Strategy::Shield => self.config.tip_floor_sol * COLD_START_MULTIPLIER,
-            Strategy::Spear => self.config.tip_floor_sol * COLD_START_MULTIPLIER * 1.5,
+            Strategy::Spear => self.config.tip_floor_sol * COLD_START_MULTIPLIER * Decimal::from_str("1.5").unwrap(),
             Strategy::Exit => self.config.tip_ceiling_sol, // Max tip for exits
         }
     }
 
     /// Percentile-based tip calculation
-    fn percentile_tip(&self, strategy: Strategy) -> f64 {
+    fn percentile_tip(&self, strategy: Strategy) -> Decimal {
         let history = self.history.read();
 
         if history.is_empty() {
@@ -150,19 +147,16 @@ impl TipManager {
         let percentile_tip = tips[index];
 
         // For Spear/Exit, use max of percentile and config floor
-        // Convert to f64 for comparison with config values (which are f64)
-        let floor = Decimal::from_f64_retain(self.config.tip_floor_sol).unwrap_or(Decimal::ZERO);
         let result = match strategy {
-            Strategy::Shield => percentile_tip.max(floor),
-            Strategy::Spear => percentile_tip.max(floor),
+            Strategy::Shield => percentile_tip.max(self.config.tip_floor_sol),
+            Strategy::Spear => percentile_tip.max(self.config.tip_floor_sol),
             Strategy::Exit => {
-                let mid = Decimal::from_f64_retain((self.config.tip_floor_sol + self.config.tip_ceiling_sol) / 2.0)
-                    .unwrap_or(Decimal::ZERO);
+                let mid = (self.config.tip_floor_sol + self.config.tip_ceiling_sol) / Decimal::from(2);
                 percentile_tip.max(mid)
             },
         };
         
-        result.to_f64().unwrap_or(0.0)
+        result
     }
 
     /// Get success rate for a given tip amount range

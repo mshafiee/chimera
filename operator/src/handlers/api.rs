@@ -527,9 +527,9 @@ pub async fn get_config(
 
     Ok(Json(ConfigResponse {
         circuit_breakers: CircuitBreakerConfig {
-            max_loss_24h: config.circuit_breakers.max_loss_24h_usd,
+            max_loss_24h: config.circuit_breakers.max_loss_24h_usd.to_f64().unwrap_or(0.0),
             max_consecutive_losses: config.circuit_breakers.max_consecutive_losses,
-            max_drawdown_percent: config.circuit_breakers.max_drawdown_percent,
+            max_drawdown_percent: config.circuit_breakers.max_drawdown_percent.to_f64().unwrap_or(0.0),
             cool_down_minutes: config.circuit_breakers.cooldown_minutes,
         },
         strategy_allocation: StrategyAllocation {
@@ -537,14 +537,14 @@ pub async fn get_config(
             spear_percent: config.strategy.spear_percent,
         },
         strategy: StrategyConfigResponse {
-            max_position_sol: config.strategy.max_position_sol,
-            min_position_sol: config.strategy.min_position_sol,
+            max_position_sol: config.strategy.max_position_sol.to_f64().unwrap_or(0.0),
+            min_position_sol: config.strategy.min_position_sol.to_f64().unwrap_or(0.0),
         },
         jito_tip_strategy: JitoTipConfig {
-            tip_floor: config.jito.tip_floor_sol,
-            tip_ceiling: config.jito.tip_ceiling_sol,
+            tip_floor: config.jito.tip_floor_sol.to_f64().unwrap_or(0.0),
+            tip_ceiling: config.jito.tip_ceiling_sol.to_f64().unwrap_or(0.0),
             tip_percentile: config.jito.tip_percentile,
-            tip_percent_max: config.jito.tip_percent_max,
+            tip_percent_max: config.jito.tip_percent_max.to_f64().unwrap_or(0.0),
         },
         jito_enabled: config.jito.enabled,
         rpc_status: RpcStatus {
@@ -586,29 +586,29 @@ pub async fn get_config(
             max_active_wallets: m.max_active_wallets,
         }),
         profit_management: ProfitManagementConfigResponse {
-            targets: config.profit_management.targets.clone(),
-            tiered_exit_percent: config.profit_management.tiered_exit_percent,
-            trailing_stop_activation: config.profit_management.trailing_stop_activation,
-            trailing_stop_distance: config.profit_management.trailing_stop_distance,
-            hard_stop_loss: config.profit_management.hard_stop_loss,
+            targets: config.profit_management.targets.iter().map(|d| d.to_f64().unwrap_or(0.0)).collect(),
+            tiered_exit_percent: config.profit_management.tiered_exit_percent.to_f64().unwrap_or(0.0),
+            trailing_stop_activation: config.profit_management.trailing_stop_activation.to_f64().unwrap_or(0.0),
+            trailing_stop_distance: config.profit_management.trailing_stop_distance.to_f64().unwrap_or(0.0),
+            hard_stop_loss: config.profit_management.hard_stop_loss.to_f64().unwrap_or(0.0),
             time_exit_hours: config.profit_management.time_exit_hours,
         },
         position_sizing: PositionSizingConfigResponse {
-            base_size_sol: config.position_sizing.base_size_sol,
-            max_size_sol: config.position_sizing.max_size_sol,
-            min_size_sol: config.position_sizing.min_size_sol,
-            consensus_multiplier: config.position_sizing.consensus_multiplier,
+            base_size_sol: config.position_sizing.base_size_sol.to_f64().unwrap_or(0.0),
+            max_size_sol: config.position_sizing.max_size_sol.to_f64().unwrap_or(0.0),
+            min_size_sol: config.position_sizing.min_size_sol.to_f64().unwrap_or(0.0),
+            consensus_multiplier: config.position_sizing.consensus_multiplier.to_f64().unwrap_or(0.0),
             max_concurrent_positions: config.position_sizing.max_concurrent_positions,
         },
         mev_protection: MevProtectionConfigResponse {
             always_use_jito: config.mev_protection.always_use_jito,
-            exit_tip_sol: config.mev_protection.exit_tip_sol,
-            consensus_tip_sol: config.mev_protection.consensus_tip_sol,
-            standard_tip_sol: config.mev_protection.standard_tip_sol,
+            exit_tip_sol: config.mev_protection.exit_tip_sol.to_f64().unwrap_or(0.0),
+            consensus_tip_sol: config.mev_protection.consensus_tip_sol.to_f64().unwrap_or(0.0),
+            standard_tip_sol: config.mev_protection.standard_tip_sol.to_f64().unwrap_or(0.0),
         },
         token_safety: TokenSafetyConfigResponse {
-            min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
-            min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+            min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd.to_f64().unwrap_or(0.0),
+            min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd.to_f64().unwrap_or(0.0),
             honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
             cache_capacity: config.token_safety.cache_capacity,
             cache_ttl_seconds: config.token_safety.cache_ttl_seconds,
@@ -655,8 +655,9 @@ pub async fn update_config(
     // Update circuit breakers if provided
     if let Some(cb) = body.circuit_breakers {
         if let Some(v) = cb.max_loss_24h {
+            use rust_decimal::prelude::*;
             let old = config.circuit_breakers.max_loss_24h_usd;
-            config.circuit_breakers.max_loss_24h_usd = v;
+            config.circuit_breakers.max_loss_24h_usd = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "circuit_breakers.max_loss_24h",
@@ -681,8 +682,9 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = cb.max_drawdown_percent {
+            use rust_decimal::prelude::*;
             let old = config.circuit_breakers.max_drawdown_percent;
-            config.circuit_breakers.max_drawdown_percent = v;
+            config.circuit_breakers.max_drawdown_percent = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "circuit_breakers.max_drawdown_percent",
@@ -736,8 +738,9 @@ pub async fn update_config(
     // Update strategy position limits if provided
     if let Some(s) = body.strategy {
         if let Some(v) = s.max_position_sol {
+            use rust_decimal::prelude::*;
             let old = config.strategy.max_position_sol;
-            config.strategy.max_position_sol = v;
+            config.strategy.max_position_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "strategy.max_position_sol",
@@ -749,8 +752,9 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = s.min_position_sol {
+            use rust_decimal::prelude::*;
             let old = config.strategy.min_position_sol;
-            config.strategy.min_position_sol = v;
+            config.strategy.min_position_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "strategy.min_position_sol",
@@ -903,17 +907,18 @@ pub async fn update_config(
     if let Some(pm) = body.profit_management {
         if let Some(v) = pm.targets {
             // Validate targets are positive and ascending
-            let mut prev = 0.0;
+            let mut prev = Decimal::ZERO;
             for target in &v {
-                if *target <= prev {
+                let target_dec = Decimal::from_f64_retain(*target).unwrap_or(Decimal::ZERO);
+                if target_dec <= prev {
                     return Err(AppError::Validation(
                         "Profit targets must be positive and in ascending order".to_string(),
                     ));
                 }
-                prev = *target;
+                prev = target_dec;
             }
             let old = format!("{:?}", config.profit_management.targets);
-            config.profit_management.targets = v.clone();
+            config.profit_management.targets = v.iter().map(|t| Decimal::from_f64_retain(*t).unwrap_or(Decimal::ZERO)).collect();
             db::log_config_change(
                 &state.db,
                 "profit_management.targets",
@@ -931,7 +936,7 @@ pub async fn update_config(
                 ));
             }
             let old = config.profit_management.tiered_exit_percent;
-            config.profit_management.tiered_exit_percent = v;
+            config.profit_management.tiered_exit_percent = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.tiered_exit_percent",
@@ -944,7 +949,7 @@ pub async fn update_config(
         }
         if let Some(v) = pm.trailing_stop_activation {
             let old = config.profit_management.trailing_stop_activation;
-            config.profit_management.trailing_stop_activation = v;
+            config.profit_management.trailing_stop_activation = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.trailing_stop_activation",
@@ -957,7 +962,7 @@ pub async fn update_config(
         }
         if let Some(v) = pm.trailing_stop_distance {
             let old = config.profit_management.trailing_stop_distance;
-            config.profit_management.trailing_stop_distance = v;
+            config.profit_management.trailing_stop_distance = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.trailing_stop_distance",
@@ -975,7 +980,7 @@ pub async fn update_config(
                 ));
             }
             let old = config.profit_management.hard_stop_loss;
-            config.profit_management.hard_stop_loss = v;
+            config.profit_management.hard_stop_loss = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.hard_stop_loss",
@@ -1004,7 +1009,8 @@ pub async fn update_config(
     // Update position sizing if provided
     if let Some(ps) = body.position_sizing {
         if let Some(v) = ps.base_size_sol {
-            if v < config.position_sizing.min_size_sol || v > config.position_sizing.max_size_sol {
+            let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            if v_dec < config.position_sizing.min_size_sol || v_dec > config.position_sizing.max_size_sol {
                 return Err(AppError::Validation(
                     format!(
                         "Base size must be between {} and {} SOL",
@@ -1013,7 +1019,7 @@ pub async fn update_config(
                 ));
             }
             let old = config.position_sizing.base_size_sol;
-            config.position_sizing.base_size_sol = v;
+            config.position_sizing.base_size_sol = v_dec;
             db::log_config_change(
                 &state.db,
                 "position_sizing.base_size_sol",
@@ -1025,13 +1031,14 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = ps.max_size_sol {
-            if v < config.position_sizing.base_size_sol {
+            let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            if v_dec < config.position_sizing.base_size_sol {
                 return Err(AppError::Validation(
                     "Max size must be >= base size".to_string(),
                 ));
             }
             let old = config.position_sizing.max_size_sol;
-            config.position_sizing.max_size_sol = v;
+            config.position_sizing.max_size_sol = v_dec;
             db::log_config_change(
                 &state.db,
                 "position_sizing.max_size_sol",
@@ -1043,13 +1050,14 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = ps.min_size_sol {
-            if v > config.position_sizing.base_size_sol {
+            let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            if v_dec > config.position_sizing.base_size_sol {
                 return Err(AppError::Validation(
                     "Min size must be <= base size".to_string(),
                 ));
             }
             let old = config.position_sizing.min_size_sol;
-            config.position_sizing.min_size_sol = v;
+            config.position_sizing.min_size_sol = v_dec;
             db::log_config_change(
                 &state.db,
                 "position_sizing.min_size_sol",
@@ -1067,7 +1075,7 @@ pub async fn update_config(
                 ));
             }
             let old = config.position_sizing.consensus_multiplier;
-            config.position_sizing.consensus_multiplier = v;
+            config.position_sizing.consensus_multiplier = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "position_sizing.consensus_multiplier",
@@ -1110,7 +1118,7 @@ pub async fn update_config(
         }
         if let Some(v) = mp.exit_tip_sol {
             let old = config.mev_protection.exit_tip_sol;
-            config.mev_protection.exit_tip_sol = v;
+            config.mev_protection.exit_tip_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "mev_protection.exit_tip_sol",
@@ -1123,7 +1131,7 @@ pub async fn update_config(
         }
         if let Some(v) = mp.consensus_tip_sol {
             let old = config.mev_protection.consensus_tip_sol;
-            config.mev_protection.consensus_tip_sol = v;
+            config.mev_protection.consensus_tip_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "mev_protection.consensus_tip_sol",
@@ -1136,7 +1144,7 @@ pub async fn update_config(
         }
         if let Some(v) = mp.standard_tip_sol {
             let old = config.mev_protection.standard_tip_sol;
-            config.mev_protection.standard_tip_sol = v;
+            config.mev_protection.standard_tip_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "mev_protection.standard_tip_sol",
@@ -1153,7 +1161,7 @@ pub async fn update_config(
     if let Some(ts) = body.token_safety {
         if let Some(v) = ts.min_liquidity_shield_usd {
             let old = config.token_safety.min_liquidity_shield_usd;
-            config.token_safety.min_liquidity_shield_usd = v;
+            config.token_safety.min_liquidity_shield_usd = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "token_safety.min_liquidity_shield_usd",
@@ -1166,7 +1174,7 @@ pub async fn update_config(
         }
         if let Some(v) = ts.min_liquidity_spear_usd {
             let old = config.token_safety.min_liquidity_spear_usd;
-            config.token_safety.min_liquidity_spear_usd = v;
+            config.token_safety.min_liquidity_spear_usd = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "token_safety.min_liquidity_spear_usd",

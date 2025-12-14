@@ -47,14 +47,14 @@ impl PositionSizer {
     /// # Returns
     /// Position size in SOL (using Decimal for precision)
     pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
-        let mut size = Decimal::from_f64_retain(self.config.base_size_sol).unwrap_or(Decimal::ZERO);
+        let mut size = self.config.base_size_sol;
 
         // Confidence multiplier (using Decimal)
-        let confidence_mult = Decimal::from_f64_retain(if factors.is_consensus {
+        let confidence_mult = if factors.is_consensus {
             self.config.consensus_multiplier
         } else {
-            1.0
-        }).unwrap_or(Decimal::ONE);
+            Decimal::ONE
+        };
 
         // High WQS multiplier (>80)
         let wqs_mult = Decimal::from_f64_retain(if factors.wallet_wqs >= 80.0 {
@@ -130,10 +130,8 @@ impl PositionSizer {
         size = size * volatility_mult;
 
         // Apply min/max bounds
-        let min_size = Decimal::from_f64_retain(self.config.min_size_sol).unwrap_or(Decimal::ZERO);
-        let max_size = Decimal::from_f64_retain(self.config.max_size_sol).unwrap_or(Decimal::ZERO);
-        size = size.max(min_size);
-        size = size.min(max_size);
+        size = size.max(self.config.min_size_sol);
+        size = size.min(self.config.max_size_sol);
 
         size
     }

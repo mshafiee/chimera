@@ -1205,24 +1205,19 @@ impl Executor {
         } else {
             // Fallback to simple strategy-based tip calculation
             let base_tip = match signal.payload.strategy {
-                Strategy::Shield => Decimal::from_f64_retain(self.config.jito.tip_floor_sol).unwrap_or(Decimal::ZERO),
+                Strategy::Shield => self.config.jito.tip_floor_sol,
                 Strategy::Spear => {
                     // Use higher tip for Spear to ensure bundle inclusion
-                    let floor = Decimal::from_f64_retain(self.config.jito.tip_floor_sol).unwrap_or(Decimal::ZERO);
-                    let ceiling = Decimal::from_f64_retain(self.config.jito.tip_ceiling_sol).unwrap_or(Decimal::ZERO);
-                    (floor + ceiling) / Decimal::from(2)
+                    (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol) / Decimal::from(2)
                 }
-                Strategy::Exit => Decimal::from_f64_retain(self.config.jito.tip_ceiling_sol).unwrap_or(Decimal::ZERO), // Max tip for exits
+                Strategy::Exit => self.config.jito.tip_ceiling_sol, // Max tip for exits
             };
 
             // Apply percentage cap
-            let tip_percent_max = Decimal::from_f64_retain(self.config.jito.tip_percent_max).unwrap_or(Decimal::ZERO);
-            let max_by_percent = signal.payload.amount_sol * tip_percent_max;
-            let ceiling = Decimal::from_f64_retain(self.config.jito.tip_ceiling_sol).unwrap_or(Decimal::ZERO);
-            let floor = Decimal::from_f64_retain(self.config.jito.tip_floor_sol).unwrap_or(Decimal::ZERO);
-            let tip = base_tip.min(max_by_percent).min(ceiling);
+            let max_by_percent = signal.payload.amount_sol * self.config.jito.tip_percent_max;
+            let tip = base_tip.min(max_by_percent).min(self.config.jito.tip_ceiling_sol);
 
-            tip.max(floor)
+            tip.max(self.config.jito.tip_floor_sol)
         }
     }
 
