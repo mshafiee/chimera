@@ -56,6 +56,8 @@ pub struct TokenMetadataFetcher {
     pool_enumerator: Option<Arc<PoolEnumerator>>,
     /// Optional rate limiter for RPC calls (simulation calls use higher weight)
     rate_limiter: Option<Arc<RateLimiter>>,
+    /// Jupiter API base URL (e.g., https://api.jup.ag/swap/v1 or https://lite-api.jup.ag/swap/v1)
+    jupiter_api_url: String,
 }
 
 impl TokenMetadataFetcher {
@@ -66,6 +68,15 @@ impl TokenMetadataFetcher {
     
     /// Create a new metadata fetcher with optional rate limiter
     pub fn new_with_rate_limiter(rpc_url: &str, rate_limiter: Option<Arc<RateLimiter>>) -> Self {
+        Self::new_with_rate_limiter_and_jupiter(rpc_url, rate_limiter, "https://api.jup.ag/swap/v1".to_string())
+    }
+
+    /// Create a new metadata fetcher with optional rate limiter and Jupiter API URL
+    pub fn new_with_rate_limiter_and_jupiter(
+        rpc_url: &str,
+        rate_limiter: Option<Arc<RateLimiter>>,
+        jupiter_api_url: String,
+    ) -> Self {
         let rpc_client = RpcClient::new_with_timeout(rpc_url.to_string(), Duration::from_secs(10));
         let rpc_client_arc = Arc::new(rpc_client);
 
@@ -78,6 +89,7 @@ impl TokenMetadataFetcher {
                 300,  // cache TTL seconds
             ))),
             rate_limiter,
+            jupiter_api_url,
         }
     }
 
@@ -91,6 +103,15 @@ impl TokenMetadataFetcher {
         rpc_client: Arc<RpcClient>,
         rate_limiter: Option<Arc<RateLimiter>>,
     ) -> Self {
+        Self::with_client_rate_limiter_and_jupiter(rpc_client, rate_limiter, "https://api.jup.ag/swap/v1".to_string())
+    }
+
+    /// Create from an existing RPC client with optional rate limiter and Jupiter API URL
+    pub fn with_client_rate_limiter_and_jupiter(
+        rpc_client: Arc<RpcClient>,
+        rate_limiter: Option<Arc<RateLimiter>>,
+        jupiter_api_url: String,
+    ) -> Self {
         let pool_enumerator = Some(Arc::new(PoolEnumerator::new(
             rpc_client.clone(),
             100,
@@ -102,6 +123,7 @@ impl TokenMetadataFetcher {
             metadata_cache: RwLock::new(HashMap::new()),
             pool_enumerator,
             rate_limiter,
+            jupiter_api_url,
         }
     }
 
@@ -461,10 +483,10 @@ impl TokenMetadataFetcher {
         output_mint: Pubkey,
         amount: u64,
     ) -> AppResult<String> {
-        // First get a quote
+        // First get a quote (using configured URL, migrated from deprecated v6)
         let quote_url = format!(
-            "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
-            input_mint, output_mint, amount
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
+            self.jupiter_api_url, input_mint, output_mint, amount
         );
 
         let quote_response = reqwest::get(&quote_url)
@@ -486,7 +508,7 @@ impl TokenMetadataFetcher {
         // Get swap transaction
         // Note: For simulation, we don't need a real wallet - we can use a dummy pubkey
         let dummy_wallet = Pubkey::new_unique();
-        let swap_url = "https://quote-api.jup.ag/v6/swap";
+        let swap_url = format!("{}/swap", self.jupiter_api_url);
         let payload = serde_json::json!({
             "quoteResponse": quote,
             "userPublicKey": dummy_wallet.to_string(),

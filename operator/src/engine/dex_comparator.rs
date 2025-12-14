@@ -42,11 +42,18 @@ pub struct DexComparator {
     cache_ttl: Duration,
     /// HTTP client for API calls
     http_client: reqwest::Client,
+    /// Jupiter API base URL (e.g., https://api.jup.ag/swap/v1 or https://lite-api.jup.ag/swap/v1)
+    jupiter_api_url: String,
 }
 
 impl DexComparator {
-    /// Create a new DEX comparator
+    /// Create a new DEX comparator with default Jupiter API URL
     pub fn new() -> Self {
+        Self::with_jupiter_api_url("https://api.jup.ag/swap/v1".to_string())
+    }
+
+    /// Create a new DEX comparator with custom Jupiter API URL
+    pub fn with_jupiter_api_url(jupiter_api_url: String) -> Self {
         Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: Duration::from_secs(5),
@@ -54,6 +61,7 @@ impl DexComparator {
                 .timeout(Duration::from_secs(2))
                 .build()
                 .expect("Failed to create HTTP client"),
+            jupiter_api_url,
         }
     }
 
@@ -122,7 +130,7 @@ impl DexComparator {
                     total_cost_sol: default_total_cost,
                     fee_sol: default_fee,
                     slippage_sol: default_slippage,
-                    dex_url: "https://quote-api.jup.ag/v6".to_string(),
+                    dex_url: self.jupiter_api_url.clone(),
                 }
             });
 
@@ -153,9 +161,10 @@ impl DexComparator {
             .to_u64()
             .unwrap_or(0);
         
-        // Jupiter API endpoint
+        // Jupiter API endpoint (using configured URL, migrated from deprecated v6)
         let url = format!(
-            "https://quote-api.jup.ag/v6/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
+            self.jupiter_api_url,
             token_in,
             token_out,
             lamports
@@ -204,7 +213,7 @@ impl DexComparator {
             total_cost_sol,
             fee_sol,
             slippage_sol,
-            dex_url: "https://quote-api.jup.ag/v6".to_string(),
+            dex_url: self.jupiter_api_url.clone(),
         })
     }
 

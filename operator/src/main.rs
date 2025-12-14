@@ -146,9 +146,10 @@ async fn main() -> anyhow::Result<()> {
         config.token_safety.cache_capacity,
         config.token_safety.cache_ttl_seconds,
     ));
-    let token_fetcher = Arc::new(TokenMetadataFetcher::new_with_rate_limiter(
+    let token_fetcher = Arc::new(TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
         &config.rpc.primary_url,
         Some(rpc_rate_limiter.clone()),
+        config.jupiter.api_url.clone(),
     ));
     let token_safety_config = TokenSafetyConfig {
         freeze_authority_whitelist: config.token_safety.freeze_authority_whitelist.iter().cloned().collect(),

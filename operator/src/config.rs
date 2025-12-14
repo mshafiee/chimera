@@ -345,7 +345,7 @@ pub struct JupiterConfig {
 }
 
 fn default_jupiter_api_url() -> String {
-    "https://lite-api.jup.ag/swap/v1".to_string()
+    "https://api.jup.ag/swap/v1".to_string()
 }
 
 fn default_reconstruct_v0() -> bool {
