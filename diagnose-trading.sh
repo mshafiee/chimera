@@ -105,3 +105,5 @@ if [ "$TRADE_COUNT" -eq 0 ]; then
     echo "  4. Check if wallets are actually trading on-chain"
 fi
 
+
+
