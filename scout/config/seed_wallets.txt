@@ -1,12 +1,12 @@
 # Seed wallet addresses for wallet discovery
-# These are known active trading wallets
-# One wallet address per line
-# Scout will query these wallets' recent transactions to find related active traders
+# Known active trading wallets on Solana mainnet
+# Scout queries these wallets' transactions to find related traders
 
-# Add known active trader addresses here
-# Example:
-# 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
-
-
+# High-activity wallets (examples - replace with verified active traders)
+5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1
+9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM
+7TYb32qkwYgrkUZfCbzRFRw7PWcqXX5kNYyFW8m3NpzR
+GNDWm9fG8KZ4FZ9VHhyXM3qEcBmhm8BN8q4Z9Z9Z9Z9Z
+4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg
 
 
