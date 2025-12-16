@@ -9,9 +9,9 @@ server:
 rpc:
   primary_provider: "helius"
   # Override via CHIMERA_RPC__PRIMARY_URL env var
-  primary_url: "https://api.devnet.solana.com"
+  primary_url: "https://api.mainnet-beta.solana.com"
   # Override via CHIMERA_RPC__FALLBACK_URL env var
-  fallback_url: "https://api.devnet.solana.com"
+  fallback_url: "https://api.mainnet-beta.solana.com"
   rate_limit_per_second: 40
   timeout_ms: 2000
   max_consecutive_failures: 3

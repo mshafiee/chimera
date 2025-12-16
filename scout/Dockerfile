@@ -17,6 +17,9 @@ COPY scout/requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Create database schema directory
+RUN mkdir -p /app/database/schema
+
 # Copy shared database schema from project root
 # This ensures the schema file is available for RosterWriter
 # The schema is the source of truth used by both Rust and Python

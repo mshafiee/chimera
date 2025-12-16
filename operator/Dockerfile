@@ -15,8 +15,10 @@ WORKDIR /build
 # Copy Cargo files first for better caching
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY migrations ./migrations
 
-# Build release binary
+# Build release binary with offline mode for sqlx
+ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
 # Runtime stage

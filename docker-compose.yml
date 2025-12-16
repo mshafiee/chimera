@@ -49,13 +49,15 @@ services:
       # Fix Auto-Merge: Use operator container name
       - CHIMERA_API_URL=http://chimera-operator:8080
       - CHIMERA_OPERATOR_CONTAINER=chimera-operator
+      # Helius API Key for wallet discovery
+      - HELIUS_API_KEY=609cb910-17a5-4a76-9d1b-2ca9c42f759e
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
-      - SCOUT_MAX_WALLETS=100                                    # Reduced from 150
+      - SCOUT_MAX_WALLETS=10                                     # Testing with 10 wallets
       - SCOUT_DISCOVERY_HOURS=24
       - SCOUT_LIQUIDITY_MODE=real
       # Performance Optimization
-      - SCOUT_WALLET_TX_LIMIT=200                                # Reduced from 500 (60% fewer API calls)
+      - SCOUT_WALLET_TX_LIMIT=50                                 # Reduced to 50 for faster testing
       - SCOUT_WALLET_TX_MAX_PAGES=10                             # Reduced from 20 (50% reduction)
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
       # WQS Thresholds (calibrated for real-world performance)
@@ -76,7 +78,7 @@ services:
       sh -c "
         while true; do
           echo '[Scout] Starting wallet analysis...';
-          python main.py --output /app/data/roster_new.db || true;
+          python main.py --output /app/data/roster_new.db --skip-backtest || true;
           if [ -f /app/data/roster_new.db ]; then
             echo '[Scout] Analysis complete, triggering roster merge...';
             curl -X POST http://chimera-operator:8080/api/v1/roster/merge -H 'Content-Type: application/json' -d '{}' || echo '[Scout] Merge API call failed';
