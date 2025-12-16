@@ -6,6 +6,7 @@
 pub mod rate_limiter;
 pub mod helius;
 pub mod rpc_polling;
+pub mod polling_task;
 pub mod transaction_parser;
 pub mod signal_aggregator;
 pub mod pre_validator;
@@ -15,6 +16,7 @@ pub mod wallet_performance;
 pub use rate_limiter::{RateLimiter, RateLimitMetrics, RequestPriority};
 pub use helius::HeliusClient;
 pub use rpc_polling::RpcPollingState;
+pub use polling_task::{start_polling_task, PollingConfig};
 pub use signal_aggregator::SignalAggregator;
 pub use pre_validator::PreValidator;
 pub use exit_detector::ExitDetector;

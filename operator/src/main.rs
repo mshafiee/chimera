@@ -452,6 +452,41 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Metrics update task started");
     
+    // Start RPC polling task if enabled
+    if config.monitoring.as_ref().map(|m| m.rpc_polling_enabled).unwrap_or(false) {
+        let interval_secs = config.monitoring.as_ref().map(|m| m.rpc_poll_interval_secs).unwrap_or(8);
+        let batch_size = config.monitoring.as_ref().map(|m| m.rpc_poll_batch_size).unwrap_or(6);
+        let rate_limit = config.monitoring.as_ref().map(|m| m.rpc_poll_rate_limit).unwrap_or(40);
+        
+        let polling_config = chimera_operator::monitoring::PollingConfig {
+            interval_secs,
+            batch_size,
+            rpc_url: config.rpc.primary_url.clone(),
+            rate_limit,
+        };
+        
+        let polling_db = db_pool.clone();
+        let polling_engine = _engine_handle.clone();
+        let polling_token = cancel_token.clone();
+        
+        tokio::spawn(async move {
+            chimera_operator::monitoring::start_polling_task(
+                polling_db,
+                polling_engine,
+                polling_config,
+                polling_token,
+            ).await;
+        });
+        
+        tracing::info!(
+            interval_secs,
+            batch_size,
+            "RPC polling task started"
+        );
+    } else {
+        tracing::info!("RPC polling disabled in configuration");
+    }
+    
     tracing::info!("All background tasks spawned");
     
     // Now create the FULL router with all routes
@@ -522,9 +557,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/positions/{trade_uuid}", get(get_position))
         .route("/trades", get(list_trades))
         .route("/trades/export", get(export_trades))
+        .route("/metrics/strategy", get(get_strategy_performance))
         .route("/metrics/performance", get(get_performance_metrics))
         .route("/metrics/costs", get(get_cost_metrics))
-        .route("/metrics/strategy/{strategy}", get(get_strategy_performance))
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
         .route("/config", get(get_config))
