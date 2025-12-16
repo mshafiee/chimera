@@ -32,3 +32,5 @@ CREATE TABLE IF NOT EXISTS wallets (
 -- Indexes for wallets table
 CREATE INDEX IF NOT EXISTS idx_wallets_status ON wallets(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_wqs ON wallets(wqs_score DESC);
+
+
