@@ -81,3 +81,5 @@ def safe_decimal_divide(numerator: Decimal, denominator: Decimal, default: Decim
     if denominator == Decimal('0'):
         return default
     return numerator / denominator
+
+

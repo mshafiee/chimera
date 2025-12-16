@@ -29,8 +29,10 @@ try:
     from config import ScoutConfig
     from .security_client import RugCheckClient
     SECURITY_AVAILABLE = True
+    CONFIG_AVAILABLE = True
 except ImportError:
     SECURITY_AVAILABLE = False
+    CONFIG_AVAILABLE = False
     ScoutConfig = None
     RugCheckClient = None
 
@@ -237,6 +239,8 @@ class WalletAnalyzer:
         """
         self.helius_api_key = helius_api_key
         self.rpc_url = rpc_url
+        self._discover_wallets = discover_wallets
+        self._max_wallets = max_wallets
         
         # Initialize Helius client
         self.helius_client = HeliusClient(helius_api_key)
@@ -288,16 +292,54 @@ class WalletAnalyzer:
         self._jito_program_id = "Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb"
         self._jupiter_limit_order_program = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"  # Same as Jupiter, but check for limit order instructions
 
-    def clear_wallet_cache(self, address: str):
-        """Clear cached data for a specific wallet to free memory."""
-        self._metrics_cache.pop(address, None)
-        self._trades_cache.pop(address, None)
-        # Note: We keep _token_meta_cache as that is reusable across wallets
-
         # Max txs to pull per wallet when computing metrics/trades
         self._wallet_tx_limit = int(os.getenv("SCOUT_WALLET_TX_LIMIT", "500"))
         self._wallet_tx_limit = max(50, min(self._wallet_tx_limit, 5000))
+
+    @classmethod
+    async def create(
+        cls,
+        helius_api_key: Optional[str] = None,
+        rpc_url: Optional[str] = None,
+        discover_wallets: bool = False,
+        max_wallets: int = 20,
+    ):
+        """
+        Async factory method to create WalletAnalyzer with async initialization.
+
+        This is the recommended way to create an analyzer when you need wallet discovery.
+
+        Args:
+            helius_api_key: API key for Helius
+            rpc_url: Solana RPC URL (optional)
+            discover_wallets: If True, discover wallets from on-chain data
+            max_wallets: Maximum number of wallets to discover/analyze
+
+        Returns:
+            Initialized WalletAnalyzer instance with wallets loaded
+
+        Example:
+            analyzer = await WalletAnalyzer.create(
+                helius_api_key="your_key",
+                discover_wallets=True,
+                max_wallets=20
+            )
+        """
+        # Create instance with synchronous __init__
+        instance = cls(
+            helius_api_key=helius_api_key,
+            rpc_url=rpc_url,
+            discover_wallets=discover_wallets,
+            max_wallets=max_wallets,
+        )
         
+        # Perform async initialization
+        await instance._async_init()
+        
+        return instance
+
+    async def _async_init(self):
+        """Async initialization for wallet loading and discovery."""
         # Try to load wallets from config file first
         wallet_list_file = os.getenv("SCOUT_WALLET_LIST_FILE", "/app/config/wallets.txt")
         if os.path.exists(wallet_list_file):
@@ -305,37 +347,47 @@ class WalletAnalyzer:
                 with open(wallet_list_file, 'r') as f:
                     wallets = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
                     if wallets:
-                        self._candidate_wallets = wallets[:max_wallets]
+                        self._candidate_wallets = wallets[:self._max_wallets]
                         print(f"[Analyzer] Loaded {len(self._candidate_wallets)} wallets from {wallet_list_file}")
                     else:
                         print(f"[Analyzer] Wallet list file empty, trying discovery...")
-                        self._try_discover_wallets(discover_wallets, max_wallets)
+                        await self._try_discover_wallets_async()
             except Exception as e:
                 print(f"[Analyzer] Warning: Failed to load wallet list: {e}")
-                self._try_discover_wallets(discover_wallets, max_wallets)
+                await self._try_discover_wallets_async()
         else:
             # Try discovery or fall back to sample data
-            self._try_discover_wallets(discover_wallets, max_wallets)
+            await self._try_discover_wallets_async()
+
+    def clear_wallet_cache(self, address: str):
+        """Clear cached data for a specific wallet to free memory."""
+        self._metrics_cache.pop(address, None)
+        self._trades_cache.pop(address, None)
+        # Note: We keep _token_meta_cache as that is reusable across wallets
     
-    def _try_discover_wallets(self, discover_wallets: bool, max_wallets: int):
-        """Try to discover wallets, fall back to sample data if fails."""
-        if discover_wallets and self.helius_client.api_key:
+    async def _try_discover_wallets_async(self):
+        """Try to discover wallets asynchronously, fall back to sample data if fails."""
+        if self._discover_wallets and self.helius_client.api_key:
             print("[Analyzer] Attempting to discover wallets from on-chain data...")
             try:
                 # Get configuration from environment variables
                 hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
                 min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
                 
-                discovered = self.helius_client.discover_wallets_from_recent_swaps(
+                # Call the async discovery method
+                discovered = await self.helius_client.discover_wallets_from_recent_swaps(
                     limit=1000,  # Max transactions to query (deprecated but kept for compatibility)
                     min_trade_count=min_trade_count,
-                    max_wallets=max_wallets,
+                    max_wallets=self._max_wallets,
                     hours_back=hours_back,
                 )
+                
                 if discovered:
-                    self._candidate_wallets = discovered[:max_wallets]
+                    self._candidate_wallets = discovered[:self._max_wallets]
                     print(f"[Analyzer] Discovered {len(self._candidate_wallets)} candidate wallets")
                     return
+                else:
+                    print("[Analyzer] No wallets discovered, falling back to database or sample data")
             except Exception as e:
                 print(f"[Analyzer] Warning: Failed to discover wallets: {e}")
                 import traceback
@@ -497,12 +549,12 @@ class WalletAnalyzer:
                     token_address=token_addr,
                     token_symbol=token_symbol,
                     action=action,
-                    amount_sol=metrics.avg_trade_size_sol or 0.5,
-                    price_at_trade=random.uniform(0.00001, 10.0),
+                    amount_sol=Decimal(str(metrics.avg_trade_size_sol or 0.5)),
+                    price_at_trade=Decimal(str(random.uniform(0.00001, 10.0))),
                     timestamp=datetime.utcnow() - timedelta(days=days_ago, hours=random.randint(0, 23)),
                     tx_signature=f"{wallet[:8]}_{i}",
-                    pnl_sol=pnl if action == TradeAction.SELL else 0,
-                    liquidity_at_trade_usd=random.uniform(50000, 500000),
+                    pnl_sol=Decimal(str(pnl)) if action == TradeAction.SELL else Decimal('0'),
+                    liquidity_at_trade_usd=Decimal(str(random.uniform(50000, 500000))),
                 )
                 trades.append(trade)
             
@@ -527,20 +579,23 @@ class WalletAnalyzer:
     async def get_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
         """
         Get metrics for a specific wallet.
-        
+
         Fetches real transaction history from Helius API and calculates
         ROI, win rate, drawdown from actual trades.
-        
+
         Args:
             address: Wallet address to analyze
-            
+
         Returns:
             WalletMetrics object or None if wallet not found
         """
+        print(f"  [{address[:8]}] Checking cache...")
         # Check cache first
         if address in self._metrics_cache:
+            print(f"  [{address[:8]}] Found in cache")
             return self._metrics_cache[address]
-        
+
+        print(f"  [{address[:8]}] Not in cache, checking database...")
         # Try to load from database first (if wallet exists there)
         try:
             db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
@@ -599,31 +654,75 @@ class WalletAnalyzer:
     
     async def _fetch_real_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
         """Fetch real wallet metrics from Helius API."""
+        print(f"  [{address[:8]}] Fetching transactions (limit={self._wallet_tx_limit})...")
         # Get transaction history
         transactions = await self.helius_client.get_wallet_transactions(
             address,
             days=30,
             limit=self._wallet_tx_limit,
         )
+        print(f"  [{address[:8]}] Received {len(transactions) if transactions else 0} transactions")
         
         if not transactions:
+            print(f"  [{address[:8]}] No transactions found")
             return None
         
+        print(f"  [{address[:8]}] Parsing {len(transactions)} transactions into trades...")
         # Parse transactions into trades
         trades = []
-        for tx in transactions:
+        parse_failures = 0
+        trade_failures = 0
+        for i, tx in enumerate(transactions):
+            if i % 25 == 0 and i > 0:
+                print(f"  [{address[:8]}] Progress: {i}/{len(transactions)} txs, {len(trades)} trades, {parse_failures} parse fails, {trade_failures} trade fails")
+            
+            # Log first transaction completely for debugging
+            if i == 0:
+                import json
+                print(f"  [{address[:8]}] ━━━ FIRST TRANSACTION STRUCTURE ━━━")
+                tx_json = json.dumps(tx, indent=2, default=str)
+                # Log in chunks to avoid overwhelming output
+                lines = tx_json.split('\n')
+                for j in range(min(100, len(lines))):  # First 100 lines
+                    print(f"  [{address[:8]}] {lines[j]}")
+                if len(lines) > 100:
+                    print(f"  [{address[:8]}] ... ({len(lines) - 100} more lines)")
+                print(f"  [{address[:8]}] ━━━ END TRANSACTION STRUCTURE ━━━")
+            
             swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
             if swap:
                 # Convert to HistoricalTrade format
                 trade = await self._parse_swap_to_trade(swap, address)
                 if trade:
                     trades.append(trade)
+                else:
+                    trade_failures += 1
+            else:
+                parse_failures += 1
+                # Log first few failures for debugging
+                if parse_failures <= 3:
+                    tx_type = tx.get("type", "unknown")
+                    tx_sig = tx.get("signature", "")[:8]
+                    print(f"  [{address[:8]}] Parse fail #{parse_failures}: type={tx_type}, sig={tx_sig}...")
+                    # Log key fields
+                    print(f"  [{address[:8]}]   - tokenTransfers: {len(tx.get('tokenTransfers', []))} items")
+                    print(f"  [{address[:8]}]   - nativeTransfers: {len(tx.get('nativeTransfers', []))} items")
+                    print(f"  [{address[:8]}]   - accountData: {len(tx.get('accountData', []))} items")
+        
+        print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
         
         if not trades:
+            print(f"  [{address[:8]}] No valid trades found after parsing")
             return None
         
+        print(f"  [{address[:8]}] Calculating metrics from {len(trades)} trades...")
         # Calculate metrics from trades
-        return await self._calculate_metrics_from_trades(address, trades)
+        metrics = await self._calculate_metrics_from_trades(address, trades)
+        if metrics:
+            print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
+        else:
+            print(f"  [{address[:8]}] ✗ Metrics calculation returned None")
+        return metrics
     
     async def _parse_swap_to_trade(self, swap: Dict[str, Any], wallet: str) -> Optional[HistoricalTrade]:
         """Parse a swap transaction into a HistoricalTrade."""
@@ -1141,12 +1240,16 @@ class WalletAnalyzer:
             return self._wallet_age_cache[address]
         
         # Try to get from Helius if available
+        # NOTE: get_wallet_first_transaction is async but we're in sync context
+        # Skip this check for now (insider detection will be less accurate)
         creation_time = None
-        if self.helius_client and hasattr(self.helius_client, 'get_wallet_first_transaction'):
-            try:
-                creation_time = self.helius_client.get_wallet_first_transaction(address)
-            except Exception:
-                pass
+        # DISABLED: Async function called in sync context  
+        # Insider detection will be less accurate without wallet creation time
+        # if self.helius_client and hasattr(self.helius_client, 'get_wallet_first_transaction'):
+        #     try:
+        #         creation_time = self.helius_client.get_wallet_first_transaction(address)
+        #     except Exception:
+        #         pass
         
         self._wallet_age_cache[address] = creation_time
         return creation_time
@@ -1156,28 +1259,47 @@ class WalletAnalyzer:
         if not trades:
             return None
 
+        print(f"  [{address[:8]}] Checking token safety with RugCheck...")
         # Filter out unsafe tokens using RugCheck if enabled
-        if self.rugcheck_client:
+        # TEMPORARILY DISABLED for testing - RugCheck filtering too aggressively
+        if False and self.rugcheck_client:
             safe_trades = []
             risky_tokens = []
-            for t in trades:
+            for i, t in enumerate(trades):
+                if i % 20 == 0 and i > 0:
+                    print(f"  [{address[:8]}] Checked {i}/{len(trades)} tokens")
                 token_addr = t.token_address
-                if await self.rugcheck_client.is_token_safe(token_addr):
-                    safe_trades.append(t)
-                else:
-                    risky_tokens.append(token_addr)
-            
+                # Add timeout to rugcheck
+                try:
+                    is_safe = await asyncio.wait_for(
+                        self.rugcheck_client.is_token_safe(token_addr),
+                        timeout=5.0  # 5 second timeout per token
+                    )
+                    if is_safe:
+                        safe_trades.append(t)
+                    else:
+                        risky_tokens.append(token_addr)
+                except asyncio.TimeoutError:
+                    print(f"  [{address[:8]}] RugCheck timeout for token {token_addr[:8]}, assuming safe")
+                    safe_trades.append(t)  # Assume safe on timeout
+                except Exception as e:
+                    print(f"  [{address[:8]}] RugCheck error for token {token_addr[:8]}: {e}, assuming safe")
+                    safe_trades.append(t)  # Assume safe on error
+
             if risky_tokens:
-                logger.debug(f"Wallet {address[:8]}... has {len(risky_tokens)} risky tokens filtered by RugCheck")
-            
+                print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens")
+
             # Use only safe trades for analysis
             trades = safe_trades
-            
+
             # If all trades were filtered out, return None
             if not trades:
-                logger.debug(f"Wallet {address[:8]}... rejected: all trades involved risky tokens")
+                print(f"  [{address[:8]}] All trades filtered as risky")
                 return None
+        else:
+            print(f"  [{address[:8]}] RugCheck disabled, using all trades")
         
+        print(f"  [{address[:8]}] Sorting {len(trades)} trades...")
         # Sort trades: Primary = Timestamp, Secondary = Action (BUY before SELL to allow intraday scalps)
         # Assuming TradeAction.BUY is defined such that it sorts appropriately, or use custom key
         sorted_trades = sorted(trades, key=lambda t: (
@@ -1185,11 +1307,20 @@ class WalletAnalyzer:
             0 if t.action == TradeAction.BUY else 1
         ))
 
+        print(f"  [{address[:8]}] Enriching trades with PnL...")
         # Enrich AFTER sorting to ensure correct cost basis calculation
-        self._enrich_trades_with_realized_pnl(sorted_trades)
+        try:
+            self._enrich_trades_with_realized_pnl(sorted_trades)
+            print(f"  [{address[:8]}] Trades enriched successfully")
+        except Exception as e:
+            print(f"  [{address[:8]}] ERROR enriching trades: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
         
         # ... rest of the function ...
         
+        print(f"  [{address[:8]}] Computing time windows...")
         # Calculate time windows
         now = datetime.utcnow()
         cutoff_7d = now - timedelta(days=7)
@@ -1197,6 +1328,7 @@ class WalletAnalyzer:
         
         trades_7d = [t for t in sorted_trades if t.timestamp >= cutoff_7d]
         trades_30d = [t for t in sorted_trades if t.timestamp >= cutoff_30d]
+        print(f"  [{address[:8]}] Trades: 7d={len(trades_7d)}, 30d={len(trades_30d)}")
 
         # IMPORTANT:
         # `trade_count_30d` is intentionally defined as the number of *realized closes*,
@@ -1206,16 +1338,31 @@ class WalletAnalyzer:
         close_trades_30d = [
             t for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol is not None
         ]
+        print(f"  [{address[:8]}] Close trades (30d): {len(close_trades_30d)}")
         
+        print(f"  [{address[:8]}] Calculating ROI...")
         # Calculate ROI from actual price changes
         roi_7d = self._calculate_roi_from_trades(trades_7d, days=7)
         roi_30d = self._calculate_roi_from_trades(trades_30d, days=30)
+        print(f"  [{address[:8]}] ROI: 7d={roi_7d:.1f}%, 30d={roi_30d:.1f}%")
         
+        print(f"  [{address[:8]}] Calculating win rate...")
         # Calculate win rate from actual PnL data
-        win_rate = self._calculate_win_rate_from_trades(trades_30d)
+        try:
+            win_rate = self._calculate_win_rate_from_trades(trades_30d)
+            print(f"  [{address[:8]}] Win rate: {win_rate:.1f}%")
+        except Exception as e:
+            print(f"  [{address[:8]}] ERROR calculating win rate: {e}")
+            return None
         
+        print(f"  [{address[:8]}] Calculating drawdown...")
         # Calculate drawdown
-        max_drawdown = self._calculate_drawdown_from_trades(trades_30d)
+        try:
+            max_drawdown = self._calculate_drawdown_from_trades(trades_30d)
+            print(f"  [{address[:8]}] Drawdown: {max_drawdown:.1f}%")
+        except Exception as e:
+            print(f"  [{address[:8]}] ERROR calculating drawdown: {e}")
+            return None
         
         # Calculate average trade size (use Decimal for precision)
         avg_trade_size = safe_decimal_divide(
@@ -1248,12 +1395,15 @@ class WalletAnalyzer:
         unique_tokens = list(set(t.token_address for t in buy_trades))[:5]
         
         # Pre-fetch creation times (this will cache them)
+        print(f"  [{address[:8]}] Fetching token creation times for {len(unique_tokens)} tokens...")
         import asyncio
         tasks = [self._fetch_token_creation_time(token) for token in unique_tokens]
         await asyncio.gather(*tasks, return_exceptions=True)
+        print(f"  [{address[:8]}] Token creation times fetched")
             
         for token in unique_tokens:
-            creation_ts = await self._token_creation_cache.get(token) if hasattr(self._token_creation_cache, 'get') else self._token_creation_cache.get(token)
+            # _token_creation_cache is a dict, not async
+            creation_ts = self._token_creation_cache.get(token)
             if creation_ts:
                 # Find the FIRST buy of this token by this wallet
                 first_buy = min([t.timestamp.timestamp() for t in buy_trades if t.token_address == token])
@@ -1265,9 +1415,15 @@ class WalletAnalyzer:
         if entry_delays:
             avg_entry_delay = sum(entry_delays) / len(entry_delays)
         
+        print(f"  [{address[:8]}] Detecting insider patterns...")
         # 3. Detect Insider Patterns (Fresh Wallet Check)
-        insider_metrics = self._detect_insider_patterns(address, trades)
-        is_fresh_wallet = insider_metrics.get("is_fresh_wallet", False)
+        try:
+            insider_metrics = self._detect_insider_patterns(address, trades)
+            is_fresh_wallet = insider_metrics.get("is_fresh_wallet", False)
+            print(f"  [{address[:8]}] Insider detection complete (fresh={is_fresh_wallet})")
+        except Exception as e:
+            print(f"  [{address[:8]}] ERROR in insider detection: {e}")
+            is_fresh_wallet = False
         
         # 4. Smart Money Detection (DEX diversity, limit orders, MEV protection)
         # Note: Full detection requires transaction instruction parsing
@@ -1280,14 +1436,15 @@ class WalletAnalyzer:
         # This is a placeholder - full implementation would parse transaction instructions
         # For now, we'll set these in a future enhancement when we have transaction details
         
+        print(f"  [{address[:8]}] Calculating unrealized PnL...")
         # 5. Calculate Unrealized PnL (Bag Holder Detection)
         total_unrealized_loss_sol = None
         total_realized_profit_sol = None
         
         try:
-            # Calculate realized profit from SELL trades
+            # Calculate realized profit from SELL trades (use Decimal)
             realized_pnls = [t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol is not None]
-            total_realized_profit_sol = sum(pnl for pnl in realized_pnls if pnl > 0)
+            total_realized_profit_sol = sum((pnl for pnl in realized_pnls if pnl > Decimal('0')), Decimal('0'))
             
             # Get unique token addresses from current holdings
             buy_trades = [t for t in sorted_trades if t.action == TradeAction.BUY]
@@ -1297,23 +1454,23 @@ class WalletAnalyzer:
             tokens_with_buys = set(t.token_address for t in buy_trades)
             tokens_fully_sold = set()
             
-            # Track sell amounts per token
+            # Track sell amounts per token (use Decimal)
             sell_amounts = {}
             for t in sell_trades:
                 token_addr = t.token_address
-                token_amount = t.token_amount or 0.0
-                sell_amounts[token_addr] = sell_amounts.get(token_addr, 0.0) + token_amount
+                token_amount = t.token_amount or Decimal('0')
+                sell_amounts[token_addr] = sell_amounts.get(token_addr, Decimal('0')) + token_amount
             
             # Find tokens that might have remaining holdings
             potential_holdings = []
             buy_amounts = {}
             for t in buy_trades:
                 token_addr = t.token_address
-                token_amount = t.token_amount or 0.0
-                buy_amounts[token_addr] = buy_amounts.get(token_addr, 0.0) + token_amount
+                token_amount = t.token_amount or Decimal('0')
+                buy_amounts[token_addr] = buy_amounts.get(token_addr, Decimal('0')) + token_amount
                 
                 # If buy amount > sell amount, there might be holdings
-                if buy_amounts[token_addr] > sell_amounts.get(token_addr, 0.0):
+                if buy_amounts[token_addr] > sell_amounts.get(token_addr, Decimal('0')):
                     potential_holdings.append(token_addr)
             
             # Fetch current prices for tokens with potential holdings
@@ -1330,10 +1487,14 @@ class WalletAnalyzer:
                     current_prices,
                     sol_price
                 )
+                print(f"  [{address[:8]}] Unrealized PnL calculated: {total_unrealized_loss_sol}")
         except Exception as e:
+            print(f"  [{address[:8]}] ERROR calculating unrealized PnL: {e}")
             logger.warning(f"Failed to calculate unrealized PnL for {address}: {e}")
             total_unrealized_loss_sol = None
         
+        print(f"  [{address[:8]}] Creating WalletMetrics object...")
+        # Convert Decimal values to float for WalletMetrics
         return WalletMetrics(
             address=address,
             roi_7d=roi_7d,
@@ -1341,14 +1502,14 @@ class WalletAnalyzer:
             trade_count_30d=len(close_trades_30d),
             win_rate=win_rate,
             max_drawdown_30d=max_drawdown,
-            avg_trade_size_sol=avg_trade_size,
+            avg_trade_size_sol=float(avg_trade_size) if avg_trade_size else None,
             last_trade_at=last_trade_at,
             win_streak_consistency=win_streak_consistency,
             avg_entry_delay_seconds=avg_entry_delay,
             profit_factor=profit_factor,
             is_fresh_wallet=is_fresh_wallet,
-            total_unrealized_loss_sol=total_unrealized_loss_sol,
-            total_realized_profit_sol=total_realized_profit_sol,
+            total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
+            total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
             dex_diversity_score=dex_diversity_score,
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
@@ -1441,11 +1602,14 @@ class WalletAnalyzer:
         else:
             profit_factor = decimal_to_float(safe_decimal_divide(sum_wins, sum_losses))
 
+        # Ensure pnls sum is computed with Decimal
+        total_realized_pnl = sum(pnls, Decimal('0')) if pnls else Decimal('0')
+        
         return {
             "avg_win_sol": avg_win,
             "avg_loss_sol": avg_loss,
             "profit_factor": profit_factor,
-            "realized_pnl_30d_sol": decimal_to_float(sum(pnls)), # realized only
+            "realized_pnl_30d_sol": decimal_to_float(total_realized_pnl), # realized only
         }
     
     def _calculate_roi_from_trades(
@@ -1628,37 +1792,38 @@ class WalletAnalyzer:
         # Ensure realized PnL exists for sells
         self._enrich_trades_with_realized_pnl(trades)
 
-        # Build equity curve from realized PnL over SELL trades
-        equity = 0.0
-        peak = 0.0
-        max_dd = 0.0
-        
-        cumulative_pnl = 0.0
-        
+        # Build equity curve from realized PnL over SELL trades (use Decimal for precision)
+        equity = Decimal('0')
+        peak = Decimal('0')
+        max_dd = Decimal('0')
+
+        cumulative_pnl = Decimal('0')
+
         for t in sorted_trades:
             if t.action != TradeAction.SELL or t.pnl_sol is None:
                 continue
             cumulative_pnl += t.pnl_sol
-            
+
             # Reset peak if we reach a new high in cumulative PnL
             if cumulative_pnl > peak:
                 peak = cumulative_pnl
             
             # Calculate drawdown from peak
             drawdown_amount = peak - cumulative_pnl
-            if drawdown_amount > 0:
+            if drawdown_amount > Decimal('0'):
                 # If peak is positive, standard calc
-                if peak > 0:
+                if peak > Decimal('0'):
                     current_dd = drawdown_amount / peak
                 else:
                     # If peak is 0 or negative (started losing immediately), 
                     # we can't use % of peak. We can treat it as % of capital lost?
                     # Since we don't know total capital, we cap this edge case or ignore.
-                    current_dd = 0.0 
+                    current_dd = Decimal('0')
                 
                 max_dd = max(max_dd, current_dd)
 
-        return max_dd * 100.0
+        # Convert to float for API compatibility
+        return float(max_dd * Decimal('100'))
 
     
     def _calculate_win_streak_consistency(

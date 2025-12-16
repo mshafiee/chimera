@@ -285,18 +285,31 @@ async def analyze_wallets(
     candidates = analyzer.get_candidate_wallets()
     stats["total"] = len(candidates)
     
-    if verbose:
-        print(f"[Scout] Analyzing {len(candidates)} candidate wallets (Parallel)...")
+    print(f"[Scout] Analyzing {len(candidates)} candidate wallets (Parallel, max 10 concurrent)...")
 
     # Define a single wallet processor function (async)
     async def process_wallet(wallet_address):
         try:
+            print(f"[Scout] Starting analysis for {wallet_address[:8]}...")
             metrics = await analyzer.get_wallet_metrics(wallet_address)
             if metrics is None:
+                print(f"[Scout] No metrics for {wallet_address[:8]}... (skipped)")
                 return None
             
-            wqs_score = calculate_wqs(metrics)
-            trades = await analyzer.get_historical_trades(wallet_address, days=30)
+            print(f"[Scout] Computing WQS for {wallet_address[:8]}...")
+            try:
+                wqs_score = calculate_wqs(metrics)
+                print(f"[Scout] WQS calculated: {wqs_score:.1f}")
+            except Exception as e:
+                print(f"[Scout] ✗ ERROR calculating WQS for {wallet_address[:8]}...: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
+            print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
+            # Get trades from cache (already fetched during metrics calculation)
+            trades = analyzer._trades_cache.get(wallet_address, [])
+            print(f"[Scout] Got {len(trades)} trades from cache")
             
             # Initial Status
             if wqs_score >= min_wqs_active:
@@ -305,6 +318,8 @@ async def analyze_wallets(
                 initial_status = "CANDIDATE"
             else:
                 initial_status = "REJECTED"
+            
+            print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} Status={initial_status}")
             
             # Validation / Backtest logic
             final_status = initial_status
@@ -324,6 +339,16 @@ async def analyze_wallets(
                     final_status = "CANDIDATE"
                     backtest_res = {"status": "SKIPPED", "notes": "No trades"}
             
+            print(f"[Scout] Computing wallet stats for {wallet_address[:8]}...")
+            try:
+                wallet_stats = analyzer.compute_wallet_trade_stats(trades)
+                print(f"[Scout] Wallet stats computed")
+            except Exception as e:
+                print(f"[Scout] ✗ ERROR computing wallet stats for {wallet_address[:8]}...: {e}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
             result = {
                 "address": wallet_address,
                 "metrics": metrics,
@@ -331,15 +356,16 @@ async def analyze_wallets(
                 "status": final_status,
                 "backtest": backtest_res,
                 "trades": trades,
-                "wallet_stats": analyzer.compute_wallet_trade_stats(trades)
+                "wallet_stats": wallet_stats
             }
             
             # MEMORY FIX: Clear analyzer cache for this wallet immediately
             # We have extracted everything we need into 'result'
             analyzer.clear_wallet_cache(wallet_address)
+            print(f"[Scout] ✓ Completed {wallet_address[:8]}... (WQS={wqs_score:.1f}, Status={final_status})")
             return result
         except Exception as e:
-            print(f"[Scout] ERROR processing {wallet_address}: {e}")
+            print(f"[Scout] ✗ ERROR processing {wallet_address[:8]}...: {e}")
             # Ensure cleanup happens even on error
             analyzer.clear_wallet_cache(wallet_address)
             return None
@@ -349,11 +375,19 @@ async def analyze_wallets(
     
     async def process_with_semaphore(wallet_address):
         async with semaphore:
-            return await process_wallet(wallet_address)
+            try:
+                # Add timeout per wallet: 5 minutes max
+                return await asyncio.wait_for(process_wallet(wallet_address), timeout=300)
+            except asyncio.TimeoutError:
+                print(f"[Scout] TIMEOUT: {wallet_address[:8]}... took >5 minutes, skipping")
+                return None
     
     # Process all wallets concurrently
+    print(f"[Scout] Creating {len(candidates)} concurrent tasks...")
     tasks = [process_with_semaphore(w) for w in candidates]
+    print(f"[Scout] Waiting for all tasks to complete...")
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    print(f"[Scout] All tasks completed, processing results...")
     
     for res in results:
         if isinstance(res, Exception):
@@ -362,64 +396,62 @@ async def analyze_wallets(
             continue
         if not res:
             continue
+        
+        # Unpack results and update stats
+        wallet_addr = res['address']
+        wqs = res['wqs']
+        status = res['status']
+        
+        # Update counters
+        if status == "ACTIVE": stats["active"] += 1
+        elif status == "CANDIDATE": stats["candidate"] += 1
+        else: stats["rejected"] += 1
+        
+        bt_status = res['backtest']['status']
+        if bt_status == "PASSED": stats["backtest_passed"] += 1
+        elif bt_status == "FAILED": stats["backtest_failed"] += 1
+        elif bt_status == "SKIPPED" and status == "ACTIVE": stats["backtest_skipped"] += 1
 
-            # Unpack results and update stats
-            wallet_addr = res['address']
-            wqs = res['wqs']
-            status = res['status']
-            
-            # Update counters
-            if status == "ACTIVE": stats["active"] += 1
-            elif status == "CANDIDATE": stats["candidate"] += 1
-            else: stats["rejected"] += 1
-            
-            bt_status = res['backtest']['status']
-            if bt_status == "PASSED": stats["backtest_passed"] += 1
-            elif bt_status == "FAILED": stats["backtest_failed"] += 1
-            elif bt_status == "SKIPPED" and status == "ACTIVE": stats["backtest_skipped"] += 1
+        # Console output
+        print(f"  [{status}] {wallet_addr[:8]}... WQS: {wqs:.1f}")
 
-            # Console output
-            if verbose:
-                bt_str = f"| BT: {bt_status}" if bt_status != "SKIPPED" else ""
-                print(f"  [{status}] {wallet_addr[:8]}... WQS: {wqs:.1f} {bt_str}")
+        # Build record
+        notes_parts = [f"WQS: {wqs:.1f}"]
+        if res['backtest']['notes']:
+            notes_parts.append(f"Backtest: {res['backtest']['notes']}")
+        notes_parts.append(f"Analyzed at {datetime.utcnow().isoformat()}")
 
-            # Build record
-            notes_parts = [f"WQS: {wqs:.1f}"]
-            if res['backtest']['notes']:
-                notes_parts.append(f"Backtest: {res['backtest']['notes']}")
-            notes_parts.append(f"Analyzed at {datetime.utcnow().isoformat()}")
-
-            # Determine archetype
-            archetype = None
-            if res['trades']:
-                try:
-                    from core.models import TraderArchetype
-                    archetype_enum = analyzer.determine_archetype(res['metrics'], res['trades'])
-                    archetype = archetype_enum.value if archetype_enum else None
-                except Exception as e:
-                    if verbose:
-                        print(f"  Warning: Failed to determine archetype for {wallet_addr[:8]}...: {e}")
-            
-            record = WalletRecord(
-                address=wallet_addr,
-                status=status,
-                wqs_score=wqs,
-                roi_7d=res['metrics'].roi_7d,
-                roi_30d=res['metrics'].roi_30d,
-                trade_count_30d=res['metrics'].trade_count_30d,
-                win_rate=res['metrics'].win_rate,
-                max_drawdown_30d=res['metrics'].max_drawdown_30d,
-                avg_trade_size_sol=res['metrics'].avg_trade_size_sol,
-                avg_win_sol=res['wallet_stats'].get("avg_win_sol"),
-                avg_loss_sol=res['wallet_stats'].get("avg_loss_sol"),
-                profit_factor=res['wallet_stats'].get("profit_factor"),
-                realized_pnl_30d_sol=res['wallet_stats'].get("realized_pnl_30d_sol"),
-                last_trade_at=res['metrics'].last_trade_at,
-                notes=" | ".join(notes_parts),
-                archetype=archetype,
-                avg_entry_delay_seconds=res['metrics'].avg_entry_delay_seconds,
-            )
-            records.append(record)
+        # Determine archetype
+        archetype = None
+        if res['trades']:
+            try:
+                from core.models import TraderArchetype
+                archetype_enum = analyzer.determine_archetype(res['metrics'], res['trades'])
+                archetype = archetype_enum.value if archetype_enum else None
+            except Exception as e:
+                if verbose:
+                    print(f"  Warning: Failed to determine archetype for {wallet_addr[:8]}...: {e}")
+        
+        record = WalletRecord(
+            address=wallet_addr,
+            status=status,
+            wqs_score=wqs,
+            roi_7d=res['metrics'].roi_7d,
+            roi_30d=res['metrics'].roi_30d,
+            trade_count_30d=res['metrics'].trade_count_30d,
+            win_rate=res['metrics'].win_rate,
+            max_drawdown_30d=res['metrics'].max_drawdown_30d,
+            avg_trade_size_sol=res['metrics'].avg_trade_size_sol,
+            avg_win_sol=res['wallet_stats'].get("avg_win_sol"),
+            avg_loss_sol=res['wallet_stats'].get("avg_loss_sol"),
+            profit_factor=res['wallet_stats'].get("profit_factor"),
+            realized_pnl_30d_sol=res['wallet_stats'].get("realized_pnl_30d_sol"),
+            last_trade_at=res['metrics'].last_trade_at,
+            notes=" | ".join(notes_parts),
+            archetype=archetype,
+            avg_entry_delay_seconds=res['metrics'].avg_entry_delay_seconds,
+        )
+        records.append(record)
             
     return records, stats
 
@@ -462,13 +494,16 @@ async def main_async():
             print("[Scout] WARNING: Running with simulated liquidity mode - results are non-deterministic!")
             print("[Scout] Set SCOUT_LIQUIDITY_MODE=real and provide BIRDEYE_API_KEY for production use")
         
-        analyzer = WalletAnalyzer(
+        # Use async factory for proper wallet discovery
+        analyzer = await WalletAnalyzer.create(
             helius_api_key=helius_api_key,
             discover_wallets=True,  # Enable wallet discovery from on-chain data
             max_wallets=args.max_wallets,
         )
     except Exception as e:
         print(f"[Scout] ERROR: Failed to initialize analyzer: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
     
     # Initialize validator if not skipping backtest

@@ -74,8 +74,8 @@ class HeliusClient:
         self.base_url = "https://api.helius.xyz/v0"
         self.last_request_time = 0.0
         # Conservative rate limit: 10 calls/sec
-        self.rate_limit_delay = 0.1 
-        self._lock = threading.Lock()  # Thread safety lock
+        self.rate_limit_delay = 0.1
+        self._lock = asyncio.Lock()  # Async lock for rate limiting
 
         # Cache valid discoveries between runs
         self._discovery_cache: Dict[str, Any] = {}
@@ -102,9 +102,11 @@ class HeliusClient:
         self._own_session = False
     
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session."""
+        """Get or create aiohttp session with default timeout."""
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            # Set default timeout for all requests: 60s total, 30s connect
+            timeout = aiohttp.ClientTimeout(total=60, connect=30, sock_read=30)
+            self._session = aiohttp.ClientSession(timeout=timeout)
             self._own_session = True
         return self._session
 
@@ -264,7 +266,7 @@ class HeliusClient:
     async def _rate_limit_async(self):
         """Async rate limiting."""
         current_time = time.time()
-        with self._lock:
+        async with self._lock:
             time_since_last = current_time - self.last_request_time
             if time_since_last < self.rate_limit_delay:
                 await asyncio.sleep(self.rate_limit_delay - time_since_last)
@@ -525,13 +527,16 @@ class HeliusClient:
     
     def _extract_wallets_from_transaction(self, tx: Dict[str, Any]) -> List[str]:
         """
-        Extract multiple wallet addresses from a transaction.
+        Extract ACTUAL TRADING wallet addresses from a transaction.
+        
+        Only extracts wallets that are directly involved in swaps (appear in tokenTransfers),
+        and filters out infrastructure addresses like program IDs, routing contracts, etc.
         
         Args:
             tx: Transaction dictionary from Helius API
             
         Returns:
-            List of unique valid wallet addresses
+            List of unique valid wallet addresses that are actual traders
         """
         if not isinstance(tx, dict):
             return []
@@ -563,43 +568,58 @@ class HeliusClient:
             # Skip low-value spam/dust transactions
             return []
 
-        wallets: Set[str] = set()
+        # Known infrastructure addresses to EXCLUDE (program IDs, routers, etc.)
+        INFRASTRUCTURE_ADDRESSES = {
+            # Program IDs
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
+            "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",   # Jupiter V4
+            "JUP3c2Uh3WA4Ng34oA4UGdXZMDK79qPEoJNhKz",        # Jupiter V3
+            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium
+            "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS",   # Raydium Router
+            "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",  # Orca
+            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Whirlpool
+            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # PumpFun
+            "Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb",   # Jito
+            "jitonobu",                                         # Jito program
+            "srmqPvymPx9SrHEZqFDvC3KVszRAHd9X7ddZy4j6Yb3",  # Serum
+            "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",  # Serum V3
+            "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # CAMM
+            "DFLoBWSFUNqgdmxjKzQb3Th5GJxDiRJSqFzofAV3e",     # DFlow
+            # System accounts
+            "11111111111111111111111111111111",                # System Program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # Token Program
+            "SysvarRent111111111111111111111111111111111",    # Rent Sysvar
+            "SysvarC1ock11111111111111111111111111111111",    # Clock Sysvar
+            "SysvarRecentB1ockHashes111111111111111111111",   # Recent Blockhashes
+        }
+
+        # ONLY extract wallets from tokenTransfers (actual traders)
+        traders: Set[str] = set()
         
-        # Primary: Extract fee payer (transaction signer) - most reliable
-        if "feePayer" in tx:
-            fee_payer = tx["feePayer"]
-            if self._validate_wallet_address(fee_payer):
-                wallets.add(fee_payer)
-        
-        # Secondary: Extract from accountData array (user accounts)
-        if "accountData" in tx:
-            for acc in tx.get("accountData", []):
-                if isinstance(acc, dict) and "account" in acc:
-                    account_addr = acc.get("account")
-                    if account_addr and self._validate_wallet_address(account_addr):
-                        wallets.add(account_addr)
-        
-        # Tertiary: Extract from nativeTransfers
-        if "nativeTransfers" in tx:
-            for transfer in tx.get("nativeTransfers", []):
-                if isinstance(transfer, dict):
-                    for key in ["fromUserAccount", "toUserAccount"]:
-                        if key in transfer:
-                            addr = transfer[key]
-                            if self._validate_wallet_address(addr):
-                                wallets.add(addr)
-        
-        # Tertiary: Extract from tokenTransfers
+        # Extract from tokenTransfers ONLY
         if "tokenTransfers" in tx:
             for transfer in tx.get("tokenTransfers", []):
                 if isinstance(transfer, dict):
-                    for key in ["fromUserAccount", "toUserAccount", "userAccount"]:
+                    # Only fromUserAccount and toUserAccount are actual traders
+                    for key in ["fromUserAccount", "toUserAccount"]:
                         if key in transfer:
                             addr = transfer[key]
-                            if self._validate_wallet_address(addr):
-                                wallets.add(addr)
+                            # Validate address format and not in exclusion list
+                            if (addr and 
+                                self._validate_wallet_address(addr) and
+                                addr not in INFRASTRUCTURE_ADDRESSES and
+                                not addr.startswith("11111") and  # System addresses
+                                not addr.startswith("Sysvar")):   # Sysvar accounts
+                                traders.add(addr)
         
-        return list(wallets)
+        # OPTIONAL: Also check if feePayer appears in the transfers
+        # If feePayer paid for the tx AND appears in transfers, they're definitely a trader
+        fee_payer = tx.get("feePayer")
+        if fee_payer and fee_payer in traders:
+            # Fee payer is the transaction initiator and appears in transfers - strong signal
+            pass  # Already in traders set
+        
+        return list(traders)
     
     def _validate_wallet_activity(
         self,
@@ -625,7 +645,7 @@ class HeliusClient:
         except Exception:
             return False  # If we can't validate, assume invalid
     
-    def _query_token_transactions(
+    async def _query_token_transactions(
         self,
         token_addr: str,
         cutoff_time: int,
@@ -733,7 +753,7 @@ class HeliusClient:
                     print(f"[Helius] Reached max API calls, stopping token queries")
                     break
                 
-                token_addr, transactions = self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
+                token_addr, transactions = await self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
                 
                 for tx in transactions:
                     fee_payer = tx.get("feePayer")
@@ -841,7 +861,7 @@ class HeliusClient:
                         data = await response.json()
                 
                     if "result" in data and "data" in data["result"]:
-                    transactions = data["result"]["data"]
+                        transactions = data["result"]["data"]
                     
                     for tx in transactions:
                         wallets = self._extract_wallets_from_transaction(tx)
@@ -1123,6 +1143,7 @@ class HeliusClient:
             cutoff = datetime.utcnow() - timedelta(days=days)
             cutoff_timestamp = int(cutoff.timestamp())
 
+        print(f"  [{wallet_address[:8]}] Starting pagination (target={target}, max_pages={MAX_PAGES})")
         while True:
             # Stop if we have enough
             if len(all_txs) >= target:
@@ -1137,7 +1158,9 @@ class HeliusClient:
             if before_sig:
                 params["before"] = before_sig
 
+            print(f"  [{wallet_address[:8]}] Page {pages+1}: Requesting from API...")
             data = await self._make_request(endpoint, params)
+            print(f"  [{wallet_address[:8]}] Page {pages+1}: Response received")
             if not data:
                 break
 
@@ -1258,6 +1281,38 @@ class HeliusClient:
             return swap_info
 
         # Robust behavior: compute wallet-relative deltas.
+        # FIRST: Check if wallet is actually involved in this transaction
+        if wallet_address:
+            wallet_involved = False
+            
+            # Check feePayer
+            if tx.get("feePayer") == wallet_address:
+                wallet_involved = True
+            
+            # Check tokenTransfers
+            if not wallet_involved:
+                for tr in tx.get("tokenTransfers", []) or []:
+                    if (tr.get("fromUserAccount") == wallet_address or 
+                        tr.get("toUserAccount") == wallet_address):
+                        wallet_involved = True
+                        break
+            
+            # Check accountData for balance changes (wallet might be program/vault)
+            if not wallet_involved:
+                for acc in tx.get("accountData", []) or []:
+                    if acc.get("account") == wallet_address:
+                        # Check if this account had any token balance changes
+                        if acc.get("tokenBalanceChanges"):
+                            wallet_involved = True
+                            break
+            
+            if not wallet_involved:
+                # Wallet not directly involved in this swap
+                return None
+            else:
+                # Debug: Wallet is involved, proceeding with parse
+                pass  # Continue parsing
+        
         sol_mint = "So11111111111111111111111111111111111111112"
         usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         usdt_mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
@@ -1336,6 +1391,8 @@ class HeliusClient:
                     break
             
             if not primary_mint:
+                # Debug log why parse failed
+                # print(f"[Parser] No primary token found. sol_delta={sol_delta}, token_deltas={len(token_deltas)}")
                 return None
 
         # If we have no SOL leg, try to value token->token swaps using a stablecoin quote.

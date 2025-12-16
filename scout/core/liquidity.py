@@ -45,6 +45,19 @@ except ImportError:
     JUPITER_AVAILABLE = False
     JupiterLiquidityClient = None
 
+try:
+    from .redis_client import RedisClient, REDIS_AVAILABLE
+except ImportError:
+    REDIS_AVAILABLE = False
+    RedisClient = None
+
+try:
+    from config import ScoutConfig
+    CONFIG_AVAILABLE = True
+except ImportError:
+    CONFIG_AVAILABLE = False
+    ScoutConfig = None
+
 logger = logging.getLogger(__name__)
 
 
