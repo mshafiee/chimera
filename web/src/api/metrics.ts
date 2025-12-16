@@ -43,8 +43,8 @@ export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: numbe
     queryKey: ['metrics', 'strategy', strategy, days],
     queryFn: async () => {
       const { data } = await apiClient.get<StrategyPerformance>(
-        `/metrics/strategy/${strategy}`,
-        { params: { days: days.toString() } }
+        `/metrics/strategy`,
+        { params: { strategy, days: days.toString() } }
       )
       return data
     },

@@ -156,24 +156,24 @@ export function Dashboard() {
             <div className="border-t border-border pt-3">
               <div className="text-xs text-text-muted mb-1">24h PnL</div>
               <div className={`text-2xl font-bold font-mono-numbers ${
-                performanceMetrics && performanceMetrics.pnl_24h >= 0
+                performanceMetrics && Number(performanceMetrics.pnl_24h) >= 0
                   ? 'text-profit'
                   : 'text-loss'
               }`}>
                 {metricsLoading
                   ? '...'
-                  : performanceMetrics
-                  ? `${performanceMetrics.pnl_24h >= 0 ? '+' : ''}$${performanceMetrics.pnl_24h.toFixed(2)}`
+                  : performanceMetrics && performanceMetrics.pnl_24h != null
+                  ? `${Number(performanceMetrics.pnl_24h) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_24h, 2)}`
                   : '$0.00'}
               </div>
-              {performanceMetrics?.pnl_24h_change_percent && (
+              {performanceMetrics?.pnl_24h_change_percent != null && (
                 <div className={`text-xs mt-1 ${
-                  performanceMetrics.pnl_24h_change_percent >= 0
+                  Number(performanceMetrics.pnl_24h_change_percent) >= 0
                     ? 'text-profit'
                     : 'text-loss'
                 }`}>
-                  {performanceMetrics.pnl_24h_change_percent >= 0 ? '+' : ''}
-                  {performanceMetrics.pnl_24h_change_percent.toFixed(1)}%
+                  {Number(performanceMetrics.pnl_24h_change_percent) >= 0 ? '+' : ''}
+                  {safeToFixed(performanceMetrics.pnl_24h_change_percent, 1)}%
                 </div>
               )}
             </div>
@@ -284,48 +284,48 @@ export function Dashboard() {
               value={
                 metricsLoading
                   ? '...'
-                  : performanceMetrics
-                  ? `${performanceMetrics.pnl_24h >= 0 ? '+' : ''}$${performanceMetrics.pnl_24h.toFixed(2)}`
+                  : performanceMetrics && performanceMetrics.pnl_24h != null
+                  ? `${Number(performanceMetrics.pnl_24h) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_24h, 2)}`
                   : '$0.00'
               }
               change={
                 performanceMetrics?.pnl_24h_change_percent !== undefined && performanceMetrics.pnl_24h_change_percent !== null
-                  ? `${performanceMetrics.pnl_24h_change_percent >= 0 ? '+' : ''}${performanceMetrics.pnl_24h_change_percent.toFixed(1)}%`
+                  ? `${Number(performanceMetrics.pnl_24h_change_percent) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_24h_change_percent, 1)}%`
                   : undefined
               }
-              positive={performanceMetrics ? performanceMetrics.pnl_24h >= 0 : true}
+              positive={performanceMetrics ? Number(performanceMetrics.pnl_24h) >= 0 : true}
             />
             <MetricCard
               label="7d"
               value={
                 metricsLoading
                   ? '...'
-                  : performanceMetrics
-                  ? `${performanceMetrics.pnl_7d >= 0 ? '+' : ''}$${performanceMetrics.pnl_7d.toFixed(2)}`
+                  : performanceMetrics && performanceMetrics.pnl_7d != null
+                  ? `${Number(performanceMetrics.pnl_7d) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_7d, 2)}`
                   : '$0.00'
               }
               change={
                 performanceMetrics?.pnl_7d_change_percent !== undefined && performanceMetrics.pnl_7d_change_percent !== null
-                  ? `${performanceMetrics.pnl_7d_change_percent >= 0 ? '+' : ''}${performanceMetrics.pnl_7d_change_percent.toFixed(1)}%`
+                  ? `${Number(performanceMetrics.pnl_7d_change_percent) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_7d_change_percent, 1)}%`
                   : undefined
               }
-              positive={performanceMetrics ? performanceMetrics.pnl_7d >= 0 : true}
+              positive={performanceMetrics ? Number(performanceMetrics.pnl_7d) >= 0 : true}
             />
             <MetricCard
               label="30d"
               value={
                 metricsLoading
                   ? '...'
-                  : performanceMetrics
-                  ? `${performanceMetrics.pnl_30d >= 0 ? '+' : ''}$${performanceMetrics.pnl_30d.toFixed(2)}`
+                  : performanceMetrics && performanceMetrics.pnl_30d != null
+                  ? `${Number(performanceMetrics.pnl_30d) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_30d, 2)}`
                   : '$0.00'
               }
               change={
                 performanceMetrics?.pnl_30d_change_percent !== undefined && performanceMetrics.pnl_30d_change_percent !== null
-                  ? `${performanceMetrics.pnl_30d_change_percent >= 0 ? '+' : ''}${performanceMetrics.pnl_30d_change_percent.toFixed(1)}%`
+                  ? `${Number(performanceMetrics.pnl_30d_change_percent) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_30d_change_percent, 1)}%`
                   : undefined
               }
-              positive={performanceMetrics ? performanceMetrics.pnl_30d >= 0 : true}
+              positive={performanceMetrics ? Number(performanceMetrics.pnl_30d) >= 0 : true}
             />
           </div>
           {pnlData.length > 0 ? (
@@ -352,19 +352,19 @@ export function Dashboard() {
                 <div>
                   <div className="text-xs md:text-sm text-text-muted mb-1">Avg Jito Tip</div>
                   <div className="text-lg md:text-xl font-semibold font-mono-numbers">
-                    {costMetrics.avg_jito_tip_sol.toFixed(4)} SOL
+                    {safeToFixed(costMetrics.avg_jito_tip_sol, 4)} SOL
                   </div>
                 </div>
                 <div>
                   <div className="text-xs md:text-sm text-text-muted mb-1">Avg DEX Fee</div>
                   <div className="text-lg md:text-xl font-semibold font-mono-numbers">
-                    {costMetrics.avg_dex_fee_sol.toFixed(4)} SOL
+                    {safeToFixed(costMetrics.avg_dex_fee_sol, 4)} SOL
                   </div>
                 </div>
                 <div>
                   <div className="text-xs md:text-sm text-text-muted mb-1">Avg Slippage</div>
                   <div className="text-lg md:text-xl font-semibold font-mono-numbers">
-                    {costMetrics.avg_slippage_cost_sol.toFixed(4)} SOL
+                    {safeToFixed(costMetrics.avg_slippage_cost_sol, 4)} SOL
                   </div>
                 </div>
               </div>
@@ -373,25 +373,25 @@ export function Dashboard() {
                   <div>
                     <div className="text-xs md:text-sm text-text-muted mb-1">Total Costs (30d)</div>
                     <div className="text-lg md:text-xl font-semibold font-mono-numbers text-text-muted">
-                      {costMetrics.total_costs_30d_sol.toFixed(4)} SOL
+                      {safeToFixed(costMetrics.total_costs_30d_sol, 4)} SOL
                     </div>
                   </div>
                   <div>
                     <div className="text-xs md:text-sm text-text-muted mb-1">Net Profit (30d)</div>
                     <div className={`text-lg md:text-xl font-semibold font-mono-numbers ${
-                      costMetrics.net_profit_30d_sol >= 0 ? 'text-profit' : 'text-loss'
+                      Number(costMetrics.net_profit_30d_sol) >= 0 ? 'text-profit' : 'text-loss'
                     }`}>
-                      {costMetrics.net_profit_30d_sol >= 0 ? '+' : ''}
-                      {costMetrics.net_profit_30d_sol.toFixed(4)} SOL
+                      {Number(costMetrics.net_profit_30d_sol) >= 0 ? '+' : ''}
+                      {safeToFixed(costMetrics.net_profit_30d_sol, 4)} SOL
                     </div>
                   </div>
                   <div>
                     <div className="text-xs md:text-sm text-text-muted mb-1">ROI %</div>
                     <div className={`text-lg md:text-xl font-semibold font-mono-numbers ${
-                      costMetrics.roi_percent >= 0 ? 'text-profit' : 'text-loss'
+                      Number(costMetrics.roi_percent) >= 0 ? 'text-profit' : 'text-loss'
                     }`}>
-                      {costMetrics.roi_percent >= 0 ? '+' : ''}
-                      {costMetrics.roi_percent.toFixed(1)}%
+                      {Number(costMetrics.roi_percent) >= 0 ? '+' : ''}
+                      {safeToFixed(costMetrics.roi_percent, 1)}%
                     </div>
                   </div>
                 </div>
@@ -415,19 +415,19 @@ export function Dashboard() {
                 <div className="text-xs md:text-sm text-text-muted">Win Rate</div>
                 <div className="text-xl md:text-2xl font-semibold font-mono-numbers text-shield">
                   {shieldPerformance
-                    ? `${shieldPerformance.win_rate.toFixed(1)}%`
+                    ? `${safeToFixed(shieldPerformance.win_rate, 1)}%`
                     : '...'}
                 </div>
               </div>
               <div>
                 <div className="text-xs md:text-sm text-text-muted">Avg Return</div>
                 <div className={`text-xl md:text-2xl font-semibold font-mono-numbers ${
-                  shieldPerformance && shieldPerformance.avg_return >= 0
+                  shieldPerformance && Number(shieldPerformance.avg_return) >= 0
                     ? 'text-profit'
                     : 'text-loss'
                 }`}>
                   {shieldPerformance
-                    ? `${shieldPerformance.avg_return >= 0 ? '+' : ''}$${shieldPerformance.avg_return.toFixed(2)}`
+                    ? `${Number(shieldPerformance.avg_return) >= 0 ? '+' : ''}$${safeToFixed(shieldPerformance.avg_return, 2)}`
                     : '...'}
                 </div>
               </div>
@@ -465,19 +465,19 @@ export function Dashboard() {
                 <div className="text-xs md:text-sm text-text-muted">Win Rate</div>
                 <div className="text-xl md:text-2xl font-semibold font-mono-numbers text-spear">
                   {spearPerformance
-                    ? `${spearPerformance.win_rate.toFixed(1)}%`
+                    ? `${safeToFixed(spearPerformance.win_rate, 1)}%`
                     : '...'}
                 </div>
               </div>
               <div>
                 <div className="text-xs md:text-sm text-text-muted">Avg Return</div>
                 <div className={`text-xl md:text-2xl font-semibold font-mono-numbers ${
-                  spearPerformance && spearPerformance.avg_return >= 0
+                  spearPerformance && Number(spearPerformance.avg_return) >= 0
                     ? 'text-profit'
                     : 'text-loss'
                 }`}>
                   {spearPerformance
-                    ? `${spearPerformance.avg_return >= 0 ? '+' : ''}$${spearPerformance.avg_return.toFixed(2)}`
+                    ? `${Number(spearPerformance.avg_return) >= 0 ? '+' : ''}$${safeToFixed(spearPerformance.avg_return, 2)}`
                     : '...'}
                 </div>
               </div>
@@ -711,4 +711,16 @@ function formatUptime(seconds: number): string {
     return `${hours}h ${minutes}m`
   }
   return `${minutes}m`
+}
+
+// Helper function to safely convert and format numbers
+function safeToFixed(value: unknown, decimals: number = 2): string {
+  if (value === null || value === undefined) {
+    return '0.' + '0'.repeat(decimals)
+  }
+  const num = typeof value === 'number' ? value : Number(value)
+  if (isNaN(num)) {
+    return '0.' + '0'.repeat(decimals)
+  }
+  return num.toFixed(decimals)
 }
