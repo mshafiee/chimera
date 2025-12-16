@@ -1829,13 +1829,17 @@ pub async fn get_cost_metrics(
 
 /// Get strategy performance breakdown
 ///
-/// GET /api/v1/metrics/strategy/:strategy
+/// GET /api/v1/metrics/strategy?strategy=SHIELD&days=30
 /// Requires: readonly+ role
 pub async fn get_strategy_performance(
     State(state): State<Arc<ApiState>>,
-    Path(strategy): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<StrategyPerformanceResponse>, AppError> {
+    // Get strategy parameter (required)
+    let strategy = params
+        .get("strategy")
+        .ok_or_else(|| AppError::Validation("Missing required parameter: strategy".to_string()))?;
+    
     // Get days parameter (default to 30)
     let days = params
         .get("days")
