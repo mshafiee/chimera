@@ -3,7 +3,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use rust_decimal::Decimal;
-use std::str::FromStr;
 
 /// Trading strategy types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -170,6 +169,7 @@ impl Signal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_strategy_priority() {

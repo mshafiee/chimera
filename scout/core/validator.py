@@ -257,31 +257,30 @@ class PrePromotionValidator:
                     notes=f"Rejection rate: {rejection_rate:.0%}",
                 )
 
-        # 6b. NEW: Check PROFIT FACTOR in Simulator
-        sim_profit = sum(t.simulated_pnl_sol for t in backtest_result.trades if t.simulated_pnl_sol and t.simulated_pnl_sol > 0)
-        sim_loss = abs(sum(t.simulated_pnl_sol for t in backtest_result.trades if t.simulated_pnl_sol and t.simulated_pnl_sol < 0))
-        
-        sim_pf = sim_profit / sim_loss if sim_loss > 0 else (100.0 if sim_profit > 0 else 0.0)
-        
-        if sim_pf < 1.2:
-             logger.info(f"Wallet failed Simulated Profit Factor: {sim_pf:.2f} (Min 1.2)")
-             return ValidationResult(
-                wallet_address=wallet_address,
-                status=ValidationStatus.FAILED_NEGATIVE_PNL,
-                backtest_result=backtest_result,
-                passed=False,
-                reason=f"Simulated Profit Factor too low: {sim_pf:.2f} (Min 1.2)",
-                recommended_status="CANDIDATE",
-                notes=f"Sim PF: {sim_pf:.2f}, Orig PF: {metrics.profit_factor if metrics.profit_factor else 0.0:.2f}"
-            )
+        # 6b. NEW: Check PROFIT FACTOR in Simulator (only when individual trade records available)
+        trade_list = getattr(backtest_result, 'trades', []) or []
+        if trade_list:
+            sim_profit = sum(t.simulated_pnl_sol for t in trade_list if t.simulated_pnl_sol and t.simulated_pnl_sol > 0)
+            sim_loss = abs(sum(t.simulated_pnl_sol for t in trade_list if t.simulated_pnl_sol and t.simulated_pnl_sol < 0))
+
+            sim_pf = sim_profit / sim_loss if sim_loss > 0 else (100.0 if sim_profit > 0 else 0.0)
+
+            if sim_pf < 1.2:
+                logger.info(f"Wallet failed Simulated Profit Factor: {sim_pf:.2f} (Min 1.2)")
+                return ValidationResult(
+                    wallet_address=wallet_address,
+                    status=ValidationStatus.FAILED_NEGATIVE_PNL,
+                    backtest_result=backtest_result,
+                    passed=False,
+                    reason=f"Simulated Profit Factor too low: {sim_pf:.2f} (Min 1.2)",
+                    recommended_status="CANDIDATE",
+                    notes=f"Sim PF: {sim_pf:.2f}, Orig PF: {metrics.profit_factor if metrics.profit_factor else 0.0:.2f}",
+                )
 
         # 6c. NEW: Max Drawdown Check in Simulator
-        # Note: BacktestResult needs max_drawdown_percent or we calculate it here.
-        # Assuming BacktestResult has it (standard model update usually needed or calculate on fly)
-        # We'll calculate it on fly from the trades if missing
         simulated_equity = [0.0]
         current_eq = 0.0
-        for t in backtest_result.trades:
+        for t in trade_list:
             if t.simulated_pnl_sol:
                 current_eq += t.simulated_pnl_sol
                 simulated_equity.append(current_eq)
@@ -409,7 +408,7 @@ class PrePromotionValidator:
 
 
 
-def validate_wallet_for_promotion(
+async def validate_wallet_for_promotion(
     wallet_address: str,
     metrics: WalletMetrics,
     trades: List[HistoricalTrade],
@@ -418,19 +417,19 @@ def validate_wallet_for_promotion(
 ) -> ValidationResult:
     """
     Convenience function to validate a wallet for promotion.
-    
+
     Args:
         wallet_address: Wallet to validate
         metrics: Wallet metrics
         trades: Historical trades
         strategy: Trading strategy
         config: Optional backtest config
-        
+
     Returns:
         ValidationResult
     """
     validator = PrePromotionValidator(backtest_config=config)
-    return validator.validate_for_promotion(wallet_address, metrics, trades, strategy)
+    return await validator.validate_for_promotion(wallet_address, metrics, trades, strategy)
 
 
 # Example usage

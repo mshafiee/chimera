@@ -6,7 +6,6 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Json,
-    response::IntoResponse,
 };
 use serde::Serialize;
 use std::sync::Arc;

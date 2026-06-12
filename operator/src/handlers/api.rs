@@ -557,12 +557,10 @@ pub async fn get_config(
                         RpcMode::Jito => "jito".to_string(),
                         RpcMode::Standard => "helius".to_string(),
                     }
+                } else if config.jito.enabled {
+                    "jito".to_string()
                 } else {
-                    if config.jito.enabled {
-                        "jito".to_string()
-                    } else {
-                        "helius".to_string()
-                    }
+                    "helius".to_string()
                 }
             },
             fallback_triggered: {
@@ -930,7 +928,7 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = pm.tiered_exit_percent {
-            if v < 0.0 || v > 100.0 {
+            if !(0.0..=100.0).contains(&v) {
                 return Err(AppError::Validation(
                     "Tiered exit percent must be between 0 and 100".to_string(),
                 ));
@@ -974,7 +972,7 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = pm.hard_stop_loss {
-            if v < 0.0 || v > 100.0 {
+            if !(0.0..=100.0).contains(&v) {
                 return Err(AppError::Validation(
                     "Hard stop loss must be between 0 and 100".to_string(),
                 ));
@@ -1069,7 +1067,7 @@ pub async fn update_config(
             .await?;
         }
         if let Some(v) = ps.consensus_multiplier {
-            if v < 1.0 || v > 5.0 {
+            if !(1.0..=5.0).contains(&v) {
                 return Err(AppError::Validation(
                     "Consensus multiplier must be between 1.0 and 5.0".to_string(),
                 ));
@@ -1847,7 +1845,7 @@ pub async fn get_strategy_performance(
         .unwrap_or(30);
 
     let (win_rate, avg_return, trade_count) =
-        db::get_strategy_performance(&state.db, &strategy, days).await?;
+        db::get_strategy_performance(&state.db, strategy, days).await?;
 
     // Calculate total PnL for the period
     // We need to query the actual trades to get total PnL (not just average)
@@ -1859,7 +1857,7 @@ pub async fn get_strategy_performance(
         Some(&from_date_str),
         None,
         Some("CLOSED"),
-        Some(&strategy),
+        Some(strategy),
         None, // No wallet_address filter for strategy performance
         None,
         None,

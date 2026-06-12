@@ -390,6 +390,8 @@ impl TokenParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     // ==========================================================================
     // KNOWN TOKENS TESTS
@@ -427,9 +429,9 @@ mod tests {
     fn test_default_config_liquidity_thresholds() {
         let config = TokenSafetyConfig::default();
         // Default includes 20% buffer: 10k * 1.2 = 12k, 5k * 1.2 = 6k
-        assert_eq!(config.min_liquidity_shield_usd, 12_000.0, 
+        assert_eq!(config.min_liquidity_shield_usd, Decimal::from_str("12000.0").unwrap(),
             "Shield liquidity threshold should be $12,000 (10k + 20% buffer)");
-        assert_eq!(config.min_liquidity_spear_usd, 6_000.0,
+        assert_eq!(config.min_liquidity_spear_usd, Decimal::from_str("6000.0").unwrap(),
             "Spear liquidity threshold should be $6,000 (5k + 20% buffer)");
     }
 
@@ -538,7 +540,7 @@ mod tests {
     #[test]
     fn test_shield_liquidity_above_threshold() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 15_000.0;
+        let liquidity_usd = Decimal::from(15_000u32);
         let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
         assert!(!should_reject, "Shield with $15k liquidity should pass");
     }
@@ -546,7 +548,7 @@ mod tests {
     #[test]
     fn test_shield_liquidity_below_threshold() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 5_000.0;
+        let liquidity_usd = Decimal::from(5_000u32);
         let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
         assert!(should_reject, "Shield with $5k liquidity should be rejected");
     }
@@ -554,8 +556,8 @@ mod tests {
     #[test]
     fn test_shield_liquidity_exact_threshold() {
         let config = TokenSafetyConfig::default();
-        // Default threshold is 12_000.0 (10k + 20% buffer)
-        let liquidity_usd = 12_000.0;
+        // Default threshold is 12_000 (10k + 20% buffer)
+        let liquidity_usd = Decimal::from(12_000u32);
         let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
         assert!(!should_reject, "Shield at exact $12k threshold should pass");
     }
@@ -563,7 +565,7 @@ mod tests {
     #[test]
     fn test_spear_liquidity_above_threshold() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 8_000.0;
+        let liquidity_usd = Decimal::from(8_000u32);
         let should_reject = liquidity_usd < config.min_liquidity_spear_usd;
         assert!(!should_reject, "Spear with $8k liquidity should pass");
     }
@@ -571,7 +573,7 @@ mod tests {
     #[test]
     fn test_spear_liquidity_below_threshold() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 3_000.0;
+        let liquidity_usd = Decimal::from(3_000u32);
         let should_reject = liquidity_usd < config.min_liquidity_spear_usd;
         assert!(should_reject, "Spear with $3k liquidity should be rejected");
     }
@@ -631,7 +633,7 @@ mod tests {
     #[test]
     fn test_zero_liquidity_rejected() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 0.0;
+        let liquidity_usd = Decimal::ZERO;
         assert!(liquidity_usd < config.min_liquidity_shield_usd);
         assert!(liquidity_usd < config.min_liquidity_spear_usd);
     }
@@ -639,7 +641,7 @@ mod tests {
     #[test]
     fn test_very_high_liquidity_passes() {
         let config = TokenSafetyConfig::default();
-        let liquidity_usd = 1_000_000.0; // $1M
+        let liquidity_usd = Decimal::from(1_000_000u32); // $1M
         assert!(liquidity_usd >= config.min_liquidity_shield_usd);
         assert!(liquidity_usd >= config.min_liquidity_spear_usd);
     }

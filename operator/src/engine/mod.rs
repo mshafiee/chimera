@@ -8,7 +8,7 @@ pub mod executor;
 mod jito_searcher;
 pub mod recovery;
 pub mod tips;
-mod transaction_builder;
+pub mod transaction_builder;
 mod v0_reconstruction;
 pub mod profit_targets;
 pub mod stop_loss;
@@ -220,6 +220,7 @@ impl Engine {
     }
 
     /// Create a new engine instance with all optional extras including tip manager, price cache, and token parser
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_extras_tip_manager_price_cache_and_token_parser(
         config: AppConfig,
         db: DbPool,
@@ -250,6 +251,7 @@ impl Engine {
 
 
     /// Internal helper to create engine with optional extras including tip manager and price cache
+    #[allow(clippy::too_many_arguments)]
     fn new_with_optional_extras_tip_manager_and_price_cache(
         config: AppConfig,
         db: DbPool,

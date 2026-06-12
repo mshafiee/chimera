@@ -65,6 +65,7 @@ pub struct PriceCache {
     /// Whether the updater is running
     updater_running: Arc<RwLock<bool>>,
     /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
+    #[allow(clippy::type_complexity)]
     pub price_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>>>,
     /// SOL mint address (for market condition filtering)
     sol_mint: String,
@@ -129,7 +130,7 @@ impl PriceCache {
         
         // Update price history for volatility calculation (keep last 24 hours)
         let mut history = self.price_history.write();
-        let token_history = history.entry(token_address.to_string()).or_insert_with(VecDeque::new);
+        let token_history = history.entry(token_address.to_string()).or_default();
         token_history.push_back((now, price_usd));
         
         // Keep only last 24 hours (assuming updates every 5 seconds = ~17,280 entries max)

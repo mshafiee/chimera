@@ -17,7 +17,6 @@ pub use telegram::TelegramNotifier;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use rust_decimal::prelude::*;
-use std::str::FromStr;
 
 /// Alert level for notifications
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

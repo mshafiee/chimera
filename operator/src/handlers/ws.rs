@@ -127,7 +127,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
     let send_task = tokio::spawn(async move {
         while let Ok(event) = rx.recv().await {
             let msg = match serde_json::to_string(&event) {
-                Ok(json) => Message::Text(json.into()),
+                Ok(json) => Message::Text(json),
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to serialize WebSocket event");
                     continue;

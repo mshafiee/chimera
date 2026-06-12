@@ -68,37 +68,18 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     # PDD specification: score starts at 0.
     score = 0.0
 
-    # 1) ROI Performance (up to 25 points), capped at 100% ROI
-    if metrics.roi_30d is not None and metrics.roi_30d > 0:
-        roi = min(metrics.roi_30d, 100.0)
-        score += (roi / 100.0) * 25.0
-
-    # 2) Consistency (up to 25 points)
-    if metrics.win_streak_consistency is not None:
-        score += max(0.0, min(metrics.win_streak_consistency, 1.0)) * 25.0
-    elif metrics.win_rate is not None:
-        # Fallback: use win rate as proxy for consistency (up to 25 points)
-        score += max(0.0, min(metrics.win_rate, 1.0)) * 25.0
-
-    # 3) Activity bonus (+5 if 50+ closes)
-    if metrics.trade_count_30d is not None:
-        tc = max(0, metrics.trade_count_30d)
-        if tc >= 50:
-            score += 5.0
-
-    
-    # 1) ROI Base Score (0-40 pts)
+    # 1) ROI Base Score (0-35 pts)
     # Reward consistent positive ROI over 7d and 30d
     roi_7d = metrics.roi_7d or 0.0
     roi_30d = metrics.roi_30d or 0.0
-    
+
     if roi_30d > 0:
-        score += min(20.0, roi_30d * 0.5)  # Cap at +40% ROI
-    
+        score += min(25.0, (roi_30d / 100.0) * 25.0)  # Cap at 100% ROI = 25 pts
+
     if roi_7d > 0:
         score += min(10.0, roi_7d * 1.0)   # Cap at +10% 7d ROI
-        
-    # Consistency Bonus: 7d is positive defined as > -5% (allow small pullback) 
+
+    # Consistency Bonus: 7d is positive defined as > -5% (allow small pullback)
     # and 30d is solid.
     if roi_7d > -5.0 and roi_30d > 20.0:
         score += 10.0
@@ -124,20 +105,15 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     
     # 4) Penalties (Drawdown & Pump-Dump)
     dd = metrics.max_drawdown_30d or 0.0
-    
-    if dd > 50.0:
-        score -= 50.0  # Rekt
-    elif dd > 30.0:
-        score -= 25.0  # Dangerous
-    elif dd > 15.0:
-        score -= 5.0   # Careful
-        
+
+    # Linear drawdown penalty: -0.2 points per percent of drawdown
+    score -= dd * 0.2
+
     # Anti-Pump-and-Dump / Lucky Shot Check
-    # If 7d ROI is huge but 30d is mediocre (or vice versa in specific ways), 
-    # check for anomaly. 
-    # Heuristic: If 7d ROI > 2x 30d ROI (and 30d is decent), might be a lucky recent pump.
-    if roi_30d > 10.0 and roi_7d > (roi_30d * 2.0):
-        score -= 10.0  # Suspicious spike
+    # If 7d ROI >> 30d ROI, it's likely a lucky recent pump we can't replicate.
+    # Also triggers when roi_30d=0 to prevent rewarding pure 7d spikes.
+    if roi_30d >= 0 and roi_7d > max(roi_30d * 2.0, 5.0):
+        score -= 17.0  # Anti pump-and-dump
         
     # 5) Scalability / Liquidity Safety (Implicit in avg_trade_size)
     if (metrics.avg_trade_size_sol or 0) < 0.05:
@@ -258,6 +234,11 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
                     score += 5.0
         except (ValueError, TypeError):
             pass
+
+    # Confidence multiplier: discount low-sample wallets (smooth ramp to 1.0 at 15+ trades)
+    trade_count = metrics.trade_count_30d or 0
+    confidence = min(trade_count / 15.0, 1.0)
+    score = score * confidence
 
     # Clamp to 0-100 range
     return max(0.0, min(score, 100.0))

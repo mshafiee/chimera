@@ -119,7 +119,7 @@ impl TransactionBuilder {
 
         tracing::debug!(
             tx_bytes_len = tx_bytes.len(),
-            first_byte = tx_bytes.get(0).copied(),
+            first_byte = tx_bytes.first().copied(),
             "Decoded transaction from Jupiter"
         );
 
@@ -132,7 +132,7 @@ impl TransactionBuilder {
 
         // Jupiter v1 API returns VersionedTransaction (starts with version byte 0x01)
         // Check the first byte to determine transaction type
-        if tx_bytes.len() > 0 && tx_bytes[0] == 0x01 {
+        if !tx_bytes.is_empty() && tx_bytes[0] == 0x01 {
             // VersionedTransaction (version 1) - may be V0 or Legacy
             // Parse to sign
             // Use bincode 1.3 (bincode1) to match Solana wire format

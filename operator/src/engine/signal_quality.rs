@@ -96,7 +96,7 @@ impl SignalQuality {
         score += age_score * 0.1;
 
         // Clamp to 0.0-1.0
-        let score = score.min(1.0).max(0.0);
+        let score = score.clamp(0.0, 1.0);
 
         SignalQuality {
             score,
@@ -156,14 +156,15 @@ impl std::fmt::Display for QualityCategory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
 
     #[test]
     fn test_high_quality_signal() {
         let quality = SignalQuality::calculate(
-            90.0,  // High WQS
-            true,  // Consensus
-            60000.0,  // High liquidity
-            Some(200.0),  // Old token
+            90.0,
+            true,
+            Decimal::from(60000u32),
+            Some(200.0),
         );
 
         assert!(quality.score >= 0.9);
@@ -174,10 +175,10 @@ mod tests {
     #[test]
     fn test_medium_quality_signal() {
         let quality = SignalQuality::calculate(
-            75.0,  // Medium-high WQS (increased to ensure >= 0.7)
-            true,  // Consensus signal (increases score significantly)
-            25000.0,  // Good liquidity (> 20k gives 0.7 score)
-            Some(48.0),  // 2 days old (> 24h gives 0.7 score)
+            75.0,
+            true,
+            Decimal::from(25000u32),
+            Some(48.0),
         );
 
         assert!(quality.score >= 0.7);
@@ -189,10 +190,10 @@ mod tests {
     #[test]
     fn test_low_quality_signal() {
         let quality = SignalQuality::calculate(
-            50.0,  // Low WQS
-            false,  // No consensus
-            3000.0,  // Low liquidity
-            Some(2.0),  // Very new token
+            50.0,
+            false,
+            Decimal::from(3000u32),
+            Some(2.0),
         );
 
         assert!(quality.score < 0.7);
@@ -202,16 +203,16 @@ mod tests {
 
     #[test]
     fn test_consensus_boost() {
-        let with_consensus = SignalQuality::calculate(60.0, true, 10000.0, None);
-        let without_consensus = SignalQuality::calculate(60.0, false, 10000.0, None);
+        let with_consensus = SignalQuality::calculate(60.0, true, Decimal::from(10000u32), None);
+        let without_consensus = SignalQuality::calculate(60.0, false, Decimal::from(10000u32), None);
 
         assert!(with_consensus.score > without_consensus.score);
     }
 
     #[test]
     fn test_liquidity_scoring() {
-        let high_liquidity = SignalQuality::calculate(70.0, false, 60000.0, None);
-        let low_liquidity = SignalQuality::calculate(70.0, false, 3000.0, None);
+        let high_liquidity = SignalQuality::calculate(70.0, false, Decimal::from(60000u32), None);
+        let low_liquidity = SignalQuality::calculate(70.0, false, Decimal::from(3000u32), None);
 
         assert!(high_liquidity.score > low_liquidity.score);
     }

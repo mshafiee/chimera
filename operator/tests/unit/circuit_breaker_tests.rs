@@ -10,6 +10,8 @@ use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState, Tri
 use chimera_operator::config::{CircuitBreakerConfig, DatabaseConfig};
 use chimera_operator::db::init_pool;
 use chrono::{Duration, Utc};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 use tempfile::TempDir;
 
 /// Create a test circuit breaker with custom config
@@ -49,14 +51,14 @@ async fn create_test_circuit_breaker(config: CircuitBreakerConfig) -> (CircuitBr
 #[tokio::test]
 async fn test_max_loss_24h_threshold() {
     let config = CircuitBreakerConfig {
-        max_loss_24h_usd: 500.0,
+        max_loss_24h_usd: Decimal::from_str("500.0").unwrap(),
         max_consecutive_losses: 10,
-        max_drawdown_percent: 20.0,
+        max_drawdown_percent: Decimal::from_str("20.0").unwrap(),
         cooldown_minutes: 30,
     };
-    
+
     let (_cb, _temp_dir) = create_test_circuit_breaker(config).await;
-    
+
     // Test exact threshold
     let pnl_24h: f64 = -500.0;
     // In real implementation, this would call cb.evaluate()
@@ -72,9 +74,9 @@ async fn test_max_loss_24h_threshold() {
 #[tokio::test]
 async fn test_max_consecutive_losses_threshold() {
     let config = CircuitBreakerConfig {
-        max_loss_24h_usd: 500.0,
+        max_loss_24h_usd: Decimal::from_str("500.0").unwrap(),
         max_consecutive_losses: 5,
-        max_drawdown_percent: 20.0,
+        max_drawdown_percent: Decimal::from_str("20.0").unwrap(),
         cooldown_minutes: 30,
     };
     
@@ -95,9 +97,9 @@ async fn test_max_consecutive_losses_threshold() {
 #[tokio::test]
 async fn test_max_drawdown_percent_threshold() {
     let config = CircuitBreakerConfig {
-        max_loss_24h_usd: 500.0,
+        max_loss_24h_usd: Decimal::from_str("500.0").unwrap(),
         max_consecutive_losses: 5,
-        max_drawdown_percent: 15.0,
+        max_drawdown_percent: Decimal::from_str("15.0").unwrap(),
         cooldown_minutes: 30,
     };
     

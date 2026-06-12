@@ -23,6 +23,7 @@ pub struct ValidationResult {
 
 /// Pre-execution validator
 pub struct PreValidator {
+    #[allow(dead_code)]
     config: Arc<AppConfig>,
 }
 

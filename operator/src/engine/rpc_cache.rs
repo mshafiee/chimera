@@ -82,7 +82,6 @@ impl RpcCache {
     /// Clear expired entries
     pub fn clear_expired(&self) {
         let mut cache = self.cache.write();
-        let now = SystemTime::now();
         cache.retain(|_, cached| {
             cached.cached_at.elapsed().unwrap_or_default() < cached.ttl
         });

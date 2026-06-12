@@ -14,6 +14,7 @@ mod tests {
     use chimera_operator::config::AppConfig;
     use chimera_operator::engine::executor::{Executor, RpcMode};
     use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
+    use rust_decimal::Decimal;
     use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -139,7 +140,7 @@ mod tests {
             token: "BONK".to_string(),
             token_address: Some("BONK111111111111111111111111111111111111111".to_string()),
             action: Action::Buy,
-            amount_sol: 0.5,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
         };
@@ -164,7 +165,7 @@ mod tests {
             token: "BONK".to_string(),
             token_address: Some("BONK111111111111111111111111111111111111111".to_string()),
             action: Action::Buy,
-            amount_sol: 0.5,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
         };
@@ -451,7 +452,7 @@ mod tests {
             token: "BONK".to_string(),
             token_address: Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()), // USDC for testing
             action: Action::Buy,
-            amount_sol: 0.5,
+            amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: Some("test-mid-trade-failure".to_string()),
         };
@@ -479,7 +480,7 @@ mod tests {
                 token: "BONK".to_string(),
                 token_address: Some("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string()),
                 action: Action::Buy,
-                amount_sol: 0.5,
+                amount_sol: Decimal::from_str("0.5").unwrap(),
                 wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
                 trade_uuid: Some("test-spear-in-fallback".to_string()),
             };

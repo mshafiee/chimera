@@ -157,9 +157,7 @@ impl RecoveryManager {
         // For EXITING positions, check the exit transaction signature
         // If no exit signature yet, check entry signature as fallback
         let tx_signature = position
-            .exit_tx_signature
-            .as_ref()
-            .map(|s| s.as_str())
+            .exit_tx_signature.as_deref()
             .unwrap_or(&position.entry_tx_signature);
         
         let on_chain_state = self.check_on_chain_state(tx_signature).await?;

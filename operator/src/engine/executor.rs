@@ -27,6 +27,7 @@ use tokio::time::timeout;
 const MAX_TX_SIZE_RAW: usize = 1232;
 /// Maximum transaction size in bytes (base64 encoded)
 /// Solana's limit is 1644 bytes for encoded transaction size
+#[allow(dead_code)]
 const MAX_TX_SIZE_ENCODED: usize = 1644;
 
 /// RPC mode for trade execution
@@ -469,7 +470,7 @@ impl Executor {
         // Skip trades during low-activity hours (2 AM - 6 AM UTC)
         let now = Utc::now();
         let hour_utc = now.time().hour();
-        if hour_utc >= 2 && hour_utc < 6 {
+        if (2..6).contains(&hour_utc) {
             return Err(format!(
                 "Low liquidity period: {}:00 UTC (off-hours 2-6 AM)",
                 hour_utc
@@ -689,7 +690,10 @@ impl Executor {
         // Try direct Jito Searcher first if configured
         // Note: Jito bundles currently only support legacy transactions
         if let Some(ref jito_searcher) = self.jito_searcher {
-            let tip_lamports = (tip * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0); // Convert SOL to lamports
+            let tip_lamports = (tip * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or_else(|| {
+                tracing::warn!(tip = %tip, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
+                10_000_000u64
+            }); // Convert SOL to lamports
             
             // Serialize based on transaction type using Legacy config for Solana wire compatibility
             let tx_bytes = match &built_tx {
@@ -776,7 +780,7 @@ impl Executor {
                 self.submit_transaction(transaction, &wallet_keypair).await?
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
-                self.submit_versioned_transaction(&transaction_bytes, &wallet_keypair).await?
+                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?
             }
         };
 
@@ -802,7 +806,10 @@ impl Executor {
         // In production, you would create a proper bundle with tip transaction
         
         // Convert Decimal SOL to lamports (1 SOL = 1_000_000_000 lamports)
-        let tip_lamports = (tip_sol * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or(0);
+        let tip_lamports = (tip_sol * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or_else(|| {
+            tracing::warn!(tip_sol = %tip_sol, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
+            10_000_000u64
+        });
         let payload = serde_json::json!({
             "transactions": [tx_base64],
             "tip": tip_lamports,
@@ -894,7 +901,7 @@ impl Executor {
                 self.submit_transaction(transaction, &wallet_keypair).await?
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
-                self.submit_versioned_transaction(&transaction_bytes, &wallet_keypair).await?
+                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?
             }
         };
 

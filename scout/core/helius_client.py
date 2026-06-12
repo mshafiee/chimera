@@ -75,7 +75,8 @@ class HeliusClient:
         self.last_request_time = 0.0
         # Conservative rate limit: 10 calls/sec
         self.rate_limit_delay = 0.1
-        self._lock = asyncio.Lock()  # Async lock for rate limiting
+        self._lock = asyncio.Lock()  # Async lock for async rate limiting
+        self._sync_lock = threading.Lock()  # Sync lock for _rate_limit()
 
         # Cache valid discoveries between runs
         self._discovery_cache: Dict[str, Any] = {}
@@ -183,6 +184,9 @@ class HeliusClient:
             return None
         return None
 
+    # Well-known DEX program (Jupiter v6 aggregator)
+    JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
+
     # Known system accounts to filter out
     SYSTEM_ACCOUNTS = {
         "11111111111111111111111111111111",  # System Program
@@ -219,7 +223,7 @@ class HeliusClient:
 
     def _rate_limit(self):
         """Ensure we don't exceed rate limits (Thread-Safe)."""
-        with self._lock:  # ADDED: Lock acquisition
+        with self._sync_lock:
             current_time = time.time()
             time_since_last = current_time - self.last_request_time
             if time_since_last < self.rate_limit_delay:
@@ -248,14 +252,21 @@ class HeliusClient:
         if self._circuit_breaker_failures > 0:
             self._circuit_breaker_failures = max(0, self._circuit_breaker_failures - 1)
     
-    async def _retry_with_backoff(self, coro, max_retries: int = 3):
-        """Retry a coroutine with exponential backoff."""
+    async def _retry_with_backoff(self, coro_factory, max_retries: int = 3):
+        """Retry an async callable with exponential backoff.
+
+        coro_factory must be a callable (sync or async) that is called fresh
+        on each attempt so that a new coroutine is created every retry.
+        """
         for attempt in range(max_retries):
             try:
-                result = await coro
+                if asyncio.iscoroutinefunction(coro_factory):
+                    result = await coro_factory()
+                else:
+                    result = coro_factory()
                 self._record_success()
                 return result
-            except Exception as e:
+            except Exception:
                 if attempt == max_retries - 1:
                     self._record_failure()
                     raise
@@ -621,7 +632,7 @@ class HeliusClient:
         
         return list(traders)
     
-    def _validate_wallet_activity(
+    async def _validate_wallet_activity(
         self,
         wallet_address: str,
         min_trades: int = 3,
@@ -629,18 +640,18 @@ class HeliusClient:
     ) -> bool:
         """
         Quick validation of wallet activity.
-        
+
         Args:
             wallet_address: Wallet address to validate
             min_trades: Minimum number of trades required
             days_back: Number of days to look back
-            
+
         Returns:
             True if wallet meets activity criteria
         """
         try:
             # Quick transaction count check
-            transactions = self.get_wallet_transactions(wallet_address, days=days_back, limit=min_trades + 1)
+            transactions = await self.get_wallet_transactions(wallet_address, days=days_back, limit=min_trades + 1)
             return len(transactions) >= min_trades
         except Exception:
             return False  # If we can't validate, assume invalid
@@ -1053,7 +1064,7 @@ class HeliusClient:
             print("[Helius] Validating wallet activity...")
             validated_wallets = []
             for wallet in candidate_wallets:
-                if self._validate_wallet_activity(wallet, min_trades=min_trade_count, days_back=7):
+                if await self._validate_wallet_activity(wallet, min_trades=min_trade_count, days_back=7):
                     validated_wallets.append(wallet)
                 if len(validated_wallets) >= max_wallets:
                     break
@@ -1344,13 +1355,13 @@ class HeliusClient:
                 continue
             amt_ui = self._parse_ui_token_amount(tr)
 
-            from_acc = tr.get("fromUserAccount") or tr.get("fromUserAccount")
-            to_acc = tr.get("toUserAccount") or tr.get("toUserAccount")
+            from_acc = tr.get("fromUserAccount")
+            to_acc = tr.get("toUserAccount")
             user_acc = tr.get("userAccount")
 
-            if from_acc == wallet_address or user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address:
+            if from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address):
                 token_deltas[mint] -= amt_ui
-            if to_acc == wallet_address or user_acc == wallet_address and tr.get("toUserAccount") == wallet_address:
+            if to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address):
                 token_deltas[mint] += amt_ui
 
         # Include wSOL delta in SOL delta if present

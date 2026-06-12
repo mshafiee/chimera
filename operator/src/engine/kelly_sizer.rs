@@ -43,7 +43,7 @@ impl KellySizer {
 
     /// Create with custom conservative multiplier
     pub fn with_conservative_multiplier(db: DbPool, multiplier: f64) -> Self {
-        let mult = Decimal::from_f64_retain(multiplier.max(0.0).min(1.0)).unwrap_or(Decimal::ZERO);
+        let mult = Decimal::from_f64_retain(multiplier.clamp(0.0, 1.0)).unwrap_or(Decimal::ZERO);
         Self {
             db,
             conservative_multiplier: mult,

@@ -30,6 +30,7 @@ impl std::fmt::Display for MarketRegime {
 }
 
 /// Market regime detector
+#[allow(clippy::type_complexity)]
 pub struct MarketRegimeDetector {
     price_cache: Arc<PriceCache>,
     /// Price history for trend analysis (last 24 hours)

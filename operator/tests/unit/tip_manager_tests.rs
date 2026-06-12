@@ -7,6 +7,7 @@
 
 use chimera_operator::engine::tips::TipManager;
 use chimera_operator::JitoConfig;
+use rust_decimal::prelude::*;
 
 const COLD_START_MULTIPLIER: f64 = 2.0;
 const MIN_SAMPLES_FOR_PERCENTILE: u32 = 10;
@@ -20,15 +21,15 @@ fn test_cold_start_multiplier() {
 fn test_cold_start_tip_calculation() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
-    let cold_tip = config.tip_floor_sol * COLD_START_MULTIPLIER;
+
+    let cold_tip = config.tip_floor_sol.to_f64().unwrap() * COLD_START_MULTIPLIER;
     assert!((cold_tip - 0.002).abs() < 0.0001, "Cold start tip should be 0.002 SOL");
 }
 
@@ -36,16 +37,16 @@ fn test_cold_start_tip_calculation() {
 fn test_cold_start_shield_tip() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
+
     // Shield uses floor * 2
-    let tip = config.tip_floor_sol * COLD_START_MULTIPLIER;
+    let tip = config.tip_floor_sol.to_f64().unwrap() * COLD_START_MULTIPLIER;
     assert!((tip - 0.002).abs() < 0.0001, "Shield cold start tip should be 0.002");
 }
 
@@ -53,16 +54,16 @@ fn test_cold_start_shield_tip() {
 fn test_cold_start_spear_tip() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
+
     // Spear uses floor * 2 * 1.5
-    let tip = config.tip_floor_sol * COLD_START_MULTIPLIER * 1.5;
+    let tip = config.tip_floor_sol.to_f64().unwrap() * COLD_START_MULTIPLIER * 1.5;
     assert!((tip - 0.003).abs() < 0.0001, "Spear cold start tip should be 0.003");
 }
 
@@ -70,16 +71,16 @@ fn test_cold_start_spear_tip() {
 fn test_cold_start_exit_tip() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
+
     // Exit uses ceiling during cold start
-    let tip = config.tip_ceiling_sol;
+    let tip = config.tip_ceiling_sol.to_f64().unwrap();
     assert!((tip - 0.01).abs() < 0.0001, "Exit cold start tip should be ceiling");
 }
 
@@ -109,11 +110,11 @@ fn test_percentile_50th_calculation() {
         0.006, 0.007, 0.008, 0.009, 0.010,
     ];
     tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    
+
     let percentile = 50_usize;
     let index = (tips.len() * percentile / 100).min(tips.len() - 1);
     let tip = tips[index];
-    
+
     assert!((tip - 0.006).abs() < 0.0001, "50th percentile should be 0.006");
 }
 
@@ -124,11 +125,11 @@ fn test_percentile_25th_calculation() {
         0.006, 0.007, 0.008, 0.009, 0.010,
     ];
     tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    
+
     let percentile = 25_usize;
     let index = (tips.len() * percentile / 100).min(tips.len() - 1);
     let tip = tips[index];
-    
+
     assert!((tip - 0.003).abs() < 0.0001, "25th percentile should be 0.003");
 }
 
@@ -136,17 +137,17 @@ fn test_percentile_25th_calculation() {
 fn test_tip_ceiling_cap() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
+
     let calculated_tip: f64 = 0.015; // Above ceiling
-    let capped_tip = calculated_tip.min(config.tip_ceiling_sol);
-    
+    let capped_tip = calculated_tip.min(config.tip_ceiling_sol.to_f64().unwrap());
+
     assert!((capped_tip - 0.01).abs() < 0.0001, "Tip should be capped at ceiling");
 }
 
@@ -154,17 +155,17 @@ fn test_tip_ceiling_cap() {
 fn test_tip_floor_minimum() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
+
     let calculated_tip: f64 = 0.0005; // Below floor
-    let floored_tip = calculated_tip.max(config.tip_floor_sol);
-    
+    let floored_tip = calculated_tip.max(config.tip_floor_sol.to_f64().unwrap());
+
     assert!((floored_tip - 0.001).abs() < 0.0001, "Tip should be floored at minimum");
 }
 
@@ -172,19 +173,18 @@ fn test_tip_floor_minimum() {
 fn test_tip_percent_max_cap() {
     let config = JitoConfig {
         enabled: true,
-        tip_floor_sol: 0.001,
-        tip_ceiling_sol: 0.01,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
         tip_percentile: 50,
-        tip_percent_max: 0.10, // 10%
+        tip_percent_max: Decimal::from_str("0.10").unwrap(), // 10%
         helius_fallback: false,
         searcher_endpoint: None,
     };
-    
+
     let trade_amount_sol: f64 = 1.0;
     let calculated_tip: f64 = 0.15; // 15% of trade
-    let max_tip_by_percent = trade_amount_sol * config.tip_percent_max;
+    let max_tip_by_percent = trade_amount_sol * config.tip_percent_max.to_f64().unwrap();
     let capped_tip = calculated_tip.min(max_tip_by_percent);
-    
+
     assert!((capped_tip - 0.10).abs() < 0.0001, "Tip should be capped at 10% of trade");
 }
-

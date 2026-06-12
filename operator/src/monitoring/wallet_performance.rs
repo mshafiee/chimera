@@ -20,7 +20,6 @@ pub struct WalletPerformanceTracker {
     auto_demote_enabled: bool,
 }
 
-use rust_decimal::prelude::*;
 
 /// Wallet copy trading metrics
 #[derive(Debug, Clone)]
@@ -112,7 +111,7 @@ impl WalletPerformanceTracker {
         metrics.last_updated = std::time::SystemTime::now();
 
         // Update WQS in database based on copy performance
-        self.update_wqs_from_copy_performance(wallet_address, &metrics).await?;
+        self.update_wqs_from_copy_performance(wallet_address, metrics).await?;
 
         Ok(())
     }

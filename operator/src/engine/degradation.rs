@@ -96,10 +96,10 @@ where
 pub async fn check_memory_pressure() -> AppResult<f64> {
     #[cfg(target_os = "linux")]
     {
-        use std::fs;
-        
-        // Read /proc/meminfo
-        let meminfo = fs::read_to_string("/proc/meminfo")
+        // Use spawn_blocking so the synchronous file read doesn't stall the async executor
+        let meminfo = tokio::task::spawn_blocking(|| std::fs::read_to_string("/proc/meminfo"))
+            .await
+            .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
             .map_err(|e| AppError::Internal(format!("Failed to read /proc/meminfo: {}", e)))?;
         
         let mut total_kb = 0u64;
@@ -149,7 +149,7 @@ pub fn is_memory_pressure_high() -> bool {
 }
 
 /// Check disk space and return free space percentage
-pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
+pub async fn check_disk_space(_path: &std::path::Path) -> AppResult<f64> {
     #[cfg(target_os = "linux")]
     {
         use std::fs;

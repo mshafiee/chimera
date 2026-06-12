@@ -33,10 +33,13 @@ struct PoolCacheEntry {
 /// Pool enumerator for Raydium and Orca
 pub struct PoolEnumerator {
     /// RPC client (async for future use, sync for current implementation)
+    #[allow(dead_code)]
     rpc_client: Arc<RpcClient>,
     /// Raydium program ID
+    #[allow(dead_code)]
     raydium_program: Pubkey,
     /// Orca program ID
+    #[allow(dead_code)]
     orca_program: Pubkey,
     /// Cache for pool data
     cache: Arc<RwLock<lru::LruCache<String, PoolCacheEntry>>>,

@@ -35,11 +35,10 @@ pub fn extract_v0_components(
 ) -> Result<V0Components, String> {
     // V0 message fields are accessed directly, not via methods
     // Get payer (first account in account_keys)
-    let payer = v0_message
+    let payer = *v0_message
         .account_keys
         .first()
-        .ok_or_else(|| "V0 message has no account keys".to_string())?
-        .clone();
+        .ok_or_else(|| "V0 message has no account keys".to_string())?;
 
     // Extract instructions (field, not method)
     let instructions = v0_message.instructions.clone();
@@ -140,7 +139,7 @@ pub async fn reconstruct_v0_message_with_blockhash(
     // account indices to pubkeys.
 
     // Build the full account list (static + resolved from ALTs)
-    let mut all_accounts = components.static_account_keys.clone();
+    let _all_accounts = components.static_account_keys.clone();
 
     // For each address table lookup, we need to resolve the accounts
     // But since we're reconstructing, we'll let try_compile handle the account resolution
@@ -185,20 +184,18 @@ pub async fn reconstruct_v0_message_with_blockhash(
     for compiled_ix in &components.instructions {
         // Resolve program ID
         let program_id_idx = compiled_ix.program_id_index as usize;
-        let program_id = all_account_keys
+        let program_id = *all_account_keys
             .get(program_id_idx)
-            .ok_or_else(|| format!("Program ID index {} out of range", program_id_idx))?
-            .clone();
+            .ok_or_else(|| format!("Program ID index {} out of range", program_id_idx))?;
 
         // Resolve account keys and determine metadata (writable/signer)
         let account_metas: Vec<AccountMeta> = compiled_ix
             .accounts
             .iter()
             .map(|&idx| {
-                let account_key = all_account_keys
+                let account_key = *all_account_keys
                     .get(idx as usize)
-                    .ok_or_else(|| format!("Account index {} out of range", idx))?
-                    .clone();
+                    .ok_or_else(|| format!("Account index {} out of range", idx))?;
                 
                 // Determine if account is a signer (must be in first num_required_signatures)
                 let is_signer = (idx as usize) < num_required_signatures;

@@ -229,13 +229,12 @@ pub async fn bearer_auth(
     };
 
     // Parse Bearer token
-    let token = if auth_header.starts_with("Bearer ") {
-        &auth_header[7..]
-    } else {
-        return auth_error(
+    let token = match auth_header.strip_prefix("Bearer ") {
+        Some(t) => t,
+        None => return auth_error(
             StatusCode::BAD_REQUEST,
             "Authorization header must use Bearer scheme",
-        );
+        ),
     };
 
     if token.is_empty() {

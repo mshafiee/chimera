@@ -9,32 +9,34 @@ from scout.core.models import HistoricalTrade, TradeAction, SimulatedResult, Bac
 from scout.core.liquidity import LiquidityProvider
 
 
-def test_validator_rejects_low_wqs():
+@pytest.mark.asyncio
+async def test_validator_rejects_low_wqs():
     """Test that validator rejects wallets with WQS below threshold."""
     validator = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(min_wqs_score=60.0)
     )
-    
+
     metrics = WalletMetrics(
         address="test_wallet",
         roi_30d=10.0,  # Low ROI
         trade_count_30d=5,
         win_rate=0.5,
     )
-    
-    result = validator.validate_for_promotion(
+
+    result = await validator.validate_for_promotion(
         "test_wallet",
         metrics,
         [],
         strategy="SHIELD"
     )
-    
+
     assert not result.passed
     assert result.status == ValidationStatus.FAILED_WQS
     assert "wqs score" in result.reason.lower()
 
 
-def test_validator_rejects_insufficient_trades():
+@pytest.mark.asyncio
+async def test_validator_rejects_insufficient_trades():
     """Test that validator rejects wallets with insufficient trades."""
     validator = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(
@@ -42,14 +44,14 @@ def test_validator_rejects_insufficient_trades():
             min_trades=10,
         )
     )
-    
+
     metrics = WalletMetrics(
         address="test_wallet",
         roi_30d=50.0,
         trade_count_30d=20,  # Enough for WQS
         win_rate=0.7,
     )
-    
+
     # Only 5 trades (below min_trades=10)
     trades = [
         HistoricalTrade(
@@ -63,19 +65,20 @@ def test_validator_rejects_insufficient_trades():
         )
         for i in range(5)
     ]
-    
-    result = validator.validate_for_promotion(
+
+    result = await validator.validate_for_promotion(
         "test_wallet",
         metrics,
         trades,
         strategy="SHIELD"
     )
-    
+
     assert not result.passed
     assert result.status == ValidationStatus.FAILED_INSUFFICIENT_TRADES
 
 
-def test_validator_rejects_insufficient_closes():
+@pytest.mark.asyncio
+async def test_validator_rejects_insufficient_closes():
     """Test that validator rejects wallets with insufficient realized closes."""
     validator = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(
@@ -84,14 +87,15 @@ def test_validator_rejects_insufficient_closes():
             min_closes_required=10,  # Need 10 SELLs with PnL
         )
     )
-    
+    validator.rugcheck_client = None  # disable network call in tests
+
     metrics = WalletMetrics(
         address="test_wallet",
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
     )
-    
+
     # Create trades with only 5 SELLs (below min_closes_required=10)
     trades = []
     for i in range(15):
@@ -106,20 +110,21 @@ def test_validator_rejects_insufficient_closes():
             tx_signature=f"tx{i}",
             pnl_sol=0.1 if is_sell else None,  # Only SELLs have PnL
         ))
-    
-    result = validator.validate_for_promotion(
+
+    result = await validator.validate_for_promotion(
         "test_wallet",
         metrics,
         trades,
         strategy="SHIELD"
     )
-    
+
     assert not result.passed
     assert result.status == ValidationStatus.FAILED_INSUFFICIENT_TRADES
     assert "closes" in result.reason.lower()
 
 
-def test_validator_rejects_negative_simulated_pnl():
+@pytest.mark.asyncio
+async def test_validator_rejects_negative_simulated_pnl():
     """Test that validator rejects wallets with negative simulated PnL."""
     # Mock backtester to return negative PnL
     mock_simulator = Mock()
@@ -136,7 +141,7 @@ def test_validator_rejects_negative_simulated_pnl():
         passed=False,
         failure_reason="Negative simulated PnL",
     )
-    
+
     validator = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
@@ -145,14 +150,15 @@ def test_validator_rejects_negative_simulated_pnl():
         )
     )
     validator.simulator = mock_simulator
-    
+    validator.rugcheck_client = None  # disable network call in tests
+
     metrics = WalletMetrics(
         address="test_wallet",
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
     )
-    
+
     trades = [
         HistoricalTrade(
             token_address="token1",
@@ -166,19 +172,20 @@ def test_validator_rejects_negative_simulated_pnl():
         )
         for i in range(10)
     ]
-    
-    result = validator.validate_for_promotion(
+
+    result = await validator.validate_for_promotion(
         "test_wallet",
         metrics,
         trades,
         strategy="SHIELD"
     )
-    
+
     assert not result.passed
     assert result.status == ValidationStatus.FAILED_NEGATIVE_PNL
 
 
-def test_validator_rejects_high_rejection_rate():
+@pytest.mark.asyncio
+async def test_validator_rejects_high_rejection_rate():
     """Test that validator rejects wallets with too many rejected trades."""
     # Mock backtester to return high rejection rate
     mock_simulator = Mock()
@@ -195,7 +202,7 @@ def test_validator_rejects_high_rejection_rate():
         passed=False,
         failure_reason="Too many trades rejected",
     )
-    
+
     validator = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
@@ -205,14 +212,15 @@ def test_validator_rejects_high_rejection_rate():
         )
     )
     validator.simulator = mock_simulator
-    
+    validator.rugcheck_client = None  # disable network call in tests
+
     metrics = WalletMetrics(
         address="test_wallet",
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
     )
-    
+
     trades = [
         HistoricalTrade(
             token_address="token1",
@@ -226,19 +234,20 @@ def test_validator_rejects_high_rejection_rate():
         )
         for i in range(10)
     ]
-    
-    result = validator.validate_for_promotion(
+
+    result = await validator.validate_for_promotion(
         "test_wallet",
         metrics,
         trades,
         strategy="SHIELD"
     )
-    
+
     assert not result.passed
     assert result.status == ValidationStatus.FAILED_LIQUIDITY  # High rejection usually means liquidity issues
 
 
-def test_validator_passes_good_wallet():
+@pytest.mark.asyncio
+async def test_validator_passes_good_wallet():
     """Test that validator accepts wallets that pass all checks."""
     # Mock backtester to return positive result
     mock_simulator = Mock()
@@ -255,7 +264,7 @@ def test_validator_passes_good_wallet():
         passed=True,
         failure_reason=None,
     )
-    
+
     validator = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
@@ -264,14 +273,15 @@ def test_validator_passes_good_wallet():
         )
     )
     validator.simulator = mock_simulator
-    
+    validator.rugcheck_client = None  # disable network call in tests
+
     metrics = WalletMetrics(
         address="test_wallet",
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
     )
-    
+
     trades = [
         HistoricalTrade(
             token_address="token1",
@@ -285,14 +295,14 @@ def test_validator_passes_good_wallet():
         )
         for i in range(15)
     ]
-    
-    result = validator.validate_for_promotion(
+
+    result = await validator.validate_for_promotion(
         "test_wallet",
         metrics,
         trades,
         strategy="SHIELD"
     )
-    
+
     assert result.passed
     assert result.status == ValidationStatus.PASSED
     assert result.recommended_status == "ACTIVE"

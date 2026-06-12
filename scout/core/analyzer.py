@@ -1667,11 +1667,11 @@ class WalletAnalyzer:
         total_pnl = Decimal('0')
         for t in trades:
             if t.action == TradeAction.BUY:
-                amount = t.amount_sol or Decimal('0')
-                price = t.price_at_trade or Decimal('0')
+                amount = float_to_decimal(t.amount_sol or Decimal('0'))
+                price = float_to_decimal(t.price_at_trade or Decimal('0'))
                 total_cost += amount * price
             elif t.action == TradeAction.SELL and t.pnl_sol is not None:
-                total_pnl += t.pnl_sol
+                total_pnl += float_to_decimal(t.pnl_sol)
 
         if total_cost <= Decimal('0'):
             return 0.0
@@ -1802,7 +1802,7 @@ class WalletAnalyzer:
         for t in sorted_trades:
             if t.action != TradeAction.SELL or t.pnl_sol is None:
                 continue
-            cumulative_pnl += t.pnl_sol
+            cumulative_pnl += float_to_decimal(t.pnl_sol)
 
             # Reset peak if we reach a new high in cumulative PnL
             if cumulative_pnl > peak:

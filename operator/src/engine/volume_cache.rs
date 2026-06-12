@@ -21,6 +21,7 @@ pub struct VolumeEntry {
 /// Volume cache for token trading volumes
 pub struct VolumeCache {
     /// Volume history by token (token -> VecDeque of (timestamp, volume))
+    #[allow(clippy::type_complexity)]
     volume_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>>>,
 }
 
@@ -36,7 +37,7 @@ impl VolumeCache {
     pub fn record_volume(&self, token_address: &str, volume_usd: Decimal) {
         let now = Utc::now();
         let mut history = self.volume_history.write();
-        let token_history = history.entry(token_address.to_string()).or_insert_with(VecDeque::new);
+        let token_history = history.entry(token_address.to_string()).or_default();
         token_history.push_back((now, volume_usd));
         
         // Keep only last 24 hours

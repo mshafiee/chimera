@@ -873,10 +873,15 @@ impl AppConfig {
             ));
         }
 
-        // Check webhook secret is set
+        // Check webhook secret is set and meets minimum length for security
         if self.security.webhook_secret.is_empty() {
             return Err(ConfigError::Message(
                 "Webhook secret must be set via CHIMERA_SECURITY__WEBHOOK_SECRET".to_string(),
+            ));
+        }
+        if self.security.webhook_secret.len() < 32 {
+            return Err(ConfigError::Message(
+                "Webhook secret must be at least 32 characters (use: openssl rand -hex 32)".to_string(),
             ));
         }
 
@@ -905,6 +910,19 @@ impl AppConfig {
             return Err(ConfigError::Message(
                 "Max position size must be greater than min position size".to_string(),
             ));
+        }
+
+        if self.notifications.daily_summary.hour_utc > 23 {
+            return Err(ConfigError::Message(format!(
+                "notifications.daily_summary.hour_utc must be 0–23, got {}",
+                self.notifications.daily_summary.hour_utc
+            )));
+        }
+        if self.notifications.daily_summary.minute > 59 {
+            return Err(ConfigError::Message(format!(
+                "notifications.daily_summary.minute must be 0–59, got {}",
+                self.notifications.daily_summary.minute
+            )));
         }
 
         Ok(())

@@ -4,7 +4,8 @@
 //! within Helius Developer plan constraints (50 req/sec).
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -82,8 +83,8 @@ impl RateLimiter {
 
             // Clean up old requests outside the window and check if we can proceed
             let (can_proceed, wait_time) = {
-                let mut requests = self.requests.lock().unwrap();
-                let mut current_credits = self.current_credits.lock().unwrap();
+                let mut requests = self.requests.lock();
+                let mut current_credits = self.current_credits.lock();
                 
                 while let Some(&(oldest_time, oldest_weight)) = requests.front() {
                     if oldest_time < window_start {
@@ -99,7 +100,7 @@ impl RateLimiter {
                     // Add current request with weight
                     requests.push_back((now, weight_value));
                     *current_credits += weight_value;
-                    *self.credit_usage.lock().unwrap() += weight_value as u64;
+                    *self.credit_usage.lock() += weight_value as u64;
                     return;
                 }
 
@@ -156,8 +157,8 @@ impl RateLimiter {
         let window_start = now - Duration::from_secs(self.window_secs);
         let weight_value = weight.value();
 
-        let mut requests = self.requests.lock().unwrap();
-        let mut current_credits = self.current_credits.lock().unwrap();
+        let mut requests = self.requests.lock();
+        let mut current_credits = self.current_credits.lock();
         
         // Clean up old requests
         while let Some(&(oldest_time, oldest_weight)) = requests.front() {
@@ -173,7 +174,7 @@ impl RateLimiter {
         if *current_credits + weight_value <= self.max_credits {
             requests.push_back((now, weight_value));
             *current_credits += weight_value;
-            *self.credit_usage.lock().unwrap() += weight_value as u64;
+            *self.credit_usage.lock() += weight_value as u64;
             true
         } else {
             false
@@ -185,8 +186,8 @@ impl RateLimiter {
         let now = Instant::now();
         let window_start = now - Duration::from_secs(self.window_secs);
 
-        let mut requests = self.requests.lock().unwrap();
-        let mut current_credits = self.current_credits.lock().unwrap();
+        let mut requests = self.requests.lock();
+        let mut current_credits = self.current_credits.lock();
         
         // Clean up old requests
         while let Some(&(oldest_time, oldest_weight)) = requests.front() {
@@ -206,8 +207,8 @@ impl RateLimiter {
         let now = Instant::now();
         let window_start = now - Duration::from_secs(self.window_secs);
 
-        let mut requests = self.requests.lock().unwrap();
-        let mut current_credits = self.current_credits.lock().unwrap();
+        let mut requests = self.requests.lock();
+        let mut current_credits = self.current_credits.lock();
         
         // Clean up old requests
         while let Some(&(oldest_time, oldest_weight)) = requests.front() {
@@ -224,12 +225,12 @@ impl RateLimiter {
 
     /// Get total credit usage (for tracking)
     pub fn credit_usage(&self) -> u64 {
-        *self.credit_usage.lock().unwrap()
+        *self.credit_usage.lock()
     }
 
     /// Reset credit usage counter
     pub fn reset_credit_usage(&self) {
-        *self.credit_usage.lock().unwrap() = 0;
+        *self.credit_usage.lock() = 0;
     }
 }
 

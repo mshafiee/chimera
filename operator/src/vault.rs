@@ -15,7 +15,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use secrecy::{Secret, ExposeSecret}; // Import Secret
+use secrecy::Secret;
 
 /// Secrets stored in the encrypted vault
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -268,6 +268,7 @@ pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
 
     #[test]
     fn test_generate_key() {

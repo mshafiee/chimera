@@ -14,6 +14,7 @@ use crate::db::DbPool;
 
 /// Signal aggregator state
 pub struct SignalAggregator {
+    #[allow(dead_code)]
     db: DbPool,
     /// Recent signals by token (for consensus detection)
     recent_signals: Arc<RwLock<HashMap<String, Vec<TokenSignal>>>>,
@@ -23,9 +24,10 @@ pub struct SignalAggregator {
 
 /// Token signal from a wallet
 #[derive(Debug, Clone)]
-
 struct TokenSignal {
+    #[allow(dead_code)]
     wallet_address: String,
+    #[allow(dead_code)]
     token_address: String,
     direction: String, // BUY or SELL
     amount_sol: Decimal,

@@ -25,6 +25,7 @@ pub enum MomentumExitAction {
 
 /// Momentum exit detector
 pub struct MomentumExit {
+    #[allow(dead_code)]
     db: DbPool,
     price_cache: Arc<PriceCache>,
     volume_cache: Option<Arc<VolumeCache>>,
@@ -32,6 +33,7 @@ pub struct MomentumExit {
 
 /// Position entry data for momentum tracking
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct PositionEntry {
     trade_uuid: String,
     token_address: String,

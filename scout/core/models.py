@@ -183,7 +183,10 @@ class SimulatedResult:
     
     # Rejected trade details
     rejected_trade_details: List[str] = field(default_factory=list)
-    
+
+    # Individual simulated trade results (populated by BacktestSimulator)
+    trades: List = field(default_factory=list)
+
     # Overall result
     passed: bool = False
     failure_reason: Optional[str] = None
@@ -264,6 +267,18 @@ class BacktestConfig:
     # network calls in offline environments. Enable in production Scout runs.
     enforce_current_liquidity: bool = False
     
+    def __post_init__(self):
+        """Coerce all Decimal fields so tests can pass plain floats/ints."""
+        _d = lambda v: Decimal(str(v)) if not isinstance(v, Decimal) else v
+        self.min_liquidity_shield_usd = _d(self.min_liquidity_shield_usd)
+        self.min_liquidity_spear_usd = _d(self.min_liquidity_spear_usd)
+        self.dex_fee_percent = _d(self.dex_fee_percent)
+        self.max_slippage_percent = _d(self.max_slippage_percent)
+        self.priority_fee_sol_per_trade = _d(self.priority_fee_sol_per_trade)
+        self.jito_tip_sol_per_trade = _d(self.jito_tip_sol_per_trade)
+        self.shield_multiplier = _d(self.shield_multiplier)
+        self.spear_multiplier = _d(self.spear_multiplier)
+
     def get_min_liquidity(self, strategy: str) -> Decimal:
         """Get minimum liquidity for a strategy type."""
         if strategy.upper() == "SHIELD":

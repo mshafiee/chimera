@@ -7,6 +7,8 @@
 
 use chimera_operator::engine::PriorityQueue;
 use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
 /// Create a test signal with the given strategy
 fn make_signal(strategy: Strategy, id: u32) -> Signal {
@@ -15,7 +17,7 @@ fn make_signal(strategy: Strategy, id: u32) -> Signal {
         token: format!("TEST{}", id),
         token_address: None,
         action: Action::Buy,
-        amount_sol: 0.1,
+        amount_sol: Decimal::from_str("0.1").unwrap(),
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some(format!("test-uuid-{}", id)),
     };
@@ -50,7 +52,7 @@ async fn test_queue_full_rejects_all() {
     }
     
     // Next signal should be rejected (queue full)
-    let result = queue.push(make_signal(Strategy::Shield, 999)).await;
+    let result = queue.push(make_signal(Strategy::Shield, 999), None).await;
     assert!(result.is_err(), "Signal should be rejected when queue is full");
     assert!(result.unwrap_err().contains("full"));
 }
@@ -85,15 +87,15 @@ async fn test_spear_dropped_shield_accepted_at_threshold() {
     
     // Fill to threshold
     for i in 0..8 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Spear should be rejected
-    let spear = queue.push(make_signal(Strategy::Spear, 100)).await;
+    let spear = queue.push(make_signal(Strategy::Spear, 100), None).await;
     assert!(spear.is_err(), "Spear should be dropped");
     
     // Shield should still be accepted
-    let shield = queue.push(make_signal(Strategy::Shield, 101)).await;
+    let shield = queue.push(make_signal(Strategy::Shield, 101), None).await;
     assert!(shield.is_ok(), "Shield should be accepted even during load shedding");
 }
 
@@ -103,7 +105,7 @@ async fn test_exit_accepted_during_load_shedding() {
     
     // Fill to threshold
     for i in 0..8 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Exit should be accepted (highest priority)
@@ -117,15 +119,15 @@ async fn test_only_spear_dropped() {
     
     // Fill to threshold
     for i in 0..8 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     let initial_len = queue.len();
     
     // Try to add all three strategies
     let spear_result = queue.push(make_signal(Strategy::Spear, 100), Some(50.0)).await;
-    let shield_result = queue.push(make_signal(Strategy::Shield, 101)).await;
-    let exit_result = queue.push(make_signal(Strategy::Exit, 102)).await;
+    let shield_result = queue.push(make_signal(Strategy::Shield, 101), None).await;
+    let exit_result = queue.push(make_signal(Strategy::Exit, 102), None).await;
     
     // Spear dropped, others accepted
     assert!(spear_result.is_err());
@@ -205,7 +207,7 @@ async fn test_high_load_spear_rejection_rate() {
     
     // Fill to 80%
     for i in 0..800 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Try to push 100 Spear signals - all should be rejected
@@ -226,7 +228,7 @@ async fn test_high_load_shield_acceptance_rate() {
     
     // Fill to 80%
     for i in 0..800 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Try to push 100 Shield signals - all should be accepted (until full)
@@ -248,7 +250,7 @@ async fn test_queue_empty_after_drain() {
     
     // Add signals
     for i in 0..50 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Drain queue
@@ -267,7 +269,7 @@ async fn test_zero_capacity_queue() {
     let queue = PriorityQueue::new(0, 80);
     
     // Should immediately reject
-    let result = queue.push(make_signal(Strategy::Shield, 1)).await;
+    let result = queue.push(make_signal(Strategy::Shield, 1), None).await;
     assert!(result.is_err(), "Zero capacity queue should reject all signals");
 }
 
@@ -277,11 +279,11 @@ async fn test_100_percent_threshold_no_load_shedding() {
     
     // Fill almost full
     for i in 0..9 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Spear should be accepted (no load shedding at 100%)
-    let spear = queue.push(make_signal(Strategy::Spear, 100)).await;
+    let spear = queue.push(make_signal(Strategy::Spear, 100), None).await;
     assert!(spear.is_ok(), "Spear should be accepted with 100% threshold");
 }
 
@@ -291,11 +293,11 @@ async fn test_very_low_threshold() {
     
     // Fill to 10%
     for i in 0..10 {
-        queue.push(make_signal(Strategy::Shield, i)).await.unwrap();
+        queue.push(make_signal(Strategy::Shield, i), None).await.unwrap();
     }
     
     // Spear should be rejected even though queue is mostly empty
-    let spear = queue.push(make_signal(Strategy::Spear, 100)).await;
+    let spear = queue.push(make_signal(Strategy::Spear, 100), None).await;
     assert!(spear.is_err(), "Spear should be rejected at 10% threshold");
 }
 

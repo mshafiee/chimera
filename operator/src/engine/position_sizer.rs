@@ -132,13 +132,13 @@ impl PositionSizer {
         };
 
         // Apply all multipliers using Decimal arithmetic
-        size = size * confidence_mult;
-        size = size * wqs_mult;
-        size = size * performance_mult;
-        size = size * token_age_mult;
-        size = size * slippage_mult;
-        size = size * quality_mult;
-        size = size * volatility_mult;
+        size *= confidence_mult;
+        size *= wqs_mult;
+        size *= performance_mult;
+        size *= token_age_mult;
+        size *= slippage_mult;
+        size *= quality_mult;
+        size *= volatility_mult;
 
         // Apply min/max bounds
         size = size.max(self.config.min_size_sol);

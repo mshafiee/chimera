@@ -150,16 +150,16 @@ impl TipManager {
         let percentile_tip = tips[index];
 
         // For Spear/Exit, use max of percentile and config floor
-        let result = match strategy {
+        
+        
+        match strategy {
             Strategy::Shield => percentile_tip.max(self.config.tip_floor_sol),
             Strategy::Spear => percentile_tip.max(self.config.tip_floor_sol),
             Strategy::Exit => {
                 let mid = (self.config.tip_floor_sol + self.config.tip_ceiling_sol) / Decimal::from(2);
                 percentile_tip.max(mid)
             },
-        };
-        
-        result
+        }
     }
 
     /// Get success rate for a given tip amount range
@@ -316,14 +316,16 @@ pub struct TipStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     fn test_config() -> JitoConfig {
         JitoConfig {
             enabled: true,
-            tip_floor_sol: 0.001,
-            tip_ceiling_sol: 0.01,
+            tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+            tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
             tip_percentile: 50,
-            tip_percent_max: 0.10,
+            tip_percent_max: Decimal::from_str("0.10").unwrap(),
             helius_fallback: false,
             searcher_endpoint: None,
         }
@@ -370,7 +372,7 @@ mod tests {
         let config = test_config();
         // Exit uses ceiling during cold start
         let tip = config.tip_ceiling_sol;
-        assert!((tip - 0.01).abs() < 0.0001, "Exit cold start tip should be ceiling");
+        assert!((tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Exit cold start tip should be ceiling");
     }
 
     // ==========================================================================
@@ -454,45 +456,45 @@ mod tests {
     #[test]
     fn test_tip_ceiling_cap() {
         let config = test_config();
-        let percentile_tip: f64 = 0.015; // Above ceiling
+        let percentile_tip = Decimal::from_str("0.015").unwrap(); // Above ceiling
         let capped_tip = percentile_tip.min(config.tip_ceiling_sol);
-        assert!((capped_tip - 0.01).abs() < 0.0001, "Tip should be capped at ceiling");
+        assert!((capped_tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Tip should be capped at ceiling");
     }
 
     #[test]
     fn test_tip_floor_minimum() {
         let config = test_config();
-        let percentile_tip: f64 = 0.0005; // Below floor
+        let percentile_tip = Decimal::from_str("0.0005").unwrap(); // Below floor
         let floored_tip = percentile_tip.max(config.tip_floor_sol);
-        assert!((floored_tip - 0.001).abs() < 0.0001, "Tip should be floored at minimum");
+        assert!((floored_tip - Decimal::from_str("0.001").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Tip should be floored at minimum");
     }
 
     #[test]
     fn test_tip_percent_max() {
         let config = test_config();
-        let trade_size_sol = 0.05; // 0.05 SOL trade
+        let trade_size_sol = Decimal::from_str("0.05").unwrap(); // 0.05 SOL trade
         let max_by_percent = trade_size_sol * config.tip_percent_max;
-        
+
         // Max tip = 0.05 * 0.10 = 0.005 SOL
-        assert!((max_by_percent - 0.005).abs() < 0.0001, "Max by percent should be 0.005");
+        assert!((max_by_percent - Decimal::from_str("0.005").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Max by percent should be 0.005");
     }
 
     #[test]
     fn test_tip_all_caps_applied() {
         let config = test_config();
-        let trade_size_sol: f64 = 0.1;
-        let base_tip: f64 = 0.015; // High percentile result
-        
+        let trade_size_sol = Decimal::from_str("0.1").unwrap();
+        let base_tip = Decimal::from_str("0.015").unwrap(); // High percentile result
+
         // Apply percentage cap
         let max_by_percent = trade_size_sol * config.tip_percent_max; // 0.01
-        
+
         // Apply ceiling
         let tip = base_tip.min(max_by_percent).min(config.tip_ceiling_sol);
-        
+
         // Ensure minimum
         let final_tip = tip.max(config.tip_floor_sol);
-        
-        assert!((final_tip - 0.01).abs() < 0.0001, "Final tip should be 0.01 (ceiling applies)");
+
+        assert!((final_tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Final tip should be 0.01 (ceiling applies)");
     }
 
     // ==========================================================================
@@ -593,24 +595,24 @@ mod tests {
     #[test]
     fn test_large_trade_ceiling_applies() {
         let config = test_config();
-        let trade_size_sol = 10.0;
-        
+        let trade_size_sol = Decimal::from_str("10.0").unwrap();
+
         // Max by percent = 10.0 * 0.10 = 1.0 SOL (way above ceiling)
         let max_by_percent = trade_size_sol * config.tip_percent_max;
         let final_tip = max_by_percent.min(config.tip_ceiling_sol);
-        
-        assert!((final_tip - 0.01).abs() < 0.0001, "Large trade should still be capped at ceiling");
+
+        assert!((final_tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Large trade should still be capped at ceiling");
     }
 
     #[test]
     fn test_small_trade_floor_applies() {
         let config = test_config();
-        let trade_size_sol = 0.005;
-        
+        let trade_size_sol = Decimal::from_str("0.005").unwrap();
+
         // Max by percent = 0.005 * 0.10 = 0.0005 SOL (below floor)
         let max_by_percent = trade_size_sol * config.tip_percent_max;
         let final_tip = max_by_percent.max(config.tip_floor_sol);
-        
-        assert!((final_tip - 0.001).abs() < 0.0001, "Small trade should use floor");
+
+        assert!((final_tip - Decimal::from_str("0.001").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Small trade should use floor");
     }
 }

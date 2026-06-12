@@ -150,7 +150,7 @@ class BacktestSimulator:
             
             # Track original realized PnL (only SELL trades with pnl_sol)
             if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
-                total_original_realized_pnl += trade.pnl_sol
+                total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
             
             if sim_trade.rejected:
                 rejected_count += 1
@@ -352,7 +352,7 @@ class BacktestSimulator:
                 ), f"Insufficient current liquidity: ${decimal_to_float(current_liquidity_now):,.0f}"
         
         # Get trade size in SOL (use sol_amount if available, fallback to amount_sol)
-        trade_size_sol = trade.sol_amount if trade.sol_amount is not None else trade.amount_sol
+        trade_size_sol = float_to_decimal(trade.sol_amount if trade.sol_amount is not None else trade.amount_sol)
         if trade_size_sol <= Decimal('0'):
             return SimulatedTrade(
                 original_trade=trade,

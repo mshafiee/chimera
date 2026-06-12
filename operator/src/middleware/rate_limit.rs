@@ -37,8 +37,8 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
                 // Extract the first "for=" value
                 for part in header_str.split(';') {
                     let part = part.trim();
-                    if part.starts_with("for=") {
-                        let ip = part[4..].trim_matches('"').trim();
+                    if let Some(ip_raw) = part.strip_prefix("for=") {
+                        let ip = ip_raw.trim_matches('"').trim();
                         if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
                             return Ok(ip.to_string());
                         }

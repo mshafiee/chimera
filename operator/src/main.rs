@@ -4,9 +4,7 @@
 //! It sets up the Axum web server with middleware and routes.
 
 use axum::{
-    extract::{Request, State},
-    http::HeaderMap,
-    middleware::{self as axum_middleware, Next},
+    middleware::{self as axum_middleware},
     routing::{get, post, put},
     Router,
 };
@@ -14,7 +12,6 @@ use chrono::Utc;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -37,15 +34,14 @@ use chimera_operator::handlers::{
     get_monitoring_status, enable_wallet_monitoring, disable_wallet_monitoring, helius_webhook_handler,
     ApiState, AppState, RosterState, WalletAuthState, WebhookState, WsState,
 };
-use chimera_operator::middleware::{self, bearer_auth, AuthState, HmacState, Role};
+use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
 use chimera_operator::metrics::{MetricsState, metrics_router};
-use chimera_operator::notifications::{self, CompositeNotifier, DiscordNotifier, NotificationEvent, TelegramNotifier};
+use chimera_operator::notifications::{self, NotificationEvent};
 use chimera_operator::price_cache::PriceCache;
 use chimera_operator::roster;
 use chimera_operator::monitoring::{HeliusClient, SignalAggregator, MonitoringState, rate_limiter};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
-use rust_decimal::prelude::*;
 
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
@@ -265,11 +261,14 @@ async fn main() -> anyhow::Result<()> {
             let mut next_run = now
                 .date_naive()
                 .and_hms_opt(target_hour, target_minute, 0)
-                .unwrap()
+                .unwrap_or_else(|| {
+                    tracing::warn!(target_hour, target_minute, "Invalid daily_summary time in config, defaulting to 00:00 UTC");
+                    now.date_naive().and_hms_opt(0, 0, 0).expect("midnight always valid")
+                })
                 .and_utc();
 
             if next_run <= now {
-                next_run = next_run + chrono::Duration::days(1);
+                next_run += chrono::Duration::days(1);
             }
 
             let sleep_duration = (next_run - now).to_std().unwrap_or(std::time::Duration::from_secs(3600));
@@ -430,12 +429,12 @@ async fn main() -> anyhow::Result<()> {
 
                     // Update active positions count
                     if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
-                        metrics_state_clone.active_positions.set(count as i64);
+                        metrics_state_clone.active_positions.set(count);
                     }
 
                     // Update total trades count
                     if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
-                        metrics_state_clone.total_trades.set(count as i64);
+                        metrics_state_clone.total_trades.set(count);
                     }
 
                     // Broadcast health update via WebSocket
@@ -584,19 +583,15 @@ async fn main() -> anyhow::Result<()> {
     
     // Create SignalAggregator and HeliusClient for signal quality enhancements
     let signal_aggregator = Arc::new(SignalAggregator::new(db_pool.clone()));
-    let helius_client = Arc::new(
-        HeliusClient::new(
-            config.monitoring.as_ref()
-                .and_then(|m| m.helius_api_key.clone())
-                .unwrap_or_default(),
-        )
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "Failed to create HeliusClient, signal quality will be limited");
-            // Create a dummy client with empty API key (will fail gracefully)
-            HeliusClient::new(String::new()).unwrap()
-        })
-    );
-    
+    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
+        config.monitoring.as_ref()
+            .and_then(|m| m.helius_api_key.clone())
+            .unwrap_or_default(),
+    )
+    .map(Arc::new)
+    .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
+    .ok();
+
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: _engine_handle.clone(),
@@ -604,7 +599,7 @@ async fn main() -> anyhow::Result<()> {
         circuit_breaker: circuit_breaker.clone(),
         portfolio_heat: None, // Optional - can be enabled later
         signal_aggregator: Some(signal_aggregator.clone()),
-        helius_client: Some(helius_client.clone()),
+        helius_client: helius_client.clone(),
     });
     
     // Create roster state
@@ -649,7 +644,7 @@ async fn main() -> anyhow::Result<()> {
         .burst_size(config.security.webhook_burst_size)
         .key_extractor(middleware::ProxyAwareKeyExtractor)
         .finish()
-        .unwrap();
+        .ok_or_else(|| anyhow::anyhow!("Failed to build rate limiter — webhook_rate_limit must be > 0"))?;
     let governor_conf = std::sync::Arc::new(governor_conf);
     let governor_layer = tower_governor::GovernorLayer { config: governor_conf };
     
@@ -765,13 +760,21 @@ async fn main() -> anyhow::Result<()> {
     
     let shutdown_token = cancel_token.clone();
     let server_handle = tokio::spawn(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-        axum::serve(listener, app)
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(error = %e, %addr, "Failed to bind server port — is it already in use?");
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 shutdown_token.cancelled().await;
             })
             .await
-            .unwrap();
+        {
+            tracing::error!(error = %e, "Server exited with error");
+        }
     });
 
     match tokio::signal::ctrl_c().await {
@@ -788,6 +791,7 @@ async fn main() -> anyhow::Result<()> {
 
 
 /// Build list of HMAC secrets from vault and config
+#[allow(dead_code)]
 fn build_hmac_secrets(secrets: &vault::VaultSecrets, config: &AppConfig) -> Vec<String> {
     let mut hmac_secrets = Vec::new();
 

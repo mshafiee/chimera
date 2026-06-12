@@ -42,7 +42,7 @@ pub fn parse_transaction(tx_json: &Value, wallet_address: &str) -> Result<Transa
         .get("transaction")
         .and_then(|t| t.get("signatures"))
         .and_then(|s| s.as_array())
-        .and_then(|arr| arr.get(0))
+        .and_then(|arr| arr.first())
         .and_then(|s| s.as_str())
         .context("Missing transaction signature")?
         .to_string();
@@ -302,7 +302,7 @@ pub fn parse_helius_webhook(payload: &crate::monitoring::helius::HeliusWebhookPa
     // Parse token balance changes
     for account in &payload.account_data {
         if let Some(token_changes) = &account.token_balance_changes {
-            for change in token_changes {
+            if let Some(change) = token_changes.first() {
                 // Determine direction based on balance change
                 // Positive change = received tokens (BUY)
                 // Negative change = sent tokens (SELL)
@@ -317,7 +317,7 @@ pub fn parse_helius_webhook(payload: &crate::monitoring::helius::HeliusWebhookPa
 
                 // Check native balance change for SOL amount
                 let sol_amount = account.native_balance_change
-                    .map(|c| Decimal::from(c) / Decimal::from(1_000_000_000u64)) // Convert lamports to SOL
+                    .map(|c| Decimal::from(c) / Decimal::from(1_000_000_000u64))
                     .unwrap_or(Decimal::ZERO);
 
                 return Ok(Some(ParsedSwap {
@@ -334,7 +334,7 @@ pub fn parse_helius_webhook(payload: &crate::monitoring::helius::HeliusWebhookPa
                     amount_in: sol_amount.abs(),
                     amount_out: amount.abs(),
                     direction,
-                    dex: "Unknown".to_string(), // Helius doesn't specify DEX
+                    dex: "Unknown".to_string(),
                     slippage: None,
                 }));
             }

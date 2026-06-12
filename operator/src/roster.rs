@@ -81,6 +81,7 @@ async fn validate_wallets_schema(
 ) -> AppResult<()> {
     // Query table_info for the attached database
     // PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk)
+    #[allow(clippy::type_complexity)]
     let columns: Vec<(i32, String, String, Option<i32>, Option<String>, i32)> =
         sqlx::query_as("PRAGMA new_roster.table_info(wallets)")
             .fetch_all(&mut *conn)
@@ -271,7 +272,7 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
 
     // Step 3: Validate schema compatibility
     info!("Validating wallets table schema");
-    if let Err(e) = validate_wallets_schema(&mut *conn).await {
+    if let Err(e) = validate_wallets_schema(&mut conn).await {
         // Detach before returning error
         let _ = sqlx::query("DETACH DATABASE new_roster")
             .execute(&mut *conn)

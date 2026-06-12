@@ -75,7 +75,7 @@ pub async fn start_polling_task(
                 };
 
                 if wallets.is_empty() {
-                    if poll_count % 10 == 0 { // Log every 10 cycles to avoid spam
+                    if poll_count.is_multiple_of(10) { // Log every 10 cycles to avoid spam
                         tracing::debug!("No active wallets to monitor");
                     }
                     continue;

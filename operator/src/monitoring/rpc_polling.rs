@@ -33,6 +33,12 @@ pub struct RpcPollingState {
     last_poll: Arc<tokio::sync::RwLock<std::collections::HashMap<String, SystemTime>>>,
 }
 
+impl Default for RpcPollingState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RpcPollingState {
     pub fn new() -> Self {
         Self {
@@ -107,7 +113,7 @@ pub async fn poll_wallet_transactions(
         // Limit to 10 most recent to save credits
         if !found_last {
             if let Some(last) = last_signature {
-                if sig_info.signature.to_string() == last {
+                if sig_info.signature == last {
                     found_last = true;
                     continue;
                 }
@@ -173,15 +179,6 @@ pub async fn poll_wallet_transactions(
                                 }
                             };
                             
-                            transactions.push(WalletTransaction {
-                                wallet_address: wallet_address.to_string(),
-                                signature: sig_str.clone(),
-                                token_address,
-                                direction,
-                                amount_sol,
-                                timestamp: tx.block_time.unwrap_or(0),
-                            });
-                            
                             tracing::debug!(
                                 wallet = wallet_address,
                                 signature = sig_str,
@@ -190,6 +187,15 @@ pub async fn poll_wallet_transactions(
                                 amount_sol = ?amount_sol,
                                 "Parsed swap transaction from RPC polling"
                             );
+
+                            transactions.push(WalletTransaction {
+                                wallet_address: wallet_address.to_string(),
+                                signature: sig_str.clone(),
+                                token_address,
+                                direction,
+                                amount_sol,
+                                timestamp: tx.block_time.unwrap_or(0),
+                            });
                         } else {
                             // Not a swap transaction, skip
                             tracing::trace!(

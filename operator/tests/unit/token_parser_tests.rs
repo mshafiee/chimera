@@ -7,6 +7,8 @@
 //! - Liquidity thresholds per strategy
 
 use chimera_operator::token::{TokenParser, TokenSafetyConfig, TokenSafetyResult};
+use rust_decimal::Decimal;
+use std::str::FromStr;
 
 // Known token addresses for testing
 mod known_tokens {
@@ -55,8 +57,9 @@ fn test_liquidity_threshold_shield() {
     let config = TokenSafetyConfig::default();
     
     assert_eq!(
-        config.min_liquidity_shield_usd, 10_000.0,
-        "Shield strategy should require $10,000 liquidity"
+        config.min_liquidity_shield_usd,
+        Decimal::from_str("12000.0").unwrap(),
+        "Shield strategy should require $12,000 liquidity (20% buffer over $10k)"
     );
 }
 
@@ -65,8 +68,9 @@ fn test_liquidity_threshold_spear() {
     let config = TokenSafetyConfig::default();
     
     assert_eq!(
-        config.min_liquidity_spear_usd, 5_000.0,
-        "Spear strategy should require $5,000 liquidity"
+        config.min_liquidity_spear_usd,
+        Decimal::from_str("6000.0").unwrap(),
+        "Spear strategy should require $6,000 liquidity (20% buffer over $5k)"
     );
 }
 

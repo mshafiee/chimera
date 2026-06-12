@@ -135,7 +135,7 @@ impl StopLossManager {
                 Decimal::ONE
             };
             
-            stop_loss_threshold = stop_loss_threshold * volatility_multiplier;
+            stop_loss_threshold *= volatility_multiplier;
             
             // Ensure stop never goes below -5% (too tight) or above -50% (too wide)
             let min_threshold = Decimal::from_str("-50.0").unwrap_or(Decimal::ZERO);
@@ -154,7 +154,7 @@ impl StopLossManager {
         // Widen stop-loss by 5% for consensus signals
         if is_consensus {
             let consensus_adjustment = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
-            stop_loss_threshold = stop_loss_threshold + consensus_adjustment; // Make it wider (e.g., -15% -> -20%)
+            stop_loss_threshold += consensus_adjustment; // Make it wider (e.g., -15% -> -20%)
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,

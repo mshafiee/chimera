@@ -205,6 +205,7 @@ impl NotificationService for TelegramNotifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_rate_limiter() {
@@ -240,8 +241,8 @@ mod tests {
         let key2 = RateLimiter::get_key(&NotificationEvent::PositionExited {
             token: "BONK".to_string(),
             strategy: "SHIELD".to_string(),
-            pnl_percent: 10.0,
-            pnl_sol: 0.1,
+            pnl_percent: rust_decimal::Decimal::from(10u32),
+            pnl_sol: rust_decimal::Decimal::from_str("0.1").unwrap(),
         });
         assert_eq!(key2, "position:BONK:SHIELD");
     }

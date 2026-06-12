@@ -128,7 +128,7 @@ mod tests {
         let epsilon = 0.0001; // 0.01% tolerance
         
         // Test cases
-        let test_cases = vec![
+        let test_cases: Vec<(f64, f64, bool)> = vec![
             (0.5, 0.50001, true),   // Within epsilon - should be considered equal
             (0.5, 0.5001, false),  // Outside epsilon - should be considered different
             (1.0, 1.00001, true),   // Within epsilon

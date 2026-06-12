@@ -123,14 +123,27 @@ class TestHistoricalLiquidity:
         
         assert result is None
     
-    def test_get_historical_liquidity_fallback_to_current(self, provider):
+    def test_get_historical_liquidity_fallback_to_current(self, provider, monkeypatch):
         """Test fallback to current liquidity when historical unavailable."""
+        # Disable strict mode so the fallback path is exercised
+        monkeypatch.setenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false")
         token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
         timestamp = datetime.utcnow() - timedelta(days=30)
-        
+
+        # Mock get_current_liquidity so the test is self-contained (no API needed)
+        simulated = LiquidityData(
+            token_address=token,
+            liquidity_usd=30000.0,
+            price_usd=0.001,
+            volume_24h_usd=5000.0,
+            timestamp=timestamp,
+            source="simulated_test",
+        )
+        monkeypatch.setattr(provider, "get_current_liquidity", lambda addr: simulated)
+
         # No historical data stored, should fallback to current
         result = provider.get_historical_liquidity_or_current(token, timestamp)
-        
+
         assert result is not None
         assert result.token_address == token
         assert result.timestamp == timestamp  # Timestamp should be set to historical

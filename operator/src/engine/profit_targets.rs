@@ -17,6 +17,7 @@ use crate::engine::market_regime::MarketRegimeDetector;
 
 /// Profit target state
 pub struct ProfitTargetManager {
+    #[allow(dead_code)]
     db: DbPool,
     config: Arc<ProfitManagementConfig>,
     price_cache: Arc<PriceCache>,
@@ -31,8 +32,10 @@ pub struct ProfitTargetManager {
 /// Profit target state for a position
 #[derive(Debug, Clone)]
 struct ProfitTargetState {
+    #[allow(dead_code)]
     trade_uuid: String,
     entry_price: Decimal,
+    #[allow(dead_code)]
     entry_amount_sol: Decimal,
     current_price: Decimal,
     peak_price: Decimal,
@@ -191,7 +194,7 @@ impl ProfitTargetManager {
 
         // Check tiered profit targets
         for target in &targets {
-            if profit_percent >= *target && !state.targets_hit.iter().any(|&hit| hit == *target) {
+            if profit_percent >= *target && !state.targets_hit.contains(target) {
                 state.targets_hit.push(*target);
                 return ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent);
             }
@@ -243,7 +246,7 @@ impl ProfitTargetManager {
                 }
             }
             // Default: Original time_exit_hours for moderate profits (5-10%)
-            else if elapsed_hours >= self.config.time_exit_hours as u64 && profit_percent > zero {
+            else if elapsed_hours >= self.config.time_exit_hours && profit_percent > zero {
                 return ProfitTargetAction::FullExit;
             }
         }

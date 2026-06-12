@@ -98,6 +98,7 @@ pub async fn trade_uuid_exists(pool: &DbPool, trade_uuid: &str) -> AppResult<boo
 }
 
 /// Insert a trade record
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_trade(
     pool: &DbPool,
     trade_uuid: &str,
@@ -296,6 +297,7 @@ pub async fn get_dead_letter_queue(
     }
 
     // Query as tuple and map to struct (can_retry is INTEGER in DB, need to convert to bool)
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(i64, Option<String>, String, String, Option<String>, Option<String>, i32, i64, String, Option<String>)> = 
         sqlx::query_as(&query)
         .fetch_all(pool)
@@ -443,24 +445,24 @@ pub async fn get_strategy_performance(
     strategy: &str,
     days: i64,
 ) -> AppResult<(f64, Decimal, u32)> {
-    // Get trades for the strategy in the time period
-    // Use parameterized query to avoid SQL injection
-    let query_str = format!(
+    // Validate days to prevent negative or unreasonably large lookback windows
+    let days = days.clamp(1, 365);
+    let days_interval = format!("-{} days", days);
+
+    let trades: Vec<(Option<f64>,)> = sqlx::query_as(
         r#"
         SELECT pnl_usd
         FROM trades
         WHERE status = 'CLOSED'
         AND strategy = ?
-        AND created_at >= datetime('now', '-{} days')
+        AND created_at >= datetime('now', ?)
         ORDER BY created_at DESC
         "#,
-        days
-    );
-    
-    let trades: Vec<(Option<f64>,)> = sqlx::query_as(&query_str)
-        .bind(strategy)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(strategy)
+    .bind(&days_interval)
+    .fetch_all(pool)
+    .await?;
 
     if trades.is_empty() {
         return Ok((0.0, Decimal::ZERO, 0));
@@ -606,6 +608,7 @@ pub async fn prune_old_tips(pool: &DbPool) -> AppResult<u64> {
 // =============================================================================
 
 /// Create a new position from a successful buy trade
+#[allow(clippy::too_many_arguments)]
 pub async fn open_position(
     pool: &DbPool,
     trade_uuid: &str,
@@ -731,6 +734,7 @@ pub struct PositionRecord {
 
 /// Get positions stuck in EXITING state for too long
 pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>> {
+    #[allow(clippy::type_complexity)]
     let positions: Vec<(i64, String, String, String, String, String, String, Option<String>, String)> = sqlx::query_as(
         r#"
         SELECT id, trade_uuid, wallet_address, token_address, strategy, state, 
@@ -1068,7 +1072,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WalletDetail {
 pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>> {
     let wallets = match status_filter {
         Some(status) => {
-            sqlx::query(
+            sqlx::query_as::<_, WalletDetail>(
                 r#"
                 SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
                        win_rate, max_drawdown_30d, avg_trade_size_sol,
@@ -1078,15 +1082,15 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
                 FROM wallets
                 WHERE status = ?
                 ORDER BY wqs_score DESC NULLS LAST
+                LIMIT 1000
                 "#
             )
             .bind(status)
-            .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
             .fetch_all(pool)
             .await?
         }
         None => {
-            sqlx::query(
+            sqlx::query_as::<_, WalletDetail>(
                 r#"
                 SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
                        win_rate, max_drawdown_30d, avg_trade_size_sol,
@@ -1095,9 +1099,9 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
                        promoted_at, ttl_expires_at, notes, created_at, updated_at
                 FROM wallets
                 ORDER BY wqs_score DESC NULLS LAST
+                LIMIT 1000
                 "#
             )
-            .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
             .fetch_all(pool)
             .await?
         }
@@ -1108,7 +1112,7 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
 
 /// Get a single wallet by address
 pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Option<WalletDetail>> {
-    let wallet = sqlx::query(
+    let wallet = sqlx::query_as::<_, WalletDetail>(
         r#"
         SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
                win_rate, max_drawdown_30d, avg_trade_size_sol,
@@ -1120,7 +1124,6 @@ pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Op
         "#
     )
     .bind(address)
-    .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
     .fetch_optional(pool)
     .await?;
 
@@ -1131,6 +1134,7 @@ pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Op
 ///
 /// If the wallet doesn't exist, it will be created with CANDIDATE status.
 /// If it exists, it will be updated with new metrics.
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_wallet(
     pool: &DbPool,
     address: &str,
@@ -1293,9 +1297,9 @@ pub async fn get_wallet_copy_performance(
     pool: &DbPool,
     wallet_address: &str,
 ) -> AppResult<Option<WalletCopyPerformance>> {
-    let result = sqlx::query(
+    let result = sqlx::query_as::<_, WalletCopyPerformance>(
         r#"
-        SELECT 
+        SELECT
             wallet_address,
             copy_pnl_7d,
             copy_pnl_30d,
@@ -1309,7 +1313,6 @@ pub async fn get_wallet_copy_performance(
         "#
     )
     .bind(wallet_address)
-    .map(|row: sqlx::sqlite::SqliteRow| sqlx::FromRow::from_row(&row).unwrap())
     .fetch_optional(pool)
     .await?;
 
@@ -1535,6 +1538,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for TradeDetail {
 }
 
 /// Get trades with optional filters for API and export
+#[allow(clippy::too_many_arguments)]
 pub async fn get_trades(
     pool: &DbPool,
     from_date: Option<&str>,
@@ -1670,7 +1674,7 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.token_symbol.as_deref().unwrap_or(""),
             trade.strategy,
             trade.side,
-            trade.amount_sol.to_string(),
+            trade.amount_sol,
             trade.price_at_signal.map(|p| p.to_string()).unwrap_or_default(),
             trade.tx_signature.as_deref().unwrap_or(""),
             trade.status,

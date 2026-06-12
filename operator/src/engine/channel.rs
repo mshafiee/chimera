@@ -33,7 +33,7 @@ impl PriorityQueue {
     /// Create a new priority queue
     pub fn new(capacity: usize, load_shed_threshold_percent: u32) -> Self {
         // High-WQS SPEAR queue capacity is 10% of total capacity (minimum 10, maximum 50)
-        let spear_high_wqs_capacity = (capacity / 10).max(10).min(50);
+        let spear_high_wqs_capacity = (capacity / 10).clamp(10, 50);
         
         Self {
             high: Mutex::new(VecDeque::new()),
@@ -72,17 +72,16 @@ impl PriorityQueue {
     /// * `signal` - Signal to push
     /// * `wallet_wqs` - Optional wallet WQS score (used to route high-WQS SPEAR signals)
     pub async fn push(&self, signal: Signal, wallet_wqs: Option<f64>) -> Result<(), String> {
-        // Check capacity
-        if self.len() >= self.capacity {
-            return Err("Queue is full".to_string());
-        }
-
-        // Push to appropriate queue
+        // Push to appropriate queue — Exit signals bypass capacity checks (always allow exits)
         match signal.payload.strategy {
             Strategy::Exit => {
                 self.high.lock().push_back(signal);
+                return Ok(());
             }
             Strategy::Shield => {
+                if self.len() >= self.capacity {
+                    return Err("Queue is full".to_string());
+                }
                 self.medium.lock().push_back(signal);
             }
             Strategy::Spear => {
@@ -129,7 +128,10 @@ impl PriorityQueue {
                     );
                     return Err("Load shedding active: Spear signals temporarily rejected".to_string());
                 }
-                
+
+                if self.len() >= self.capacity {
+                    return Err("Queue is full".to_string());
+                }
                 // Add to regular SPEAR queue
                 self.low.lock().push_back(signal);
             }
@@ -193,6 +195,8 @@ pub struct QueueDepths {
 mod tests {
     use super::*;
     use crate::models::{Action, SignalPayload};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
 
     fn make_signal(strategy: Strategy) -> Signal {
         let payload = SignalPayload {
@@ -200,7 +204,7 @@ mod tests {
             token: "TEST".to_string(),
             token_address: None,
             action: Action::Buy,
-            amount_sol: 0.1,
+            amount_sol: Decimal::from_str("0.1").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
         };
