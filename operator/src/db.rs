@@ -392,13 +392,14 @@ pub async fn count_trades_by_status(pool: &DbPool, status: &str) -> AppResult<i6
 }
 
 /// Get total PnL for the last 24 hours
+/// Uses positions.realized_pnl_sol (the field actually populated by close_position)
 pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<Decimal> {
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
-        SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
-        FROM trades
-        WHERE status = 'CLOSED'
-        AND created_at >= datetime('now', '-24 hours')
+        SELECT CAST(COALESCE(SUM(realized_pnl_sol), 0) AS REAL)
+        FROM positions
+        WHERE state = 'CLOSED'
+        AND closed_at >= datetime('now', '-24 hours')
         "#,
     )
     .fetch_one(pool)
@@ -411,10 +412,10 @@ pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<Decimal> {
 pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<Decimal> {
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
-        SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
-        FROM trades
-        WHERE status = 'CLOSED'
-        AND created_at >= datetime('now', '-7 days')
+        SELECT CAST(COALESCE(SUM(realized_pnl_sol), 0) AS REAL)
+        FROM positions
+        WHERE state = 'CLOSED'
+        AND closed_at >= datetime('now', '-7 days')
         "#,
     )
     .fetch_one(pool)
@@ -427,10 +428,10 @@ pub async fn get_pnl_7d(pool: &DbPool) -> AppResult<Decimal> {
 pub async fn get_pnl_30d(pool: &DbPool) -> AppResult<Decimal> {
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
-        SELECT CAST(COALESCE(SUM(pnl_usd), 0) AS REAL)
-        FROM trades
-        WHERE status = 'CLOSED'
-        AND created_at >= datetime('now', '-30 days')
+        SELECT CAST(COALESCE(SUM(realized_pnl_sol), 0) AS REAL)
+        FROM positions
+        WHERE state = 'CLOSED'
+        AND closed_at >= datetime('now', '-30 days')
         "#,
     )
     .fetch_one(pool)
@@ -693,23 +694,21 @@ pub async fn close_position(
         
         sqlx::query(
             r#"
-            UPDATE positions 
-            SET 
-                exit_price = ?, 
+            UPDATE positions
+            SET
+                exit_price = ?,
                 exit_tx_signature = ?,
-                exit_value_usd = ?, 
-                realized_pnl_sol = ?, 
-                realized_pnl_usd = ?, 
-                closed_at = CURRENT_TIMESTAMP, 
-                state = 'CLOSED' 
+                realized_pnl_sol = ?,
+                realized_pnl_usd = ?,
+                closed_at = CURRENT_TIMESTAMP,
+                state = 'CLOSED'
             WHERE id = ?
             "#
         )
         .bind(exit_price.to_f64().unwrap_or(0.0))
         .bind(signature)
-        .bind(0.0) // exit_value_usd
         .bind(pnl_sol.to_f64().unwrap_or(0.0))
-        .bind(0.0) // realized_pnl_usd
+        .bind(0.0) // realized_pnl_usd placeholder
         .bind(id)
         .execute(pool)
         .await?;
@@ -820,25 +819,26 @@ pub async fn insert_reconciliation_log(
 // =============================================================================
 
 /// Get maximum drawdown from peak (for circuit breaker)
+/// Uses positions.realized_pnl_sol (the field actually populated by close_position)
 pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
     // Calculate drawdown from highest cumulative PnL to current
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
         WITH cumulative_pnl AS (
-            SELECT 
-                created_at,
-                CAST(SUM(COALESCE(pnl_usd, 0)) OVER (ORDER BY created_at) AS REAL) as running_pnl
-            FROM trades
-            WHERE status = 'CLOSED'
+            SELECT
+                closed_at,
+                CAST(SUM(COALESCE(realized_pnl_sol, 0)) OVER (ORDER BY closed_at) AS REAL) as running_pnl
+            FROM positions
+            WHERE state = 'CLOSED'
         ),
         peaks AS (
-            SELECT 
+            SELECT
                 COALESCE(MAX(running_pnl), 0.0) as peak_pnl,
-                COALESCE((SELECT running_pnl FROM cumulative_pnl ORDER BY created_at DESC LIMIT 1), 0.0) as current_pnl
+                COALESCE((SELECT running_pnl FROM cumulative_pnl ORDER BY closed_at DESC LIMIT 1), 0.0) as current_pnl
             FROM cumulative_pnl
         )
-        SELECT 
-            CAST(CASE 
+        SELECT
+            CAST(CASE
                 WHEN peak_pnl > 0 THEN ((peak_pnl - current_pnl) / peak_pnl) * 100.0
                 ELSE 0.0
             END AS REAL) as drawdown_percent
@@ -862,6 +862,67 @@ pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
     .await?;
 
     Ok(count.0 as u32)
+}
+
+/// Active position enriched with entry data for the position monitoring loop
+#[derive(Debug, Clone)]
+pub struct ActivePositionEntry {
+    pub trade_uuid: String,
+    pub wallet_address: String,
+    pub token_address: String,
+    pub token_symbol: String,
+    pub strategy: String,
+    pub entry_price: Decimal,
+    pub entry_amount_sol: Decimal,
+    pub entry_time: chrono::DateTime<chrono::Utc>,
+}
+
+/// Fetch all ACTIVE positions with their entry data for stop-loss / profit-target monitoring
+pub async fn get_active_positions_with_entry(pool: &DbPool) -> AppResult<Vec<ActivePositionEntry>> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(String, String, String, Option<String>, String, f64, f64, String)> =
+        sqlx::query_as(
+            r#"
+            SELECT
+                p.trade_uuid,
+                p.wallet_address,
+                p.token_address,
+                t.token,
+                p.strategy,
+                COALESCE(p.entry_price, 0.0),
+                COALESCE(p.entry_amount_sol, 0.0),
+                COALESCE(p.created_at, datetime('now'))
+            FROM positions p
+            LEFT JOIN trades t ON t.trade_uuid = p.trade_uuid
+            WHERE p.state = 'ACTIVE'
+            LIMIT 500
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
+
+    let entries = rows
+        .into_iter()
+        .map(|(trade_uuid, wallet_address, token_address, token_opt, strategy, entry_price_f64, entry_amount_f64, created_at_str)| {
+            let entry_price = Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
+            let entry_amount_sol = Decimal::from_f64_retain(entry_amount_f64).unwrap_or(Decimal::ZERO);
+            let entry_time = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+            ActivePositionEntry {
+                token_symbol: token_opt.unwrap_or_else(|| token_address.clone()),
+                trade_uuid,
+                wallet_address,
+                token_address,
+                strategy,
+                entry_price,
+                entry_amount_sol,
+                entry_time,
+            }
+        })
+        .collect();
+
+    Ok(entries)
 }
 
 // =============================================================================

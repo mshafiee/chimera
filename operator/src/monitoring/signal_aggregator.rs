@@ -7,8 +7,9 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 use rust_decimal::prelude::*;
 use crate::db::DbPool;
 
@@ -31,7 +32,7 @@ struct TokenSignal {
     token_address: String,
     direction: String, // BUY or SELL
     amount_sol: Decimal,
-    timestamp: SystemTime,
+    timestamp: Instant,
 }
 
 /// Consensus signal (multiple wallets buying same token)
@@ -80,13 +81,13 @@ impl SignalAggregator {
             token_address: token_address.to_string(),
             direction: direction.to_string(),
             amount_sol,
-            timestamp: SystemTime::now(),
+            timestamp: Instant::now(),
         };
 
         let mut signals = self.recent_signals.write().await;
 
         // Clean up old signals (older than 5 minutes)
-        let five_min_ago = SystemTime::now() - Duration::from_secs(300);
+        let five_min_ago = Instant::now() - Duration::from_secs(300);
         signals.retain(|_, token_signals| {
             token_signals.retain(|s| s.timestamp > five_min_ago);
             !token_signals.is_empty()
@@ -135,7 +136,7 @@ impl SignalAggregator {
                 .filter(|s| {
                     s.direction == "BUY" 
                         && s.wallet_address != exiting_wallet
-                        && s.timestamp > SystemTime::now() - Duration::from_secs(3600) // Within 1 hour
+                        && s.timestamp > Instant::now() - Duration::from_secs(3600) // Within 1 hour
                 })
                 .collect();
 

@@ -86,3 +86,4 @@ rust_decimal = { version = "1.33", features = ["serde"] }
 axum-test = "18.4.1"
 tempfile = "3.23"
 tower = { version = "0.4", features = ["util"] }
+tokio = { version = "1.37", features = ["test-util"] }

@@ -66,8 +66,9 @@ impl StopLossManager {
         };
 
         // Calculate loss percentage using Decimal for precision
+        // Negative when price has fallen (e.g. -15.0 for 15% drop), matching negative thresholds
         let loss_percent = if !entry_price.is_zero() {
-            let diff = entry_price - current_price;
+            let diff = current_price - entry_price;
             let ratio = diff / entry_price;
             ratio * Decimal::from(100)
         } else {

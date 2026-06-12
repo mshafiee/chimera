@@ -97,26 +97,28 @@ async fn test_consensus_expires_after_5_minutes() {
         max_connections: 5,
     };
 
+    // Set up DB before pausing time (pool init uses real timers)
     let pool = init_pool(&config).await.unwrap();
     run_migrations(&pool).await.unwrap();
 
     let aggregator = SignalAggregator::new(pool.clone());
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
-    // First wallet buys
+    // First wallet buys — records Instant::now()
     aggregator
         .add_signal("Wallet1", token_address, "BUY", Decimal::from_str("1.0").unwrap())
         .await;
 
-    // Note: In real tests, you'd use tokio::time::sleep, but for unit tests
-    // we just test that the logic works without waiting
+    // Pause tokio time then advance 6 minutes so Wallet1's signal expires
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(360)).await;
 
-    // Second wallet buys after window expires
+    // Second wallet buys — the cleanup loop removes Wallet1 (> 5 min old)
     let result = aggregator
         .add_signal("Wallet2", token_address, "BUY", Decimal::from_str("1.5").unwrap())
         .await;
 
-    // Should not trigger consensus (window expired)
+    // Wallet1's signal was cleaned up; only Wallet2's signal exists → no consensus
     assert!(result.is_none(), "Consensus should expire after 5 minutes");
 }
 

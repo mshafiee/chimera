@@ -27,3 +27,20 @@ mod momentum_exit_tests;
 #[path = "unit/kelly_sizer_tests.rs"]
 mod kelly_sizer_tests;
 
+// ── Financial-loss & missed-profit test suite ─────────────────────────────────
+
+#[path = "unit/stop_loss_tests.rs"]
+mod stop_loss_tests;
+
+#[path = "unit/profit_target_tests.rs"]
+mod profit_target_tests;
+
+#[path = "unit/db_integrity_tests.rs"]
+mod db_integrity_tests;
+
+#[path = "unit/position_sizer_tests.rs"]
+mod position_sizer_tests;
+
+#[path = "unit/circuit_breaker_real_tests.rs"]
+mod circuit_breaker_real_tests;
+

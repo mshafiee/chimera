@@ -113,7 +113,7 @@ class BacktestSimulator:
         
         # Get minimum liquidity threshold for strategy (convert to Decimal)
         min_liquidity_decimal = self.config.get_min_liquidity(strategy)
-        sol_price_float = self.liquidity.get_sol_price_usd()
+        sol_price_float = self.liquidity.get_sol_price_usd_sync()
         sol_price = float_to_decimal(sol_price_float)
         
         # Round-trip position tracking: {token_address: {"qty": Decimal, "cost_basis_sol": Decimal}}
@@ -229,6 +229,7 @@ class BacktestSimulator:
             total_slippage_cost_sol=total_slippage,
             total_fee_cost_sol=total_fees,
             rejected_trade_details=rejected_details,
+            trades=simulated_trades,  # Enables profit factor check in validator
             passed=passed,
             failure_reason=failure_reason,
         )

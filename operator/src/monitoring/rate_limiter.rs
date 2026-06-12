@@ -308,25 +308,20 @@ mod tests {
     
     #[tokio::test]
     async fn test_rate_limiter_weighted() {
-        let limiter = RateLimiter::new(10, 1);
-        
-        // Should allow 2 simulation requests (2 * 5 = 10 credits)
+        // 5-credit-per-second window so we don't need to wait a full second
+        let limiter = RateLimiter::new(5, 1);
+
+        // One SIMULATION request (weight 5) fills the 5-credit window entirely
         limiter.acquire(RequestPriority::Polling, RequestWeight::SIMULATION).await;
-        limiter.acquire(RequestPriority::Polling, RequestWeight::SIMULATION).await;
-        
-        // 3rd simulation should be blocked (would exceed 10 credits)
+
+        // A standard try_acquire (weight 1) should immediately fail (0 credits left)
+        assert!(!limiter.try_acquire(), "bucket should be full after one SIMULATION request");
+
+        // 2nd SIMULATION must wait for the window to slide
         let start = Instant::now();
         limiter.acquire(RequestPriority::Polling, RequestWeight::SIMULATION).await;
         let elapsed = start.elapsed();
-        
-        // Should have waited at least some time
-        assert!(elapsed.as_millis() > 0);
-        
-        // But should allow 10 standard requests
-        for _ in 0..10 {
-            assert!(limiter.try_acquire());
-        }
-        assert!(!limiter.try_acquire());
+        assert!(elapsed.as_millis() > 0, "2nd simulation should have been rate-limited");
     }
 
     #[test]

@@ -79,7 +79,10 @@ def test_wqs_medium_trade_count_penalty():
     score_high = calculate_wqs(wallet_high)
     
     assert score_high > score_medium, f"High trade count should score higher: {score_high} vs {score_medium}"
-    assert (score_medium / score_high) > 0.5
+    # With confidence ramp to 1.0 at 20 trades (10 trades → 50% confidence) and activity
+    # bonuses that differ by count, the ratio should be > 0 and < 1 (discounted but not zero).
+    ratio = score_medium / score_high
+    assert 0.2 < ratio < 1.0, f"Expected discounted but non-zero ratio, got {ratio}"
 
 
 def test_wqs_very_low_trade_count_curve():
@@ -374,3 +377,196 @@ def test_classify_wallet():
     assert classify_wallet(40.0) == "CANDIDATE"
     assert classify_wallet(39.9) == "REJECTED"
     assert classify_wallet(0.0) == "REJECTED"
+
+
+# ── Financial-loss & missed-profit test suite ─────────────────────────────────
+
+
+def test_wqs_momentum_bonus_not_applied_when_both_roi_negative():
+    """
+    Test 72 (plan): momentum bonus must NOT fire when roi_30d and roi_7d are both negative.
+
+    The code: `if (roi_7d or 0) > 0 and (roi_30d or 0) > 0 and roi_7d >= roi_30d * 0.5`
+    For roi_30d=-50%, roi_7d=-20%: roi_7d > 0 is False → no bonus.
+
+    Risk: If the condition incorrectly applied the bonus for negative pairs where roi_7d
+    is "better" than roi_30d (smaller magnitude), bad wallets in recovery would be promoted.
+    """
+    wallet = WalletMetrics(
+        address="test_neg_momentum",
+        roi_30d=-50.0,
+        roi_7d=-20.0,  # "better" but still negative
+        win_streak_consistency=0.6,
+        trade_count_30d=25,
+        max_drawdown_30d=10.0,
+    )
+
+    wallet_no_recent = WalletMetrics(
+        address="test_no_recent",
+        roi_30d=-50.0,
+        roi_7d=None,
+        win_streak_consistency=0.6,
+        trade_count_30d=25,
+        max_drawdown_30d=10.0,
+    )
+
+    score_neg = calculate_wqs(wallet)
+    score_none = calculate_wqs(wallet_no_recent)
+
+    # Both should score the same since neither gets the momentum bonus
+    assert score_neg == score_none, (
+        f"Negative ROI pair must not get momentum bonus: {score_neg} vs {score_none}"
+    )
+
+
+def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
+    """
+    Test 73 (plan): A wallet with 1 trade and high profit_factor gets a nearly-zero score
+    due to the confidence multiplier (trade_count=1 → confidence=1/20=0.05).
+
+    Even with profit_factor > 3.0 (+15 pts bonus), the final score ≈ (base + 15) × 0.05.
+    This prevents a wallet with 1 lucky trade from being promoted.
+    """
+    wallet_1_win = WalletMetrics(
+        address="test_1_win",
+        roi_30d=200.0,
+        roi_7d=200.0,
+        profit_factor=5.0,  # Elite → +15 pts
+        win_streak_consistency=1.0,
+        trade_count_30d=1,  # confidence = 0.05
+        max_drawdown_30d=0.0,
+        avg_trade_size_sol=1.0,
+    )
+
+    wallet_25_wins = WalletMetrics(
+        address="test_25_wins",
+        roi_30d=200.0,
+        roi_7d=200.0,
+        profit_factor=5.0,
+        win_streak_consistency=1.0,
+        trade_count_30d=25,  # confidence = 1.0
+        max_drawdown_30d=0.0,
+        avg_trade_size_sol=1.0,
+    )
+
+    score_1 = calculate_wqs(wallet_1_win)
+    score_25 = calculate_wqs(wallet_25_wins)
+
+    # 1-trade wallet must be heavily discounted
+    assert score_1 < score_25, "1-trade wallet must score much lower than 25-trade wallet"
+    assert score_1 < score_25 * 0.15, (
+        f"1-trade confidence penalty (5%) must reduce score to <15% of full-confidence score: "
+        f"{score_1} vs {score_25}"
+    )
+
+
+def test_wqs_recency_naive_datetime_string_no_error():
+    """
+    Test 74 (plan): A naive datetime string (no timezone suffix) must not cause a
+    ValueError that is silently swallowed. The recency bonus/penalty should still apply.
+    """
+    from datetime import datetime, timedelta
+
+    # Recent naive datetime (2 days ago)
+    recent = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    wallet = WalletMetrics(
+        address="test_naive_dt",
+        roi_30d=30.0,
+        roi_7d=5.0,
+        win_streak_consistency=0.7,
+        trade_count_30d=20,
+        max_drawdown_30d=5.0,
+        last_trade_at=recent,  # naive ISO string, no Z or +00:00
+    )
+
+    # Should not raise; bonus should be applied for recent activity
+    score = calculate_wqs(wallet)
+    assert 0 <= score <= 100, f"Score out of bounds for naive datetime: {score}"
+
+    # Compare against wallet with no last_trade_at — recent one should score >= (no penalty)
+    wallet_no_dt = WalletMetrics(
+        address="test_no_dt",
+        roi_30d=30.0,
+        roi_7d=5.0,
+        win_streak_consistency=0.7,
+        trade_count_30d=20,
+        max_drawdown_30d=5.0,
+    )
+    score_no_dt = calculate_wqs(wallet_no_dt)
+    # Recent trader should score >= no-datetime wallet (gets activity bonus)
+    assert score >= score_no_dt, (
+        f"Recent trader should score >= no-datetime wallet: {score} vs {score_no_dt}"
+    )
+
+
+def test_wqs_confidence_multiplier_applied_once_not_doubled():
+    """
+    Test 75 (plan): The confidence multiplier (trade_count / 20) must be applied exactly
+    once at the end of calculate_wqs(), not combined with other per-section penalties.
+
+    Verify: with trade_count=2 (confidence=0.1) and trade_count=4 (confidence=0.2),
+    the score ratio is ≈ 0.5 (not further compounded by another mechanism).
+    """
+    base_metrics = dict(
+        roi_30d=50.0,
+        win_streak_consistency=0.8,
+        roi_7d=10.0,
+        max_drawdown_30d=5.0,
+        avg_trade_size_sol=1.0,
+    )
+
+    wallet_2 = WalletMetrics(address="tc_2", trade_count_30d=2, **base_metrics)
+    wallet_4 = WalletMetrics(address="tc_4", trade_count_30d=4, **base_metrics)
+    wallet_20 = WalletMetrics(address="tc_20", trade_count_30d=20, **base_metrics)
+
+    score_2 = calculate_wqs(wallet_2)
+    score_4 = calculate_wqs(wallet_4)
+    score_20 = calculate_wqs(wallet_20)
+
+    # confidence(2) = 0.1, confidence(4) = 0.2, confidence(20) = 1.0
+    # Expected ratios: score_2/score_20 ≈ 0.1, score_4/score_20 ≈ 0.2
+    if score_20 > 0:
+        ratio_2 = score_2 / score_20
+        ratio_4 = score_4 / score_20
+        # Ratios should be close to confidence values (within activity bonus variance)
+        assert ratio_2 < 0.25, f"tc=2 ratio should be ~0.1, got {ratio_2}"
+        assert ratio_4 < 0.40, f"tc=4 ratio should be ~0.2, got {ratio_4}"
+
+
+def test_wqs_sniper_detection_not_applied_when_delay_is_none():
+    """
+    Test 76 (plan): If avg_entry_delay_seconds is None, the sniper penalty must NOT fire.
+
+    Risk: If None were treated as 0 (fast entry), the wallet would be immediately rejected.
+    Many legitimate wallets lack delay data, and incorrect rejection = missed profits.
+    """
+    wallet_with_delay_none = WalletMetrics(
+        address="test_no_delay",
+        roi_30d=60.0,
+        roi_7d=10.0,
+        win_streak_consistency=0.8,
+        trade_count_30d=30,
+        max_drawdown_30d=3.0,
+        avg_entry_delay_seconds=None,  # No delay data
+    )
+
+    wallet_with_safe_delay = WalletMetrics(
+        address="test_safe_delay",
+        roi_30d=60.0,
+        roi_7d=10.0,
+        win_streak_consistency=0.8,
+        trade_count_30d=30,
+        max_drawdown_30d=3.0,
+        avg_entry_delay_seconds=300.0,  # 5 minutes = safe "smart money" range
+    )
+
+    score_none = calculate_wqs(wallet_with_delay_none)
+    score_safe = calculate_wqs(wallet_with_safe_delay)
+
+    # Both should be > 0 (neither is penalized as a sniper)
+    assert score_none > 0.0, "None delay must not trigger sniper rejection (score must be > 0)"
+    # Safe delay gets +15 bonus, so score_safe >= score_none is expected
+    assert score_safe >= score_none, (
+        f"Safe delay (5 min) should score >= None delay: {score_safe} vs {score_none}"
+    )

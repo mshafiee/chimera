@@ -235,9 +235,9 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
         except (ValueError, TypeError):
             pass
 
-    # Confidence multiplier: discount low-sample wallets (smooth ramp to 1.0 at 15+ trades)
+    # Confidence multiplier: discount low-sample wallets (smooth ramp to 1.0 at 20+ trades)
     trade_count = metrics.trade_count_30d or 0
-    confidence = min(trade_count / 15.0, 1.0)
+    confidence = min(trade_count / 20.0, 1.0)
     score = score * confidence
 
     # Clamp to 0-100 range

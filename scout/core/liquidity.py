@@ -13,6 +13,7 @@ Data sources (multi-source with deterministic ranking):
 Mode: real (default) or simulated (for testing/dev)
 """
 
+import json
 import math
 import os
 import logging
@@ -690,7 +691,20 @@ class LiquidityProvider:
         # Fallback estimate (only if all else fails)
         logger.warning("Using fallback SOL price estimate: 150.0 USD")
         return 150.0
-    
+
+    def get_sol_price_usd_sync(self) -> float:
+        """Synchronous wrapper for get_sol_price_usd using the in-memory cache.
+
+        Used by the backtester which runs in a non-async context. Returns the
+        most recently cached price, or a conservative fallback if no fresh
+        cache entry exists (the async updater will correct it on the next run).
+        """
+        if self._sol_price_cache:
+            price, cached_at = self._sol_price_cache
+            if (datetime.utcnow() - cached_at).total_seconds() < 300:
+                return price
+        return 150.0  # Conservative fallback; corrected on next async refresh
+
     def _simulate_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
         Simulate current liquidity for testing (only used in simulated mode).

@@ -235,6 +235,27 @@ pub async fn webhook_handler(
             false
         };
 
+        // Persist BUY signal to signal_aggregation table so stop-loss manager
+        // can detect consensus when checking existing open positions.
+        // The stop-loss query counts DISTINCT wallet_address entries within the last 5 minutes;
+        // inserting a new row each time is correct (NULLs don't conflict in UNIQUE indexes).
+        if let Some(ref token_address) = signal.payload.token_address {
+            let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO signal_aggregation
+                    (token_address, wallet_address, direction, amount_sol, is_consensus)
+                VALUES (?, ?, 'BUY', ?, ?)
+                "#,
+            )
+            .bind(token_address)
+            .bind(&signal.payload.wallet_address)
+            .bind(amount_f64)
+            .bind(is_consensus)
+            .execute(&state.db)
+            .await;
+        }
+
         // Get liquidity from token safety check result (if available)
         let liquidity_usd = if let Some(ref token_address) = signal.payload.token_address {
             // Try to get liquidity from token parser cache or metadata

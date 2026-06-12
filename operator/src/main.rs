@@ -24,7 +24,9 @@ use tokio_util::sync::CancellationToken;
 use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::AppConfig;
 use chimera_operator::db;
-use chimera_operator::engine::{self, RecoveryManager, TipManager};
+use chimera_operator::db::ActivePositionEntry;
+use chimera_operator::engine::{self, RecoveryManager, TipManager, StopLossManager, StopLossAction, MomentumExit, ProfitTargetManager, ProfitTargetAction};
+use chimera_operator::{Action, Signal, SignalPayload, Strategy};
 use chimera_operator::handlers::{
     export_trades, get_config, get_cost_metrics, get_performance_metrics, get_position, get_strategy_performance,
     get_wallet, health_check, health_simple, list_config_audit, list_dead_letter_queue,
@@ -396,7 +398,94 @@ async fn main() -> anyhow::Result<()> {
         }
     });
     tracing::info!("RPC health check task started");
-    
+
+    // Build position risk managers and spawn monitoring loop
+    {
+        let stop_loss_mgr = Arc::new(StopLossManager::new(
+            db_pool.clone(),
+            Arc::new(config.profit_management.clone()),
+            price_cache.clone(),
+        ));
+        let momentum_exit = Arc::new(MomentumExit::new(db_pool.clone(), price_cache.clone()));
+        let profit_target_mgr = Arc::new(ProfitTargetManager::with_momentum_exit(
+            db_pool.clone(),
+            Arc::new(config.profit_management.clone()),
+            price_cache.clone(),
+            momentum_exit,
+        ));
+
+        let monitor_db     = db_pool.clone();
+        let monitor_sl     = stop_loss_mgr;
+        let monitor_pt     = profit_target_mgr;
+        let monitor_engine = _engine_handle.clone();
+        let monitor_token  = cancel_token.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tokio::select! {
+                    _ = monitor_token.cancelled() => {
+                        tracing::info!("Shutting down position monitoring task");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let positions = match db::get_active_positions_with_entry(&monitor_db).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Position monitor: DB query failed");
+                                continue;
+                            }
+                        };
+
+                        for pos in positions {
+                            // Check stop-loss first (higher priority)
+                            let sl_action = monitor_sl.check_stop_loss(
+                                &pos.trade_uuid,
+                                &pos.wallet_address,
+                                pos.entry_price,
+                                &pos.token_address,
+                            ).await;
+
+                            if sl_action == StopLossAction::Exit {
+                                tracing::warn!(
+                                    trade_uuid = %pos.trade_uuid,
+                                    token = %pos.token_address,
+                                    "Stop-loss triggered, queuing EXIT signal"
+                                );
+                                let signal = build_exit_signal(&pos);
+                                let _ = monitor_engine.queue_signal(signal, None).await;
+                                continue;
+                            }
+
+                            // Register position with profit target manager (idempotent)
+                            monitor_pt.register_position(
+                                &pos.trade_uuid,
+                                pos.entry_price,
+                                pos.entry_amount_sol,
+                                &pos.token_address,
+                            ).await;
+
+                            // Check profit targets
+                            match monitor_pt.check_targets(&pos.trade_uuid, &pos.token_address).await {
+                                ProfitTargetAction::FullExit | ProfitTargetAction::ExitPercent(_) => {
+                                    tracing::info!(
+                                        trade_uuid = %pos.trade_uuid,
+                                        token = %pos.token_address,
+                                        "Profit target reached, queuing EXIT signal"
+                                    );
+                                    let signal = build_exit_signal(&pos);
+                                    let _ = monitor_engine.queue_signal(signal, None).await;
+                                }
+                                ProfitTargetAction::None => {}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Position monitoring task started");
+    }
+
     // Create metrics state (shared between task and router)
     let metrics_state = Arc::new(MetricsState::new());
     
@@ -789,6 +878,26 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+
+/// Build an EXIT signal from an active position entry (for stop-loss / profit-target exits)
+fn build_exit_signal(pos: &ActivePositionEntry) -> Signal {
+    use rust_decimal::prelude::*;
+    let amount = if pos.entry_amount_sol.is_zero() {
+        rust_decimal::Decimal::from_str("0.01").unwrap_or(rust_decimal::Decimal::ONE)
+    } else {
+        pos.entry_amount_sol
+    };
+    let payload = SignalPayload {
+        strategy: Strategy::Exit,
+        token: pos.token_symbol.clone(),
+        token_address: Some(pos.token_address.clone()),
+        action: Action::Sell,
+        amount_sol: amount,
+        wallet_address: pos.wallet_address.clone(),
+        trade_uuid: Some(pos.trade_uuid.clone()),
+    };
+    Signal::new(payload, chrono::Utc::now().timestamp(), None)
+}
 
 /// Build list of HMAC secrets from vault and config
 #[allow(dead_code)]

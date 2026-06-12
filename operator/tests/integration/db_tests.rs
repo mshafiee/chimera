@@ -39,10 +39,16 @@ async fn create_test_db() -> (DbPool, TempDir) {
             win_rate REAL,
             max_drawdown_30d REAL,
             avg_trade_size_sol REAL,
+            avg_win_sol REAL,
+            avg_loss_sol REAL,
+            profit_factor REAL,
+            realized_pnl_30d_sol REAL,
             last_trade_at TIMESTAMP,
             promoted_at TIMESTAMP,
             ttl_expires_at TIMESTAMP,
             notes TEXT,
+            archetype TEXT,
+            avg_entry_delay_seconds REAL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -51,7 +57,7 @@ async fn create_test_db() -> (DbPool, TempDir) {
     .execute(&pool)
     .await
     .unwrap();
-    
+
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS config_audit (
@@ -89,12 +95,13 @@ async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
         .await
         .unwrap();
     
-    // Create wallets table
+    // Create wallets table — must match EXPECTED_WALLETS_COLUMNS in roster.rs
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS wallets (
-            address TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'CANDIDATE',
             wqs_score REAL,
             roi_7d REAL,
             roi_30d REAL,
@@ -102,12 +109,18 @@ async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
             win_rate REAL,
             max_drawdown_30d REAL,
             avg_trade_size_sol REAL,
-            last_trade_at TEXT,
-            promoted_at TEXT,
-            ttl_expires_at TEXT,
+            avg_win_sol REAL,
+            avg_loss_sol REAL,
+            profit_factor REAL,
+            realized_pnl_30d_sol REAL,
+            last_trade_at TIMESTAMP,
+            promoted_at TIMESTAMP,
+            ttl_expires_at TIMESTAMP,
             notes TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+            archetype TEXT,
+            avg_entry_delay_seconds REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         "#,
     )
@@ -118,11 +131,7 @@ async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
     // Insert test wallets
     for i in 0..wallet_count {
         sqlx::query(
-            r#"
-            INSERT INTO wallets (
-                address, status, wqs_score, created_at, updated_at
-            ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            "#,
+            "INSERT INTO wallets (address, status, wqs_score) VALUES (?, ?, ?)",
         )
         .bind(format!("test_wallet_{}", i))
         .bind("CANDIDATE")
@@ -288,16 +297,16 @@ async fn test_roster_merge_atomic_write() {
     
     // Perform merge
     let result = merge_roster(&pool, &roster_path).await.unwrap();
-    
-    // Verify old wallet was removed and new ones added (atomic operation)
+
+    // Upsert strategy: existing wallets are preserved, new ones are inserted
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wallets")
         .fetch_one(&pool)
         .await
         .unwrap();
-    
-    assert_eq!(count.0, 2, "Should have exactly 2 wallets after merge");
-    
-    // Verify old wallet is gone
+
+    assert_eq!(count.0, 3, "Should have 3 wallets after merge (1 existing + 2 new)");
+
+    // Verify old wallet still exists (upsert preserves existing wallets)
     let old_wallet: Option<(String,)> = sqlx::query_as(
         "SELECT address FROM wallets WHERE address = ?"
     )
@@ -305,8 +314,8 @@ async fn test_roster_merge_atomic_write() {
     .fetch_optional(&pool)
     .await
     .unwrap();
-    
-    assert!(old_wallet.is_none(), "Old wallet should be removed");
+
+    assert!(old_wallet.is_some(), "Existing wallet should be preserved by upsert strategy");
 }
 
 #[tokio::test]
@@ -384,12 +393,12 @@ async fn test_roster_merge_transaction_rollback() {
     let result = merge_roster(&pool, &roster_path).await.unwrap();
     assert_eq!(result.wallets_merged, 1);
     
-    // Verify final state (transaction committed)
+    // Verify final state — upsert strategy: both wallets exist (no deletes)
     let count_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wallets")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(count_after.0, 1, "Should have 1 wallet after merge");
+    assert_eq!(count_after.0, 2, "Should have 2 wallets after merge (existing + new from roster)");
 }
 
 // =============================================================================

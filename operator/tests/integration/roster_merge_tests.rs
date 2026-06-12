@@ -13,7 +13,7 @@ async fn create_test_pool() -> (Pool<Sqlite>, TempDir) {
     let db_path = temp_dir.path().join("test.db");
     
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(5)
         .connect_with(
             sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(&db_path)
@@ -56,7 +56,25 @@ async fn create_test_pool() -> (Pool<Sqlite>, TempDir) {
     .execute(&pool)
     .await
     .unwrap();
-    
+
+    // config_audit is required by merge_roster for audit logging
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS config_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL,
+            old_value TEXT,
+            new_value TEXT,
+            changed_by TEXT NOT NULL,
+            change_reason TEXT,
+            changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
     (pool, temp_dir)
 }
 

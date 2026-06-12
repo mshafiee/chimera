@@ -367,7 +367,7 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
                     avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                     last_trade_at, promoted_at,
                     ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
                 ON CONFLICT(address) DO UPDATE SET
                     status = CASE 
                         WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01') 
