@@ -454,9 +454,9 @@ pub async fn get_strategy_performance(
     let days = days.clamp(1, 365);
     let days_interval = format!("-{} days", days);
 
-    let trades: Vec<(Option<f64>,)> = sqlx::query_as(
+    let trades: Vec<(f64,)> = sqlx::query_as(
         r#"
-        SELECT pnl_usd
+        SELECT COALESCE(net_pnl_sol, 0)
         FROM trades
         WHERE status = 'CLOSED'
         AND strategy = ?
@@ -475,16 +475,13 @@ pub async fn get_strategy_performance(
 
     let mut total_pnl = Decimal::ZERO;
     let mut winning_trades = 0u32;
-    let mut total_trades = 0u32;
+    let total_trades = trades.len() as u32;
 
-    for (pnl_opt,) in trades {
-        if let Some(pnl) = pnl_opt {
-            total_trades += 1;
-            let pnl_dec = Decimal::from_f64_retain(pnl).unwrap_or(Decimal::ZERO);
-            total_pnl += pnl_dec;
-            if pnl_dec > Decimal::ZERO {
-                winning_trades += 1;
-            }
+    for (pnl_f64,) in trades {
+        let pnl = Decimal::from_f64_retain(pnl_f64).unwrap_or(Decimal::ZERO);
+        total_pnl += pnl;
+        if pnl > Decimal::ZERO {
+            winning_trades += 1;
         }
     }
 

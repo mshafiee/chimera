@@ -61,14 +61,17 @@ impl ExitDetector {
         // For now, assume full exit (would need position tracking to determine partial)
         let exit_type = ExitType::Full;
 
+        // For SELL swaps, the exited token is token_in (what we're selling), not token_out (SOL)
+        let exited_token = swap.token_in.clone();
+
         // Store pending exit
         let mut pending = self.pending_exits.write().await;
         let wallet_exits = pending.entry(wallet_address.to_string()).or_insert_with(std::collections::HashMap::new);
-        wallet_exits.insert(swap.token_out.clone(), std::time::SystemTime::now());
+        wallet_exits.insert(exited_token.clone(), std::time::SystemTime::now());
 
         Some(ExitSignal {
             wallet_address: wallet_address.to_string(),
-            token_address: swap.token_out.clone(),
+            token_address: exited_token,
             exit_type,
             delay_secs: delay_secs.min(60), // Cap at 60 seconds
         })

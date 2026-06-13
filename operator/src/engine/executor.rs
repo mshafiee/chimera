@@ -223,8 +223,8 @@ impl Executor {
                 return Err(ExecutorError::SpearDisabled);
             }
 
-            // Check market conditions before executing
-            if let Err(e) = self.check_market_conditions().await {
+            // Check market conditions before executing (skip off-hours gate for exits)
+            if let Err(e) = self.check_market_conditions(&signal.payload.action).await {
                 tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
                     error = %e,
@@ -415,7 +415,7 @@ impl Executor {
 
     /// Check market conditions before executing trades
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
-    async fn check_market_conditions(&self) -> Result<(), String> {
+    async fn check_market_conditions(&self, action: &crate::models::Action) -> Result<(), String> {
         // Check 1: SOL price crash (>10% drop in last hour)
         // This requires price history - check if we have sufficient data
         if let Some(ref price_cache) = self.price_cache {
@@ -466,15 +466,17 @@ impl Executor {
             }
         }
         
-        // Check 3: Low liquidity period (off-hours)
-        // Skip trades during low-activity hours (2 AM - 6 AM UTC)
-        let now = Utc::now();
-        let hour_utc = now.time().hour();
-        if (2..6).contains(&hour_utc) {
-            return Err(format!(
-                "Low liquidity period: {}:00 UTC (off-hours 2-6 AM)",
-                hour_utc
-            ));
+        // Check 3: Low liquidity period (off-hours) — only for new positions, not exits
+        // Skip BUY trades during low-activity hours (2 AM - 6 AM UTC), but allow exits
+        if matches!(action, crate::models::Action::Buy) {
+            let now = Utc::now();
+            let hour_utc = now.time().hour();
+            if (2..6).contains(&hour_utc) {
+                return Err(format!(
+                    "Low liquidity period: {}:00 UTC (off-hours 2-6 AM) — BUY signals blocked, exits allowed",
+                    hour_utc
+                ));
+            }
         }
 
         // All checks passed

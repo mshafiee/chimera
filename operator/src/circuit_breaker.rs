@@ -168,6 +168,12 @@ impl CircuitBreaker {
             return Ok(());
         }
 
+        // Transition from Tripped → Cooldown after trip is recorded
+        if self.current_state() == CircuitBreakerState::Tripped {
+            self.enter_cooldown().await?;
+            return Ok(());
+        }
+
         // If still in cooldown or tripped, don't evaluate further
         if self.current_state() != CircuitBreakerState::Active {
             return Ok(());

@@ -154,7 +154,8 @@ impl SignalAggregator {
         for i in 0..wallets.len() {
             for j in (i + 1)..wallets.len() {
                 let cluster_key = format!("{}:{}", wallets[i], wallets[j]);
-                clusters.entry(cluster_key).or_insert_with(Vec::new);
+                let wallet_pair = vec![wallets[i].clone(), wallets[j].clone()];
+                clusters.insert(cluster_key, wallet_pair);
             }
         }
     }

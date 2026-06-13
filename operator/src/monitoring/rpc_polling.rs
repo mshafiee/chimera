@@ -51,9 +51,8 @@ impl RpcPollingState {
     }
 
     pub async fn has_seen(&self, signature: &str) -> bool {
-        let seen = self.seen_signatures.write().await;
-        // get updates LRU status, contains does not
-        seen.contains(signature) 
+        let seen = self.seen_signatures.read().await;
+        seen.contains(signature)
     }
 
     pub async fn mark_seen(&self, signature: String) {
