@@ -1285,16 +1285,33 @@ class HeliusClient:
             
             # 1. Handle Transfers (IN/OUT)
             if tx_type == "TRANSFER":
-                # Calculate net change for wallet
-                # This requires iterating through nativeTransfers and tokenTransfers
-                # to see what entered/left the specific wallet.
-                pass # Stub for deep transfer implementation
+                # Parse transfers: look for token deltas involving the wallet
+                source = tx.get("source")
+                destination = tx.get("destination")
+
+                # Check if wallet is source or destination
+                if source == wallet_address or destination == wallet_address:
+                    # Extract amount and token
+                    amount = tx.get("amount")
+                    mint = tx.get("mint")
+                    if amount and mint:
+                        # For now, just record that a transfer occurred
+                        # Full implementation would track this in wallet history
+                        return {
+                            "type": "TRANSFER",
+                            "token": mint,
+                            "amount": amount,
+                            "direction": "IN" if destination == wallet_address else "OUT",
+                        }
+                return None
 
             # 2. Handle LP / Staking
             elif tx_type in ("ADD_LIQUIDITY", "REMOVE_LIQUIDITY", "STAKE_TOKEN", "UNSTAKE_TOKEN"):
-                # Extract token deltas
-                pass # Stub for LP implementation
-                
+                # Extract token deltas - currently stubbed pending LP pool structure docs
+                # TODO: Implement LP position tracking for Raydium/Orca/Marinade
+                # Would require parsing pool account structures and delta computation
+                return None
+
             # For now, we rely on the existing parse_swap_transaction for the core logic
             # and this method serves as the entry point for expanding coverage.
             return None

@@ -1197,34 +1197,42 @@ class WalletAnalyzer:
     def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
         """
         Detect insider behavior based on wallet age and funding.
-        
+
         Fresh wallets (created <24h before first trade) are typically:
         - Burner wallets for insider trading
         - Bot wallets for sniping
         - Ephemeral addresses to hide identity
-        
+
         Returns:
             Dict with insider metrics
         """
         is_fresh_wallet = False
-        
+
         if not trades:
             return {"is_fresh_wallet": False, "suspicion_score": 0.0}
-        
+
         # Get first trade timestamp
         first_trade_time = min(t.timestamp for t in trades)
-        
-        # Try to get wallet creation time (first transaction ever)
+
+        # Simple fresh wallet detection: if first trade is < 7 days old
+        now = time.time()
+        wallet_age_seconds = now - first_trade_time.timestamp()
+        wallet_age_days = wallet_age_seconds / 86400
+
+        if wallet_age_days < 7:
+            is_fresh_wallet = True
+
+        # Try to get wallet creation time (first transaction ever) for more precision
         wallet_creation_time = self._get_wallet_creation_time_cached(address)
-        
+
         if wallet_creation_time:
             # Calculate hours between wallet creation and first trade
             hours_diff = (first_trade_time.timestamp() - wallet_creation_time) / 3600
-            
+
             # If wallet was created <24h before trading, it's suspicious
             if hours_diff < 24:
                 is_fresh_wallet = True
-        
+
         return {
             "is_fresh_wallet": is_fresh_wallet,
             "suspicion_score": 100.0 if is_fresh_wallet else 0.0
