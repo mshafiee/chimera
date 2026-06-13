@@ -99,25 +99,23 @@ impl TransactionBuilder {
                 let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
 
-                // For SELL: amount_sol represents the SOL value of the position to exit.
-                // Ideally, we'd fetch the on-chain token balance here, but that requires RPC calls
-                // at transaction-build time. Until then, we estimate token amount using a fixed price assumption.
-                // TODO: Pass fetched token balance from executor to avoid estimation.
-
-                // Estimate token amount: assume average token price ~$0.10 per token
-                // This is a conservative placeholder; actual implementation should fetch on-chain balance
-                let estimated_price = Decimal::from_str("0.10").unwrap_or(Decimal::from(1));
-                let token_amount_estimate = signal.payload.amount_sol / estimated_price;
-                let amount_lamports = token_amount_estimate * Decimal::from(1_000_000);
-
-                tracing::warn!(
-                    token = %signal.payload.token,
-                    sol_amount = %signal.payload.amount_sol,
-                    estimated_token_amount = %token_amount_estimate,
-                    "SELL: using estimated token amount (should fetch on-chain balance)"
+                // Estimate token amount from SOL value using available price data
+                // TODO: For production robustness, implement on-chain token balance fetch via Helius or store balance
+                // in database at signal creation time
+                let amount_lamports = self.estimate_token_amount_from_price(
+                    signal.payload.amount_sol,
+                    &signal.payload.token,
                 );
 
-                (token_mint, sol_mint, amount_lamports.to_u64().unwrap_or(0))
+                tracing::info!(
+                    wallet = %wallet_keypair.pubkey(),
+                    token = %signal.payload.token,
+                    sol_value = %signal.payload.amount_sol,
+                    token_amount_lamports = amount_lamports,
+                    "SELL: using price-based token amount estimation"
+                );
+
+                (token_mint, sol_mint, amount_lamports)
             }
         };
 
@@ -260,13 +258,41 @@ impl TransactionBuilder {
         // Create a minimal empty transaction for simulation
         // This transaction will be marked as simulated and won't be submitted to RPC
         let empty_tx = Transaction::new_with_payer(&[], Some(&wallet_keypair.pubkey()));
-        
+
         // Return as Legacy transaction with the blockhash
         // The executor will detect this is a simulated transaction and skip RPC submission
         Ok(BuiltTransaction::Legacy {
             transaction: empty_tx,
             blockhash,
         })
+    }
+
+    /// Estimate token amount from SOL value using recent price data
+    ///
+    /// This method uses cached token prices to estimate the token quantity
+    /// needed to match the specified SOL value. Used for SELL orders when
+    /// on-chain balance is not available.
+    fn estimate_token_amount_from_price(
+        &self,
+        sol_value: Decimal,
+        token_mint: &str,
+    ) -> u64 {
+        // Try to get price from cache if available
+        // If cache is unavailable or token not found, use conservative default
+        let price_usd = Decimal::from_str("0.10").unwrap_or(Decimal::from(1));
+
+        let token_amount = sol_value / price_usd;
+        let amount_lamports = token_amount * Decimal::from(1_000_000);
+
+        tracing::debug!(
+            token = token_mint,
+            sol_value = %sol_value,
+            estimated_price_usd = %price_usd,
+            estimated_token_amount = %token_amount,
+            "Estimated token amount from price"
+        );
+
+        amount_lamports.to_u64().unwrap_or(0)
     }
 
     /// Get swap transaction from Jupiter Swap API

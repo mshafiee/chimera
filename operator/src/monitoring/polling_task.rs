@@ -13,7 +13,6 @@ use crate::db::DbPool;
 use crate::engine::EngineHandle;
 use crate::models::{Signal, SignalPayload, Strategy, Action};
 use super::{RpcPollingState, RateLimiter, rpc_polling};
-use rust_decimal::Decimal;
 
 /// Configuration for the polling task
 #[derive(Debug, Clone)]
