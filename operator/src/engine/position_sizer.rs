@@ -1,13 +1,14 @@
 //! Confidence-based dynamic position sizing
 //!
 //! Calculates position size based on:
-//! - Base size
+//! - Base size (or Kelly Criterion when enabled)
 //! - Confidence multiplier (consensus, WQS, etc.)
 //! - Wallet performance multiplier
 //! - Portfolio limits
 
 use crate::config::PositionSizingConfig;
 use crate::db::DbPool;
+use crate::engine::kelly_sizer::KellySizer;
 use rust_decimal::prelude::*;
 use sqlx;
 use std::sync::Arc;
@@ -16,6 +17,8 @@ use std::sync::Arc;
 pub struct PositionSizer {
     db: DbPool,
     config: Arc<PositionSizingConfig>,
+    /// Kelly Criterion sizer (active when use_kelly_sizing = true and ≥10 closed trades exist)
+    kelly_sizer: Option<Arc<KellySizer>>,
 }
 
 /// Position sizing factors
@@ -30,11 +33,20 @@ pub struct SizingFactors {
     pub signal_quality: Option<Decimal>, // Quality score, used in financial calculations
     /// Token 24h volatility percentage (None if unknown)
     pub token_volatility_24h: Option<Decimal>, // Volatility percentage, used in financial calculations
+    /// Wallet address for Kelly Criterion lookup
+    pub wallet_address: String,
+    /// Total trading capital in SOL (for Kelly sizing)
+    pub total_capital_sol: Decimal,
 }
 
 impl PositionSizer {
     pub fn new(db: DbPool, config: Arc<PositionSizingConfig>) -> Self {
-        Self { db, config }
+        let kelly_sizer = if config.use_kelly_sizing {
+            Some(Arc::new(KellySizer::new(db.clone())))
+        } else {
+            None
+        };
+        Self { db, config, kelly_sizer }
     }
 
     /// Calculate position size based on factors
@@ -47,7 +59,27 @@ impl PositionSizer {
     /// # Returns
     /// Position size in SOL (using Decimal for precision)
     pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
-        let mut size = self.config.base_size_sol;
+        // Kelly Criterion override: derive base size from historical win/loss ratio.
+        // Falls back to config.base_size_sol when Kelly can't compute (< 10 trades).
+        let mut size = if let Some(ref kelly) = self.kelly_sizer {
+            match kelly.calculate_kelly(&factors.wallet_address, 30).await {
+                Ok(result) => {
+                    let kelly_base = factors.total_capital_sol * result.recommended_size_percent;
+                    tracing::debug!(
+                        wallet = %factors.wallet_address,
+                        kelly_pct = ?result.recommended_size_percent,
+                        kelly_base_sol = ?kelly_base,
+                        "Kelly Criterion base size computed"
+                    );
+                    kelly_base
+                        .max(self.config.min_size_sol)
+                        .min(self.config.max_size_sol)
+                }
+                Err(_) => self.config.base_size_sol, // < 10 trades: use fixed base
+            }
+        } else {
+            self.config.base_size_sol
+        };
 
         // Confidence multiplier (using Decimal)
         let confidence_mult = if factors.is_consensus {
@@ -158,6 +190,7 @@ impl PositionSizer {
     /// * `estimated_slippage` - Estimated slippage percentage
     /// * `token_address` - Optional token address for age calculation
     /// * `helius_client` - Optional Helius client for token age fetching
+    /// * `total_capital_sol` - Total trading capital for Kelly sizing
     pub async fn get_sizing_factors(
         &self,
         wallet_address: &str,
@@ -165,6 +198,7 @@ impl PositionSizer {
         estimated_slippage: Decimal,
         token_address: Option<&str>,
         helius_client: Option<&crate::monitoring::HeliusClient>,
+        total_capital_sol: Decimal,
     ) -> SizingFactors {
         // Get wallet from database
         let wallet_opt = crate::db::get_wallet_by_address(&self.db, wallet_address).await;
@@ -208,6 +242,8 @@ impl PositionSizer {
             estimated_slippage,
             signal_quality: None,       // Will be set by caller if available
             token_volatility_24h: None, // Will be set by caller if available
+            wallet_address: wallet_address.to_string(),
+            total_capital_sol,
         }
     }
 

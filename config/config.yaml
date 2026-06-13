@@ -127,7 +127,7 @@ monitoring:
 profit_management:
   targets: [25, 50, 100, 200]  # Percentage targets
   tiered_exit_percent: 25       # Sell 25% at each target
-  trailing_stop_activation: 50  # Activate after +50%
+  trailing_stop_activation: 30  # Activate after +30%
   trailing_stop_distance: 20    # -20% from peak
   hard_stop_loss: 15            # -15% max loss
   time_exit_hours: 24           # Exit profitable positions after 24h
@@ -139,7 +139,8 @@ position_sizing:
   min_size_sol: 0.02
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
   max_concurrent_positions: 5
-  use_kelly_sizing: false  # Enable Kelly Criterion sizing (Phase 2)
+  use_kelly_sizing: true   # Kelly Criterion sizing enabled
+  total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
 
 # MEV protection configuration
 mev_protection:

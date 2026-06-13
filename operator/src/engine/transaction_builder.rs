@@ -4,6 +4,7 @@
 //! Supports both Jito bundles and standard TPU submission
 
 use crate::config::AppConfig;
+use crate::engine::dex_comparator::DexComparator;
 use crate::error::AppResult;
 use crate::models::{Action, Signal};
 use crate::vault::VaultSecrets;
@@ -25,6 +26,8 @@ pub struct TransactionBuilder {
     config: Arc<AppConfig>,
     /// HTTP client for Jupiter API calls
     http_client: reqwest::Client,
+    /// DEX comparator for dynamic slippage estimation
+    dex_comparator: DexComparator,
 }
 
 /// Built transaction ready for signing and submission
@@ -51,10 +54,12 @@ impl TransactionBuilder {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()); // Fallback to default if builder fails
 
+        let jupiter_url = config.jupiter.api_url.clone();
         Self {
             rpc_client,
             config,
             http_client,
+            dex_comparator: DexComparator::with_jupiter_api_url(jupiter_url),
         }
     }
 
@@ -412,11 +417,40 @@ impl TransactionBuilder {
         output_mint: Pubkey,
         amount: u64,
     ) -> AppResult<JupiterQuote> {
+        // Use DEX comparator to estimate true slippage and set a tighter tolerance.
+        // Clamp to [30, 150] bps: 30 = tight floor, 150 = 1.5% absolute ceiling.
+        let amount_sol = Decimal::from(amount) / Decimal::from(1_000_000_000u64);
+        let slippage_bps: u64 = match self
+            .dex_comparator
+            .compare_and_select(
+                &input_mint.to_string(),
+                &output_mint.to_string(),
+                amount_sol,
+            )
+            .await
+        {
+            Ok(result) if !amount_sol.is_zero() => {
+                let bps = ((result.slippage_sol / amount_sol) * Decimal::from(10_000u64))
+                    .to_u64()
+                    .unwrap_or(50)
+                    .clamp(30, 150);
+                if result.selected_dex != "Jupiter" {
+                    tracing::debug!(
+                        selected_dex = %result.selected_dex,
+                        slippage_bps = bps,
+                        "DexComparator found cheaper route; slippage adjusted"
+                    );
+                }
+                bps
+            }
+            _ => 50, // fallback to original hardcoded value on error
+        };
+
         // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
         // Old quote-api.jup.ag/v6 is deprecated
         let url = format!(
-            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
-            self.config.jupiter.api_url, input_mint, output_mint, amount
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+            self.config.jupiter.api_url, input_mint, output_mint, amount, slippage_bps
         );
 
         tracing::debug!(url = %url, "Requesting Jupiter quote");

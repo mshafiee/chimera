@@ -25,8 +25,8 @@ use chimera_operator::config::AppConfig;
 use chimera_operator::db;
 use chimera_operator::db::ActivePositionEntry;
 use chimera_operator::engine::{
-    self, MomentumExit, ProfitTargetAction, ProfitTargetManager, RecoveryManager, StopLossAction,
-    StopLossManager, TipManager,
+    self, MarketRegimeDetector, MomentumExit, PortfolioHeat, ProfitTargetAction,
+    ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager,
 };
 use chimera_operator::handlers::{
     disable_wallet_monitoring, enable_wallet_monitoring, export_trades, get_config,
@@ -535,6 +535,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("RPC health check task started");
 
     // Build position risk managers and spawn monitoring loop
+    let market_regime_detector = Arc::new(MarketRegimeDetector::new(price_cache.clone()));
     {
         let stop_loss_mgr = Arc::new(StopLossManager::new(
             db_pool.clone(),
@@ -542,11 +543,12 @@ async fn main() -> anyhow::Result<()> {
             price_cache.clone(),
         ));
         let momentum_exit = Arc::new(MomentumExit::new(db_pool.clone(), price_cache.clone()));
-        let profit_target_mgr = Arc::new(ProfitTargetManager::with_momentum_exit(
+        let profit_target_mgr = Arc::new(ProfitTargetManager::with_extras(
             db_pool.clone(),
             Arc::new(config.profit_management.clone()),
             price_cache.clone(),
-            momentum_exit,
+            Some(momentum_exit),
+            Some(market_regime_detector.clone()),
         ));
 
         let monitor_db = db_pool.clone();
@@ -724,6 +726,22 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("RPC polling disabled in configuration");
     }
 
+    // Spawn market regime price history update task (every 5 minutes)
+    {
+        let regime_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                tokio::select! {
+                    _ = regime_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        market_regime_detector.update_price_history().await;
+                    }
+                }
+            }
+        });
+    }
+
     tracing::info!("All background tasks spawned");
 
     // Now create the FULL router with all routes
@@ -838,12 +856,21 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
     .ok();
 
+    let portfolio_heat = Arc::new(PortfolioHeat::new(
+        db_pool.clone(),
+        config.position_sizing.total_capital_sol,
+    ));
+    tracing::info!(
+        total_capital_sol = ?config.position_sizing.total_capital_sol,
+        "Portfolio heat manager initialized"
+    );
+
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: _engine_handle.clone(),
         token_parser,
         circuit_breaker: circuit_breaker.clone(),
-        portfolio_heat: None, // Optional - can be enabled later
+        portfolio_heat: Some(portfolio_heat),
         signal_aggregator: Some(signal_aggregator.clone()),
         helius_client: helius_client.clone(),
     });

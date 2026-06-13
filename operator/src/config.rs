@@ -760,6 +760,9 @@ pub struct PositionSizingConfig {
     /// Enable Kelly Criterion sizing
     #[serde(default = "default_use_kelly_sizing")]
     pub use_kelly_sizing: bool,
+    /// Total trading capital in SOL (used for Kelly sizing and portfolio heat)
+    #[serde(default = "default_total_capital_sol")]
+    pub total_capital_sol: Decimal,
 }
 
 fn default_base_size_sol() -> Decimal {
@@ -786,6 +789,10 @@ fn default_use_kelly_sizing() -> bool {
     false
 }
 
+fn default_total_capital_sol() -> Decimal {
+    Decimal::from_str("10.0").unwrap()
+}
+
 impl Default for PositionSizingConfig {
     fn default() -> Self {
         Self {
@@ -795,6 +802,7 @@ impl Default for PositionSizingConfig {
             consensus_multiplier: default_consensus_multiplier(),
             max_concurrent_positions: default_max_concurrent_positions(),
             use_kelly_sizing: default_use_kelly_sizing(),
+            total_capital_sol: default_total_capital_sol(),
         }
     }
 }

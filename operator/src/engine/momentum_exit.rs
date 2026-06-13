@@ -99,7 +99,16 @@ impl MomentumExit {
         let elapsed = entry_time.elapsed().unwrap_or_default();
         let elapsed_minutes = elapsed.as_secs() / 60;
 
-        let price_drop_threshold = Decimal::from(5);
+        let base_drop_threshold = Decimal::from(5);
+        // Widen threshold for high-volatility tokens to avoid shakeout exits.
+        // At 30% vol → ~8%, at 50% vol → ~10%, capped at 15%.
+        let price_drop_threshold = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
+            let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
+            let scaled = base_drop_threshold + (vol_dec * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO));
+            scaled.min(Decimal::from(15))
+        } else {
+            base_drop_threshold
+        };
         if elapsed_minutes <= 5 && price_drop_percent >= price_drop_threshold {
             let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
             tracing::warn!(

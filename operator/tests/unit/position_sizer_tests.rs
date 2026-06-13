@@ -57,6 +57,8 @@ fn neutral_factors() -> SizingFactors {
         estimated_slippage: Decimal::from_str("1.0").unwrap(), // <2%: no penalty
         signal_quality: None,
         token_volatility_24h: None,
+        wallet_address: "test_wallet".to_string(),
+        total_capital_sol: Decimal::from_str("10.0").unwrap(),
     }
 }
 
@@ -234,6 +236,8 @@ async fn test_position_size_capped_at_max() {
         estimated_slippage: Decimal::from_str("0.5").unwrap(),    // no penalty
         signal_quality: Some(Decimal::from_str("0.95").unwrap()), // 1.3x
         token_volatility_24h: None,
+        wallet_address: "test_wallet".to_string(),
+        total_capital_sol: Decimal::from_str("10.0").unwrap(),
     };
 
     let size = sizer.calculate_size(factors).await;
@@ -265,6 +269,8 @@ async fn test_position_size_floor_at_minimum() {
         estimated_slippage: Decimal::from_str("5.0").unwrap(),   // 0.7x penalty
         signal_quality: Some(Decimal::from_str("0.5").unwrap()), // 0.7x penalty
         token_volatility_24h: Some(Decimal::from_str("50.0").unwrap()), // additional reduction
+        wallet_address: "test_wallet".to_string(),
+        total_capital_sol: Decimal::from_str("10.0").unwrap(),
     };
 
     let size = sizer.calculate_size(factors).await;
