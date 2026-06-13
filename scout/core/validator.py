@@ -52,6 +52,8 @@ class PromotionCriteria:
     max_rejection_rate: float = 0.5  # Max 50% of trades can be rejected
     require_positive_simulated_pnl: bool = True
     max_pnl_reduction_percent: float = 80.0  # Max 80% reduction allowed
+    # Max drawdown as fraction of total positive PnL (0.5 = 50% of gains)
+    max_drawdown_fraction: float = 0.5
 
     # Walk-forward validation (reduce overfitting / "lucky wallet" promotion)
     walk_forward_enabled: bool = True
@@ -277,33 +279,50 @@ class PrePromotionValidator:
                     notes=f"Sim PF: {sim_pf:.2f}, Orig PF: {metrics.profit_factor if metrics.profit_factor else 0.0:.2f}",
                 )
 
-        # 6c. NEW: Max Drawdown Check in Simulator
+        # 6c. Max Drawdown Check — reject if peak-to-trough > max_drawdown_fraction of total gains
         from decimal import Decimal as _D
         simulated_equity = [_D("0")]
         current_eq = _D("0")
+        total_positive_pnl = _D("0")
         for t in trade_list:
             pnl = t.simulated_pnl_sol
             if pnl:
-                current_eq += _D(str(pnl)) if not isinstance(pnl, _D) else pnl
+                pnl_d = _D(str(pnl)) if not isinstance(pnl, _D) else pnl
+                current_eq += pnl_d
                 simulated_equity.append(current_eq)
-        
-        if simulated_equity:
+                if pnl_d > _D("0"):
+                    total_positive_pnl += pnl_d
+
+        if len(simulated_equity) > 1 and total_positive_pnl > _D("0"):
             peak = simulated_equity[0]
-            max_dd = 0.0
+            max_dd = _D("0")
             for val in simulated_equity:
                 if val > peak:
                     peak = val
                 dd = peak - val
                 if dd > max_dd:
                     max_dd = dd
-            
-            # Since equity is absolute PnL in SOL, drawdown percentage relies on initial capital
-            # For simplicity, if absolute drawdown > 30% of Total Gains, it's risky? 
-            # Or use the metric from BacktestResult if available.
-            
-            # Let's rely on BacktestResult having a 'max_drawdown_percent' field if added,
-            # otherwise skip or use a simple heuristic on the PnL sequence.
-            pass
+
+            threshold = total_positive_pnl * _D(str(self.criteria.max_drawdown_fraction))
+            if max_dd > threshold:
+                logger.info(
+                    f"Wallet failed drawdown check: max_dd={float(max_dd):.4f} SOL "
+                    f"> {self.criteria.max_drawdown_fraction*100:.0f}% of gains "
+                    f"({float(total_positive_pnl):.4f} SOL)"
+                )
+                return ValidationResult(
+                    wallet_address=wallet_address,
+                    status=ValidationStatus.FAILED_NEGATIVE_PNL,
+                    backtest_result=backtest_result,
+                    passed=False,
+                    reason=(
+                        f"Max drawdown {float(max_dd):.4f} SOL exceeds "
+                        f"{self.criteria.max_drawdown_fraction*100:.0f}% of total gains "
+                        f"({float(total_positive_pnl):.4f} SOL)"
+                    ),
+                    recommended_status="CANDIDATE",
+                    notes="Wallet has excessive drawdown relative to gains — too volatile to promote",
+                )
 
         # Check simulated PnL (Original Check)
         if self.criteria.require_positive_simulated_pnl:

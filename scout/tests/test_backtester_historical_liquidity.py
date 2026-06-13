@@ -76,9 +76,10 @@ class TestBacktesterHistoricalLiquidity:
             min_liquidity_spear_usd=5000.0,
             dex_fee_percent=0.003,
             max_slippage_percent=0.05,
+            enforce_current_liquidity=False,  # test is offline; current-liq check not under test
         )
         simulator = BacktestSimulator(provider, config)
-        
+
         # Create trade
         trade = HistoricalTrade(
             token_address=token,
@@ -90,10 +91,10 @@ class TestBacktesterHistoricalLiquidity:
             tx_signature="tx1",
             pnl_sol=None,
         )
-        
+
         # Simulate trade
         result, _ = simulator._simulate_trade(trade, 10000.0, 150.0)
-        
+
         # Verify historical liquidity was used
         assert len(provider.calls_made) > 0
         call_token, call_timestamp = provider.calls_made[0]
@@ -116,6 +117,7 @@ class TestBacktesterHistoricalLiquidity:
             min_liquidity_spear_usd=5000.0,
             dex_fee_percent=0.003,
             max_slippage_percent=0.05,
+            enforce_current_liquidity=False,  # test is offline; fallback is in historical provider
         )
         simulator = BacktestSimulator(provider, config)
         
@@ -156,6 +158,7 @@ class TestBacktesterHistoricalLiquidity:
             dex_fee_percent=0.003,
             max_slippage_percent=0.05,
             min_trades_required=3,
+            enforce_current_liquidity=False,  # test is offline
         )
         simulator = BacktestSimulator(provider, config)
         

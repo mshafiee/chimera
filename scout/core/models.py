@@ -260,12 +260,11 @@ class BacktestConfig:
     spear_multiplier: Decimal = field(default_factory=lambda: Decimal('1.5'))  # More aggressive for Spear
 
     # Copy-viability gate (PDD):
-    # If enabled, reject wallets whose traded tokens no longer meet current liquidity
-    # thresholds (i.e., the token is effectively dead/un-copyable now).
-    #
-    # Default is False to keep unit tests deterministic and to avoid surprising
-    # network calls in offline environments. Enable in production Scout runs.
-    enforce_current_liquidity: bool = False
+    # Reject wallets whose traded tokens no longer meet current liquidity thresholds
+    # (i.e., the token is effectively dead/un-copyable now).
+    # Only fires when liquidity provider is in "real" mode, so offline/test
+    # environments running in "simulated" mode are unaffected.
+    enforce_current_liquidity: bool = True
     
     def __post_init__(self):
         """Coerce all Decimal fields so tests can pass plain floats/ints."""

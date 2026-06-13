@@ -99,23 +99,27 @@ impl SignalAggregator {
             .or_insert_with(Vec::new);
         token_signals.push(signal);
 
-        // Check for consensus (2+ wallets buying same token within 5 minutes)
-        if token_signals.len() >= 2 {
-            let wallets: Vec<String> = token_signals
-                .iter()
-                .map(|s| s.wallet_address.clone())
-                .collect();
+        // Check for consensus (2+ DISTINCT wallets buying same token within 5 minutes).
+        // Dedup by wallet address so a single wallet retrying cannot fake consensus.
+        let mut seen = std::collections::HashSet::new();
+        let unique_wallets: Vec<String> = token_signals
+            .iter()
+            .filter(|s| seen.insert(s.wallet_address.clone()))
+            .map(|s| s.wallet_address.clone())
+            .collect();
+
+        if unique_wallets.len() >= 2 {
             let total_amount: Decimal = token_signals.iter().map(|s| s.amount_sol).sum();
-            let confidence = (token_signals.len() as f64 / 5.0).min(1.0); // Max confidence at 5+ wallets
+            let confidence = (unique_wallets.len() as f64 / 5.0).min(1.0); // Max confidence at 5+ wallets
 
             // Update wallet clusters
-            self.update_wallet_clusters(&wallets).await;
+            self.update_wallet_clusters(&unique_wallets).await;
 
             return Some(ConsensusSignal {
                 token_address: token_address.to_string(),
-                wallet_count: token_signals.len(),
+                wallet_count: unique_wallets.len(),
                 total_amount_sol: total_amount,
-                wallets,
+                wallets: unique_wallets,
                 confidence,
             });
         }

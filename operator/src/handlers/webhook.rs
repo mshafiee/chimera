@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::db::{self, DbPool};
-use crate::engine::{EngineHandle, SignalQuality};
+use crate::engine::{EngineHandle, PositionSizer, SignalQuality};
+use crate::engine::position_sizer::SizingFactors;
 use crate::error::AppError;
 use crate::middleware::TIMESTAMP_HEADER;
 use crate::models::{Signal, SignalPayload, Strategy};
@@ -61,6 +62,10 @@ pub struct WebhookState {
     pub signal_aggregator: Option<Arc<SignalAggregator>>,
     /// Helius client for token age fetching
     pub helius_client: Option<Arc<HeliusClient>>,
+    /// Position sizer for Kelly/confidence-based sizing
+    pub position_sizer: Option<Arc<PositionSizer>>,
+    /// Total trading capital in SOL (from config.position_sizing.total_capital_sol)
+    pub total_capital_sol: Decimal,
 }
 
 /// Webhook handler
@@ -195,22 +200,75 @@ pub async fn webhook_handler(
     // Create signal
     let signal = Signal::new(payload, timestamp, None);
 
-    // Fetch wallet data once (used for both quality check and queue routing)
+    // Fetch wallet data once (used for both quality check and queue routing).
+    // For BUY signals, also gate on wallet status — only ACTIVE wallets may trigger buys.
     let wallet_data = if signal.payload.action == crate::models::Action::Buy {
         match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
-            Ok(Some(wallet)) => Some((wallet.wqs_score.unwrap_or(50.0), wallet.wqs_score)),
-            Ok(None) => Some((50.0, None)), // Default if wallet not found
-            Err(_) => Some((50.0, None)),   // Default on error
+            Ok(Some(wallet)) => {
+                if wallet.status != "ACTIVE" {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        wallet = %signal.payload.wallet_address,
+                        status = %wallet.status,
+                        "BUY signal from non-ACTIVE wallet rejected"
+                    );
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        Json(WebhookResponse {
+                            status: WebhookStatus::Rejected,
+                            trade_uuid: signal.trade_uuid,
+                            reason: Some(format!("Wallet status is {}, only ACTIVE wallets may trigger buys", wallet.status)),
+                        }),
+                    ));
+                }
+                let win_rate = wallet.win_rate
+                    .and_then(Decimal::from_f64_retain)
+                    .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
+                Some((wallet.wqs_score.unwrap_or(50.0), wallet.wqs_score, win_rate))
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    trade_uuid = %signal.trade_uuid,
+                    wallet = %signal.payload.wallet_address,
+                    "BUY signal from unknown wallet rejected"
+                );
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid: signal.trade_uuid,
+                        reason: Some("Unknown wallet — not in roster".to_string()),
+                    }),
+                ));
+            }
+            Err(e) => {
+                tracing::error!(
+                    trade_uuid = %signal.trade_uuid,
+                    error = %e,
+                    "DB error fetching wallet status, rejecting BUY (fail-closed)"
+                );
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid: signal.trade_uuid,
+                        reason: Some("DB error during wallet status check".to_string()),
+                    }),
+                ));
+            }
         }
     } else {
         None
     };
 
+    // Trade amount: starts as payload value for SELL/EXIT; overridden by PositionSizer for BUY.
+    let mut trade_amount_sol = signal.payload.amount_sol;
+
     // Signal quality check (for BUY signals only, EXIT/SELL don't need quality check)
     if signal.payload.action == crate::models::Action::Buy {
         let wallet_wqs = wallet_data
             .as_ref()
-            .map(|(wqs, _)| wqs)
+            .map(|(wqs, _, _)| wqs)
             .copied()
             .unwrap_or(50.0);
 
@@ -308,11 +366,15 @@ pub async fn webhook_handler(
         let quality =
             SignalQuality::calculate(wallet_wqs, is_consensus, liquidity_usd, token_age_hours);
 
-        // Reject if quality too low
-        if !quality.should_enter(0.7) {
+        // Reject if quality too low.
+        // 0.45 lets through a typical ACTIVE wallet (WQS 70, $15k liq) scoring ~0.47
+        // while blocking genuinely poor signals (WQS <30, <$5k liq).
+        let quality_threshold = 0.45_f64;
+        if !quality.should_enter(quality_threshold) {
             tracing::warn!(
                 trade_uuid = %signal.trade_uuid,
                 quality_score = quality.score,
+                threshold = quality_threshold,
                 wallet_wqs = wallet_wqs,
                 liquidity_usd = %liquidity_usd,
                 "Signal rejected due to low quality"
@@ -324,7 +386,7 @@ pub async fn webhook_handler(
                 Some(&signal.trade_uuid),
                 &serde_json::to_string(&signal.payload).unwrap_or_default(),
                 "SIGNAL_QUALITY_TOO_LOW",
-                Some(&format!("Quality score: {:.2} < 0.7", quality.score)),
+                Some(&format!("Quality score: {:.2} < {:.2}", quality.score, quality_threshold)),
                 None,
             )
             .await;
@@ -345,18 +407,44 @@ pub async fn webhook_handler(
             category = %quality.category(),
             "Signal quality check passed"
         );
+
+        // Compute position size via PositionSizer (Kelly + confidence multipliers).
+        // Ignores payload amount_sol — caller must not control trade size.
+        if let Some(ref sizer) = state.position_sizer {
+            let wallet_success_rate = wallet_data
+                .as_ref()
+                .map(|(_, _, wr)| *wr)
+                .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
+            let factors = SizingFactors {
+                is_consensus,
+                wallet_wqs,
+                wallet_success_rate,
+                token_age_hours,
+                estimated_slippage: Decimal::ZERO,
+                signal_quality: Decimal::from_f64_retain(quality.score),
+                token_volatility_24h: None,
+                wallet_address: signal.payload.wallet_address.clone(),
+                total_capital_sol: state.total_capital_sol,
+            };
+            trade_amount_sol = sizer.calculate_size(factors).await;
+            tracing::info!(
+                trade_uuid = %signal.trade_uuid,
+                trade_amount_sol = ?trade_amount_sol,
+                "Position size computed by PositionSizer"
+            );
+        }
     }
 
     // Check portfolio heat (if enabled)
     if let Some(ref portfolio_heat) = state.portfolio_heat {
         match portfolio_heat
-            .can_open_position(signal.payload.amount_sol)
+            .can_open_position(trade_amount_sol)
             .await
         {
             Ok(false) => {
                 tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
-                    amount_sol = %signal.payload.amount_sol,
+                    amount_sol = %trade_amount_sol,
                     "Signal rejected: portfolio heat limit reached"
                 );
 
@@ -402,7 +490,7 @@ pub async fn webhook_handler(
         Some(&signal.payload.token),
         &signal.payload.strategy.to_string(),
         &signal.payload.action.to_string(),
-        signal.payload.amount_sol,
+        trade_amount_sol,
         "PENDING",
     )
     .await?;
@@ -411,13 +499,13 @@ pub async fn webhook_handler(
         trade_uuid = %signal.trade_uuid,
         strategy = %signal.payload.strategy,
         token = %signal.payload.token,
-        amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
+        amount_sol = trade_amount_sol.to_f64().unwrap_or(0.0),
         action = %signal.payload.action,
         "Signal received and validated"
     );
 
     // Use cached wallet data for queue routing
-    let wallet_wqs = wallet_data.as_ref().and_then(|(_, wqs)| *wqs);
+    let wallet_wqs = wallet_data.as_ref().and_then(|(_, wqs, _)| *wqs);
 
     // Queue for execution
     match state.engine.queue_signal(signal.clone(), wallet_wqs).await {

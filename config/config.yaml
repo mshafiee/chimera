@@ -129,7 +129,7 @@ profit_management:
   tiered_exit_percent: 25       # Sell 25% at each target
   trailing_stop_activation: 30  # Activate after +30%
   trailing_stop_distance: 20    # -20% from peak
-  hard_stop_loss: 15            # -15% max loss
+  hard_stop_loss: -15           # -15% max loss
   time_exit_hours: 24           # Exit profitable positions after 24h
 
 # Position sizing configuration

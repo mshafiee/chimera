@@ -616,6 +616,7 @@ async def test_profit_factor_threshold_1_2_enforced():
             min_trades=5,
             min_closes_required=5,
             walk_forward_enabled=False,
+            max_drawdown_fraction=1.0,  # disable drawdown gate — this test is about profit-factor only
         )
     )
     validator_exact.simulator = mock_exact

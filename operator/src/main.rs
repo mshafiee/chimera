@@ -25,7 +25,7 @@ use chimera_operator::config::AppConfig;
 use chimera_operator::db;
 use chimera_operator::db::ActivePositionEntry;
 use chimera_operator::engine::{
-    self, MarketRegimeDetector, MomentumExit, PortfolioHeat, ProfitTargetAction,
+    self, MarketRegimeDetector, MomentumExit, PortfolioHeat, PositionSizer, ProfitTargetAction,
     ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager,
 };
 use chimera_operator::handlers::{
@@ -865,6 +865,12 @@ async fn main() -> anyhow::Result<()> {
         "Portfolio heat manager initialized"
     );
 
+    let position_sizer = Arc::new(PositionSizer::new(
+        db_pool.clone(),
+        Arc::new(config.position_sizing.clone()),
+    ));
+    tracing::info!("Position sizer initialized (Kelly sizing: {})", config.position_sizing.use_kelly_sizing);
+
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: _engine_handle.clone(),
@@ -873,6 +879,8 @@ async fn main() -> anyhow::Result<()> {
         portfolio_heat: Some(portfolio_heat),
         signal_aggregator: Some(signal_aggregator.clone()),
         helius_client: helius_client.clone(),
+        position_sizer: Some(position_sizer),
+        total_capital_sol: config.position_sizing.total_capital_sol,
     });
 
     // Create roster state
