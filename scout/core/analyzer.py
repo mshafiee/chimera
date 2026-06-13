@@ -1261,8 +1261,7 @@ class WalletAnalyzer:
 
         print(f"  [{address[:8]}] Checking token safety with RugCheck...")
         # Filter out unsafe tokens using RugCheck if enabled
-        # TEMPORARILY DISABLED for testing - RugCheck filtering too aggressively
-        if False and self.rugcheck_client:
+        if self.rugcheck_client:
             safe_trades = []
             risky_tokens = []
             for i, t in enumerate(trades):
@@ -1493,6 +1492,26 @@ class WalletAnalyzer:
             logger.warning(f"Failed to calculate unrealized PnL for {address}: {e}")
             total_unrealized_loss_sol = None
         
+        print(f"  [{address[:8]}] Computing Sortino ratio...")
+        # Calculate Sortino ratio: excess return / downside deviation
+        sortino_ratio = None
+        try:
+            if close_trades_30d and roi_30d:
+                # Get downside returns (negative returns only)
+                pnls_30d = [t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol is not None]
+                if pnls_30d:
+                    downside_returns = [float(p) for p in pnls_30d if p < 0]
+                    if downside_returns:
+                        # Downside deviation: sqrt(mean(min(return, 0)^2))
+                        downside_variance = sum(r**2 for r in downside_returns) / len(downside_returns)
+                        downside_deviation = downside_variance ** 0.5
+                        if downside_deviation > 0:
+                            # Sortino = (avg_return - 0) / downside_deviation
+                            avg_return = roi_30d / 100.0  # Convert percentage to decimal
+                            sortino_ratio = avg_return / downside_deviation if downside_deviation > 0 else None
+        except Exception as e:
+            print(f"  [{address[:8]}] Warning: Could not calculate Sortino ratio: {e}")
+
         print(f"  [{address[:8]}] Creating WalletMetrics object...")
         # Convert Decimal values to float for WalletMetrics
         return WalletMetrics(
@@ -1508,6 +1527,7 @@ class WalletAnalyzer:
             avg_entry_delay_seconds=avg_entry_delay,
             profit_factor=profit_factor,
             is_fresh_wallet=is_fresh_wallet,
+            sortino_ratio=sortino_ratio,
             total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
             total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
             dex_diversity_score=dex_diversity_score,
@@ -1983,21 +2003,21 @@ class WalletAnalyzer:
         self._enrich_trades_with_realized_pnl(trades)
         return sorted(trades, key=lambda t: t.timestamp, reverse=True)
     
-    def fetch_recent_trades(self, address: str, days: int = 30) -> List[dict]:
+    async def fetch_recent_trades(self, address: str, days: int = 30) -> List[dict]:
         """
         Fetch recent trades for a wallet (legacy method).
-        
+
         In production, this would query Helius API for transaction history.
-        
+
         Args:
             address: Wallet address
             days: Number of days to look back
-            
+
         Returns:
             List of trade dictionaries
         """
         # Convert to dict format for backwards compatibility
-        trades = self.get_historical_trades(address, days)
+        trades = await self.get_historical_trades(address, days)
         return [
             {
                 "token_address": t.token_address,

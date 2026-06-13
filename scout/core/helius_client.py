@@ -335,9 +335,12 @@ class HeliusClient:
 
         try:
             if use_retry:
-                return await self._retry_with_backoff(_do_request())
+                return await self._retry_with_backoff(_do_request)
             else:
                 return await _do_request()
+        except asyncio.TimeoutError:
+            print(f"[Helius] API request timeout")
+            return None
         except aiohttp.ClientError as e:
             print(f"[Helius] API request failed: {_redact(str(e))}")
             return None
@@ -723,40 +726,45 @@ class HeliusClient:
         cutoff_time = int((datetime.utcnow() - timedelta(hours=hours_back)).timestamp())
         
         print(f"[Helius] Discovering from {len(token_addresses)} active tokens...")
-        
+
         if use_parallel and len(token_addresses) > 1:
-            # Use parallel processing with rate limiting
+            # Use parallel processing with rate limiting (asyncio, not ThreadPoolExecutor)
             max_workers = min(5, len(token_addresses))  # Limit concurrent requests
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(self._query_token_transactions, token_addr, cutoff_time, limit_per_token): token_addr
-                    for token_addr in token_addresses
-                    if self._api_calls_made < self._max_api_calls
-                }
-                
-                for future in as_completed(futures):
-                    if self._api_calls_made >= self._max_api_calls:
-                        break
-                    
-                    token_addr, transactions = future.result()
-                    
-                    for tx in transactions:
-                        # Prefer fee payer (usually the user wallet) for discovery
-                        fee_payer = tx.get("feePayer")
-                        if fee_payer and self._is_candidate_wallet_address(fee_payer):
-                            wallet_counts[fee_payer] += 1
-                            self._discovered_this_run.add(fee_payer)
-                        else:
-                            # Fallback: extract multiple wallets, but apply strict filter
-                            wallets = self._extract_wallets_from_transaction(tx)
-                            for wallet in wallets:
-                                if self._is_candidate_wallet_address(wallet):
-                                    wallet_counts[wallet] += 1
-                                    self._discovered_this_run.add(wallet)
-                    
-                    if transactions:
-                        print(f"[Helius] Processed {len(transactions)} transactions from token {token_addr[:8]}...")
+
+            # Create async tasks for all tokens
+            tasks = [
+                self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
+                for token_addr in token_addresses
+                if self._api_calls_made < self._max_api_calls
+            ]
+
+            # Process results as they complete
+            for coro in asyncio.as_completed(tasks):
+                if self._api_calls_made >= self._max_api_calls:
+                    break
+
+                try:
+                    token_addr, transactions = await coro
+                except Exception as e:
+                    print(f"[Helius] Error querying token: {e}")
+                    continue
+
+                for tx in transactions:
+                    # Prefer fee payer (usually the user wallet) for discovery
+                    fee_payer = tx.get("feePayer")
+                    if fee_payer and self._is_candidate_wallet_address(fee_payer):
+                        wallet_counts[fee_payer] += 1
+                        self._discovered_this_run.add(fee_payer)
+                    else:
+                        # Fallback: extract multiple wallets, but apply strict filter
+                        wallets = self._extract_wallets_from_transaction(tx)
+                        for wallet in wallets:
+                            if self._is_candidate_wallet_address(wallet):
+                                wallet_counts[wallet] += 1
+                                self._discovered_this_run.add(wallet)
+
+                if transactions:
+                    print(f"[Helius] Processed {len(transactions)} transactions from token {token_addr[:8]}...")
         else:
             # Sequential processing
             for token_addr in token_addresses:
@@ -935,7 +943,25 @@ class HeliusClient:
                 continue
         
         return dict(wallet_counts)
-    
+
+    async def discover_from_top_performing_tokens(self) -> List[str]:
+        """
+        Discover wallets from top performing/trending tokens (Strategy 5).
+        Falls back to using active tokens if trending data is unavailable.
+
+        Returns:
+            List of discovered wallet addresses
+        """
+        try:
+            # Use active tokens as the data source for trending token analysis
+            # In production, could integrate with Birdeye/DexScreener for real trending tokens
+            wallet_counts = await self._discover_from_active_tokens(hours_back=12, limit_per_token=100)
+            # Take top N wallets by trade count
+            top_wallets = sorted(wallet_counts.items(), key=lambda x: x[1], reverse=True)[:50]
+            return [wallet for wallet, _count in top_wallets]
+        except Exception as e:
+            print(f"[Helius] discover_from_top_performing_tokens failed: {e}")
+            return []
 
     async def discover_wallets_from_recent_swaps(
         self,

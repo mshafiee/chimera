@@ -31,9 +31,9 @@ class TraderArchetype(Enum):
 class LiquidityData:
     """Snapshot of token liquidity at a point in time."""
     token_address: str
-    liquidity_usd: Decimal
-    price_usd: Decimal
-    volume_24h_usd: Decimal
+    liquidity_usd: float
+    price_usd: float
+    volume_24h_usd: float
     timestamp: datetime
     source: str = "unknown"
     # New: Token creation time for sniper checks
@@ -58,7 +58,7 @@ class WalletRecord:
     realized_pnl_30d_sol: Optional[Decimal] = None
     last_trade_at: Optional[str] = None
     notes: Optional[str] = None
-    created_at: str = datetime.utcnow().isoformat()
+    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     # New fields for detailed records
     avg_entry_delay_seconds: Optional[float] = None  # Time metric, float is acceptable
     archetype: Optional[str] = None  # TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
