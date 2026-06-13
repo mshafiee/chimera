@@ -1845,16 +1845,30 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
     y_pos -= 5.0;
     
     // Add trade rows (limit to prevent PDF from being too large)
-    let max_rows = 1000;
+    // Increased limit to 5000 to support active traders with large trade histories
+    // Note: Multi-page PDF support would require additional implementation for page breaks
+    let max_rows = 5000;
     let display_trades = if trades.len() > max_rows {
+        tracing::warn!(
+            total_trades = trades.len(),
+            exported_rows = max_rows,
+            "PDF export truncated: user has more trades than supported in single page"
+        );
         &trades[..max_rows]
     } else {
         trades
     };
-    
+
     for trade in display_trades {
         if y_pos < 20.0 {
-            // Would need to create new page here - for now, just stop
+            // Page space exhausted - would require multi-page PDF implementation
+            // For now, log warning about incomplete export
+            if display_trades.len() > 1 {
+                tracing::warn!(
+                    rows_attempted = display_trades.len(),
+                    "PDF export incomplete: insufficient page space for all rows"
+                );
+            }
             break;
         }
         

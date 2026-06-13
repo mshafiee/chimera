@@ -1060,9 +1060,16 @@ class WalletAnalyzer:
                                 # However, most legitimate tokens have mint_authority, so this is
                                 # primarily a check for tokens that explicitly disabled it (very safe)
                                 # For now, we rely on RugCheck for comprehensive mint authority checks
-        except Exception:
-            pass
-        
+        except Exception as e:
+            # Log error but don't fail silently - conservative approach
+            import traceback
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Token safety check failed for {token_address}: {e}\n{traceback.format_exc()}")
+            # Default to False (reject) if we can't verify - safer than accepting unknown tokens
+            return False
+
+        # Token passed basic safety checks
         return True
 
     async def _get_sol_price_usd(self) -> float:
@@ -1605,11 +1612,32 @@ class WalletAnalyzer:
                     pos["qty"] -= qty
                     pos["cost"] -= (pos["cost"] * fraction)
         
-        # Check remaining bags
-        # Note: This check requires async SOL price fetching, so we skip it in this sync function
-        # The unrealized PnL calculation is handled separately in calculate_unrealized_pnl
-        # which is async and can properly fetch prices
-        pass
+        # Check remaining bags (open positions)
+        # Apply penalty for positions held > 30 days without exit
+        # Full unrealized PnL requires price fetches (handled in calculate_unrealized_pnl async)
+        now = Decimal(str(int(time.time())))
+        bag_count = 0
+        max_bag_age_seconds = Decimal('2592000')  # 30 days
+        for token, pos in positions.items():
+            if pos["qty"] > Decimal('0'):
+                # This token is held without exit
+                last_buy = None
+                for t in sorted_trades:
+                    if t.token_address == token and t.action == TradeAction.BUY:
+                        last_buy = t.timestamp
+
+                if last_buy:
+                    bag_age = now - Decimal(str(int(last_buy)))
+                    if bag_age > max_bag_age_seconds:
+                        # Bag held > 30 days - apply penalty
+                        bag_count += 1
+
+        # Reduce profit_factor by 10% per held bag (capped at 50% reduction)
+        if bag_count > 0:
+            bag_penalty = min(Decimal('0.5'), Decimal(bag_count) * Decimal('0.1'))
+            profit_factor = decimal_to_float(
+                (Decimal(str(profit_factor)) * (Decimal('1.0') - bag_penalty))
+            )
 
 
         avg_win = decimal_to_float(safe_decimal_divide(sum_wins, Decimal(str(len(wins))))) if wins else None
