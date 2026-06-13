@@ -234,7 +234,65 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-    
+    tracing::info!("Circuit breaker task spawned");
+
+    // Spawn DLQ retry worker task
+    let dlq_token = cancel_token.clone();
+    let dlq_pool = db_pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+        loop {
+            tokio::select! {
+                _ = dlq_token.cancelled() => {
+                    tracing::info!("Shutting down DLQ retry worker");
+                    break;
+                }
+                _ = interval.tick() => {
+                    // Fetch retryable items from DLQ
+                    match sqlx::query_as::<_, (String, String)>(
+                        "SELECT trade_uuid, payload FROM dead_letter_queue WHERE can_retry = 1 AND processed_at IS NULL LIMIT 50"
+                    )
+                    .fetch_all(&dlq_pool)
+                    .await {
+                        Ok(items) => {
+                            tracing::info!(count = items.len(), "Processing DLQ retry items");
+                            for (trade_uuid, payload_str) in items {
+                                // Parse payload and re-queue
+                                match serde_json::from_str::<serde_json::Value>(&payload_str) {
+                                    Ok(_) => {
+                                        // Update DLQ item status to mark as processed and moved to RETRY
+                                        if let Err(e) = sqlx::query(
+                                            "UPDATE dead_letter_queue SET processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = ?"
+                                        )
+                                        .bind(&trade_uuid)
+                                        .execute(&dlq_pool)
+                                        .await {
+                                            tracing::warn!(error = %e, "Failed to mark DLQ item as processed");
+                                        } else {
+                                            // Update trade status to RETRY
+                                            if let Err(e) = crate::db::update_trade_status(&dlq_pool, &trade_uuid, "RETRY", None, None).await {
+                                                tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to update trade status to RETRY");
+                                            } else {
+                                                tracing::info!(uuid = %trade_uuid, "DLQ item re-queued to RETRY");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to parse DLQ payload");
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to fetch DLQ items");
+                        }
+                    }
+                }
+            }
+        }
+    });
+    tracing::info!("DLQ retry worker spawned");
+
     // Spawn price cache updater
     let price_cache_clone = price_cache.clone();
     tokio::spawn(async move {
