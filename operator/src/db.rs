@@ -140,9 +140,9 @@ pub async fn update_trade_status(
     tx_signature: Option<&str>,
     error_message: Option<&str>,
 ) -> AppResult<()> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
-        UPDATE trades 
+        UPDATE trades
         SET status = ?, tx_signature = ?, error_message = ?
         WHERE trade_uuid = ?
         "#,
@@ -153,6 +153,10 @@ pub async fn update_trade_status(
     .bind(trade_uuid)
     .execute(pool)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("trade_uuid '{}' not found", trade_uuid)));
+    }
 
     Ok(())
 }

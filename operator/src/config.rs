@@ -697,7 +697,7 @@ fn default_trailing_stop_distance() -> Decimal {
 }
 
 fn default_hard_stop_loss() -> Decimal {
-    Decimal::from_str("15.0").unwrap()
+    Decimal::from_str("-15.0").unwrap()
 }
 
 fn default_time_exit_hours() -> u64 {

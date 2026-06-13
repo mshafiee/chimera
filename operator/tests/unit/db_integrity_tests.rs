@@ -55,8 +55,8 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
     let result = update_trade_status(&pool, "nonexistent-uuid-xyz", "QUEUED", None, None).await;
 
     assert!(
-        result.is_ok(),
-        "BUG DOCUMENTED: update returns Ok(()) even when UUID does not exist"
+        result.is_err(),
+        "update_trade_status must return Err when UUID does not exist (rows_affected == 0)"
     );
 
     // Confirm nothing was actually inserted

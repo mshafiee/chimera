@@ -94,12 +94,10 @@ async fn test_peak_tracking_after_crash_and_recovery() {
     price_cache.set_price(TOKEN, Decimal::from_str("1.40").unwrap(), PriceSource::Jupiter);
     let action_at_crash = mgr.check_targets("uuid-peak", TOKEN).await;
 
-    // DOCUMENTS BUG: position is NOT exited at $1.40 (trailing stop is locked at $0.96)
-    // After fixing the ratchet bug, this should be FullExit instead
+    // After ratchet fix: stop price is $2.00 × 0.80 = $1.60, so $1.40 < $1.60 → FullExit
     assert!(
-        !matches!(action_at_crash, ProfitTargetAction::FullExit),
-        "BUG: trailing stop does not ratchet — position stays open at $1.40 \
-         (locked stop $0.96 not hit). Fix: update trailing_stop_price before checking new-high condition."
+        matches!(action_at_crash, ProfitTargetAction::FullExit),
+        "Trailing stop must ratchet to $1.60 at $2.00 peak; $1.40 crash must trigger FullExit."
     );
 
     // Position DOES exit when price falls below the activation-time locked stop ($0.96)

@@ -169,7 +169,8 @@ impl ProfitTargetManager {
 
         // Update current price and peak
         state.current_price = current_price;
-        if current_price > state.peak_price {
+        let is_new_peak = current_price > state.peak_price;
+        if is_new_peak {
             state.peak_price = current_price;
         }
 
@@ -212,8 +213,8 @@ impl ProfitTargetManager {
             return ProfitTargetAction::FullExit;
         }
 
-        // Update trailing stop price if price increases
-        if state.trailing_stop_active && state.current_price > state.peak_price {
+        // Ratchet trailing stop price on new high
+        if state.trailing_stop_active && is_new_peak {
             let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price = state.current_price * (Decimal::ONE - trailing_distance_ratio);
         }

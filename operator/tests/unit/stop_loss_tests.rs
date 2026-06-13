@@ -151,15 +151,10 @@ async fn insert_active_position(
 
 #[tokio::test]
 async fn test_zero_entry_price_bypasses_dynamic_stop_loss() {
-    // When entry_price=0, loss_percent is calculated as Decimal::ZERO (lines 70-76 of stop_loss.rs).
-    // The dynamic threshold (e.g., -15%) check: 0 <= -15 → FALSE → no exit from dynamic stop.
-    // The hard_stop_loss config stores a positive magnitude (e.g., 15.0).
-    // Comparison: loss_percent(0) <= hard_stop(15.0) → TRUE → hard stop fires immediately.
-    //
-    // BUG: A position opened with zero entry price (due to cache miss) is IMMEDIATELY exited
-    // on the next stop-loss check regardless of actual price movement.
-    // This is a lose-lose outcome: either the position never exits (old analysis) or
-    // exits immediately at breakeven (current code behavior).
+    // When entry_price=0, loss_percent is Decimal::ZERO.
+    // Dynamic threshold (WQS=50 → -15%): 0 <= -15 → FALSE → no dynamic exit.
+    // Hard stop (-15.0): 0 <= -15.0 → FALSE → no hard stop exit.
+    // Correct behavior: no stop fires on a zero-entry position.
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
@@ -170,17 +165,14 @@ async fn test_zero_entry_price_bypasses_dynamic_stop_loss() {
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
 
-    // entry_price = 0: loss_percent = 0, hard_stop = 15.0 → 0 <= 15.0 → Exit
     let action = mgr
         .check_stop_loss("uuid-1", "wallet_a", Decimal::ZERO, TOKEN)
         .await;
 
-    // Documents current behavior: hard stop fires immediately due to sign convention.
-    // When this bug is fixed (hard_stop comparison uses -hard_stop), this should be None.
     assert_eq!(
         action,
-        StopLossAction::Exit,
-        "BUG DOCUMENTED: zero entry price causes immediate hard-stop exit (loss_percent=0 <= hard_stop=15.0)"
+        StopLossAction::None,
+        "Zero entry_price → loss_percent=0 which does not trigger any stop (hard or dynamic)"
     );
 }
 
@@ -317,10 +309,11 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
 // ─── Test 4 ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_low_wqs_low_volatility_tightens_to_5pct() {
+async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     // WQS < 40 → base stop = -10%.  Volatility < 10% → multiplier = 0.9.
-    // -10% × 0.9 = -9%.  Clamped max = -5% (less negative).
-    // -9% > -5%, so clamped to -5%.  A -6% loss should exit.
+    // -10% × 0.9 = -9%.  Clamp range [-50%, -5%]: -9% is within range, stays -9%.
+    // A -6% loss must NOT exit (< 9% threshold).
+    // A -10% loss MUST exit (exceeds -9% threshold).
 
     let (pool, _tmp) = create_test_db().await;
     insert_wallet(&pool, "wallet_tight", 30.0).await;
@@ -339,19 +332,21 @@ async fn test_low_wqs_low_volatility_tightens_to_5pct() {
         assert!(v < 10.0, "Test setup requires low volatility, got {}", v);
     }
 
-    // Current price: $0.94 → -6% loss from $1.00 entry
+    let mgr = StopLossManager::new(pool.clone(), default_config(), price_cache.clone());
+
+    // -6% loss: below the -9% threshold → must NOT exit
     price_cache.set_price(TOKEN, Decimal::from_str("0.94").unwrap(), PriceSource::Jupiter);
-
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr
-        .check_stop_loss("uuid-tight", "wallet_tight", Decimal::from_str("1.00").unwrap(), TOKEN)
+    let action_small = mgr
+        .check_stop_loss("uuid-tight-small", "wallet_tight", Decimal::from_str("1.00").unwrap(), TOKEN)
         .await;
+    assert_eq!(action_small, StopLossAction::None, "-6% loss must not exit (threshold = -9%)");
 
-    assert_eq!(
-        action,
-        StopLossAction::Exit,
-        "-6% loss with -5% clamped threshold should exit"
-    );
+    // -10% loss: exceeds the -9% threshold → must exit
+    price_cache.set_price(TOKEN, Decimal::from_str("0.90").unwrap(), PriceSource::Jupiter);
+    let action_large = mgr
+        .check_stop_loss("uuid-tight-large", "wallet_tight", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .await;
+    assert_eq!(action_large, StopLossAction::Exit, "-10% loss must exit (exceeds -9% threshold)");
 }
 
 // ─── Test 5 ──────────────────────────────────────────────────────────────────
