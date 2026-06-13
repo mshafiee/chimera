@@ -26,6 +26,7 @@ use std::sync::Arc;
 use crate::config::AppConfig;
 use crate::db::DbPool;
 use crate::engine::EngineHandle;
+use crate::token::TokenMetadataFetcher;
 
 /// Main monitoring state
 pub struct MonitoringState {
@@ -46,6 +47,7 @@ impl MonitoringState {
         db: DbPool,
         engine: EngineHandle,
         config: Arc<AppConfig>,
+        token_fetcher: Option<Arc<TokenMetadataFetcher>>,
     ) -> anyhow::Result<Self> {
         let webhook_rate_limiter = Arc::new(RateLimiter::new(
             config.monitoring.as_ref()
@@ -68,7 +70,11 @@ impl MonitoringState {
         )?);
 
         let signal_aggregator = Arc::new(SignalAggregator::new(db.clone()));
-        let pre_validator = Arc::new(PreValidator::new(config.clone()));
+        let mut pv = PreValidator::new(config.clone()).with_helius(helius_client.clone());
+        if let Some(tf) = token_fetcher {
+            pv = pv.with_token_fetcher(tf);
+        }
+        let pre_validator = Arc::new(pv);
         let exit_detector = Arc::new(ExitDetector::new());
         let auto_demote_enabled = config.monitoring.as_ref()
             .map(|m| m.auto_demote_wallets)

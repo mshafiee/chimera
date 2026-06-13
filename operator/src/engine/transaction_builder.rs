@@ -99,21 +99,34 @@ impl TransactionBuilder {
                 let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
 
-                // Estimate token amount from SOL value using available price data
-                // TODO: For production robustness, implement on-chain token balance fetch via Helius or store balance
-                // in database at signal creation time
-                let amount_lamports = self.estimate_token_amount_from_price(
-                    signal.payload.amount_sol,
-                    &signal.payload.token,
-                );
-
-                tracing::info!(
-                    wallet = %wallet_keypair.pubkey(),
-                    token = %signal.payload.token,
-                    sol_value = %signal.payload.amount_sol,
-                    token_amount_lamports = amount_lamports,
-                    "SELL: using price-based token amount estimation"
-                );
+                // Try to fetch the actual on-chain token balance; fall back to price estimate.
+                let amount_lamports = match self.fetch_token_balance(
+                    &wallet_keypair.pubkey(), &token_mint,
+                ).await {
+                    Some(bal) if bal > 0 => {
+                        tracing::info!(
+                            wallet = %wallet_keypair.pubkey(),
+                            token = %signal.payload.token,
+                            balance_lamports = bal,
+                            "SELL: using on-chain token balance"
+                        );
+                        bal
+                    }
+                    _ => {
+                        let est = self.estimate_token_amount_from_price(
+                            signal.payload.amount_sol,
+                            &signal.payload.token,
+                        );
+                        tracing::warn!(
+                            wallet = %wallet_keypair.pubkey(),
+                            token = %signal.payload.token,
+                            sol_value = %signal.payload.amount_sol,
+                            estimated_lamports = est,
+                            "SELL: on-chain balance unavailable, falling back to price estimate"
+                        );
+                        est
+                    }
+                };
 
                 (token_mint, sol_mint, amount_lamports)
             }
@@ -267,11 +280,41 @@ impl TransactionBuilder {
         })
     }
 
-    /// Estimate token amount from SOL value using recent price data
+    /// Fetch the actual SPL token balance for `wallet_pubkey` / `token_mint` via RPC.
     ///
-    /// This method uses cached token prices to estimate the token quantity
-    /// needed to match the specified SOL value. Used for SELL orders when
-    /// on-chain balance is not available.
+    /// Returns the largest balance found across all token accounts for that
+    /// (owner, mint) pair, or `None` if the RPC call fails or no accounts exist.
+    async fn fetch_token_balance(&self, wallet_pubkey: &Pubkey, token_mint: &Pubkey) -> Option<u64> {
+        use solana_client::rpc_request::TokenAccountsFilter;
+        use solana_account_decoder::UiAccountData;
+
+        let accounts = self
+            .rpc_client
+            .get_token_accounts_by_owner(wallet_pubkey, TokenAccountsFilter::Mint(*token_mint))
+            .await
+            .ok()?;
+
+        accounts
+            .iter()
+            .filter_map(|keyed| {
+                if let UiAccountData::Json(parsed) = &keyed.account.data {
+                    parsed
+                        .parsed
+                        .get("info")
+                        .and_then(|i| i.get("tokenAmount"))
+                        .and_then(|ta| ta.get("amount"))
+                        .and_then(|a| a.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                } else {
+                    None
+                }
+            })
+            .max()
+    }
+
+    /// Estimate token amount from SOL value using recent price data.
+    ///
+    /// Fallback for SELL orders when on-chain balance fetch is unavailable.
     fn estimate_token_amount_from_price(
         &self,
         sol_value: Decimal,

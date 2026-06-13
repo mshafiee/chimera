@@ -192,7 +192,42 @@ async fn main() -> anyhow::Result<()> {
         recovery_clone.start_background_task().await;
     });
     tracing::info!("Recovery manager task spawned");
-    
+
+    // Spawn PnL refresh task — updates unrealized_pnl_percent every 30 seconds for active positions
+    {
+        let pnl_db = db_pool.clone();
+        let pnl_pc = price_cache.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                match db::get_active_position_tokens(&pnl_db).await {
+                    Ok(positions) => {
+                        for pos in positions {
+                            if let Some(current) = pnl_pc.get_price_usd(&pos.token_address) {
+                                let entry = if pos.entry_price.is_zero() { current } else { pos.entry_price };
+                                let pnl_sol = (current - entry) * pos.entry_amount_sol;
+                                let pnl_pct = if !entry.is_zero() {
+                                    (current - entry) / entry * rust_decimal::Decimal::from(100)
+                                } else {
+                                    rust_decimal::Decimal::ZERO
+                                };
+                                if let Err(e) = db::update_position_unrealized_pnl(
+                                    &pnl_db, &pos.token_address, current, pnl_sol, pnl_pct,
+                                ).await {
+                                    tracing::warn!(error = %e, token = %pos.token_address,
+                                        "PnL refresh: failed to update position");
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "PnL refresh: failed to fetch active positions"),
+                }
+            }
+        });
+    }
+    tracing::info!("PnL refresh task spawned");
+
     // Spawn circuit breaker evaluation task with notification support
     let circuit_breaker_clone = circuit_breaker.clone();
     let notifier_cb = notifier.clone();
@@ -853,7 +888,7 @@ async fn main() -> anyhow::Result<()> {
     // Use _engine_handle which is created earlier
     let config_arc = Arc::new(config.clone());
     tracing::info!("Attempting to create MonitoringState...");
-    let monitoring_routes = match MonitoringState::new(db_pool.clone(), _engine_handle.clone(), config_arc.clone()) {
+    let monitoring_routes = match MonitoringState::new(db_pool.clone(), _engine_handle.clone(), config_arc.clone(), Some(token_fetcher.clone())) {
         Ok(monitoring_state) => {
             let monitoring_state_arc = Arc::new(monitoring_state);
             tracing::info!("Monitoring state initialized successfully, registering monitoring routes");

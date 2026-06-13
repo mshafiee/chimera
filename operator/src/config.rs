@@ -403,10 +403,18 @@ pub struct TokenSafetyConfig {
     /// Default false (strict mode — unlisted tokens are rejected as $0 liquidity).
     #[serde(default = "default_allow_unlisted_heuristic")]
     pub allow_unlisted_heuristic: bool,
+    /// Minimum token age in hours to allow a BUY signal through. 0.0 disables the check.
+    /// Default 1.0 (reject tokens deployed less than 1 hour ago).
+    #[serde(default = "default_min_token_age_hours")]
+    pub min_token_age_hours: f64,
 }
 
 fn default_allow_unlisted_heuristic() -> bool {
     false
+}
+
+fn default_min_token_age_hours() -> f64 {
+    1.0
 }
 
 fn default_authority_whitelist() -> Vec<String> {
@@ -451,6 +459,7 @@ impl Default for TokenSafetyConfig {
             cache_capacity: default_token_cache_capacity(),
             cache_ttl_seconds: default_token_cache_ttl(),
             allow_unlisted_heuristic: default_allow_unlisted_heuristic(),
+            min_token_age_hours: default_min_token_age_hours(),
         }
     }
 }

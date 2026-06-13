@@ -6,9 +6,7 @@
 //! - Disk space monitoring and log pruning
 //! - RPC rate limit handling with exponential backoff
 
-use crate::error::AppResult;
-#[cfg(target_os = "linux")]
-use crate::error::AppError;
+use crate::error::{AppError, AppResult};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -148,28 +146,49 @@ pub fn is_memory_pressure_high() -> bool {
     MEMORY_PRESSURE.load(Ordering::Relaxed)
 }
 
-/// Check disk space and return free space percentage
-pub async fn check_disk_space(_path: &std::path::Path) -> AppResult<f64> {
-    #[cfg(target_os = "linux")]
+/// Check disk space and return free space percentage (0.0–1.0)
+pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
+    #[cfg(unix)]
     {
-        use std::fs;
-        
-        // Get filesystem stats
-        let _stat = fs::metadata(path)
-            .map_err(|e| AppError::Internal(format!("Failed to get disk stats: {}", e)))?;
-        
-        // For Linux, we'd need to use statvfs or similar
-        // This is a simplified version
-        tracing::debug!("Disk space check requested for: {:?}", path);
-        
-        // In production, use statvfs or similar system call
-        // For now, return a safe default
-        Ok(0.5) // Assume 50% free
+        let path_str = path.to_string_lossy().to_string();
+        tokio::task::spawn_blocking(move || -> AppResult<f64> {
+            let output = std::process::Command::new("df")
+                .arg("-k")
+                .arg(&path_str)
+                .output()
+                .map_err(|e| AppError::Internal(format!("df command failed: {}", e)))?;
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // df -k output: header line + data line
+            // Columns: Filesystem  1K-blocks  Used  Available  Use%  Mountpoint
+            let line = stdout
+                .lines()
+                .nth(1)
+                .ok_or_else(|| AppError::Internal("df output missing data line".to_string()))?;
+
+            let cols: Vec<&str> = line.split_whitespace().collect();
+            if cols.len() < 5 {
+                return Err(AppError::Internal(format!("Unexpected df output: {}", line)));
+            }
+
+            let total: f64 = cols[1].parse().unwrap_or(1.0);
+            let avail: f64 = cols[3].parse().unwrap_or(0.0);
+
+            if total == 0.0 {
+                return Ok(0.0);
+            }
+
+            tracing::debug!(path = path_str, total_kb = total, avail_kb = avail,
+                free_pct = avail / total, "Disk space check");
+            Ok(avail / total)
+        })
+        .await
+        .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
     }
-    
-    #[cfg(not(target_os = "linux"))]
+
+    #[cfg(not(unix))]
     {
-        tracing::warn!("Disk space check not implemented for this platform");
+        tracing::warn!("Disk space check not implemented for this platform, assuming 50% free");
         Ok(0.5)
     }
 }
@@ -202,24 +221,55 @@ pub fn reset_rpc_backoff() {
     RPC_BACKOFF_MULTIPLIER.store(1, Ordering::Relaxed);
 }
 
-/// Prune old log files if disk space is low
+/// Prune old log files if disk space is below the warning threshold.
+/// Deletes `.log` files in `log_dir` that are older than `max_age_days`.
 pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) -> AppResult<()> {
     let free_space = check_disk_space(log_dir).await?;
-    
-    if free_space < DISK_SPACE_WARNING_THRESHOLD {
-        tracing::warn!(
-            free_space_percent = free_space * 100.0,
-            threshold = DISK_SPACE_WARNING_THRESHOLD * 100.0,
-            "Disk space low, pruning logs older than {} days",
-            max_age_days
-        );
-        
-        // In production, implement actual log pruning
-        // For now, just log a warning
-        tracing::info!("Log pruning would be performed here");
+
+    if free_space >= DISK_SPACE_WARNING_THRESHOLD {
+        return Ok(());
     }
-    
-    Ok(())
+
+    tracing::warn!(
+        free_space_pct = free_space * 100.0,
+        threshold_pct = DISK_SPACE_WARNING_THRESHOLD * 100.0,
+        max_age_days = max_age_days,
+        "Disk space low, pruning old log files"
+    );
+
+    let log_dir_owned = log_dir.to_path_buf();
+    tokio::task::spawn_blocking(move || -> AppResult<()> {
+        let max_age = std::time::Duration::from_secs(max_age_days as u64 * 86400);
+        let now = std::time::SystemTime::now();
+        let mut pruned = 0u32;
+
+        let entries = std::fs::read_dir(&log_dir_owned)
+            .map_err(|e| AppError::Internal(format!("Failed to read log dir: {}", e)))?;
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("log") {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age > max_age {
+                            if std::fs::remove_file(&path).is_ok() {
+                                pruned += 1;
+                                tracing::debug!(file = ?path, age_days = age.as_secs() / 86400, "Pruned log file");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!(pruned_files = pruned, "Log pruning complete");
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
 }
 
 #[cfg(test)]

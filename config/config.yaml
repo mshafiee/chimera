@@ -80,6 +80,8 @@ token_safety:
   # Token cache settings
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
+  # Minimum token age in hours to allow a BUY signal (0 disables the check)
+  min_token_age_hours: 1.0
   # When false (default), tokens not indexed by DexScreener are treated as $0 liquidity
   # and BUY signals are rejected. Set true to re-enable the legacy supply-based heuristic
   # for not-yet-indexed tokens (riskier — may allow very new/unlisted tokens through).

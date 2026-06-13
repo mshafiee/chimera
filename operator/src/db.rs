@@ -1070,6 +1070,68 @@ pub async fn get_position_by_uuid(pool: &DbPool, trade_uuid: &str) -> AppResult<
     Ok(position)
 }
 
+/// Lightweight summary for the PnL refresh background task
+#[derive(Debug, Clone)]
+pub struct ActivePositionSummary {
+    pub token_address: String,
+    pub entry_price: Decimal,
+    pub entry_amount_sol: Decimal,
+}
+
+/// Get token_address, entry_price, and size for all ACTIVE/EXITING positions (PnL refresh)
+pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePositionSummary>> {
+    let rows: Vec<(String, f64, f64)> = sqlx::query_as(
+        r#"
+        SELECT token_address, entry_price, entry_amount_sol
+        FROM positions
+        WHERE state IN ('ACTIVE', 'EXITING')
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(token, price, size)| ActivePositionSummary {
+            token_address: token,
+            entry_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+            entry_amount_sol: Decimal::from_f64_retain(size).unwrap_or(Decimal::ZERO),
+        })
+        .collect())
+}
+
+/// Update current_price, unrealized_pnl_sol, and unrealized_pnl_percent for active positions
+pub async fn update_position_unrealized_pnl(
+    pool: &DbPool,
+    token_address: &str,
+    current_price: Decimal,
+    pnl_sol: Decimal,
+    pnl_pct: Decimal,
+) -> AppResult<()> {
+    let current_f64 = current_price.to_f64().unwrap_or(0.0);
+    let pnl_sol_f64 = pnl_sol.to_f64().unwrap_or(0.0);
+    let pnl_pct_f64 = pnl_pct.to_f64().unwrap_or(0.0);
+    sqlx::query(
+        r#"
+        UPDATE positions
+        SET current_price = ?,
+            unrealized_pnl_sol = ?,
+            unrealized_pnl_percent = ?,
+            last_updated = datetime('now')
+        WHERE token_address = ?
+          AND state IN ('ACTIVE', 'EXITING')
+        "#,
+    )
+    .bind(current_f64)
+    .bind(pnl_sol_f64)
+    .bind(pnl_pct_f64)
+    .bind(token_address)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 // =============================================================================
 // WALLETS API
 // =============================================================================
