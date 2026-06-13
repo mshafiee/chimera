@@ -72,7 +72,12 @@ impl StopLossManager {
             let ratio = diff / entry_price;
             ratio * Decimal::from(100)
         } else {
-            Decimal::ZERO
+            tracing::error!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                "Position has zero entry_price — forcing immediate exit (data corruption guard)"
+            );
+            return StopLossAction::Exit;
         };
 
         // Get wallet WQS for dynamic stop calculation
@@ -195,8 +200,8 @@ impl StopLossManager {
         {
             Ok(pnl) => pnl,
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to query daily PnL, skipping portfolio stop check");
-                return StopLossAction::None;
+                tracing::error!(error = %e, "Failed to query daily PnL — pausing all trading (fail-safe)");
+                return StopLossAction::PauseAll;
             }
         };
         let daily_pnl = Decimal::from_f64_retain(daily_pnl_f64).unwrap_or(Decimal::ZERO);

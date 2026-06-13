@@ -6,7 +6,7 @@
 //! - Time-based exits (auto-exit after 24h if profitable)
 
 use crate::config::ProfitManagementConfig;
-use crate::db::DbPool;
+use crate::db::{self, DbPool};
 use crate::engine::market_regime::MarketRegimeDetector;
 use crate::engine::momentum_exit::MomentumExit;
 use crate::price_cache::PriceCache;
@@ -14,10 +14,10 @@ use rust_decimal::prelude::*;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
+use serde_json;
 
 /// Profit target state
 pub struct ProfitTargetManager {
-    #[allow(dead_code)]
     db: DbPool,
     config: Arc<ProfitManagementConfig>,
     price_cache: Arc<PriceCache>,
@@ -125,7 +125,8 @@ impl ProfitTargetManager {
         }
     }
 
-    /// Register a new position for profit target tracking
+    /// Register a new position for profit target tracking.
+    /// On restart, restores persisted state (targets_hit, peak, trailing stop) from DB.
     pub async fn register_position(
         &self,
         trade_uuid: &str,
@@ -133,22 +134,63 @@ impl ProfitTargetManager {
         entry_amount_sol: Decimal,
         token_address: &str,
     ) {
+        // Skip if already tracked in-memory (idempotent)
+        {
+            let targets = self.active_targets.read().await;
+            if targets.contains_key(trade_uuid) {
+                return;
+            }
+        }
+
         let current_price = self
             .price_cache
             .get_price_usd(token_address)
             .unwrap_or(entry_price);
 
-        let state = ProfitTargetState {
-            trade_uuid: trade_uuid.to_string(),
-            entry_price,
-            entry_amount_sol,
-            current_price,
-            peak_price: current_price,
-            peak_profit_percent: Decimal::ZERO,
-            targets_hit: Vec::new(),
-            trailing_stop_active: false,
-            trailing_stop_price: Decimal::ZERO,
-            entry_time: SystemTime::now(),
+        // Try to restore state from DB (survives restarts)
+        let state = match db::load_exit_target(&self.db, trade_uuid).await {
+            Ok(Some((_, _, db_peak, db_peak_pct, targets_hit_json, trailing_active, trailing_price))) => {
+                let peak = Decimal::from_f64_retain(db_peak).unwrap_or(current_price).max(current_price);
+                let peak_pct = Decimal::from_f64_retain(db_peak_pct).unwrap_or(Decimal::ZERO);
+                let targets_hit: Vec<Decimal> = serde_json::from_str(&targets_hit_json)
+                    .unwrap_or_default();
+                let t_price = Decimal::from_f64_retain(trailing_price).unwrap_or(Decimal::ZERO);
+                tracing::debug!(trade_uuid, "Restored profit target state from DB");
+                ProfitTargetState {
+                    trade_uuid: trade_uuid.to_string(),
+                    entry_price,
+                    entry_amount_sol,
+                    current_price,
+                    peak_price: peak,
+                    peak_profit_percent: peak_pct,
+                    targets_hit,
+                    trailing_stop_active: trailing_active,
+                    trailing_stop_price: t_price,
+                    entry_time: SystemTime::now(),
+                }
+            }
+            _ => {
+                // Fresh state — also write to DB so it survives the next restart
+                let state = ProfitTargetState {
+                    trade_uuid: trade_uuid.to_string(),
+                    entry_price,
+                    entry_amount_sol,
+                    current_price,
+                    peak_price: current_price,
+                    peak_profit_percent: Decimal::ZERO,
+                    targets_hit: Vec::new(),
+                    trailing_stop_active: false,
+                    trailing_stop_price: Decimal::ZERO,
+                    entry_time: SystemTime::now(),
+                };
+                let ep = entry_price.to_f64().unwrap_or(0.0);
+                let ea = entry_amount_sol.to_f64().unwrap_or(0.0);
+                let pp = current_price.to_f64().unwrap_or(0.0);
+                if let Err(e) = db::upsert_exit_target(&self.db, trade_uuid, ep, ea, pp, 0.0, "[]", false, 0.0).await {
+                    tracing::warn!(trade_uuid, error = %e, "Failed to persist initial profit target state");
+                }
+                state
+            }
         };
 
         let mut targets = self.active_targets.write().await;
@@ -194,11 +236,17 @@ impl ProfitTargetManager {
             self.config.targets.clone()
         };
 
+        // Track whether state changed so we can persist once at the end
+        let mut state_changed = is_new_peak;
+
         // Check tiered profit targets
+        let mut tiered_action: Option<ProfitTargetAction> = None;
         for target in &targets {
             if profit_percent >= *target && !state.targets_hit.contains(target) {
                 state.targets_hit.push(*target);
-                return ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent);
+                state_changed = true;
+                tiered_action = Some(ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent));
+                break; // one target per tick
             }
         }
 
@@ -207,62 +255,83 @@ impl ProfitTargetManager {
             state.trailing_stop_active = true;
             let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
+            state_changed = true;
         }
 
         // Check if trailing stop hit
-        if state.trailing_stop_active && state.current_price <= state.trailing_stop_price {
-            return ProfitTargetAction::FullExit;
-        }
+        let trailing_hit = state.trailing_stop_active && state.current_price <= state.trailing_stop_price;
 
         // Ratchet trailing stop price on new high
         if state.trailing_stop_active && is_new_peak {
             let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price =
                 state.current_price * (Decimal::ONE - trailing_distance_ratio);
+            state_changed = true;
         }
 
-        // Refined time-based exit logic
-        if let Ok(elapsed) = state.entry_time.elapsed() {
-            let elapsed_hours = elapsed.as_secs() / 3600;
+        // Snapshot state for DB persistence (before releasing the lock)
+        let (db_ep, db_ea, db_pp, db_ppp, db_th_json, db_tsa, db_tsp) = if state_changed {
+            let ep = state.entry_price.to_f64().unwrap_or(0.0);
+            let ea = state.entry_amount_sol.to_f64().unwrap_or(0.0);
+            let pp = state.peak_price.to_f64().unwrap_or(0.0);
+            let ppp = state.peak_profit_percent.to_f64().unwrap_or(0.0);
+            let th: Vec<f64> = state.targets_hit.iter().filter_map(|d| d.to_f64()).collect();
+            let th_json = serde_json::to_string(&th).unwrap_or_else(|_| "[]".to_string());
+            let tsa = state.trailing_stop_active;
+            let tsp = state.trailing_stop_price.to_f64().unwrap_or(0.0);
+            (ep, ea, pp, ppp, th_json, tsa, tsp)
+        } else {
+            (0.0, 0.0, 0.0, 0.0, String::new(), false, 0.0)
+        };
 
-            // Use Decimal for threshold comparisons to avoid f64 precision issues
+        // Determine final action before releasing the lock
+        let time_exit = if let Ok(elapsed) = state.entry_time.elapsed() {
+            let elapsed_hours = elapsed.as_secs() / 3600;
             let ten_percent = Decimal::from_str("10.0").unwrap_or(Decimal::ZERO);
             let five_percent = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
             let zero = Decimal::ZERO;
+            if profit_percent > ten_percent && elapsed_hours >= 48 {
+                true
+            } else if profit_percent > zero && profit_percent < five_percent && elapsed_hours >= 12 {
+                true
+            } else if profit_percent < zero && elapsed_hours >= 6 {
+                true
+            } else {
+                elapsed_hours >= self.config.time_exit_hours && profit_percent > zero
+            }
+        } else {
+            false
+        };
 
-            // If profitable >10%: Extend to 48h
-            if profit_percent > ten_percent {
-                if elapsed_hours >= 48 {
-                    return ProfitTargetAction::FullExit;
-                }
+        let entry_price_snap = state.entry_price;
+        let entry_time_snap = state.entry_time;
+
+        // Release the write lock before async calls
+        drop(targets);
+
+        // Persist state changes to DB (outside the lock)
+        if state_changed {
+            let trade_uuid_owned = trade_uuid.to_string();
+            if let Err(e) = db::upsert_exit_target(
+                &self.db, &trade_uuid_owned, db_ep, db_ea, db_pp, db_ppp, &db_th_json, db_tsa, db_tsp,
+            ).await {
+                tracing::warn!(trade_uuid, error = %e, "Failed to persist profit target state");
             }
-            // If profitable <5%: Exit after 12h (lock in small profits)
-            else if profit_percent > zero && profit_percent < five_percent {
-                if elapsed_hours >= 12 {
-                    return ProfitTargetAction::FullExit;
-                }
-            }
-            // If at loss: Exit after 6h (cut losses faster)
-            else if profit_percent < zero {
-                if elapsed_hours >= 6 {
-                    return ProfitTargetAction::FullExit;
-                }
-            }
-            // Default: Original time_exit_hours for moderate profits (5-10%)
-            else if elapsed_hours >= self.config.time_exit_hours && profit_percent > zero {
-                return ProfitTargetAction::FullExit;
-            }
+        }
+
+        // Return early on tiered exit (state already persisted above)
+        if let Some(action) = tiered_action {
+            return action;
+        }
+
+        if trailing_hit || time_exit {
+            return ProfitTargetAction::FullExit;
         }
 
         // Check momentum exit (early exit on negative momentum)
         if let Some(ref momentum) = self.momentum_exit {
             if momentum
-                .should_exit(
-                    trade_uuid,
-                    token_address,
-                    state.entry_price,
-                    state.entry_time,
-                )
+                .should_exit(trade_uuid, token_address, entry_price_snap, entry_time_snap)
                 .await
             {
                 tracing::info!(
@@ -276,9 +345,13 @@ impl ProfitTargetManager {
         ProfitTargetAction::None
     }
 
-    /// Remove position from tracking
+    /// Remove position from tracking and delete persisted state
     pub async fn remove_position(&self, trade_uuid: &str) {
         let mut targets = self.active_targets.write().await;
         targets.remove(trade_uuid);
+        drop(targets);
+        if let Err(e) = db::delete_exit_target(&self.db, trade_uuid).await {
+            tracing::warn!(trade_uuid, error = %e, "Failed to delete exit target state from DB");
+        }
     }
 }

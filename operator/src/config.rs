@@ -255,10 +255,18 @@ pub struct StrategyConfig {
     /// Minimum position size in SOL
     #[serde(default = "default_min_position")]
     pub min_position_sol: Decimal,
+    /// Minimum signal quality score to accept a trade (0.0–1.0)
+    /// 0.45 lets through a typical ACTIVE wallet (WQS 70, $15k liq) scoring ~0.47
+    #[serde(default = "default_signal_quality_threshold")]
+    pub signal_quality_threshold: f64,
 }
 
 fn default_shield_percent() -> u32 {
     70
+}
+
+fn default_signal_quality_threshold() -> f64 {
+    0.45
 }
 
 fn default_spear_percent() -> u32 {

@@ -817,12 +817,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics/costs", get(get_cost_metrics))
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
-        .route("/config", get(get_config))
-        .route("/wallets", get(list_wallets))
         .with_state(api_state.clone());
 
-    // Build protected API routes (auth required for writes)
+    // Build protected API routes (auth required — includes reads that expose sensitive config)
     let protected_api_routes = Router::new()
+        .route("/config", get(get_config))
+        .route("/wallets", get(list_wallets))
         .route("/wallets/{address}", get(get_wallet).put(update_wallet))
         .route("/config", put(update_config))
         .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
@@ -881,6 +881,7 @@ async fn main() -> anyhow::Result<()> {
         helius_client: helius_client.clone(),
         position_sizer: Some(position_sizer),
         total_capital_sol: config.position_sizing.total_capital_sol,
+        signal_quality_threshold: config.strategy.signal_quality_threshold,
     });
 
     // Create roster state

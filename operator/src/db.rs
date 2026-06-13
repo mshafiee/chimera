@@ -2087,6 +2087,79 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
     Ok(bytes)
 }
 
+// =============================================================================
+// EXIT TARGETS (profit target state persistence)
+// =============================================================================
+
+/// Upsert profit target state for a position into exit_targets table
+pub async fn upsert_exit_target(
+    pool: &DbPool,
+    trade_uuid: &str,
+    entry_price: f64,
+    entry_amount_sol: f64,
+    peak_price: f64,
+    peak_profit_percent: f64,
+    targets_hit_json: &str,
+    trailing_stop_active: bool,
+    trailing_stop_price: f64,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO exit_targets (
+            trade_uuid, entry_price, entry_amount_sol, peak_price,
+            peak_profit_percent, targets_hit, trailing_stop_active, trailing_stop_price
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trade_uuid) DO UPDATE SET
+            peak_price = excluded.peak_price,
+            peak_profit_percent = excluded.peak_profit_percent,
+            targets_hit = excluded.targets_hit,
+            trailing_stop_active = excluded.trailing_stop_active,
+            trailing_stop_price = excluded.trailing_stop_price,
+            last_updated = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(trade_uuid)
+    .bind(entry_price)
+    .bind(entry_amount_sol)
+    .bind(peak_price)
+    .bind(peak_profit_percent)
+    .bind(targets_hit_json)
+    .bind(trailing_stop_active as i64)
+    .bind(trailing_stop_price)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Load saved profit target state for a position
+pub async fn load_exit_target(
+    pool: &DbPool,
+    trade_uuid: &str,
+) -> AppResult<Option<(f64, f64, f64, f64, String, bool, f64)>> {
+    let row: Option<(f64, f64, f64, f64, String, i64, f64)> = sqlx::query_as(
+        r#"
+        SELECT entry_price, entry_amount_sol, peak_price, peak_profit_percent,
+               COALESCE(targets_hit, '[]'), trailing_stop_active, COALESCE(trailing_stop_price, 0.0)
+        FROM exit_targets
+        WHERE trade_uuid = ?
+        "#,
+    )
+    .bind(trade_uuid)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|(ep, ea, pp, ppp, th, tsa, tsp)| (ep, ea, pp, ppp, th, tsa != 0, tsp)))
+}
+
+/// Delete profit target state for a closed position
+pub async fn delete_exit_target(pool: &DbPool, trade_uuid: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM exit_targets WHERE trade_uuid = ?")
+        .bind(trade_uuid)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

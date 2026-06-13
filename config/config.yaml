@@ -46,6 +46,7 @@ strategy:
   spear_percent: 30
   max_position_sol: 1.0
   min_position_sol: 0.01
+  signal_quality_threshold: 0.45  # Min score to accept (0.45 passes ACTIVE wallet WQS 70 + $15k liq)
 
 jito:
   enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper

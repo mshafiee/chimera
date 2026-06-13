@@ -711,14 +711,21 @@ class WalletAnalyzer:
                     print(f"  [{address[:8]}]   - accountData: {len(tx.get('accountData', []))} items")
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
-        
+
         if not trades:
             print(f"  [{address[:8]}] No valid trades found after parsing")
             return None
-        
+
+        # Compute DEX diversity from raw Helius transactions (source field)
+        dex_sources = {
+            tx.get("source") for tx in transactions
+            if tx.get("source") and tx.get("source") not in ("UNKNOWN", "")
+        }
+        dex_diversity = len(dex_sources) if dex_sources else None
+
         print(f"  [{address[:8]}] Calculating metrics from {len(trades)} trades...")
         # Calculate metrics from trades
-        metrics = await self._calculate_metrics_from_trades(address, trades)
+        metrics = await self._calculate_metrics_from_trades(address, trades, dex_diversity_score=dex_diversity)
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
         else:
@@ -1195,7 +1202,7 @@ class WalletAnalyzer:
         
         return sum(hold_times) / len(hold_times)
     
-    def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
+    async def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
         """
         Detect insider behavior based on wallet age and funding.
 
@@ -1224,7 +1231,7 @@ class WalletAnalyzer:
             is_fresh_wallet = True
 
         # Try to get wallet creation time (first transaction ever) for more precision
-        wallet_creation_time = self._get_wallet_creation_time_cached(address)
+        wallet_creation_time = await self._get_wallet_creation_time_cached(address)
 
         if wallet_creation_time:
             # Calculate hours between wallet creation and first trade
@@ -1238,39 +1245,31 @@ class WalletAnalyzer:
             "is_fresh_wallet": is_fresh_wallet,
             "suspicion_score": 100.0 if is_fresh_wallet else 0.0
         }
-    
-    def _get_wallet_creation_time_cached(self, address: str) -> Optional[float]:
+
+    async def _get_wallet_creation_time_cached(self, address: str) -> Optional[float]:
         """
         Get wallet creation time (first transaction) with caching.
-        
-        Args:
-            address: Wallet address
-            
+
         Returns:
             Unix timestamp of first transaction, or None
         """
         if not hasattr(self, '_wallet_age_cache'):
             self._wallet_age_cache = {}
-        
+
         if address in self._wallet_age_cache:
             return self._wallet_age_cache[address]
-        
-        # Try to get from Helius if available
-        # NOTE: get_wallet_first_transaction is async but we're in sync context
-        # Skip this check for now (insider detection will be less accurate)
+
         creation_time = None
-        # DISABLED: Async function called in sync context  
-        # Insider detection will be less accurate without wallet creation time
-        # if self.helius_client and hasattr(self.helius_client, 'get_wallet_first_transaction'):
-        #     try:
-        #         creation_time = self.helius_client.get_wallet_first_transaction(address)
-        #     except Exception:
-        #         pass
-        
+        if self.helius_client and hasattr(self.helius_client, 'get_wallet_first_transaction'):
+            try:
+                creation_time = await self.helius_client.get_wallet_first_transaction(address)
+            except Exception:
+                pass
+
         self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade]) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -1433,7 +1432,7 @@ class WalletAnalyzer:
         print(f"  [{address[:8]}] Detecting insider patterns...")
         # 3. Detect Insider Patterns (Fresh Wallet Check)
         try:
-            insider_metrics = self._detect_insider_patterns(address, trades)
+            insider_metrics = await self._detect_insider_patterns(address, trades)
             is_fresh_wallet = insider_metrics.get("is_fresh_wallet", False)
             print(f"  [{address[:8]}] Insider detection complete (fresh={is_fresh_wallet})")
         except Exception as e:
@@ -1441,15 +1440,10 @@ class WalletAnalyzer:
             is_fresh_wallet = False
         
         # 4. Smart Money Detection (DEX diversity, limit orders, MEV protection)
-        # Note: Full detection requires transaction instruction parsing
-        # For now, we set defaults that can be enhanced with transaction analysis
-        dex_diversity_score = None  # Will be calculated if transaction data available
+        # dex_diversity_score is computed from raw Helius transaction sources upstream and passed in.
+        # uses_limit_orders / uses_mev_protection require instruction-level parsing (future work).
         uses_limit_orders = False
         uses_mev_protection = False
-        
-        # Try to detect from transaction signatures if available
-        # This is a placeholder - full implementation would parse transaction instructions
-        # For now, we'll set these in a future enhancement when we have transaction details
         
         print(f"  [{address[:8]}] Calculating unrealized PnL...")
         # 5. Calculate Unrealized PnL (Bag Holder Detection)

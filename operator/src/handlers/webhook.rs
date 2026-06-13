@@ -66,6 +66,8 @@ pub struct WebhookState {
     pub position_sizer: Option<Arc<PositionSizer>>,
     /// Total trading capital in SOL (from config.position_sizing.total_capital_sol)
     pub total_capital_sol: Decimal,
+    /// Minimum signal quality score to accept a trade (from config.strategy.signal_quality_threshold)
+    pub signal_quality_threshold: f64,
 }
 
 /// Webhook handler
@@ -366,10 +368,8 @@ pub async fn webhook_handler(
         let quality =
             SignalQuality::calculate(wallet_wqs, is_consensus, liquidity_usd, token_age_hours);
 
-        // Reject if quality too low.
-        // 0.45 lets through a typical ACTIVE wallet (WQS 70, $15k liq) scoring ~0.47
-        // while blocking genuinely poor signals (WQS <30, <$5k liq).
-        let quality_threshold = 0.45_f64;
+        // Reject if quality too low (threshold from config.strategy.signal_quality_threshold)
+        let quality_threshold = state.signal_quality_threshold;
         if !quality.should_enter(quality_threshold) {
             tracing::warn!(
                 trade_uuid = %signal.trade_uuid,
