@@ -1860,7 +1860,9 @@ class WalletAnalyzer:
         for t in sorted_trades:
             if t.action != TradeAction.SELL or t.pnl_sol is None:
                 continue
-            cumulative_pnl += float_to_decimal(t.pnl_sol)
+            # Ensure pnl_sol is Decimal (may be float from test data or external sources)
+            pnl_decimal = t.pnl_sol if isinstance(t.pnl_sol, Decimal) else float_to_decimal(t.pnl_sol)
+            cumulative_pnl += pnl_decimal
 
             # Reset peak if we reach a new high in cumulative PnL
             if cumulative_pnl > peak:

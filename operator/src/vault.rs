@@ -78,6 +78,10 @@ pub enum VaultError {
     #[error("Encryption failed: {0}")]
     EncryptionFailed(String),
 
+    /// Key generation failed
+    #[error("Key generation failed: {0}")]
+    KeyGeneration(String),
+
     /// File I/O error
     #[error("File error: {0}")]
     FileError(#[from] std::io::Error),
@@ -177,7 +181,7 @@ impl Vault {
         let plaintext = serde_json::to_vec(secrets)?;
 
         // Generate random nonce
-        let nonce_bytes: [u8; 12] = rand_nonce();
+        let nonce_bytes: [u8; 12] = rand_nonce()?;
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         // Create cipher and encrypt
@@ -197,21 +201,25 @@ impl Vault {
     }
 
     /// Generate a new random vault key (for setup)
-    pub fn generate_key() -> String {
-        let key_bytes: [u8; 32] = rand_bytes();
-        hex::encode(key_bytes)
+    pub fn generate_key() -> Result<String, VaultError> {
+        let key_bytes: [u8; 32] = rand_bytes()?;
+        Ok(hex::encode(key_bytes))
     }
 }
 
 /// Generate random bytes using getrandom (cryptographically secure)
-fn rand_bytes<const N: usize>() -> [u8; N] {
+fn rand_bytes<const N: usize>() -> Result<[u8; N], VaultError> {
     let mut bytes = [0u8; N];
-    getrandom::getrandom(&mut bytes).expect("Failed to generate random bytes");
-    bytes
+    getrandom::getrandom(&mut bytes)
+        .map_err(|e| {
+            tracing::error!("Cryptographic random number generation failed: {}", e);
+            VaultError::KeyGeneration(format!("getrandom failed: {}", e))
+        })?;
+    Ok(bytes)
 }
 
 /// Generate random nonce for AES-GCM
-fn rand_nonce() -> [u8; 12] {
+fn rand_nonce() -> Result<[u8; 12], VaultError> {
     rand_bytes()
 }
 
@@ -272,13 +280,13 @@ mod tests {
 
     #[test]
     fn test_generate_key() {
-        let key = Vault::generate_key();
+        let key = Vault::generate_key().expect("Key generation failed");
         assert_eq!(key.len(), 64); // 32 bytes = 64 hex chars
     }
 
     #[test]
     fn test_vault_roundtrip() {
-        let key = Vault::generate_key();
+        let key = Vault::generate_key().expect("Key generation failed");
         let vault = Vault::new(&key).unwrap();
 
         let secrets = VaultSecrets {

@@ -513,6 +513,9 @@ pub struct NotificationRulesConfig {
     /// Send notification on RPC fallback
     #[serde(default = "default_true")]
     pub rpc_fallback: bool,
+    /// Send notification on critical system errors
+    #[serde(default = "default_true")]
+    pub system_crash: bool,
 }
 
 impl Default for NotificationRulesConfig {
@@ -524,6 +527,7 @@ impl Default for NotificationRulesConfig {
             wallet_promoted: true,
             daily_summary: true,
             rpc_fallback: true,
+            system_crash: true,
         }
     }
 }

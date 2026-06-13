@@ -7,6 +7,7 @@ import time
 import json
 import re
 import asyncio
+import logging
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 from dataclasses import dataclass
@@ -295,11 +296,17 @@ class HeliusClient:
                     result = coro_factory()
                 self._record_success()
                 return result
-            except Exception:
+            except Exception as e:
                 if attempt == max_retries - 1:
+                    # Final attempt failed, log and raise
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Retry exhausted after {max_retries} attempts: {e}")
                     self._record_failure()
                     raise
+                # Intermediate retry, log but don't fail yet
                 backoff_time = 2 ** attempt  # 1s, 2s, 4s
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Attempt {attempt + 1} failed (retry in {backoff_time}s): {e}")
                 await asyncio.sleep(backoff_time)
         return None
 

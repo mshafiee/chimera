@@ -230,15 +230,15 @@ class ScoutConfig:
         if not os.getenv("BIRDEYE_API_KEY"):
             warnings.append("BIRDEYE_API_KEY is not set. Historical liquidity data will be limited.")
 
-        # Strict Liquidity Check
+        # Strict Liquidity Check (default to true for production safety)
         mode = ScoutConfig.get_liquidity_mode()
         if mode == "real":
-            strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "false").lower() == "true"
-            allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true"
-            
+            strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
+            allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "false").lower() == "true"
+
             if not strict_mode and allow_fallback:
                 warnings.append("WARNING: Strict Historical Liquidity is OFF. Backtests may use current liquidity for old trades (Survivorship Bias).")
-                warnings.append("Recommended for Production: Set SCOUT_STRICT_HISTORICAL_LIQUIDITY=true")
+                warnings.append("Recommended for Production: Keep SCOUT_STRICT_HISTORICAL_LIQUIDITY=true")
         elif mode == "simulated":
             warnings.append("WARNING: Running in simulated liquidity mode - results are non-deterministic!")
             warnings.append("Set SCOUT_LIQUIDITY_MODE=real and provide BIRDEYE_API_KEY for production use")

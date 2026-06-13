@@ -154,7 +154,7 @@ impl HeliusClient {
             // Calculate age in hours
             let current_timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .context("Failed to get current timestamp")?
                 .as_secs() as i64;
             let age_seconds = current_timestamp - timestamp;
             let age_hours = age_seconds as f64 / 3600.0;

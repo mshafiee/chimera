@@ -165,7 +165,7 @@ impl Executor {
             let should_send = match &event {
                 NotificationEvent::CircuitBreakerTriggered { .. } => rules.circuit_breaker_triggered,
                 NotificationEvent::WalletDrained { .. } => rules.wallet_drained,
-                NotificationEvent::SystemCrash { .. } => rules.wallet_drained, // Use wallet_drained rule for system crashes
+                NotificationEvent::SystemCrash { .. } => rules.system_crash,
                 NotificationEvent::PositionExited { .. } => rules.position_exited,
                 NotificationEvent::RpcFallback { .. } => rules.rpc_fallback,
                 NotificationEvent::WalletPromoted { .. } => rules.wallet_promoted,

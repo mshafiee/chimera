@@ -830,11 +830,8 @@ class LiquidityProvider:
                 return
             except Exception as e:
                 logger.debug(f"Redis cache set failed for {token_address[:8]}...: {e}")
-        
+
         # Fallback to in-memory cache
-        self._cache[token_address] = (data, datetime.utcnow())
-    
-        """Add data to cache."""
         self._cache[token_address] = (data, datetime.utcnow())
     
     def clear_cache(self) -> None:

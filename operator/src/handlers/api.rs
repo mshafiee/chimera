@@ -379,6 +379,7 @@ pub struct NotificationRulesConfigResponse {
     pub wallet_promoted: bool,
     pub daily_summary: bool,
     pub rpc_fallback: bool,
+    pub system_crash: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -433,6 +434,7 @@ pub struct UpdateNotificationRulesConfig {
     pub wallet_promoted: Option<bool>,
     pub daily_summary: Option<bool>,
     pub rpc_fallback: Option<bool>,
+    pub system_crash: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -625,6 +627,7 @@ pub async fn get_config(
                 wallet_promoted: config.notifications.rules.wallet_promoted,
                 daily_summary: config.notifications.rules.daily_summary,
                 rpc_fallback: config.notifications.rules.rpc_fallback,
+                system_crash: config.notifications.rules.system_crash,
             },
             daily_summary: DailySummaryConfigResponse {
                 enabled: config.notifications.daily_summary.enabled,
