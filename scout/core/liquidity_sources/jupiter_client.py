@@ -11,7 +11,7 @@ from ..models import LiquidityData
 class JupiterLiquidityClient:
     """Client for Jupiter Price API to fetch price and liquidity estimates."""
 
-    def __init__(self, api_url: str = "https://price.jup.ag/v6", session: Optional[aiohttp.ClientSession] = None):
+    def __init__(self, api_url: str = "https://lite-api.jup.ag/price", session: Optional[aiohttp.ClientSession] = None):
         """
         Initialize Jupiter client.
 
@@ -62,7 +62,7 @@ class JupiterLiquidityClient:
         """
         await self._rate_limit()
 
-        url = f"{self.api_url}/price"
+        url = f"{self.api_url}/v2"
         params = {"ids": token_address}
 
         try:

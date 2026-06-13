@@ -87,7 +87,7 @@ class LiquidityProvider:
     
     def __init__(
         self,
-        jupiter_api_url: str = "https://price.jup.ag/v6",
+        jupiter_api_url: str = "https://lite-api.jup.ag/price",
         birdeye_api_key: Optional[str] = None,
         dexscreener_api_key: Optional[str] = None,
         cache_ttl_seconds: int = 60,
@@ -669,7 +669,7 @@ class LiquidityProvider:
         # Fallback: direct Jupiter API call (async)
         try:
             import aiohttp
-            url = "https://price.jup.ag/v6/price"
+            url = "https://lite-api.jup.ag/price/v2"
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, params={"ids": "So11111111111111111111111111111111111111112"}, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     resp.raise_for_status()

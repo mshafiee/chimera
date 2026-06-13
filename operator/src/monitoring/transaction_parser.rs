@@ -147,23 +147,135 @@ fn parse_jupiter_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
     })
 }
 
-/// Parse Raydium swap
-fn parse_raydium_swap(_tx_json: &Value, _wallet_address: &str) -> Result<ParsedSwap> {
-    // Similar to Jupiter but check for Raydium program IDs
-    // Raydium AMM: 675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8
-    Err(anyhow::anyhow!("Raydium parsing not fully implemented"))
+/// Check whether any instruction in the transaction mentions one of the given program IDs.
+fn has_program_id(tx_json: &Value, program_ids: &[&str]) -> bool {
+    let instructions = tx_json
+        .get("transaction")
+        .and_then(|t| t.get("message"))
+        .and_then(|m| m.get("instructions"))
+        .and_then(|i| i.as_array());
+
+    // Also check inner instructions (present when programs CPI into each other)
+    let inner_instructions = tx_json
+        .get("meta")
+        .and_then(|m| m.get("innerInstructions"))
+        .and_then(|i| i.as_array());
+
+    let check_list = |insts: &Vec<Value>| {
+        insts.iter().any(|inst| {
+            inst.get("programId")
+                .and_then(|p| p.as_str())
+                .map(|pid| program_ids.contains(&pid))
+                .unwrap_or(false)
+        })
+    };
+
+    instructions.map(check_list).unwrap_or(false)
+        || inner_instructions
+            .map(|outer| {
+                outer.iter().any(|inner_group| {
+                    inner_group
+                        .get("instructions")
+                        .and_then(|i| i.as_array())
+                        .map(check_list)
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
 }
 
-/// Parse Orca swap
-fn parse_orca_swap(_tx_json: &Value, _wallet_address: &str) -> Result<ParsedSwap> {
-    // Similar to Jupiter but check for Orca program IDs
-    Err(anyhow::anyhow!("Orca parsing not fully implemented"))
+/// Parse Raydium swap (AMM v4 and CLMM)
+fn parse_raydium_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> {
+    const RAYDIUM_AMM_V4: &str = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+    const RAYDIUM_CLMM: &str = "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK";
+
+    if !has_program_id(tx_json, &[RAYDIUM_AMM_V4, RAYDIUM_CLMM]) {
+        return Err(anyhow::anyhow!("Not a Raydium swap"));
+    }
+
+    let pre_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("preTokenBalances"))
+        .and_then(|b| b.as_array());
+    let post_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("postTokenBalances"))
+        .and_then(|b| b.as_array());
+
+    let (token_in, token_out, amount_in, amount_out, direction) =
+        parse_balance_changes(pre_balances, post_balances, wallet_address)?;
+
+    Ok(ParsedSwap {
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        direction,
+        dex: "Raydium".to_string(),
+        slippage: None,
+    })
+}
+
+/// Parse Orca swap (Whirlpool)
+fn parse_orca_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> {
+    const ORCA_WHIRLPOOL: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
+
+    if !has_program_id(tx_json, &[ORCA_WHIRLPOOL]) {
+        return Err(anyhow::anyhow!("Not an Orca swap"));
+    }
+
+    let pre_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("preTokenBalances"))
+        .and_then(|b| b.as_array());
+    let post_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("postTokenBalances"))
+        .and_then(|b| b.as_array());
+
+    let (token_in, token_out, amount_in, amount_out, direction) =
+        parse_balance_changes(pre_balances, post_balances, wallet_address)?;
+
+    Ok(ParsedSwap {
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        direction,
+        dex: "Orca".to_string(),
+        slippage: None,
+    })
 }
 
 /// Parse Pump.fun swap
-fn parse_pumpfun_swap(_tx_json: &Value, _wallet_address: &str) -> Result<ParsedSwap> {
-    // Pump.fun has specific program ID: 6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P
-    Err(anyhow::anyhow!("Pump.fun parsing not fully implemented"))
+fn parse_pumpfun_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwap> {
+    const PUMPFUN: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+
+    if !has_program_id(tx_json, &[PUMPFUN]) {
+        return Err(anyhow::anyhow!("Not a Pump.fun swap"));
+    }
+
+    let pre_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("preTokenBalances"))
+        .and_then(|b| b.as_array());
+    let post_balances = tx_json
+        .get("meta")
+        .and_then(|m| m.get("postTokenBalances"))
+        .and_then(|b| b.as_array());
+
+    let (token_in, token_out, amount_in, amount_out, direction) =
+        parse_balance_changes(pre_balances, post_balances, wallet_address)?;
+
+    Ok(ParsedSwap {
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        direction,
+        dex: "Pump.fun".to_string(),
+        slippage: None,
+    })
 }
 
 /// Parse balance changes to determine swap direction and amounts

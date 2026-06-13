@@ -522,14 +522,16 @@ pub async fn get_strategy_performance(
 
 /// Get count of consecutive losses
 pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
-    // Get the most recent trades and count consecutive losses
-    // Convert f64 from database to Decimal immediately for precise comparison
+    // Get the most recent closed trades and count consecutive losses.
+    // trades.pnl_usd is never written (inserts omit it); use positions.realized_pnl_sol
+    // joined on trade_uuid instead — this is the same column used by get_pnl_24h.
     let trades: Vec<(Option<f64>,)> = sqlx::query_as(
         r#"
-        SELECT pnl_usd
-        FROM trades
-        WHERE status = 'CLOSED'
-        ORDER BY created_at DESC
+        SELECT p.realized_pnl_sol
+        FROM trades t
+        JOIN positions p ON p.trade_uuid = t.trade_uuid
+        WHERE t.status = 'CLOSED'
+        ORDER BY t.created_at DESC
         LIMIT 20
         "#,
     )

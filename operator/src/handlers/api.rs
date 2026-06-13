@@ -165,6 +165,9 @@ pub async fn update_wallet(
     Path(address): Path<String>,
     Json(body): Json<UpdateWalletRequest>,
 ) -> Result<Json<WalletUpdateResponse>, AppError> {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden("Requires operator role or higher".to_string()));
+    }
     // Validate status
     let valid_statuses = ["ACTIVE", "CANDIDATE", "REJECTED"];
     if !valid_statuses.contains(&body.status.as_str()) {
@@ -705,6 +708,9 @@ pub async fn update_config(
     axum::Extension(auth): axum::Extension<AuthExtension>,
     Json(body): Json<UpdateConfigRequest>,
 ) -> Result<Json<ConfigResponse>, AppError> {
+    if !auth.0.role.has_permission(Role::Admin) {
+        return Err(AppError::Forbidden("Requires admin role".to_string()));
+    }
     let mut config = state.config.write().await;
 
     // Update circuit breakers if provided
@@ -1516,6 +1522,9 @@ pub async fn reset_circuit_breaker(
     State(state): State<Arc<ApiState>>,
     axum::Extension(auth): axum::Extension<AuthExtension>,
 ) -> Result<Json<CircuitBreakerResetResponse>, AppError> {
+    if !auth.0.role.has_permission(Role::Admin) {
+        return Err(AppError::Forbidden("Requires admin role".to_string()));
+    }
     let status_before = state.circuit_breaker.status();
     let previous_state = status_before.state.to_string();
 
@@ -1548,6 +1557,9 @@ pub async fn trip_circuit_breaker(
     axum::Extension(auth): axum::Extension<AuthExtension>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<CircuitBreakerResetResponse>, AppError> {
+    if !auth.0.role.has_permission(Role::Admin) {
+        return Err(AppError::Forbidden("Requires admin role".to_string()));
+    }
     let status_before = state.circuit_breaker.status();
     let previous_state = status_before.state.to_string();
 
@@ -2042,8 +2054,12 @@ pub struct SecretRotationMetricsUpdate {
 /// Requires: operator+ role
 pub async fn update_reconciliation_metrics(
     State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
     Json(payload): Json<ReconciliationMetricsUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden("Requires operator role or higher".to_string()));
+    }
     // Log the update request
     tracing::info!(
         checked = payload.checked,
@@ -2134,8 +2150,12 @@ pub async fn update_reconciliation_metrics(
 /// Requires: operator+ role
 pub async fn update_secret_rotation_metrics(
     State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
     Json(payload): Json<SecretRotationMetricsUpdate>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden("Requires operator role or higher".to_string()));
+    }
     // Log the update request
     tracing::info!(
         last_success_timestamp = payload.last_success_timestamp,

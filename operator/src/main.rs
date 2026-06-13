@@ -594,12 +594,16 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
 
-                            // Register position with profit target manager (idempotent)
+                            // Register position with profit target manager (idempotent).
+                            // Pass the actual trade open time so time-based exits fire
+                            // correctly even after a restart.
+                            let entry_st: std::time::SystemTime = pos.entry_time.into();
                             monitor_pt.register_position(
                                 &pos.trade_uuid,
                                 pos.entry_price,
                                 pos.entry_amount_sol,
                                 &pos.token_address,
+                                entry_st,
                             ).await;
 
                             // Check profit targets
@@ -612,6 +616,9 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                     let signal = build_exit_signal(&pos);
                                     let _ = monitor_engine.queue_signal(signal, None).await;
+                                    // Remove from tracker so the exit isn't re-queued on
+                                    // the next monitoring tick before the DB status updates.
+                                    monitor_pt.remove_position(&pos.trade_uuid).await;
                                 }
                                 ProfitTargetAction::None => {}
                             }
@@ -881,6 +888,7 @@ async fn main() -> anyhow::Result<()> {
         helius_client: helius_client.clone(),
         position_sizer: Some(position_sizer),
         total_capital_sol: config.position_sizing.total_capital_sol,
+        max_position_sol: config.position_sizing.max_size_sol,
         signal_quality_threshold: config.strategy.signal_quality_threshold,
     });
 

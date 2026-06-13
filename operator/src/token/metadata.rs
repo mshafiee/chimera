@@ -44,6 +44,12 @@ pub struct TokenMetadata {
     pub decimals: u8,
     /// Token supply
     pub supply: u64,
+    /// Whether this is a Token-2022 token
+    pub is_token_2022: bool,
+    /// Whether the Token-2022 mint has a TransferHook extension (can block sells)
+    pub has_transfer_hook: bool,
+    /// Whether the Token-2022 mint has a PermanentDelegate extension (can drain wallet)
+    pub has_permanent_delegate: bool,
 }
 
 /// Fetches token metadata from Solana RPC
@@ -221,12 +227,35 @@ impl TokenMetadataFetcher {
             // Parse freeze authority (bytes 46-82)
             let freeze_authority = parse_optional_pubkey(&data[46..82]);
 
+            // Detect Token-2022 program and dangerous extensions.
+            // Token-2022 mints have the same 82-byte base layout, with TLV extension
+            // data appended starting at byte 82. We scan for:
+            //   TransferHook (type 25): arbitrary program called on every transfer — can block sells
+            //   PermanentDelegate (type 27): grants a fixed address unlimited transfer authority
+            const TOKEN_2022_PROGRAM: &str =
+                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+            let is_token_2022 = account
+                .owner
+                .to_string()
+                .as_str()
+                == TOKEN_2022_PROGRAM;
+
+            let (has_transfer_hook, has_permanent_delegate) =
+                if is_token_2022 && data.len() > 82 {
+                    parse_token_2022_dangerous_extensions(&data[82..])
+                } else {
+                    (false, false)
+                };
+
             Ok(TokenMetadata {
                 mint: address,
                 freeze_authority,
                 mint_authority,
                 decimals,
                 supply,
+                is_token_2022,
+                has_transfer_hook,
+                has_permanent_delegate,
             })
         })
         .await
@@ -244,8 +273,8 @@ impl TokenMetadataFetcher {
         // Get token metadata (includes supply and decimals)
         let metadata = self.get_metadata(token_address).await?;
 
-        // Get current price from Jupiter
-        let price_url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
+        // Get current price from Jupiter (v2 API)
+        let price_url = format!("https://lite-api.jup.ag/price/v2?ids={}", token_address);
         let response = reqwest::get(&price_url)
             .await
             .map_err(|e| AppError::Http(format!("Jupiter price request failed: {}", e)))?;
@@ -518,22 +547,18 @@ impl TokenMetadataFetcher {
             // Check logs for specific failure reasons
             let logs = simulation_result.logs.join("\n").to_lowercase();
 
-            // If the failure is due to us using a dummy wallet with no funds,
-            // we cannot determine if it's a honeypot.
-            // In high-frequency context, false positives (rejecting good tokens)
-            // are better than false negatives (buying honeypots),
-            // BUT "Insufficient Funds" is guaranteed to happen with a dummy wallet.
-
+            // The simulation failed because our dummy wallet has no token balance or SOL.
+            // This is structurally guaranteed with Pubkey::new_unique() — we cannot
+            // distinguish a honeypot from a safe token via this path. Return a specific
+            // error so the caller can treat this as "inconclusive" (skip the check)
+            // rather than silently claiming the token is safe.
             if logs.contains("insufficient funds")
                 || logs.contains("account not found")
                 || err_str.contains("accountnotfound")
             {
-                tracing::warn!(
-                    token = token_address,
-                    "Honeypot check inconclusive (insufficient funds in sim). Allowing trade cautiously."
-                );
-                // Return TRUE (safe) because we failed due to setup, not token logic
-                return Ok(true);
+                return Err(AppError::Validation(
+                    "honeypot_simulation_inconclusive: dummy wallet has no funds".to_string(),
+                ));
             }
 
             // If it's a custom program error (usually 0x1770 or similar for frozen assets), reject
@@ -720,6 +745,36 @@ fn parse_optional_pubkey(data: &[u8]) -> Option<String> {
         let pubkey = Pubkey::new_from_array(pubkey_bytes);
         Some(pubkey.to_string())
     }
+}
+
+/// Parse Token-2022 TLV extension data and return (has_transfer_hook, has_permanent_delegate).
+/// Extension TLV layout: [type: u16 LE][length: u16 LE][value: length bytes] ...
+fn parse_token_2022_dangerous_extensions(ext_data: &[u8]) -> (bool, bool) {
+    const TRANSFER_HOOK_TYPE: u16 = 25;    // ExtensionType::TransferHook
+    const PERMANENT_DELEGATE_TYPE: u16 = 27; // ExtensionType::PermanentDelegate
+
+    let mut has_transfer_hook = false;
+    let mut has_permanent_delegate = false;
+    let mut cursor = 0usize;
+
+    while cursor + 4 <= ext_data.len() {
+        let ext_type = u16::from_le_bytes([ext_data[cursor], ext_data[cursor + 1]]);
+        let ext_len = u16::from_le_bytes([ext_data[cursor + 2], ext_data[cursor + 3]]) as usize;
+        cursor += 4;
+
+        if ext_type == TRANSFER_HOOK_TYPE {
+            has_transfer_hook = true;
+        } else if ext_type == PERMANENT_DELEGATE_TYPE {
+            has_permanent_delegate = true;
+        }
+
+        cursor = match cursor.checked_add(ext_len) {
+            Some(next) if next <= ext_data.len() => next,
+            _ => break,
+        };
+    }
+
+    (has_transfer_hook, has_permanent_delegate)
 }
 
 #[cfg(test)]

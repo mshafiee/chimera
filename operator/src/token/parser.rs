@@ -171,6 +171,20 @@ impl TokenParser {
             }
         };
 
+        // Reject Token-2022 tokens with dangerous extensions before anything else.
+        // TransferHook can call an arbitrary program on every transfer (can block sells).
+        // PermanentDelegate grants a fixed address unlimited transfer authority (wallet drain).
+        if metadata.has_transfer_hook {
+            return Ok(TokenSafetyResult::unsafe_with_reason(
+                "Token-2022 TransferHook extension detected — can block sells",
+            ));
+        }
+        if metadata.has_permanent_delegate {
+            return Ok(TokenSafetyResult::unsafe_with_reason(
+                "Token-2022 PermanentDelegate extension detected — can drain wallet",
+            ));
+        }
+
         // Check freeze authority
         if let Some(ref freeze_auth) = metadata.freeze_authority {
             if !self
@@ -328,9 +342,11 @@ impl TokenParser {
         }
 
         // Honeypot detection via sell simulation
+        let mut honeypot_checked = false;
         if self.config.honeypot_detection_enabled {
             match self.fetcher.simulate_sell(token_address).await {
                 Ok(can_sell) => {
+                    honeypot_checked = true;
                     if !can_sell {
                         return Ok(TokenSafetyResult {
                             safe: false,
@@ -343,11 +359,20 @@ impl TokenParser {
                         });
                     }
                 }
+                Err(ref e) if e.to_string().contains("honeypot_simulation_inconclusive") => {
+                    // Dummy wallet has no funds — simulation cannot distinguish safe from
+                    // honeypot. Log and continue; honeypot_checked stays false so callers
+                    // know the simulation was skipped.
+                    tracing::warn!(
+                        token = token_address,
+                        "Honeypot simulation inconclusive (dummy wallet); relying on Token-2022 extension checks"
+                    );
+                }
                 Err(e) => {
                     tracing::warn!(
                         token = token_address,
                         error = %e,
-                        "Honeypot simulation failed, rejecting for safety"
+                        "Honeypot simulation error, rejecting for safety"
                     );
                     return Ok(TokenSafetyResult::unsafe_with_reason(
                         "Honeypot detection failed - unable to simulate sell",
@@ -360,7 +385,7 @@ impl TokenParser {
         let result = TokenSafetyResult {
             safe: true,
             rejection_reason: None,
-            honeypot_checked: self.config.honeypot_detection_enabled,
+            honeypot_checked,
             liquidity_checked: true,
             liquidity_usd: Some(liquidity_usd),
         };

@@ -133,6 +133,7 @@ impl ProfitTargetManager {
         entry_price: Decimal,
         entry_amount_sol: Decimal,
         token_address: &str,
+        entry_time: std::time::SystemTime,
     ) {
         // Skip if already tracked in-memory (idempotent)
         {
@@ -166,7 +167,9 @@ impl ProfitTargetManager {
                     targets_hit,
                     trailing_stop_active: trailing_active,
                     trailing_stop_price: t_price,
-                    entry_time: SystemTime::now(),
+                    // Use the actual trade open time so time-based exits fire correctly
+                    // even after a restart.
+                    entry_time,
                 }
             }
             _ => {
@@ -181,7 +184,7 @@ impl ProfitTargetManager {
                     targets_hit: Vec::new(),
                     trailing_stop_active: false,
                     trailing_stop_price: Decimal::ZERO,
-                    entry_time: SystemTime::now(),
+                    entry_time,
                 };
                 let ep = entry_price.to_f64().unwrap_or(0.0);
                 let ea = entry_amount_sol.to_f64().unwrap_or(0.0);

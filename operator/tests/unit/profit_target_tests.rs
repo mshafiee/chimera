@@ -89,6 +89,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("5.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 
@@ -157,6 +158,7 @@ async fn test_first_target_fires_partial_exit_not_full() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("4.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 
@@ -211,6 +213,7 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("2.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 
@@ -250,6 +253,7 @@ async fn test_price_just_below_first_target_no_exit() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("2.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 
@@ -289,6 +293,7 @@ async fn test_trailing_stop_not_active_before_threshold() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("2.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 
@@ -353,6 +358,7 @@ async fn test_trailing_stop_distance_from_peak() {
             Decimal::from_str("1.00").unwrap(),
             Decimal::from_str("2.0").unwrap(),
             TOKEN_A,
+            std::time::SystemTime::now(),
         )
         .await;
 
@@ -390,6 +396,7 @@ async fn test_trailing_stop_distance_from_peak() {
             Decimal::from_str("1.00").unwrap(),
             Decimal::from_str("2.0").unwrap(),
             TOKEN_B,
+            std::time::SystemTime::now(),
         )
         .await;
 
@@ -460,6 +467,7 @@ async fn test_same_target_not_hit_twice() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("4.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 
@@ -500,6 +508,7 @@ async fn test_no_price_in_cache_returns_none() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("1.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 

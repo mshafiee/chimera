@@ -1093,7 +1093,7 @@ class HeliusClient:
         if len(wallet_counts) < max_wallets and os.getenv("BIRDEYE_API_KEY"):
             try:
                 print("[Helius] Strategy 5: Analyzing top trending tokens (Reverse Analysis)...")
-                trending_wallets = self.discover_from_top_performing_tokens()
+                trending_wallets = await self.discover_from_top_performing_tokens()
                 for wallet in trending_wallets:
                     # Give these a high initial weight as they are trading hot tokens
                     wallet_counts[wallet] += min_trade_count 

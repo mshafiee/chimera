@@ -215,6 +215,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("5.0").unwrap(),
         TOKEN,
+        std::time::SystemTime::now(),
     )
     .await;
 

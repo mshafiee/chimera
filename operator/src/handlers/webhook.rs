@@ -66,6 +66,8 @@ pub struct WebhookState {
     pub position_sizer: Option<Arc<PositionSizer>>,
     /// Total trading capital in SOL (from config.position_sizing.total_capital_sol)
     pub total_capital_sol: Decimal,
+    /// Maximum single-position size in SOL (used to cap SELL amounts)
+    pub max_position_sol: Decimal,
     /// Minimum signal quality score to accept a trade (from config.strategy.signal_quality_threshold)
     pub signal_quality_threshold: f64,
 }
@@ -263,8 +265,52 @@ pub async fn webhook_handler(
         None
     };
 
+    // For SELL/EXIT signals: validate wallet exists in roster and cap amount to max_position_sol.
+    // BUY signals already went through the full wallet gate above; SELL signals previously
+    // skipped it entirely, allowing arbitrary amount_sol from the caller.
+    if signal.payload.action != crate::models::Action::Buy {
+        match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
+            Ok(None) => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid: signal.trade_uuid,
+                        reason: Some("Unknown wallet — not in roster".to_string()),
+                    }),
+                ));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "DB error on SELL wallet check, rejecting (fail-closed)");
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid: signal.trade_uuid,
+                        reason: Some("DB error during wallet check".to_string()),
+                    }),
+                ));
+            }
+            Ok(Some(_)) => {} // wallet exists, proceed
+        }
+    }
+
     // Trade amount: starts as payload value for SELL/EXIT; overridden by PositionSizer for BUY.
     let mut trade_amount_sol = signal.payload.amount_sol;
+
+    // Cap SELL/EXIT amounts to max_position_sol — prevents a caller from supplying an
+    // arbitrarily large amount and closing more than we actually hold.
+    if signal.payload.action != crate::models::Action::Buy
+        && trade_amount_sol > state.max_position_sol
+    {
+        tracing::warn!(
+            trade_uuid = %signal.trade_uuid,
+            original = %trade_amount_sol,
+            capped_to = %state.max_position_sol,
+            "SELL amount exceeds max_position_sol, capping"
+        );
+        trade_amount_sol = state.max_position_sol;
+    }
 
     // Signal quality check (for BUY signals only, EXIT/SELL don't need quality check)
     if signal.payload.action == crate::models::Action::Buy {
