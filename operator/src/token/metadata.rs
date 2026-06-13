@@ -58,6 +58,12 @@ pub struct TokenMetadataFetcher {
     rate_limiter: Option<Arc<RateLimiter>>,
     /// Jupiter API base URL (e.g., https://api.jup.ag/swap/v1 or https://lite-api.jup.ag/swap/v1)
     jupiter_api_url: String,
+    /// HTTP client for DexScreener API calls
+    http_client: reqwest::Client,
+    /// DexScreener base URL for liquidity queries
+    dexscreener_base_url: String,
+    /// When true, use supply heuristic for tokens not indexed by DexScreener
+    allow_unlisted_heuristic: bool,
 }
 
 impl TokenMetadataFetcher {
@@ -90,6 +96,12 @@ impl TokenMetadataFetcher {
             ))),
             rate_limiter,
             jupiter_api_url,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
+            allow_unlisted_heuristic: false,
         }
     }
 
@@ -124,7 +136,20 @@ impl TokenMetadataFetcher {
             pool_enumerator,
             rate_limiter,
             jupiter_api_url,
+            http_client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+            dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
+            allow_unlisted_heuristic: false,
         }
+    }
+
+    /// Set whether to use supply heuristic for tokens not indexed by DexScreener.
+    /// Default is false (strict mode — unlisted tokens are rejected).
+    pub fn with_unlisted_heuristic(mut self, allow: bool) -> Self {
+        self.allow_unlisted_heuristic = allow;
+        self
     }
 
     /// Get token metadata, using cache if available
@@ -270,65 +295,108 @@ impl TokenMetadataFetcher {
         Ok(fdv_usd)
     }
 
-    /// Get estimated liquidity for a token in USD
+    /// Get estimated liquidity for a token in USD via DexScreener.
     ///
-    /// Queries multiple sources:
-    /// 1. Jupiter Price API (aggregated liquidity data)
-    /// 2. Raydium pools (via RPC)
-    /// 3. Orca pools (via RPC)
-    ///
-    /// Returns the total aggregated liquidity from all sources.
+    /// DexScreener aggregates pool liquidity across Raydium, Orca, Meteora, etc.
+    /// If a token is not indexed by DexScreener, behavior depends on `allow_unlisted_heuristic`:
+    /// - false (default): returns $0, causing the BUY safety gate to reject the token.
+    /// - true: falls back to a supply-based heuristic estimate (legacy behavior).
+    /// EXIT/SELL paths are unaffected — their liquidity threshold is $0.
     pub async fn get_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
-        tracing::debug!(token = token_address, "Fetching liquidity from DEX pools");
+        let dex_liquidity = self
+            .fetch_dexscreener_liquidity(token_address)
+            .await
+            .unwrap_or(Decimal::ZERO); // network failure → treat as unlisted
 
-        // Try Jupiter first (fastest, aggregated data)
-        let jupiter_liquidity = self.fetch_jupiter_liquidity(token_address).await.ok();
-
-        // Try Raydium pools
-        let raydium_liquidity = self.fetch_raydium_liquidity(token_address).await.ok();
-
-        // Try Orca pools
-        let orca_liquidity = self.fetch_orca_liquidity(token_address).await.ok();
-
-        // Aggregate all sources using Decimal for precision
-        let total_liquidity = jupiter_liquidity.unwrap_or(Decimal::ZERO)
-            + raydium_liquidity.unwrap_or(Decimal::ZERO)
-            + orca_liquidity.unwrap_or(Decimal::ZERO);
-
-        if total_liquidity > Decimal::ZERO {
+        if dex_liquidity > Decimal::ZERO {
             tracing::debug!(
                 token = token_address,
-                total_liquidity_usd = %total_liquidity,
-                jupiter = ?jupiter_liquidity,
-                raydium = ?raydium_liquidity,
-                orca = ?orca_liquidity,
-                "Fetched liquidity from DEX pools"
+                liquidity_usd = %dex_liquidity,
+                "Fetched DexScreener liquidity"
             );
-            Ok(total_liquidity)
-        } else {
-            // Fallback: use heuristic based on token metadata
+            return Ok(dex_liquidity);
+        }
+
+        if self.allow_unlisted_heuristic {
             let metadata = self.get_metadata(token_address).await?;
-            let estimated_liquidity = if metadata.supply > 1_000_000_000_000 {
+            let est = if metadata.supply > 1_000_000_000_000 {
                 Decimal::from(50_000)
             } else if metadata.supply > 1_000_000_000 {
                 Decimal::from(20_000)
             } else {
                 Decimal::from(5_000)
             };
-
             tracing::warn!(
                 token = token_address,
-                estimated_liquidity = %estimated_liquidity,
-                "No liquidity found in DEX pools, using heuristic estimate"
+                estimated_liquidity = %est,
+                "Token not on DexScreener; using opt-in heuristic estimate"
             );
-
-            Ok(estimated_liquidity)
+            return Ok(est);
         }
+
+        tracing::warn!(
+            token = token_address,
+            "Token not listed on DexScreener; liquidity treated as $0 (strict mode)"
+        );
+        Ok(Decimal::ZERO)
+    }
+
+    /// Fetch aggregated liquidity from DexScreener.
+    ///
+    /// Returns the maximum `liquidity.usd` across all Solana pairs for the token.
+    /// Returns `Ok(Decimal::ZERO)` when the token is not listed (not an error).
+    async fn fetch_dexscreener_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
+        let url = format!("{}/{}", self.dexscreener_base_url, token_address);
+
+        let response = self
+            .http_client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| AppError::Http(format!("DexScreener request failed: {}", e)))?;
+
+        if !response.status().is_success() {
+            return Err(AppError::Http(format!(
+                "DexScreener returned error: {}",
+                response.status()
+            )));
+        }
+
+        let data: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse DexScreener response: {}", e)))?;
+
+        let pairs = match data.get("pairs").and_then(|p| p.as_array()) {
+            Some(p) => p,
+            None => {
+                tracing::debug!(token = token_address, "DexScreener returned no pairs");
+                return Ok(Decimal::ZERO);
+            }
+        };
+
+        let max_liq = pairs
+            .iter()
+            .filter(|pair| pair.get("chainId").and_then(|c| c.as_str()) == Some("solana"))
+            .filter_map(|pair| {
+                pair.get("liquidity")
+                    .and_then(|l| l.get("usd"))
+                    .and_then(|u| u.as_f64())
+            })
+            .fold(0f64, f64::max);
+
+        if max_liq == 0.0 {
+            tracing::debug!(token = token_address, "DexScreener: no Solana pairs with liquidity");
+        }
+
+        Ok(Decimal::from_f64_retain(max_liq).unwrap_or(Decimal::ZERO))
     }
 
     /// Fetch liquidity from Jupiter Price API
     ///
-    /// Jupiter aggregates liquidity data from multiple DEXes.
+    /// Note: Jupiter's price endpoint does not return a liquidity field; this always
+    /// returns `Decimal::ZERO`. Superseded by `fetch_dexscreener_liquidity`.
+    #[allow(dead_code)]
     async fn fetch_jupiter_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         let url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
 
@@ -365,9 +433,10 @@ impl TokenMetadataFetcher {
         Ok(Decimal::ZERO)
     }
 
-    /// Fetch liquidity from Raydium pools via RPC
+    /// Fetch liquidity from Raydium pools via RPC.
     ///
-    /// Queries Raydium pool accounts for the token and calculates total liquidity.
+    /// Note: pool stubs return Decimal::ZERO. Superseded by `fetch_dexscreener_liquidity`.
+    #[allow(dead_code)]
     async fn fetch_raydium_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         if let Some(ref pool_enumerator) = self.pool_enumerator {
             pool_enumerator
@@ -383,9 +452,10 @@ impl TokenMetadataFetcher {
         }
     }
 
-    /// Fetch liquidity from Orca pools via RPC
+    /// Fetch liquidity from Orca pools via RPC.
     ///
-    /// Queries Orca pool accounts for the token and calculates total liquidity.
+    /// Note: pool stubs return Decimal::ZERO. Superseded by `fetch_dexscreener_liquidity`.
+    #[allow(dead_code)]
     async fn fetch_orca_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         if let Some(ref pool_enumerator) = self.pool_enumerator {
             pool_enumerator

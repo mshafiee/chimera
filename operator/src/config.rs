@@ -399,6 +399,14 @@ pub struct TokenSafetyConfig {
     /// Token cache TTL in seconds
     #[serde(default = "default_token_cache_ttl")]
     pub cache_ttl_seconds: i64,
+    /// When true, fall back to supply-based heuristic for tokens not indexed by DexScreener.
+    /// Default false (strict mode — unlisted tokens are rejected as $0 liquidity).
+    #[serde(default = "default_allow_unlisted_heuristic")]
+    pub allow_unlisted_heuristic: bool,
+}
+
+fn default_allow_unlisted_heuristic() -> bool {
+    false
 }
 
 fn default_authority_whitelist() -> Vec<String> {
@@ -442,6 +450,7 @@ impl Default for TokenSafetyConfig {
             honeypot_detection_enabled: default_honeypot_detection(),
             cache_capacity: default_token_cache_capacity(),
             cache_ttl_seconds: default_token_cache_ttl(),
+            allow_unlisted_heuristic: default_allow_unlisted_heuristic(),
         }
     }
 }
