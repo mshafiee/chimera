@@ -612,3 +612,123 @@ def test_wqs_high_winrate_alone_insufficient_when_profit_factor_low():
         f"Martingale profile (win_rate=0.80, PF=0.85) must be REJECTED, "
         f"not {classify_wallet(score)}"
     )
+
+
+# ── Category M: Metric boundary tests ────────────────────────────────────────
+
+def test_dust_trader_penalty_applies_below_0_05_sol():
+    """M2: avg_trade_size_sol < 0.05 → -10 pt dust penalty; >= 0.05 → no penalty."""
+    base = dict(address="w", roi_30d=50.0, roi_7d=10.0, trade_count_30d=25, max_drawdown_30d=5.0)
+
+    score_dust = calculate_wqs(WalletMetrics(**base, avg_trade_size_sol=0.04))
+    score_fine = calculate_wqs(WalletMetrics(**base, avg_trade_size_sol=0.05))
+
+    assert score_fine > score_dust, "Trade size 0.05 SOL should not incur dust penalty"
+    assert abs((score_fine - score_dust) - 10.0) < 1.5, (
+        f"Dust penalty should be ~10 pts, got diff={score_fine - score_dust:.2f}"
+    )
+
+
+def test_sniper_detection_below_30s_returns_zero():
+    """M3a: avg_entry_delay_seconds < 30 → immediate WQS=0 (not just penalized)."""
+    score = calculate_wqs(WalletMetrics(
+        address="sniper",
+        roi_30d=80.0, roi_7d=20.0, win_rate=0.9,
+        trade_count_30d=30, max_drawdown_30d=3.0,
+        avg_entry_delay_seconds=29.9,
+    ))
+    assert score == 0.0, f"Entry delay <30s must return WQS=0 (bot/sniper), got {score}"
+
+
+def test_sniper_detection_at_60s_applies_heavy_penalty():
+    """M3b: 30s <= delay < 60s → -30 pt penalty (not zero, but heavily penalized)."""
+    base = dict(address="w", roi_30d=80.0, roi_7d=20.0, win_rate=0.9,
+                trade_count_30d=30, max_drawdown_30d=3.0)
+
+    score_59 = calculate_wqs(WalletMetrics(**base, avg_entry_delay_seconds=59.0))
+    score_60 = calculate_wqs(WalletMetrics(**base, avg_entry_delay_seconds=60.0))
+
+    assert score_59 > 0.0, "59s delay should not return WQS=0"
+    assert score_60 > score_59, "60s delay escapes the <60s heavy penalty"
+    assert (score_60 - score_59) > 10.0, (
+        f"Crossing 60s boundary should gain >10 pts, got {score_60 - score_59:.2f}"
+    )
+
+
+def test_mev_protection_adds_bonus_independently_of_sniper_penalty():
+    """M4: uses_mev_protection=True adds +10 pts but does NOT waive the sniper penalty."""
+    base = dict(address="w", roi_30d=60.0, roi_7d=10.0, trade_count_30d=25,
+                max_drawdown_30d=5.0, avg_entry_delay_seconds=50.0)
+
+    score_no_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=False))
+    score_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=True))
+
+    assert score_mev > score_no_mev, "MEV protection flag should increase WQS"
+    assert abs((score_mev - score_no_mev) - 10.0) < 1.5, (
+        f"MEV protection adds ~10 pts, got diff={score_mev - score_no_mev:.2f}"
+    )
+    # Both still have the sniper penalty (delay=50 < 60 → -30 pts), but neither returns 0
+    assert score_no_mev > 0.0, "delay=50s should not return zero (only <30s does)"
+
+
+def test_profit_factor_scoring_tiers():
+    """M5: Profit factor scoring tiers: <1.0→-40, <1.2→-20, 1.2-1.5→0, >1.5→+5, >3.0→+15."""
+    base = dict(address="w", roi_30d=50.0, roi_7d=10.0, trade_count_30d=25,
+                max_drawdown_30d=5.0)
+
+    score_elite    = calculate_wqs(WalletMetrics(**base, profit_factor=3.1))   # +15
+    score_good     = calculate_wqs(WalletMetrics(**base, profit_factor=2.0))   # +5
+    score_neutral  = calculate_wqs(WalletMetrics(**base, profit_factor=1.3))   # 0
+    score_martingale = calculate_wqs(WalletMetrics(**base, profit_factor=1.1)) # -20
+    score_loser    = calculate_wqs(WalletMetrics(**base, profit_factor=0.9))   # -40
+
+    # Ordering is the critical invariant — exact magnitude is affected by the
+    # confidence multiplier (trade_count/20), so only assert relative rank.
+    assert score_elite > score_good, f"PF>3.0 must beat PF=2.0: {score_elite:.2f} vs {score_good:.2f}"
+    assert score_good > score_neutral, f"PF=2.0 must beat PF=1.3: {score_good:.2f} vs {score_neutral:.2f}"
+    assert score_neutral > score_martingale, f"PF=1.3 must beat PF=1.1: {score_neutral:.2f} vs {score_martingale:.2f}"
+    assert score_martingale > score_loser, f"PF=1.1 must beat PF=0.9: {score_martingale:.2f} vs {score_loser:.2f}"
+
+    # The loser (PF<1.0, -40 pts) and elite (PF>3.0, +15 pts) must be far apart
+    assert (score_elite - score_loser) > 30.0, (
+        f"Elite (PF>3.0) vs loser (PF<1.0) gap must be >30 pts, got {score_elite - score_loser:.2f}"
+    )
+
+
+def test_activity_bonus_cumulative_with_grinder_bonus():
+    """M6: Activity bonuses are cumulative; 100+ trades earns grinder bonus on top of 50-trade bonus."""
+    base = dict(address="w", roi_30d=50.0, roi_7d=10.0, max_drawdown_30d=5.0)
+
+    score_49  = calculate_wqs(WalletMetrics(**base, trade_count_30d=49))
+    score_50  = calculate_wqs(WalletMetrics(**base, trade_count_30d=50))
+    score_100 = calculate_wqs(WalletMetrics(**base, trade_count_30d=100))
+
+    # Note: scores are scaled by confidence multiplier (49/20 → capped at 1.0 for count>=20)
+    # All three have count>=20 so confidence=1.0 — raw bonus difference is preserved.
+    assert score_50 > score_49, "50 trades earns additional +5 vs 49"
+    assert score_100 > score_50, "100 trades earns grinder bonus (+5) on top of 50-trade bonus"
+
+
+def test_roi_momentum_bonus_requires_recent_trade_and_both_roi_positive():
+    """M7: roi_7d >= roi_30d * 0.5 earns +5 momentum pts, but only when last_trade_at is recent."""
+    from datetime import datetime, timedelta
+
+    recent = (datetime.utcnow() - timedelta(days=1)).isoformat()
+    base = dict(address="w", roi_30d=20.0, roi_7d=12.0,  # 12 >= 20*0.5=10 → qualifies
+                trade_count_30d=25, max_drawdown_30d=5.0)
+
+    score_with_date    = calculate_wqs(WalletMetrics(**base, last_trade_at=recent))
+    score_without_date = calculate_wqs(WalletMetrics(**base, last_trade_at=None))
+
+    assert score_with_date > score_without_date, (
+        "Momentum bonus should only apply when last_trade_at is provided and wallet is fresh"
+    )
+
+    # Verify the bonus does NOT apply when roi_7d < roi_30d * 0.5
+    score_no_momentum = calculate_wqs(WalletMetrics(
+        address="w", roi_30d=20.0, roi_7d=5.0,  # 5 < 20*0.5=10 → no bonus
+        trade_count_30d=25, max_drawdown_30d=5.0, last_trade_at=recent,
+    ))
+    assert score_with_date > score_no_momentum, (
+        "Momentum bonus should not apply when roi_7d < roi_30d * 50%%"
+    )

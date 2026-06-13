@@ -234,6 +234,104 @@ class BacktestSimulator:
             failure_reason=failure_reason,
         )
     
+    def run_walk_forward(
+        self,
+        wallet_address: str,
+        trades: List[HistoricalTrade],
+        strategy: str = "SHIELD",
+        train_ratio: float = 0.7,
+        min_test_trades: int = 5,
+    ) -> SimulatedResult:
+        """
+        Walk-forward validation: split trades chronologically, simulate each half.
+
+        Prevents in-sample overfitting by requiring the wallet to be profitable
+        on the out-of-sample (OOS) test set, not just the in-sample training set.
+
+        Args:
+            wallet_address: Wallet being validated
+            trades: All historical trades (sorted chronologically)
+            strategy: 'SHIELD' or 'SPEAR'
+            train_ratio: Fraction of trades used for training (default 0.7)
+            min_test_trades: Minimum trades required in OOS set
+
+        Returns:
+            SimulatedResult representing OOS performance. A wallet must pass
+            both in-sample (passed=True on train) and OOS (returned result).
+        """
+        if not trades:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=0,
+                simulated_trades=0,
+                rejected_trades=0,
+                original_pnl_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
+                pnl_difference_sol=Decimal('0'),
+                total_slippage_cost_sol=Decimal('0'),
+                total_fee_cost_sol=Decimal('0'),
+                passed=False,
+                failure_reason="No trades to walk-forward validate",
+            )
+
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        split = int(len(sorted_trades) * train_ratio)
+        train = sorted_trades[:split]
+        test = sorted_trades[split:]
+
+        if len(test) < min_test_trades:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=len(sorted_trades),
+                simulated_trades=0,
+                rejected_trades=0,
+                original_pnl_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
+                pnl_difference_sol=Decimal('0'),
+                total_slippage_cost_sol=Decimal('0'),
+                total_fee_cost_sol=Decimal('0'),
+                passed=False,
+                failure_reason=(
+                    f"Insufficient test data: {len(test)} OOS trades < {min_test_trades} required"
+                ),
+            )
+
+        # In-sample check
+        train_result = self.simulate_wallet(wallet_address, train, strategy)
+        if not train_result.passed:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=len(sorted_trades),
+                simulated_trades=train_result.simulated_trades,
+                rejected_trades=train_result.rejected_trades,
+                original_pnl_sol=train_result.original_pnl_sol,
+                simulated_pnl_sol=train_result.simulated_pnl_sol,
+                pnl_difference_sol=train_result.pnl_difference_sol,
+                total_slippage_cost_sol=train_result.total_slippage_cost_sol,
+                total_fee_cost_sol=train_result.total_fee_cost_sol,
+                passed=False,
+                failure_reason=f"FAILED_WALK_FORWARD_IN_SAMPLE: {train_result.failure_reason}",
+            )
+
+        # OOS check
+        oos_result = self.simulate_wallet(wallet_address, test, strategy)
+        if not oos_result.passed:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=len(sorted_trades),
+                simulated_trades=oos_result.simulated_trades,
+                rejected_trades=oos_result.rejected_trades,
+                original_pnl_sol=oos_result.original_pnl_sol,
+                simulated_pnl_sol=oos_result.simulated_pnl_sol,
+                pnl_difference_sol=oos_result.pnl_difference_sol,
+                total_slippage_cost_sol=oos_result.total_slippage_cost_sol,
+                total_fee_cost_sol=oos_result.total_fee_cost_sol,
+                passed=False,
+                failure_reason=f"FAILED_WALK_FORWARD: {oos_result.failure_reason}",
+            )
+
+        return oos_result
+
     def _simulate_trade_roundtrip(
         self,
         trade: HistoricalTrade,

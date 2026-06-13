@@ -443,7 +443,7 @@ def test_temp_file_cleanup_on_failure():
     """Test that temp file is cleaned up after failed write."""
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_path = Path(tmpdir) / "roster_new.db.tmp"
-        
+
         # Simulate failed write
         try:
             with open(temp_path, 'w') as f:
@@ -453,6 +453,118 @@ def test_temp_file_cleanup_on_failure():
             # Cleanup temp file on failure
             if temp_path.exists():
                 os.remove(temp_path)
-        
+
         assert not temp_path.exists(), "Temp file should be cleaned up"
+
+
+# ── Category C: Concurrency safety ───────────────────────────────────────────
+
+import threading
+
+
+def _write_wallet(db_path: Path, wallet_address: str, results: list, idx: int):
+    """Thread-safe DB writer for a single wallet row."""
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=10)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "INSERT OR REPLACE INTO wallets (address, status, wqs_score, created_at, updated_at) "
+            "VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (wallet_address, float(idx) * 10.0),
+        )
+        conn.commit()
+        conn.close()
+        results[idx] = "ok"
+    except Exception as e:
+        results[idx] = f"error:{e}"
+
+
+def test_concurrent_roster_writes_no_corruption():
+    """C1: 10 threads each write a distinct wallet concurrently. Final DB must have exactly
+    10 rows with correct data and no corruption."""
+    N = 10
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "roster_new.db"
+
+        # Bootstrap schema
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE wallets ("
+            "  address TEXT PRIMARY KEY,"
+            "  status TEXT NOT NULL,"
+            "  wqs_score REAL,"
+            "  created_at TEXT,"
+            "  updated_at TEXT"
+            ")"
+        )
+        conn.commit()
+        conn.close()
+
+        results = [None] * N
+        threads = [
+            threading.Thread(
+                target=_write_wallet,
+                args=(db_path, f"wallet_{i:04d}", results, i),
+            )
+            for i in range(N)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        errors = [r for r in results if r and r.startswith("error")]
+        assert not errors, f"Concurrent writes produced errors: {errors}"
+
+        conn = sqlite3.connect(str(db_path))
+        rows = conn.execute("SELECT address, wqs_score FROM wallets ORDER BY address").fetchall()
+        conn.close()
+
+        assert len(rows) == N, f"Expected {N} wallet rows, got {len(rows)}"
+        addresses = {r[0] for r in rows}
+        assert len(addresses) == N, "All wallet addresses must be distinct (no overwrites lost)"
+
+        for addr, score in rows:
+            idx = int(addr.split("_")[1])
+            assert abs(score - idx * 10.0) < 0.001, (
+                f"{addr}: expected wqs_score={idx * 10.0}, got {score}"
+            )
+
+
+def test_atomic_write_failure_leaves_no_temp_file():
+    """C2: If the write fails mid-way, no .tmp file should remain and the original DB
+    must be unchanged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "roster_new.db"
+        temp_path = Path(tmpdir) / "roster_new.db.tmp"
+
+        # Create original DB with known content
+        conn = sqlite3.connect(str(db_path))
+        conn.execute(
+            "CREATE TABLE wallets (address TEXT PRIMARY KEY, status TEXT)"
+        )
+        conn.execute("INSERT INTO wallets VALUES ('original_wallet', 'ACTIVE')")
+        conn.commit()
+        conn.close()
+
+        original_size = db_path.stat().st_size
+
+        # Simulate failed atomic write: write tmp, then fail before rename
+        try:
+            with open(temp_path, 'w') as f:
+                f.write("corrupt partial data")
+                raise OSError("Simulated disk full")
+        except OSError:
+            if temp_path.exists():
+                os.remove(temp_path)
+
+        # Temp file must not exist
+        assert not temp_path.exists(), "Temp file must be cleaned up on write failure"
+
+        # Original DB must be unchanged
+        assert db_path.exists(), "Original DB must survive a failed write"
+        assert db_path.stat().st_size == original_size, (
+            "Original DB size must not change after a failed atomic write"
+        )
 

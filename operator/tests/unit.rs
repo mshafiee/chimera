@@ -44,3 +44,8 @@ mod position_sizer_tests;
 #[path = "unit/circuit_breaker_real_tests.rs"]
 mod circuit_breaker_real_tests;
 
+// ── Fix-verification tests: assert CORRECT behavior (fail until bugs are fixed) ──
+
+#[path = "unit/fix_verification_tests.rs"]
+mod fix_verification_tests;
+

@@ -646,3 +646,124 @@ def test_backtester_simulated_pnl_negative_for_known_losing_trades():
         f"Loss-making wallet must fail backtest. "
         f"Simulated PnL: {result.simulated_pnl_sol} SOL, passed: {result.passed}"
     )
+
+
+# ── Category W: Walk-forward validation ──────────────────────────────────────
+
+from decimal import Decimal as _D
+
+# SOL price = $150. BUY 2.0 SOL at $100/token → qty = 2.0/(100/150) = 3.0 tokens.
+_ROUND_TRIP_TOKEN_QTY = _D("3.0")
+
+
+def _make_profitable_round_trip(token: str, idx: int, ts: datetime) -> list:
+    """BUY 2 SOL at $100, SELL proceeds=2.6 SOL at $130 (+30%).
+    amount_sol on SELL = proceeds in SOL (entry × price_ratio = 2.0 × 1.3 = 2.6).
+    token_amount=3.0 tokens so the round-trip position ledger works correctly."""
+    buy_ts = ts
+    sell_ts = datetime(ts.year, ts.month, ts.day, ts.hour, ts.minute + 1, 0)
+    return [
+        HistoricalTrade(token_address=token, token_symbol=f"TOK{idx}", action=TradeAction.BUY,
+                        amount_sol=2.0, price_at_trade=100.0, timestamp=buy_ts,
+                        tx_signature=f"buy{idx}", liquidity_at_trade_usd=500_000.0,
+                        token_amount=_ROUND_TRIP_TOKEN_QTY),
+        HistoricalTrade(token_address=token, token_symbol=f"TOK{idx}", action=TradeAction.SELL,
+                        amount_sol=2.6, price_at_trade=130.0, timestamp=sell_ts,
+                        tx_signature=f"sell{idx}", liquidity_at_trade_usd=500_000.0,
+                        pnl_sol=0.6, token_amount=_ROUND_TRIP_TOKEN_QTY),
+    ]
+
+
+def _make_losing_round_trip(token: str, idx: int, ts: datetime) -> list:
+    """BUY 2 SOL at $100, SELL proceeds=1.6 SOL at $80 (-20%).
+    amount_sol on SELL = proceeds in SOL (entry × price_ratio = 2.0 × 0.8 = 1.6)."""
+    buy_ts = ts
+    sell_ts = datetime(ts.year, ts.month, ts.day, ts.hour, ts.minute + 1, 0)
+    return [
+        HistoricalTrade(token_address=token, token_symbol=f"TOK{idx}", action=TradeAction.BUY,
+                        amount_sol=2.0, price_at_trade=100.0, timestamp=buy_ts,
+                        tx_signature=f"bloss{idx}", liquidity_at_trade_usd=500_000.0,
+                        token_amount=_ROUND_TRIP_TOKEN_QTY),
+        HistoricalTrade(token_address=token, token_symbol=f"TOK{idx}", action=TradeAction.SELL,
+                        amount_sol=1.6, price_at_trade=80.0, timestamp=sell_ts,
+                        tx_signature=f"sloss{idx}", liquidity_at_trade_usd=500_000.0,
+                        pnl_sol=-0.4, token_amount=_ROUND_TRIP_TOKEN_QTY),
+    ]
+
+
+def _make_walk_forward_simulator():
+    liquidity = MockLiquidityProvider(
+        liquidity_map={f"token{i}": 500_000.0 for i in range(20)},
+    )
+    config = BacktestConfig(
+        min_liquidity_shield_usd=10_000.0,
+        min_trades_required=4,
+    )
+    return BacktestSimulator(liquidity, config)
+
+
+def test_walk_forward_70_30_split_both_profitable():
+    """W1: 30 profitable trades → train (21) and OOS (9) both pass → walk-forward passes."""
+    simulator = _make_walk_forward_simulator()
+    trades = []
+    base = datetime(2024, 1, 1, 12, 0, 0)
+    for i in range(15):
+        ts = datetime(2024, 1, i + 1, 12, 0, 0)
+        trades.extend(_make_profitable_round_trip(f"token{i}", i, ts))
+
+    result = simulator.run_walk_forward("wallet_A", trades, strategy="SHIELD")
+    assert result.passed, (
+        f"30 profitable trades → walk-forward should pass. "
+        f"Failure: {result.failure_reason}"
+    )
+
+
+def test_walk_forward_rejects_wallet_that_deteriorates_out_of_sample():
+    """W2: Good in-sample, bad OOS → FAILED_WALK_FORWARD. Proves no data leakage."""
+    simulator = _make_walk_forward_simulator()
+    # First 14 trades (7 round-trips) = profitable in-sample
+    # Last 10 trades (5 round-trips) = losing OOS
+    trades = []
+    for i in range(7):
+        ts = datetime(2024, 1, i + 1, 12, 0, 0)
+        trades.extend(_make_profitable_round_trip(f"token{i}", i, ts))
+    for i in range(5):
+        ts = datetime(2024, 1, 8 + i, 12, 0, 0)
+        trades.extend(_make_losing_round_trip(f"token{7 + i}", 7 + i, ts))
+
+    result = simulator.run_walk_forward("wallet_B", trades, strategy="SHIELD")
+    assert not result.passed, "OOS losses must cause walk-forward rejection"
+    assert result.failure_reason and "WALK_FORWARD" in result.failure_reason, (
+        f"Failure reason must mention WALK_FORWARD, got: {result.failure_reason}"
+    )
+
+
+def test_walk_forward_minimum_test_set_size():
+    """W3: Only 10 total trades → OOS set has 3 trades < min_test_trades=5 → fails."""
+    simulator = _make_walk_forward_simulator()
+    trades = []
+    for i in range(5):
+        ts = datetime(2024, 1, i + 1, 12, 0, 0)
+        trades.extend(_make_profitable_round_trip(f"token{i}", i, ts))
+
+    result = simulator.run_walk_forward("wallet_C", trades, strategy="SHIELD", min_test_trades=5)
+    assert not result.passed, "Insufficient OOS data must fail walk-forward"
+    assert result.failure_reason and "Insufficient test data" in result.failure_reason, (
+        f"Must report insufficient test data, got: {result.failure_reason}"
+    )
+
+
+def test_walk_forward_train_failure_short_circuits_oos():
+    """W4: Bad in-sample performance → FAILED_WALK_FORWARD_IN_SAMPLE before OOS runs."""
+    simulator = _make_walk_forward_simulator()
+    # All losing trades — in-sample will fail
+    trades = []
+    for i in range(12):
+        ts = datetime(2024, 1, i + 1, 12, 0, 0)
+        trades.extend(_make_losing_round_trip(f"token{i}", i, ts))
+
+    result = simulator.run_walk_forward("wallet_D", trades, strategy="SHIELD")
+    assert not result.passed, "All-losing wallet must fail walk-forward"
+    assert result.failure_reason and "IN_SAMPLE" in result.failure_reason, (
+        f"In-sample failure must be reported, got: {result.failure_reason}"
+    )
