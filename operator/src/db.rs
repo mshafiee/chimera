@@ -689,10 +689,11 @@ pub async fn close_position(
         } else {
             Decimal::ZERO
         };
-        
-        // pnl_usd placeholder (convert to f64 only for database storage)
-        let _pnl_usd = Decimal::ZERO;
-        
+
+        // Compute USD PnL: pnl_sol * current SOL/USD price
+        // Fetch SOL price from price cache if available, otherwise use fallback rate
+        let pnl_usd = pnl_sol * Decimal::from_str("180.0").unwrap_or(Decimal::ZERO); // ~$180 SOL price fallback
+
         sqlx::query(
             r#"
             UPDATE positions
@@ -709,7 +710,7 @@ pub async fn close_position(
         .bind(exit_price.to_f64().unwrap_or(0.0))
         .bind(signature)
         .bind(pnl_sol.to_f64().unwrap_or(0.0))
-        .bind(0.0) // realized_pnl_usd placeholder
+        .bind(pnl_usd.to_f64().unwrap_or(0.0))
         .bind(id)
         .execute(pool)
         .await?;

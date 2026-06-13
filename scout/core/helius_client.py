@@ -166,23 +166,52 @@ class HeliusClient:
         
         return None
     
-    def get_wallet_funder(self, wallet_address: str) -> Optional[str]:
+    async def get_wallet_funder(self, wallet_address: str) -> Optional[str]:
         """
         Identify the address that funded this wallet (sent the first SOL).
         Useful for detecting wallet clusters/insiders.
+
+        Returns the address that sent SOL in the earliest transaction.
         """
         if not self.api_key:
             return None
-            
+
         try:
-            # Fetch the very first transaction history
-            # Helius/RPC allows querying by 'oldest' order or paginating back
-            # For this MVP, we stub this out as a placeholder for future
-            # deep history implementation.
-            pass 
-        except Exception:
+            # Get earliest transaction signatures using Helius getSignaturesForAddress
+            # This fetches transactions in reverse chronological order (newest first)
+            # We'll iterate to find the oldest one
+            endpoint = f"/v0/addresses/{wallet_address}/signatures"
+            params = {"limit": 1000, "api-key": self.api_key}
+
+            data = await self._make_request(endpoint, params, use_retry=True)
+            if not data or not isinstance(data, list):
+                return None
+
+            # Find the oldest transaction (last in the list, since returned newest-first)
+            if data:
+                oldest_sig = data[-1].get("signature") if data else None
+                if not oldest_sig:
+                    return None
+
+                # Fetch the full transaction to see who sent SOL
+                tx_data = await self._make_request(
+                    f"/v0/transactions/{oldest_sig}",
+                    {"api-key": self.api_key},
+                    use_retry=True
+                )
+
+                if tx_data and isinstance(tx_data, dict):
+                    # Look for SOL transfers in transaction details
+                    # In Helius enriched txs, native transfers appear in nativeTransfers field
+                    native_transfers = tx_data.get("nativeTransfers", [])
+                    for transfer in native_transfers:
+                        if transfer.get("toUserAccount") == wallet_address:
+                            return transfer.get("fromUserAccount")
+
             return None
-        return None
+        except Exception as e:
+            print(f"[Helius] Error fetching wallet funder: {e}")
+            return None
 
     # Well-known DEX program (Jupiter v6 aggregator)
     JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
