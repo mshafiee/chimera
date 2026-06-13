@@ -147,7 +147,7 @@ class PrePromotionValidator:
                 passed=False,
                 reason=f"Insufficient trades: {len(trades)} < {self.criteria.min_trades}",
                 recommended_status="CANDIDATE",
-                notes=f"Need more trade history",
+                notes="Need more trade history",
             )
 
         # Step 2b: RugCheck validation - filter risky tokens
@@ -291,9 +291,11 @@ class PrePromotionValidator:
             peak = simulated_equity[0]
             max_dd = 0.0
             for val in simulated_equity:
-                if val > peak: peak = val
+                if val > peak:
+                    peak = val
                 dd = peak - val
-                if dd > max_dd: max_dd = dd
+                if dd > max_dd:
+                    max_dd = dd
             
             # Since equity is absolute PnL in SOL, drawdown percentage relies on initial capital
             # For simplicity, if absolute drawdown > 30% of Total Gains, it's risky? 

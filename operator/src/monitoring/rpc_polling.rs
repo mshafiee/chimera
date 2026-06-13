@@ -3,18 +3,18 @@
 //! Used when webhooks fail or for validation. Implements signature caching
 //! and prioritized polling to minimize credit usage.
 
-use lru::LruCache;
-use std::num::NonZeroUsize;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use crate::db::DbPool;
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
 use crate::monitoring::transaction_parser;
-use crate::db::DbPool;
 use anyhow::{Context, Result};
+use lru::LruCache;
 use rust_decimal::Decimal;
-use solana_client::rpc_client::RpcClient;
 use serde_json::Value;
+use solana_client::rpc_client::RpcClient;
+use std::num::NonZeroUsize;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 /// Transaction information from polling
 #[derive(Debug, Clone)]
@@ -29,7 +29,7 @@ pub struct WalletTransaction {
 
 pub struct RpcPollingState {
     // Changed from HashSet to LruCache
-    seen_signatures: Arc<tokio::sync::RwLock<LruCache<String, ()>>>, 
+    seen_signatures: Arc<tokio::sync::RwLock<LruCache<String, ()>>>,
     last_poll: Arc<tokio::sync::RwLock<std::collections::HashMap<String, SystemTime>>>,
 }
 
@@ -44,7 +44,7 @@ impl RpcPollingState {
         Self {
             // Cap at 10,000 signatures
             seen_signatures: Arc::new(tokio::sync::RwLock::new(LruCache::new(
-                NonZeroUsize::new(10000).expect("Cache capacity must be > 0")
+                NonZeroUsize::new(10000).expect("Cache capacity must be > 0"),
             ))),
             last_poll: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         }
@@ -95,13 +95,13 @@ pub async fn poll_wallet_transactions(
     db: Option<&DbPool>,
 ) -> Result<Vec<WalletTransaction>> {
     // Rate limit before polling
-    rate_limiter.acquire_standard(RequestPriority::Polling).await;
+    rate_limiter
+        .acquire_standard(RequestPriority::Polling)
+        .await;
 
     // Get recent signatures for the wallet
     let signatures = rpc_client
-        .get_signatures_for_address(
-            &wallet_address.parse().context("Invalid wallet address")?,
-        )
+        .get_signatures_for_address(&wallet_address.parse().context("Invalid wallet address")?)
         .context("Failed to get signatures")?;
 
     // Filter to new signatures (after last_signature if provided)
@@ -129,55 +129,58 @@ pub async fn poll_wallet_transactions(
     // Parse transactions (limited to save credits)
     let mut transactions = Vec::new();
     let mut latest_signature: Option<String> = None;
-    
+
     for sig_str in new_signatures.iter().take(5) {
         // Limit to 5 transactions per poll
-        rate_limiter.acquire_standard(RequestPriority::Polling).await;
+        rate_limiter
+            .acquire_standard(RequestPriority::Polling)
+            .await;
 
         // Parse signature string to Signature type
         if let Ok(sig) = sig_str.parse::<solana_sdk::signature::Signature>() {
-            if let Ok(tx) = rpc_client.get_transaction(
-                &sig,
-                solana_transaction_status::UiTransactionEncoding::Json,
-            ) {
+            if let Ok(tx) = rpc_client
+                .get_transaction(&sig, solana_transaction_status::UiTransactionEncoding::Json)
+            {
                 // Convert UiTransaction to JSON Value for parser
-                let tx_json: Value = serde_json::to_value(&tx)
-                    .context("Failed to serialize transaction to JSON")?;
-                
+                let tx_json: Value =
+                    serde_json::to_value(&tx).context("Failed to serialize transaction to JSON")?;
+
                 // Parse transaction to extract swap info using transaction_parser
                 match transaction_parser::parse_transaction(&tx_json, wallet_address) {
                     Ok(tx_info) => {
                         if let Some(swap) = tx_info.parsed_swap {
                             // Extract token address and direction from parsed swap
-                            let token_address = if swap.direction == transaction_parser::SwapDirection::Buy {
-                                Some(swap.token_out.clone())
-                            } else {
-                                Some(swap.token_in.clone())
-                            };
-                            
+                            let token_address =
+                                if swap.direction == transaction_parser::SwapDirection::Buy {
+                                    Some(swap.token_out.clone())
+                                } else {
+                                    Some(swap.token_in.clone())
+                                };
+
                             let direction = match swap.direction {
                                 transaction_parser::SwapDirection::Buy => Some("BUY".to_string()),
                                 transaction_parser::SwapDirection::Sell => Some("SELL".to_string()),
                             };
-                            
+
                             // Calculate SOL amount (amount_in for BUY, amount_out for SELL)
                             let sol_mint = "So11111111111111111111111111111111111111112";
-                            let amount_sol = if swap.direction == transaction_parser::SwapDirection::Buy {
-                                // Buying: amount_in is SOL
-                                if swap.token_in == sol_mint {
-                                    Some(swap.amount_in)
+                            let amount_sol =
+                                if swap.direction == transaction_parser::SwapDirection::Buy {
+                                    // Buying: amount_in is SOL
+                                    if swap.token_in == sol_mint {
+                                        Some(swap.amount_in)
+                                    } else {
+                                        Some(swap.amount_out) // Fallback
+                                    }
                                 } else {
-                                    Some(swap.amount_out) // Fallback
-                                }
-                            } else {
-                                // Selling: amount_out is SOL
-                                if swap.token_out == sol_mint {
-                                    Some(swap.amount_out)
-                                } else {
-                                    Some(swap.amount_in) // Fallback
-                                }
-                            };
-                            
+                                    // Selling: amount_out is SOL
+                                    if swap.token_out == sol_mint {
+                                        Some(swap.amount_out)
+                                    } else {
+                                        Some(swap.amount_in) // Fallback
+                                    }
+                                };
+
                             tracing::debug!(
                                 wallet = wallet_address,
                                 signature = sig_str,
@@ -213,7 +216,7 @@ pub async fn poll_wallet_transactions(
                         );
                     }
                 }
-                
+
                 // Track latest signature for database update
                 if latest_signature.is_none() {
                     latest_signature = Some(sig_str.clone());
@@ -224,12 +227,9 @@ pub async fn poll_wallet_transactions(
 
     // Update last signature in database if we have new transactions and database access
     if let (Some(latest_sig), Some(db_pool)) = (latest_signature, db) {
-        if let Err(e) = crate::db::update_wallet_monitoring_signature(
-            db_pool,
-            wallet_address,
-            &latest_sig,
-        )
-        .await
+        if let Err(e) =
+            crate::db::update_wallet_monitoring_signature(db_pool, wallet_address, &latest_sig)
+                .await
         {
             tracing::warn!(
                 wallet = wallet_address,

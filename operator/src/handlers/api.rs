@@ -17,7 +17,9 @@ use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
-use crate::db::{self, ConfigAuditItem, DeadLetterItem, DbPool, PositionDetail, TradeDetail, WalletDetail};
+use crate::db::{
+    self, ConfigAuditItem, DbPool, DeadLetterItem, PositionDetail, TradeDetail, WalletDetail,
+};
 use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
@@ -220,8 +222,8 @@ pub async fn update_wallet(
     .await?;
 
     // Send notification if wallet was promoted to ACTIVE
-    let was_promoted = body.status == "ACTIVE"
-        && existing.as_ref().map(|w| w.status.as_str()) != Some("ACTIVE");
+    let was_promoted =
+        body.status == "ACTIVE" && existing.as_ref().map(|w| w.status.as_str()) != Some("ACTIVE");
 
     if was_promoted {
         // Get WQS score from existing wallet or default to 0
@@ -529,9 +531,17 @@ pub async fn get_config(
 
     Ok(Json(ConfigResponse {
         circuit_breakers: CircuitBreakerConfig {
-            max_loss_24h: config.circuit_breakers.max_loss_24h_usd.to_f64().unwrap_or(0.0),
+            max_loss_24h: config
+                .circuit_breakers
+                .max_loss_24h_usd
+                .to_f64()
+                .unwrap_or(0.0),
             max_consecutive_losses: config.circuit_breakers.max_consecutive_losses,
-            max_drawdown_percent: config.circuit_breakers.max_drawdown_percent.to_f64().unwrap_or(0.0),
+            max_drawdown_percent: config
+                .circuit_breakers
+                .max_drawdown_percent
+                .to_f64()
+                .unwrap_or(0.0),
             cool_down_minutes: config.circuit_breakers.cooldown_minutes,
         },
         strategy_allocation: StrategyAllocation {
@@ -574,41 +584,85 @@ pub async fn get_config(
                 }
             },
         },
-        monitoring: config.monitoring.as_ref().map(|m| MonitoringConfigResponse {
-            enabled: m.enabled,
-            webhook_registration_batch_size: m.webhook_registration_batch_size,
-            webhook_registration_delay_ms: m.webhook_registration_delay_ms,
-            webhook_processing_rate_limit: m.webhook_processing_rate_limit,
-            rpc_polling_enabled: m.rpc_polling_enabled,
-            rpc_poll_interval_secs: m.rpc_poll_interval_secs,
-            rpc_poll_batch_size: m.rpc_poll_batch_size,
-            rpc_poll_rate_limit: m.rpc_poll_rate_limit,
-            max_active_wallets: m.max_active_wallets,
-        }),
+        monitoring: config
+            .monitoring
+            .as_ref()
+            .map(|m| MonitoringConfigResponse {
+                enabled: m.enabled,
+                webhook_registration_batch_size: m.webhook_registration_batch_size,
+                webhook_registration_delay_ms: m.webhook_registration_delay_ms,
+                webhook_processing_rate_limit: m.webhook_processing_rate_limit,
+                rpc_polling_enabled: m.rpc_polling_enabled,
+                rpc_poll_interval_secs: m.rpc_poll_interval_secs,
+                rpc_poll_batch_size: m.rpc_poll_batch_size,
+                rpc_poll_rate_limit: m.rpc_poll_rate_limit,
+                max_active_wallets: m.max_active_wallets,
+            }),
         profit_management: ProfitManagementConfigResponse {
-            targets: config.profit_management.targets.iter().map(|d| d.to_f64().unwrap_or(0.0)).collect(),
-            tiered_exit_percent: config.profit_management.tiered_exit_percent.to_f64().unwrap_or(0.0),
-            trailing_stop_activation: config.profit_management.trailing_stop_activation.to_f64().unwrap_or(0.0),
-            trailing_stop_distance: config.profit_management.trailing_stop_distance.to_f64().unwrap_or(0.0),
-            hard_stop_loss: config.profit_management.hard_stop_loss.to_f64().unwrap_or(0.0),
+            targets: config
+                .profit_management
+                .targets
+                .iter()
+                .map(|d| d.to_f64().unwrap_or(0.0))
+                .collect(),
+            tiered_exit_percent: config
+                .profit_management
+                .tiered_exit_percent
+                .to_f64()
+                .unwrap_or(0.0),
+            trailing_stop_activation: config
+                .profit_management
+                .trailing_stop_activation
+                .to_f64()
+                .unwrap_or(0.0),
+            trailing_stop_distance: config
+                .profit_management
+                .trailing_stop_distance
+                .to_f64()
+                .unwrap_or(0.0),
+            hard_stop_loss: config
+                .profit_management
+                .hard_stop_loss
+                .to_f64()
+                .unwrap_or(0.0),
             time_exit_hours: config.profit_management.time_exit_hours,
         },
         position_sizing: PositionSizingConfigResponse {
             base_size_sol: config.position_sizing.base_size_sol.to_f64().unwrap_or(0.0),
             max_size_sol: config.position_sizing.max_size_sol.to_f64().unwrap_or(0.0),
             min_size_sol: config.position_sizing.min_size_sol.to_f64().unwrap_or(0.0),
-            consensus_multiplier: config.position_sizing.consensus_multiplier.to_f64().unwrap_or(0.0),
+            consensus_multiplier: config
+                .position_sizing
+                .consensus_multiplier
+                .to_f64()
+                .unwrap_or(0.0),
             max_concurrent_positions: config.position_sizing.max_concurrent_positions,
         },
         mev_protection: MevProtectionConfigResponse {
             always_use_jito: config.mev_protection.always_use_jito,
             exit_tip_sol: config.mev_protection.exit_tip_sol.to_f64().unwrap_or(0.0),
-            consensus_tip_sol: config.mev_protection.consensus_tip_sol.to_f64().unwrap_or(0.0),
-            standard_tip_sol: config.mev_protection.standard_tip_sol.to_f64().unwrap_or(0.0),
+            consensus_tip_sol: config
+                .mev_protection
+                .consensus_tip_sol
+                .to_f64()
+                .unwrap_or(0.0),
+            standard_tip_sol: config
+                .mev_protection
+                .standard_tip_sol
+                .to_f64()
+                .unwrap_or(0.0),
         },
         token_safety: TokenSafetyConfigResponse {
-            min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd.to_f64().unwrap_or(0.0),
-            min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd.to_f64().unwrap_or(0.0),
+            min_liquidity_shield_usd: config
+                .token_safety
+                .min_liquidity_shield_usd
+                .to_f64()
+                .unwrap_or(0.0),
+            min_liquidity_spear_usd: config
+                .token_safety
+                .min_liquidity_spear_usd
+                .to_f64()
+                .unwrap_or(0.0),
             honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
             cache_capacity: config.token_safety.cache_capacity,
             cache_ttl_seconds: config.token_safety.cache_ttl_seconds,
@@ -658,7 +712,8 @@ pub async fn update_config(
         if let Some(v) = cb.max_loss_24h {
             use rust_decimal::prelude::*;
             let old = config.circuit_breakers.max_loss_24h_usd;
-            config.circuit_breakers.max_loss_24h_usd = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.circuit_breakers.max_loss_24h_usd =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "circuit_breakers.max_loss_24h",
@@ -685,7 +740,8 @@ pub async fn update_config(
         if let Some(v) = cb.max_drawdown_percent {
             use rust_decimal::prelude::*;
             let old = config.circuit_breakers.max_drawdown_percent;
-            config.circuit_breakers.max_drawdown_percent = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.circuit_breakers.max_drawdown_percent =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "circuit_breakers.max_drawdown_percent",
@@ -919,7 +975,10 @@ pub async fn update_config(
                 prev = target_dec;
             }
             let old = format!("{:?}", config.profit_management.targets);
-            config.profit_management.targets = v.iter().map(|t| Decimal::from_f64_retain(*t).unwrap_or(Decimal::ZERO)).collect();
+            config.profit_management.targets = v
+                .iter()
+                .map(|t| Decimal::from_f64_retain(*t).unwrap_or(Decimal::ZERO))
+                .collect();
             db::log_config_change(
                 &state.db,
                 "profit_management.targets",
@@ -937,7 +996,8 @@ pub async fn update_config(
                 ));
             }
             let old = config.profit_management.tiered_exit_percent;
-            config.profit_management.tiered_exit_percent = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.profit_management.tiered_exit_percent =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.tiered_exit_percent",
@@ -950,7 +1010,8 @@ pub async fn update_config(
         }
         if let Some(v) = pm.trailing_stop_activation {
             let old = config.profit_management.trailing_stop_activation;
-            config.profit_management.trailing_stop_activation = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.profit_management.trailing_stop_activation =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.trailing_stop_activation",
@@ -963,7 +1024,8 @@ pub async fn update_config(
         }
         if let Some(v) = pm.trailing_stop_distance {
             let old = config.profit_management.trailing_stop_distance;
-            config.profit_management.trailing_stop_distance = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.profit_management.trailing_stop_distance =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.trailing_stop_distance",
@@ -981,7 +1043,8 @@ pub async fn update_config(
                 ));
             }
             let old = config.profit_management.hard_stop_loss;
-            config.profit_management.hard_stop_loss = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.profit_management.hard_stop_loss =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.hard_stop_loss",
@@ -1011,13 +1074,13 @@ pub async fn update_config(
     if let Some(ps) = body.position_sizing {
         if let Some(v) = ps.base_size_sol {
             let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            if v_dec < config.position_sizing.min_size_sol || v_dec > config.position_sizing.max_size_sol {
-                return Err(AppError::Validation(
-                    format!(
-                        "Base size must be between {} and {} SOL",
-                        config.position_sizing.min_size_sol, config.position_sizing.max_size_sol
-                    ),
-                ));
+            if v_dec < config.position_sizing.min_size_sol
+                || v_dec > config.position_sizing.max_size_sol
+            {
+                return Err(AppError::Validation(format!(
+                    "Base size must be between {} and {} SOL",
+                    config.position_sizing.min_size_sol, config.position_sizing.max_size_sol
+                )));
             }
             let old = config.position_sizing.base_size_sol;
             config.position_sizing.base_size_sol = v_dec;
@@ -1076,7 +1139,8 @@ pub async fn update_config(
                 ));
             }
             let old = config.position_sizing.consensus_multiplier;
-            config.position_sizing.consensus_multiplier = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.position_sizing.consensus_multiplier =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "position_sizing.consensus_multiplier",
@@ -1119,7 +1183,8 @@ pub async fn update_config(
         }
         if let Some(v) = mp.exit_tip_sol {
             let old = config.mev_protection.exit_tip_sol;
-            config.mev_protection.exit_tip_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.mev_protection.exit_tip_sol =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "mev_protection.exit_tip_sol",
@@ -1132,7 +1197,8 @@ pub async fn update_config(
         }
         if let Some(v) = mp.consensus_tip_sol {
             let old = config.mev_protection.consensus_tip_sol;
-            config.mev_protection.consensus_tip_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.mev_protection.consensus_tip_sol =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "mev_protection.consensus_tip_sol",
@@ -1145,7 +1211,8 @@ pub async fn update_config(
         }
         if let Some(v) = mp.standard_tip_sol {
             let old = config.mev_protection.standard_tip_sol;
-            config.mev_protection.standard_tip_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.mev_protection.standard_tip_sol =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "mev_protection.standard_tip_sol",
@@ -1162,7 +1229,8 @@ pub async fn update_config(
     if let Some(ts) = body.token_safety {
         if let Some(v) = ts.min_liquidity_shield_usd {
             let old = config.token_safety.min_liquidity_shield_usd;
-            config.token_safety.min_liquidity_shield_usd = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.token_safety.min_liquidity_shield_usd =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "token_safety.min_liquidity_shield_usd",
@@ -1175,7 +1243,8 @@ pub async fn update_config(
         }
         if let Some(v) = ts.min_liquidity_spear_usd {
             let old = config.token_safety.min_liquidity_spear_usd;
-            config.token_safety.min_liquidity_spear_usd = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+            config.token_safety.min_liquidity_spear_usd =
+                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "token_safety.min_liquidity_spear_usd",
@@ -1493,7 +1562,8 @@ pub async fn trip_circuit_breaker(
     use rust_decimal::prelude::*;
     config.circuit_breakers.max_loss_24h_usd = Decimal::from_str("0.01").unwrap_or(Decimal::ZERO);
     config.circuit_breakers.max_consecutive_losses = 1;
-    config.circuit_breakers.max_drawdown_percent = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
+    config.circuit_breakers.max_drawdown_percent =
+        Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
     config.circuit_breakers.cooldown_minutes = 999999;
     drop(config);
 
@@ -1627,7 +1697,7 @@ pub async fn export_trades(
         "pdf" => {
             let pdf_content = db::trades_to_pdf(&trades)?;
             let filename = format!("chimera_trades_{}_{}.pdf", date_from, date_to);
-            
+
             Ok((
                 StatusCode::OK,
                 [
@@ -1646,7 +1716,7 @@ pub async fn export_trades(
                 AppError::Internal(format!("Failed to serialize trades to JSON: {}", e))
             })?;
             let filename = format!("chimera_trades_{}_{}.json", date_from, date_to);
-            
+
             Ok((
                 StatusCode::OK,
                 [
@@ -1840,7 +1910,7 @@ pub async fn get_strategy_performance(
     let strategy = params
         .get("strategy")
         .ok_or_else(|| AppError::Validation("Missing required parameter: strategy".to_string()))?;
-    
+
     // Get days parameter (default to 30)
     let days = params
         .get("days")
@@ -1854,7 +1924,7 @@ pub async fn get_strategy_performance(
     // We need to query the actual trades to get total PnL (not just average)
     let from_date = chrono::Utc::now() - chrono::Duration::days(days);
     let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    
+
     let trades = db::get_trades(
         &state.db,
         Some(&from_date_str),
@@ -1866,7 +1936,7 @@ pub async fn get_strategy_performance(
         None,
     )
     .await?;
-    
+
     let total_pnl = trades
         .iter()
         .filter_map(|t| t.pnl_usd)
@@ -1981,7 +2051,7 @@ pub async fn update_reconciliation_metrics(
         unresolved = payload.unresolved,
         "Reconciliation metrics update requested"
     );
-    
+
     // Update Prometheus metrics
     // Note: Scripts should send absolute values for counters (they will be incremented by delta)
     // For gauges (unresolved), scripts send the current value
@@ -1989,23 +2059,23 @@ pub async fn update_reconciliation_metrics(
         // CHANGED: Do not increment. Set the absolute value.
         // If you need a counter, the external script must send DELTAS.
         // Assuming the script sends "total items checked in this run":
-        
+
         // If we want a running total, we rely on the script sending deltas.
         // If the script sends the daily total, we should use a Gauge for "Last Run Count"
         // or rely on Prometheus 'increase()' function over time.
-        
+
         // SAFEST FIX: Treat 'checked' as a delta (increment) BUT verify script behavior.
         // If uncertain, switch metric type in metrics.rs to IntGauge and use .set()
-        
+
         // Assuming we switch to IntGauge in metrics.rs for safer snapshots:
-        // state.metrics.reconciliation_checked.set(checked); 
-        
+        // state.metrics.reconciliation_checked.set(checked);
+
         // Keeping Counter logic but adding warning comment:
         if checked > 0 {
             // Ensure payload.checked is the DELTA since last run, not total!
             state.metrics.reconciliation_checked.inc_by(checked as u64);
         }
-        
+
         db::log_config_change(
             &state.db,
             "metrics.reconciliation.checked",
@@ -2016,13 +2086,16 @@ pub async fn update_reconciliation_metrics(
         )
         .await?;
     }
-    
+
     if let Some(discrepancies) = payload.discrepancies {
         // Increment discrepancy counter
         if discrepancies > 0 {
-            state.metrics.reconciliation_discrepancies.inc_by(discrepancies as u64);
+            state
+                .metrics
+                .reconciliation_discrepancies
+                .inc_by(discrepancies as u64);
         }
-        
+
         db::log_config_change(
             &state.db,
             "metrics.reconciliation.discrepancies",
@@ -2033,11 +2106,11 @@ pub async fn update_reconciliation_metrics(
         )
         .await?;
     }
-    
+
     if let Some(unresolved) = payload.unresolved {
         // Set gauge to current unresolved count
         state.metrics.reconciliation_unresolved.set(unresolved);
-        
+
         db::log_config_change(
             &state.db,
             "metrics.reconciliation.unresolved",
@@ -2048,7 +2121,7 @@ pub async fn update_reconciliation_metrics(
         )
         .await?;
     }
-    
+
     Ok(Json(serde_json::json!({
         "status": "updated",
         "message": "Reconciliation metrics updated"
@@ -2069,11 +2142,11 @@ pub async fn update_secret_rotation_metrics(
         days_until_due = payload.days_until_due,
         "Secret rotation metrics update requested"
     );
-    
+
     // Update Prometheus metrics
     if let Some(timestamp) = payload.last_success_timestamp {
         state.metrics.secret_rotation_last_success.set(timestamp);
-        
+
         db::log_config_change(
             &state.db,
             "metrics.secret_rotation.last_success_timestamp",
@@ -2084,10 +2157,10 @@ pub async fn update_secret_rotation_metrics(
         )
         .await?;
     }
-    
+
     if let Some(days) = payload.days_until_due {
         state.metrics.secret_rotation_days_until_due.set(days);
-        
+
         db::log_config_change(
             &state.db,
             "metrics.secret_rotation.days_until_due",
@@ -2098,7 +2171,7 @@ pub async fn update_secret_rotation_metrics(
         )
         .await?;
     }
-    
+
     Ok(Json(serde_json::json!({
         "status": "updated",
         "message": "Secret rotation metrics updated"

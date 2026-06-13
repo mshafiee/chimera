@@ -3,9 +3,9 @@
 //! Implements token bucket algorithm with sliding window for rate limiting
 //! within Helius Developer plan constraints (50 req/sec).
 
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
@@ -34,7 +34,7 @@ impl RequestWeight {
     pub fn new(weight: u32) -> Self {
         Self(weight)
     }
-    
+
     pub fn value(&self) -> u32 {
         self.0
     }
@@ -85,7 +85,7 @@ impl RateLimiter {
             let (can_proceed, wait_time) = {
                 let mut requests = self.requests.lock();
                 let mut current_credits = self.current_credits.lock();
-                
+
                 while let Some(&(oldest_time, oldest_weight)) = requests.front() {
                     if oldest_time < window_start {
                         requests.pop_front();
@@ -115,7 +115,7 @@ impl RateLimiter {
                 } else {
                     Some(Duration::from_millis(10))
                 };
-                
+
                 (false, wait_time)
             };
 
@@ -135,7 +135,7 @@ impl RateLimiter {
             }
         }
     }
-    
+
     /// Acquire permission with standard weight (backward compatibility)
     pub async fn acquire_standard(&self, priority: RequestPriority) {
         self.acquire(priority, RequestWeight::STANDARD).await;
@@ -148,7 +148,7 @@ impl RateLimiter {
     pub fn try_acquire(&self) -> bool {
         self.try_acquire_weighted(RequestWeight::STANDARD)
     }
-    
+
     /// Try to acquire permission with specified weight without blocking
     ///
     /// Returns `true` if permission granted, `false` if at limit
@@ -159,7 +159,7 @@ impl RateLimiter {
 
         let mut requests = self.requests.lock();
         let mut current_credits = self.current_credits.lock();
-        
+
         // Clean up old requests
         while let Some(&(oldest_time, oldest_weight)) = requests.front() {
             if oldest_time < window_start {
@@ -188,7 +188,7 @@ impl RateLimiter {
 
         let mut requests = self.requests.lock();
         let mut current_credits = self.current_credits.lock();
-        
+
         // Clean up old requests
         while let Some(&(oldest_time, oldest_weight)) = requests.front() {
             if oldest_time < window_start {
@@ -201,7 +201,7 @@ impl RateLimiter {
 
         requests.len() as f64 / self.window_secs as f64
     }
-    
+
     /// Get current credit usage in the window
     pub fn current_credits(&self) -> u32 {
         let now = Instant::now();
@@ -209,7 +209,7 @@ impl RateLimiter {
 
         let mut requests = self.requests.lock();
         let mut current_credits = self.current_credits.lock();
-        
+
         // Clean up old requests
         while let Some(&(oldest_time, oldest_weight)) = requests.front() {
             if oldest_time < window_start {
@@ -219,7 +219,7 @@ impl RateLimiter {
                 break;
             }
         }
-        
+
         *current_credits
     }
 
@@ -251,17 +251,21 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiter_basic() {
         let limiter = RateLimiter::new(5, 1);
-        
+
         // Should allow 5 requests immediately
         for _ in 0..5 {
-            limiter.acquire(RequestPriority::Polling, RequestWeight::STANDARD).await;
+            limiter
+                .acquire(RequestPriority::Polling, RequestWeight::STANDARD)
+                .await;
         }
-        
+
         // 6th request should be blocked
         let start = Instant::now();
-        limiter.acquire(RequestPriority::Polling, RequestWeight::STANDARD).await;
+        limiter
+            .acquire(RequestPriority::Polling, RequestWeight::STANDARD)
+            .await;
         let elapsed = start.elapsed();
-        
+
         // Should have waited at least some time
         assert!(elapsed.as_millis() > 0);
     }
@@ -269,26 +273,34 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limiter_priority() {
         let limiter = RateLimiter::new(1, 1);
-        
+
         // Fill the bucket
-        limiter.acquire(RequestPriority::Polling, RequestWeight::STANDARD).await;
-        
+        limiter
+            .acquire(RequestPriority::Polling, RequestWeight::STANDARD)
+            .await;
+
         // Test that Exit priority gets reduced wait time compared to Polling
         // We'll test by comparing wait times when bucket is full
-        
+
         // First, measure Exit priority wait time
         let start = Instant::now();
-        limiter.acquire(RequestPriority::Exit, RequestWeight::STANDARD).await;
+        limiter
+            .acquire(RequestPriority::Exit, RequestWeight::STANDARD)
+            .await;
         let exit_elapsed = start.elapsed();
-        
+
         // Refill bucket
-        limiter.acquire(RequestPriority::Polling, RequestWeight::STANDARD).await;
-        
+        limiter
+            .acquire(RequestPriority::Polling, RequestWeight::STANDARD)
+            .await;
+
         // Now measure Polling priority wait time (should be longer)
         let start = Instant::now();
-        limiter.acquire(RequestPriority::Polling, RequestWeight::STANDARD).await;
+        limiter
+            .acquire(RequestPriority::Polling, RequestWeight::STANDARD)
+            .await;
         let polling_elapsed = start.elapsed();
-        
+
         // Exit priority should wait less than or equal to polling priority
         // (In practice, Exit divides wait by 2, so it should be significantly less)
         // We allow some tolerance for timing variations
@@ -297,37 +309,48 @@ mod tests {
             "Exit priority should wait less than or equal to polling priority. Exit: {:?}, Polling: {:?}",
             exit_elapsed, polling_elapsed
         );
-        
+
         // Additionally, verify that Exit priority actually reduces wait time
         // by checking it's less than the full window (accounting for overhead)
         assert!(
             exit_elapsed < Duration::from_secs(2),
-            "Exit priority should complete within reasonable time (got {:?})", exit_elapsed
+            "Exit priority should complete within reasonable time (got {:?})",
+            exit_elapsed
         );
     }
-    
+
     #[tokio::test]
     async fn test_rate_limiter_weighted() {
         // 5-credit-per-second window so we don't need to wait a full second
         let limiter = RateLimiter::new(5, 1);
 
         // One SIMULATION request (weight 5) fills the 5-credit window entirely
-        limiter.acquire(RequestPriority::Polling, RequestWeight::SIMULATION).await;
+        limiter
+            .acquire(RequestPriority::Polling, RequestWeight::SIMULATION)
+            .await;
 
         // A standard try_acquire (weight 1) should immediately fail (0 credits left)
-        assert!(!limiter.try_acquire(), "bucket should be full after one SIMULATION request");
+        assert!(
+            !limiter.try_acquire(),
+            "bucket should be full after one SIMULATION request"
+        );
 
         // 2nd SIMULATION must wait for the window to slide
         let start = Instant::now();
-        limiter.acquire(RequestPriority::Polling, RequestWeight::SIMULATION).await;
+        limiter
+            .acquire(RequestPriority::Polling, RequestWeight::SIMULATION)
+            .await;
         let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() > 0, "2nd simulation should have been rate-limited");
+        assert!(
+            elapsed.as_millis() > 0,
+            "2nd simulation should have been rate-limited"
+        );
     }
 
     #[test]
     fn test_try_acquire() {
         let limiter = RateLimiter::new(2, 1);
-        
+
         assert!(limiter.try_acquire());
         assert!(limiter.try_acquire());
         assert!(!limiter.try_acquire()); // Should fail at limit

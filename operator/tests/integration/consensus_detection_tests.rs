@@ -3,9 +3,9 @@
 //! Tests that multiple wallets buying the same token within 5 minutes
 //! triggers consensus detection and improves signal quality.
 
-use chimera_operator::db::{init_pool, run_migrations, DbPool};
-use chimera_operator::monitoring::SignalAggregator;
 use chimera_operator::config::DatabaseConfig;
+use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::monitoring::SignalAggregator;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use tempfile::TempDir;
@@ -33,20 +33,36 @@ async fn test_consensus_detection_two_wallets() {
 
     // First wallet buys token
     let result1 = aggregator
-        .add_signal(wallet1, token_address, "BUY", Decimal::from_str("1.0").unwrap())
+        .add_signal(
+            wallet1,
+            token_address,
+            "BUY",
+            Decimal::from_str("1.0").unwrap(),
+        )
         .await;
-    assert!(result1.is_none(), "First signal should not trigger consensus");
+    assert!(
+        result1.is_none(),
+        "First signal should not trigger consensus"
+    );
 
     // Second wallet buys same token within 5 minutes
     let result2 = aggregator
-        .add_signal(wallet2, token_address, "BUY", Decimal::from_str("1.5").unwrap())
+        .add_signal(
+            wallet2,
+            token_address,
+            "BUY",
+            Decimal::from_str("1.5").unwrap(),
+        )
         .await;
 
     assert!(result2.is_some(), "Second signal should trigger consensus");
     let consensus = result2.unwrap();
     assert_eq!(consensus.wallet_count, 2);
     assert_eq!(consensus.token_address, token_address);
-    assert_eq!(consensus.total_amount_sol, Decimal::from_str("2.5").unwrap());
+    assert_eq!(
+        consensus.total_amount_sol,
+        Decimal::from_str("2.5").unwrap()
+    );
     assert!(consensus.wallets.contains(&wallet1.to_string()));
     assert!(consensus.wallets.contains(&wallet2.to_string()));
     assert!(consensus.confidence > 0.0);
@@ -70,20 +86,38 @@ async fn test_consensus_detection_three_wallets() {
 
     // Add three wallets buying same token
     aggregator
-        .add_signal("Wallet1", token_address, "BUY", Decimal::from_str("1.0").unwrap())
+        .add_signal(
+            "Wallet1",
+            token_address,
+            "BUY",
+            Decimal::from_str("1.0").unwrap(),
+        )
         .await;
     aggregator
-        .add_signal("Wallet2", token_address, "BUY", Decimal::from_str("1.5").unwrap())
+        .add_signal(
+            "Wallet2",
+            token_address,
+            "BUY",
+            Decimal::from_str("1.5").unwrap(),
+        )
         .await;
 
     let result3 = aggregator
-        .add_signal("Wallet3", token_address, "BUY", Decimal::from_str("2.0").unwrap())
+        .add_signal(
+            "Wallet3",
+            token_address,
+            "BUY",
+            Decimal::from_str("2.0").unwrap(),
+        )
         .await;
 
     assert!(result3.is_some());
     let consensus = result3.unwrap();
     assert_eq!(consensus.wallet_count, 3);
-    assert_eq!(consensus.total_amount_sol, Decimal::from_str("4.5").unwrap());
+    assert_eq!(
+        consensus.total_amount_sol,
+        Decimal::from_str("4.5").unwrap()
+    );
     assert!(consensus.confidence > 0.0);
 }
 
@@ -106,7 +140,12 @@ async fn test_consensus_expires_after_5_minutes() {
 
     // First wallet buys — records Instant::now()
     aggregator
-        .add_signal("Wallet1", token_address, "BUY", Decimal::from_str("1.0").unwrap())
+        .add_signal(
+            "Wallet1",
+            token_address,
+            "BUY",
+            Decimal::from_str("1.0").unwrap(),
+        )
         .await;
 
     // Pause tokio time then advance 6 minutes so Wallet1's signal expires
@@ -115,7 +154,12 @@ async fn test_consensus_expires_after_5_minutes() {
 
     // Second wallet buys — the cleanup loop removes Wallet1 (> 5 min old)
     let result = aggregator
-        .add_signal("Wallet2", token_address, "BUY", Decimal::from_str("1.5").unwrap())
+        .add_signal(
+            "Wallet2",
+            token_address,
+            "BUY",
+            Decimal::from_str("1.5").unwrap(),
+        )
         .await;
 
     // Wallet1's signal was cleaned up; only Wallet2's signal exists → no consensus
@@ -140,14 +184,27 @@ async fn test_no_consensus_for_sell_signals() {
 
     // Multiple SELL signals should not trigger consensus
     aggregator
-        .add_signal("Wallet1", token_address, "SELL", Decimal::from_str("1.0").unwrap())
+        .add_signal(
+            "Wallet1",
+            token_address,
+            "SELL",
+            Decimal::from_str("1.0").unwrap(),
+        )
         .await;
 
     let result = aggregator
-        .add_signal("Wallet2", token_address, "SELL", Decimal::from_str("1.5").unwrap())
+        .add_signal(
+            "Wallet2",
+            token_address,
+            "SELL",
+            Decimal::from_str("1.5").unwrap(),
+        )
         .await;
 
-    assert!(result.is_none(), "SELL signals should not trigger consensus");
+    assert!(
+        result.is_none(),
+        "SELL signals should not trigger consensus"
+    );
 }
 
 #[tokio::test]
@@ -176,5 +233,8 @@ async fn test_consensus_different_tokens() {
         .add_signal("Wallet2", token2, "BUY", Decimal::from_str("1.5").unwrap())
         .await;
 
-    assert!(result.is_none(), "Different tokens should not trigger consensus");
+    assert!(
+        result.is_none(),
+        "Different tokens should not trigger consensus"
+    );
 }

@@ -195,7 +195,6 @@ class BirdeyeClient:
         Returns:
             Dict containing creation info or None
         """
-        endpoint = "/defi/token_creation_info"
         params = {"address": token_address}
         
         try:
@@ -217,7 +216,7 @@ class BirdeyeClient:
                 if data and "data" in data:
                     return data["data"]
                 return None
-        except Exception as e:
+        except Exception:
             return None
 
     async def get_token_metadata(self, token_address: str) -> Optional[Dict[str, Any]]:

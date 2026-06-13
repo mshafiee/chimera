@@ -5,7 +5,7 @@
 //! - Retry paths
 //! - Dead letter handling
 
-use chimera_operator::models::{Trade, TradeStatus};
+use chimera_operator::models::TradeStatus;
 
 #[test]
 fn test_pending_to_queued_valid() {
@@ -87,18 +87,42 @@ fn test_recovery_flow() {
 
 #[test]
 fn test_terminal_states() {
-    assert!(TradeStatus::Closed.is_terminal(), "CLOSED should be terminal");
-    assert!(TradeStatus::DeadLetter.is_terminal(), "DEAD_LETTER should be terminal");
-    assert!(!TradeStatus::Active.is_terminal(), "ACTIVE should not be terminal");
-    assert!(!TradeStatus::Pending.is_terminal(), "PENDING should not be terminal");
+    assert!(
+        TradeStatus::Closed.is_terminal(),
+        "CLOSED should be terminal"
+    );
+    assert!(
+        TradeStatus::DeadLetter.is_terminal(),
+        "DEAD_LETTER should be terminal"
+    );
+    assert!(
+        !TradeStatus::Active.is_terminal(),
+        "ACTIVE should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Pending.is_terminal(),
+        "PENDING should not be terminal"
+    );
 }
 
 #[test]
 fn test_active_position_states() {
-    assert!(TradeStatus::Active.is_active_position(), "ACTIVE should be active position");
-    assert!(TradeStatus::Exiting.is_active_position(), "EXITING should be active position");
-    assert!(!TradeStatus::Closed.is_active_position(), "CLOSED should not be active position");
-    assert!(!TradeStatus::Pending.is_active_position(), "PENDING should not be active position");
+    assert!(
+        TradeStatus::Active.is_active_position(),
+        "ACTIVE should be active position"
+    );
+    assert!(
+        TradeStatus::Exiting.is_active_position(),
+        "EXITING should be active position"
+    );
+    assert!(
+        !TradeStatus::Closed.is_active_position(),
+        "CLOSED should not be active position"
+    );
+    assert!(
+        !TradeStatus::Pending.is_active_position(),
+        "PENDING should not be active position"
+    );
 }
 
 #[test]
@@ -108,7 +132,7 @@ fn test_invalid_transitions() {
         !TradeStatus::Pending.can_transition_to(TradeStatus::Active),
         "PENDING -> ACTIVE should be invalid"
     );
-    
+
     // CLOSED cannot transition to anything
     assert!(
         !TradeStatus::Closed.can_transition_to(TradeStatus::Active),
@@ -120,26 +144,68 @@ use std::str::FromStr;
 
 #[test]
 fn test_status_parsing() {
-    assert_eq!(TradeStatus::from_str("PENDING").unwrap(), TradeStatus::Pending);
-    assert_eq!(TradeStatus::from_str("QUEUED").unwrap(), TradeStatus::Queued);
-    assert_eq!(TradeStatus::from_str("EXECUTING").unwrap(), TradeStatus::Executing);
-    assert_eq!(TradeStatus::from_str("ACTIVE").unwrap(), TradeStatus::Active);
-    assert_eq!(TradeStatus::from_str("EXITING").unwrap(), TradeStatus::Exiting);
-    assert_eq!(TradeStatus::from_str("CLOSED").unwrap(), TradeStatus::Closed);
-    assert_eq!(TradeStatus::from_str("FAILED").unwrap(), TradeStatus::Failed);
+    assert_eq!(
+        TradeStatus::from_str("PENDING").unwrap(),
+        TradeStatus::Pending
+    );
+    assert_eq!(
+        TradeStatus::from_str("QUEUED").unwrap(),
+        TradeStatus::Queued
+    );
+    assert_eq!(
+        TradeStatus::from_str("EXECUTING").unwrap(),
+        TradeStatus::Executing
+    );
+    assert_eq!(
+        TradeStatus::from_str("ACTIVE").unwrap(),
+        TradeStatus::Active
+    );
+    assert_eq!(
+        TradeStatus::from_str("EXITING").unwrap(),
+        TradeStatus::Exiting
+    );
+    assert_eq!(
+        TradeStatus::from_str("CLOSED").unwrap(),
+        TradeStatus::Closed
+    );
+    assert_eq!(
+        TradeStatus::from_str("FAILED").unwrap(),
+        TradeStatus::Failed
+    );
     assert_eq!(TradeStatus::from_str("RETRY").unwrap(), TradeStatus::Retry);
-    assert_eq!(TradeStatus::from_str("DEAD_LETTER").unwrap(), TradeStatus::DeadLetter);
+    assert_eq!(
+        TradeStatus::from_str("DEAD_LETTER").unwrap(),
+        TradeStatus::DeadLetter
+    );
 }
 
 #[test]
 fn test_status_parsing_case_insensitive() {
     // Test that parsing is case-insensitive (implementation converts to uppercase)
-    assert_eq!("pending".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
-    assert_eq!("PENDING".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
-    assert_eq!("Active".parse::<TradeStatus>().unwrap(), TradeStatus::Active);
-    assert_eq!("ACTIVE".parse::<TradeStatus>().unwrap(), TradeStatus::Active);
-    assert_eq!("dead_letter".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
-    assert_eq!("DEAD_LETTER".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
+    assert_eq!(
+        "pending".parse::<TradeStatus>().unwrap(),
+        TradeStatus::Pending
+    );
+    assert_eq!(
+        "PENDING".parse::<TradeStatus>().unwrap(),
+        TradeStatus::Pending
+    );
+    assert_eq!(
+        "Active".parse::<TradeStatus>().unwrap(),
+        TradeStatus::Active
+    );
+    assert_eq!(
+        "ACTIVE".parse::<TradeStatus>().unwrap(),
+        TradeStatus::Active
+    );
+    assert_eq!(
+        "dead_letter".parse::<TradeStatus>().unwrap(),
+        TradeStatus::DeadLetter
+    );
+    assert_eq!(
+        "DEAD_LETTER".parse::<TradeStatus>().unwrap(),
+        TradeStatus::DeadLetter
+    );
 }
 
 #[test]
@@ -164,7 +230,7 @@ fn test_all_valid_transitions() {
         (TradeStatus::Pending, TradeStatus::DeadLetter),
         (TradeStatus::Queued, TradeStatus::DeadLetter),
     ];
-    
+
     for (from, to) in valid_transitions {
         assert!(
             from.can_transition_to(to),
@@ -209,7 +275,7 @@ fn test_all_invalid_transitions() {
         (TradeStatus::Exiting, TradeStatus::Failed), // EXITING cannot fail
         (TradeStatus::Closed, TradeStatus::Failed),
     ];
-    
+
     for (from, to) in invalid_transitions {
         assert!(
             !from.can_transition_to(to),
@@ -223,7 +289,7 @@ fn test_all_invalid_transitions() {
 #[test]
 fn test_complete_forward_flow() {
     // Test the complete happy path: PENDING -> QUEUED -> EXECUTING -> ACTIVE -> EXITING -> CLOSED
-    let flow = vec![
+    let flow = [
         TradeStatus::Pending,
         TradeStatus::Queued,
         TradeStatus::Executing,
@@ -231,7 +297,7 @@ fn test_complete_forward_flow() {
         TradeStatus::Exiting,
         TradeStatus::Closed,
     ];
-    
+
     for i in 0..flow.len() - 1 {
         let from = flow[i];
         let to = flow[i + 1];
@@ -267,7 +333,7 @@ fn test_stuck_state_recovery_flow() {
         TradeStatus::Exiting.can_transition_to(TradeStatus::Active),
         "EXITING -> ACTIVE should be valid for stuck state recovery"
     );
-    
+
     // After recovery, should be able to exit again
     assert!(
         TradeStatus::Active.can_transition_to(TradeStatus::Exiting),
@@ -295,29 +361,83 @@ fn test_direct_to_dead_letter() {
 #[test]
 fn test_terminal_state_checks() {
     // Test all states for terminal status
-    assert!(!TradeStatus::Pending.is_terminal(), "PENDING should not be terminal");
-    assert!(!TradeStatus::Queued.is_terminal(), "QUEUED should not be terminal");
-    assert!(!TradeStatus::Executing.is_terminal(), "EXECUTING should not be terminal");
-    assert!(!TradeStatus::Active.is_terminal(), "ACTIVE should not be terminal");
-    assert!(!TradeStatus::Exiting.is_terminal(), "EXITING should not be terminal");
-    assert!(!TradeStatus::Failed.is_terminal(), "FAILED should not be terminal");
-    assert!(!TradeStatus::Retry.is_terminal(), "RETRY should not be terminal");
-    assert!(TradeStatus::Closed.is_terminal(), "CLOSED should be terminal");
-    assert!(TradeStatus::DeadLetter.is_terminal(), "DEAD_LETTER should be terminal");
+    assert!(
+        !TradeStatus::Pending.is_terminal(),
+        "PENDING should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Queued.is_terminal(),
+        "QUEUED should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Executing.is_terminal(),
+        "EXECUTING should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Active.is_terminal(),
+        "ACTIVE should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Exiting.is_terminal(),
+        "EXITING should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Failed.is_terminal(),
+        "FAILED should not be terminal"
+    );
+    assert!(
+        !TradeStatus::Retry.is_terminal(),
+        "RETRY should not be terminal"
+    );
+    assert!(
+        TradeStatus::Closed.is_terminal(),
+        "CLOSED should be terminal"
+    );
+    assert!(
+        TradeStatus::DeadLetter.is_terminal(),
+        "DEAD_LETTER should be terminal"
+    );
 }
 
 #[test]
 fn test_active_position_checks() {
     // Test all states for active position status
-    assert!(!TradeStatus::Pending.is_active_position(), "PENDING should not be active position");
-    assert!(!TradeStatus::Queued.is_active_position(), "QUEUED should not be active position");
-    assert!(!TradeStatus::Executing.is_active_position(), "EXECUTING should not be active position");
-    assert!(TradeStatus::Active.is_active_position(), "ACTIVE should be active position");
-    assert!(TradeStatus::Exiting.is_active_position(), "EXITING should be active position");
-    assert!(!TradeStatus::Closed.is_active_position(), "CLOSED should not be active position");
-    assert!(!TradeStatus::Failed.is_active_position(), "FAILED should not be active position");
-    assert!(!TradeStatus::Retry.is_active_position(), "RETRY should not be active position");
-    assert!(!TradeStatus::DeadLetter.is_active_position(), "DEAD_LETTER should not be active position");
+    assert!(
+        !TradeStatus::Pending.is_active_position(),
+        "PENDING should not be active position"
+    );
+    assert!(
+        !TradeStatus::Queued.is_active_position(),
+        "QUEUED should not be active position"
+    );
+    assert!(
+        !TradeStatus::Executing.is_active_position(),
+        "EXECUTING should not be active position"
+    );
+    assert!(
+        TradeStatus::Active.is_active_position(),
+        "ACTIVE should be active position"
+    );
+    assert!(
+        TradeStatus::Exiting.is_active_position(),
+        "EXITING should be active position"
+    );
+    assert!(
+        !TradeStatus::Closed.is_active_position(),
+        "CLOSED should not be active position"
+    );
+    assert!(
+        !TradeStatus::Failed.is_active_position(),
+        "FAILED should not be active position"
+    );
+    assert!(
+        !TradeStatus::Retry.is_active_position(),
+        "RETRY should not be active position"
+    );
+    assert!(
+        !TradeStatus::DeadLetter.is_active_position(),
+        "DEAD_LETTER should not be active position"
+    );
 }
 
 #[test]
@@ -365,7 +485,7 @@ fn test_self_transitions() {
         TradeStatus::Retry,
         TradeStatus::DeadLetter,
     ];
-    
+
     for state in states {
         assert!(
             !state.can_transition_to(state),
@@ -382,7 +502,7 @@ fn test_multiple_paths_to_same_state() {
     assert!(TradeStatus::Retry.can_transition_to(TradeStatus::Executing));
     // EXECUTING can go to itself via RETRY -> EXECUTING (but not directly)
     assert!(!TradeStatus::Executing.can_transition_to(TradeStatus::Executing));
-    
+
     // Multiple states can go to DEAD_LETTER
     assert!(TradeStatus::Pending.can_transition_to(TradeStatus::DeadLetter));
     assert!(TradeStatus::Queued.can_transition_to(TradeStatus::DeadLetter));
@@ -402,7 +522,7 @@ fn test_state_machine_completeness() {
         TradeStatus::Failed,
         TradeStatus::Retry,
     ];
-    
+
     for state in non_terminal_states {
         let has_valid_transition = vec![
             TradeStatus::Pending,
@@ -417,7 +537,7 @@ fn test_state_machine_completeness() {
         ]
         .into_iter()
         .any(|target| state.can_transition_to(target));
-        
+
         assert!(
             has_valid_transition,
             "{:?} should have at least one valid transition",
@@ -425,4 +545,3 @@ fn test_state_machine_completeness() {
         );
     }
 }
-

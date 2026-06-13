@@ -540,14 +540,14 @@ async fn test_trades_list_with_filters() {
         get(|req: Request<Body>| async move {
             let uri = req.uri().to_string();
             let mut filtered_count = 2;
-            
+
             if uri.contains("status=CLOSED") {
                 filtered_count = 1;
             }
             if uri.contains("strategy=SHIELD") {
                 filtered_count = 1;
             }
-            
+
             axum::Json(json!({
                 "trades": (0..filtered_count).map(|i| json!({
                     "id": i + 1,
@@ -604,13 +604,16 @@ async fn test_trades_list_with_filters() {
 #[tokio::test]
 async fn test_trades_export_csv() {
     use axum::routing::get;
-    
+
     let app = Router::new().route(
         "/api/v1/trades/export",
         get(|| async {
             (
                 StatusCode::OK,
-                [("Content-Type", "text/csv"), ("Content-Disposition", "attachment; filename=\"trades.csv\"")],
+                [
+                    ("Content-Type", "text/csv"),
+                    ("Content-Disposition", "attachment; filename=\"trades.csv\""),
+                ],
                 "id,trade_uuid,wallet_address\n1,uuid-1,wallet-1\n",
             )
         }),
@@ -627,10 +630,7 @@ async fn test_trades_export_csv() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("Content-Type").unwrap(),
-        "text/csv"
-    );
+    assert_eq!(response.headers().get("Content-Type").unwrap(), "text/csv");
     assert!(response
         .headers()
         .get("Content-Disposition")
@@ -644,13 +644,16 @@ async fn test_trades_export_csv() {
 #[tokio::test]
 async fn test_trades_export_pdf() {
     use axum::routing::get;
-    
+
     let app = Router::new().route(
         "/api/v1/trades/export",
         get(|| async {
             (
                 StatusCode::OK,
-                [("Content-Type", "application/pdf"), ("Content-Disposition", "attachment; filename=\"trades.pdf\"")],
+                [
+                    ("Content-Type", "application/pdf"),
+                    ("Content-Disposition", "attachment; filename=\"trades.pdf\""),
+                ],
                 vec![0u8; 100], // Mock PDF bytes
             )
         }),
@@ -677,13 +680,19 @@ async fn test_trades_export_pdf() {
 #[tokio::test]
 async fn test_trades_export_json() {
     use axum::routing::get;
-    
+
     let app = Router::new().route(
         "/api/v1/trades/export",
         get(|| async {
             (
                 StatusCode::OK,
-                [("Content-Type", "application/json"), ("Content-Disposition", "attachment; filename=\"trades.json\"")],
+                [
+                    ("Content-Type", "application/json"),
+                    (
+                        "Content-Disposition",
+                        "attachment; filename=\"trades.json\"",
+                    ),
+                ],
                 json!([{"id": 1, "trade_uuid": "uuid-1"}]).to_string(),
             )
         }),
@@ -714,22 +723,23 @@ async fn test_trades_export_json() {
 #[tokio::test]
 async fn test_wallet_update_valid() {
     use axum::routing::put;
-    
+
     let app = Router::new().route(
         "/api/v1/wallets/test-address",
         put(|body: String| async move {
             let payload: Result<Value, _> = serde_json::from_str(&body);
             match payload {
-                Ok(p) if p.get("status").is_some() => {
-                    (StatusCode::OK, axum::Json(json!({
+                Ok(p) if p.get("status").is_some() => (
+                    StatusCode::OK,
+                    axum::Json(json!({
                         "success": true,
                         "wallet": {
                             "address": "test-address",
                             "status": p["status"]
                         },
                         "message": "Wallet updated successfully"
-                    })))
-                }
+                    })),
+                ),
                 _ => (
                     StatusCode::BAD_REQUEST,
                     axum::Json(json!({"success": false, "message": "Invalid request"})),
@@ -771,7 +781,7 @@ async fn test_wallet_update_valid() {
 #[tokio::test]
 async fn test_wallet_update_invalid_status() {
     use axum::routing::put;
-    
+
     let app = Router::new().route(
         "/api/v1/wallets/test-address",
         put(|body: String| async move {
@@ -815,7 +825,7 @@ async fn test_wallet_update_invalid_status() {
 #[tokio::test]
 async fn test_wallet_update_ttl_validation() {
     use axum::routing::put;
-    
+
     let app = Router::new().route(
         "/api/v1/wallets/test-address",
         put(|body: String| async move {
@@ -824,7 +834,7 @@ async fn test_wallet_update_ttl_validation() {
                 Ok(p) => {
                     let status = p.get("status").and_then(|s| s.as_str()).unwrap_or("");
                     let ttl = p.get("ttl_hours");
-                    
+
                     // TTL can only be set when status is ACTIVE
                     if ttl.is_some() && status != "ACTIVE" {
                         (
@@ -887,18 +897,19 @@ async fn test_wallet_update_ttl_validation() {
 #[tokio::test]
 async fn test_config_update_valid() {
     use axum::routing::put;
-    
+
     let app = Router::new().route(
         "/api/v1/config",
         put(|body: String| async move {
             let payload: Result<Value, _> = serde_json::from_str(&body);
             match payload {
-                Ok(p) if p.get("circuit_breakers").is_some() => {
-                    (StatusCode::OK, axum::Json(json!({
+                Ok(p) if p.get("circuit_breakers").is_some() => (
+                    StatusCode::OK,
+                    axum::Json(json!({
                         "success": true,
                         "message": "Configuration updated"
-                    })))
-                }
+                    })),
+                ),
                 _ => (
                     StatusCode::BAD_REQUEST,
                     axum::Json(json!({"success": false, "message": "Invalid config"})),
@@ -934,7 +945,7 @@ async fn test_config_update_valid() {
 #[tokio::test]
 async fn test_circuit_breaker_reset() {
     use axum::routing::post;
-    
+
     let app = Router::new().route(
         "/api/v1/config/circuit-breaker/reset",
         post(|| async {
@@ -1018,7 +1029,7 @@ async fn test_dead_letter_queue_pagination() {
             let uri = req.uri().to_string();
             let limit = if uri.contains("limit=10") { 10 } else { 50 };
             let offset = if uri.contains("offset=10") { 10 } else { 0 };
-            
+
             axum::Json(json!({
                 "items": (0..limit.min(5)).map(|i| json!({
                     "id": offset + i + 1,
@@ -1107,7 +1118,7 @@ async fn test_positions_list_with_state_filter() {
             } else {
                 "ALL"
             };
-            
+
             axum::Json(json!({
                 "positions": if state_filter != "ALL" {
                     vec![json!({
@@ -1153,16 +1164,22 @@ async fn test_position_not_found() {
         get(|req: Request<Body>| async move {
             let path = req.uri().path();
             // Extract trade_uuid from path
-            let trade_uuid = path.split('/').last().unwrap_or("");
+            let trade_uuid = path.split('/').next_back().unwrap_or("");
             if trade_uuid == "nonexistent-uuid" {
-                (StatusCode::NOT_FOUND, axum::Json(json!({
-                    "error": "Position not found: nonexistent-uuid"
-                })))
+                (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({
+                        "error": "Position not found: nonexistent-uuid"
+                    })),
+                )
             } else {
-                (StatusCode::OK, axum::Json(json!({
-                    "trade_uuid": trade_uuid,
-                    "state": "ACTIVE"
-                })))
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "trade_uuid": trade_uuid,
+                        "state": "ACTIVE"
+                    })),
+                )
             }
         }),
     );
@@ -1188,16 +1205,22 @@ async fn test_wallet_not_found() {
         get(|req: Request<Body>| async move {
             let path = req.uri().path();
             // Extract address from path
-            let address = path.split('/').last().unwrap_or("");
+            let address = path.split('/').next_back().unwrap_or("");
             if address == "nonexistent-address" {
-                (StatusCode::NOT_FOUND, axum::Json(json!({
-                    "error": "Wallet not found: nonexistent-address"
-                })))
+                (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({
+                        "error": "Wallet not found: nonexistent-address"
+                    })),
+                )
             } else {
-                (StatusCode::OK, axum::Json(json!({
-                    "address": address,
-                    "status": "ACTIVE"
-                })))
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "address": address,
+                        "status": "ACTIVE"
+                    })),
+                )
             }
         }),
     );
@@ -1227,7 +1250,8 @@ async fn test_trades_pagination() {
         get(|req: Request<Body>| async move {
             let uri = req.uri().to_string();
             let limit = if uri.contains("limit=") {
-                uri.split("limit=").nth(1)
+                uri.split("limit=")
+                    .nth(1)
                     .and_then(|s| s.split('&').next())
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(100)
@@ -1235,13 +1259,14 @@ async fn test_trades_pagination() {
                 100
             };
             let offset = if uri.contains("offset=") {
-                uri.split("offset=").nth(1)
+                uri.split("offset=")
+                    .nth(1)
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(0)
             } else {
                 0
             };
-            
+
             axum::Json(json!({
                 "trades": (0..limit.min(10)).map(|i| json!({
                     "id": offset + i + 1,
@@ -1334,7 +1359,7 @@ async fn test_error_response_format() {
 #[tokio::test]
 async fn test_malformed_json_request() {
     use axum::routing::put;
-    
+
     let app = Router::new().route(
         "/api/v1/wallets/test",
         put(|body: String| async move {
@@ -1362,4 +1387,3 @@ async fn test_malformed_json_request() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
-

@@ -5,18 +5,18 @@
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
+use crate::engine::tips::TipManager;
+use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
 use crate::models::{Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
-use crate::engine::tips::TipManager;
-use crate::engine::transaction_builder::{TransactionBuilder, load_wallet_keypair};
 use crate::price_cache::PriceCache;
 use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Timelike, Utc};
+use rust_decimal::prelude::*;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
-use rust_decimal::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -117,7 +117,10 @@ impl Executor {
 
         // Create Jito Searcher client if configured
         let jito_searcher = config.jito.searcher_endpoint.as_ref().map(|endpoint| {
-            crate::engine::jito_searcher::JitoSearcherClient::new(endpoint.clone(), rpc_client.clone())
+            crate::engine::jito_searcher::JitoSearcherClient::new(
+                endpoint.clone(),
+                rpc_client.clone(),
+            )
         });
 
         Self {
@@ -163,7 +166,9 @@ impl Executor {
             // Check notification rules before sending
             let rules = &self.config.notifications.rules;
             let should_send = match &event {
-                NotificationEvent::CircuitBreakerTriggered { .. } => rules.circuit_breaker_triggered,
+                NotificationEvent::CircuitBreakerTriggered { .. } => {
+                    rules.circuit_breaker_triggered
+                }
                 NotificationEvent::WalletDrained { .. } => rules.wallet_drained,
                 NotificationEvent::SystemCrash { .. } => rules.system_crash,
                 NotificationEvent::PositionExited { .. } => rules.position_exited,
@@ -268,7 +273,7 @@ impl Executor {
                             backoff_ms = backoff_ms,
                             "Blockhash expired/invalid. Re-requesting fresh quote and retrying with exponential backoff..."
                         );
-                        // The loop will restart, causing TransactionBuilder to fetch a NEW quote 
+                        // The loop will restart, causing TransactionBuilder to fetch a NEW quote
                         // from Jupiter with a FRESH blockhash.
                         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                         continue;
@@ -319,12 +324,15 @@ impl Executor {
                     let jito_tip = if self.rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal);
                         if let Some(ref tip_manager) = self.tip_manager {
-                            if let Err(e) = tip_manager.record_tip(
-                                tip,
-                                Some(sig),
-                                signal.payload.strategy,
-                                true, // success
-                            ).await {
+                            if let Err(e) = tip_manager
+                                .record_tip(
+                                    tip,
+                                    Some(sig),
+                                    signal.payload.strategy,
+                                    true, // success
+                                )
+                                .await
+                            {
                                 tracing::warn!(
                                     error = %e,
                                     "Failed to record tip in TipManager"
@@ -355,7 +363,9 @@ impl Executor {
                         jito_tip,
                         dex_fee_sol,
                         slippage_cost_sol,
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::warn!(
                             trade_uuid = %signal.trade_uuid,
                             error = %e,
@@ -386,12 +396,15 @@ impl Executor {
                     if self.rpc_mode == RpcMode::Jito {
                         if let Some(ref tip_manager) = self.tip_manager {
                             let tip = self.calculate_jito_tip(signal);
-                            if let Err(e) = tip_manager.record_tip(
-                                tip,
-                                None, // No signature for failed trades
-                                signal.payload.strategy,
-                                false, // failure
-                            ).await {
+                            if let Err(e) = tip_manager
+                                .record_tip(
+                                    tip,
+                                    None, // No signature for failed trades
+                                    signal.payload.strategy,
+                                    false, // failure
+                                )
+                                .await
+                            {
                                 tracing::warn!(
                                     error = %e,
                                     "Failed to record failed tip in TipManager"
@@ -428,7 +441,7 @@ impl Executor {
                     // Find price from 1 hour ago (or closest)
                     let mut price_1h_ago = None;
                     let mut current_price = None;
-                    
+
                     for (timestamp, price) in sol_history.iter().rev() {
                         if current_price.is_none() {
                             current_price = Some(*price);
@@ -438,10 +451,11 @@ impl Executor {
                             break;
                         }
                     }
-                    
+
                     if let (Some(old_price), Some(new_price)) = (price_1h_ago, current_price) {
                         if old_price > Decimal::ZERO {
-                            let drop_percent = ((old_price - new_price) / old_price) * Decimal::from(100);
+                            let drop_percent =
+                                ((old_price - new_price) / old_price) * Decimal::from(100);
                             if drop_percent > Decimal::from(10) {
                                 return Err(format!(
                                     "SOL price crash detected: {:.2}% drop in last hour ({} -> {})",
@@ -453,7 +467,7 @@ impl Executor {
                 }
             }
         }
-        
+
         // Check 2: High volatility (>30% daily volatility)
         if let Some(ref price_cache) = self.price_cache {
             if let Some(volatility) = price_cache.get_sol_volatility() {
@@ -465,7 +479,7 @@ impl Executor {
                 }
             }
         }
-        
+
         // Check 3: Low liquidity period (off-hours) — only for new positions, not exits
         // Skip BUY trades during low-activity hours (2 AM - 6 AM UTC), but allow exits
         if matches!(action, crate::models::Action::Buy) {
@@ -565,7 +579,8 @@ impl Executor {
         // Use active RPC URL (fallback if in STANDARD mode)
         let active_url = self.active_rpc_url();
         let health_check = async {
-            let response = self.http_client
+            let response = self
+                .http_client
                 .post(active_url)
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
@@ -575,20 +590,28 @@ impl Executor {
                 .send()
                 .await
                 .map_err(|e| ExecutorError::Rpc(format!("RPC health check failed: {}", e)))?;
-            
+
             if !response.status().is_success() {
-                return Err(ExecutorError::Rpc(format!("RPC returned status: {}", response.status())));
+                return Err(ExecutorError::Rpc(format!(
+                    "RPC returned status: {}",
+                    response.status()
+                )));
             }
-            
+
             // Parse response to check if healthy
-            let body: serde_json::Value = response.json().await
+            let body: serde_json::Value = response
+                .json()
+                .await
                 .map_err(|e| ExecutorError::Rpc(format!("Failed to parse RPC response: {}", e)))?;
-            
+
             // Check for error in response
             if body.get("error").is_some() {
-                return Err(ExecutorError::Rpc(format!("RPC returned error: {:?}", body["error"])));
+                return Err(ExecutorError::Rpc(format!(
+                    "RPC returned error: {:?}",
+                    body["error"]
+                )));
             }
-            
+
             Ok(())
         };
 
@@ -666,18 +689,23 @@ impl Executor {
         tracing::debug!(rpc_url = %active_url, "Proceeding with Jito trade execution");
 
         // Load wallet keypair from vault
-        let secrets = load_secrets_with_fallback()
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e)))?;
-        let wallet_keypair = load_wallet_keypair(&secrets)
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e)))?;
+        let secrets = load_secrets_with_fallback().map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
+        })?;
+        let wallet_keypair = load_wallet_keypair(&secrets).map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e))
+        })?;
 
         // Build transaction (use active RPC client)
         let active_client = self.active_rpc_client();
-        let transaction_builder = TransactionBuilder::new(active_client.clone(), self.config.clone());
+        let transaction_builder =
+            TransactionBuilder::new(active_client.clone(), self.config.clone());
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
+            })?;
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
@@ -688,7 +716,7 @@ impl Executor {
         );
 
         // Submit to Jito via direct Jito Searcher (preferred) or Helius Sender API (fallback)
-        
+
         // Try direct Jito Searcher first if configured
         // Note: Jito bundles currently only support legacy transactions
         if let Some(ref jito_searcher) = self.jito_searcher {
@@ -696,16 +724,22 @@ impl Executor {
                 tracing::warn!(tip = %tip, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
                 10_000_000u64
             }); // Convert SOL to lamports
-            
+
             // Serialize based on transaction type using Legacy config for Solana wire compatibility
             let tx_bytes = match &built_tx {
-                crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
-                    bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
-                        .map_err(|e| ExecutorError::TransactionFailed(format!("Serialization error: {}", e)))?
-                },
-                crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
-                     // Already serialized and signed by transaction_builder
-                     transaction_bytes.clone()
+                crate::engine::transaction_builder::BuiltTransaction::Legacy {
+                    transaction,
+                    ..
+                } => bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+                    .map_err(|e| {
+                        ExecutorError::TransactionFailed(format!("Serialization error: {}", e))
+                    })?,
+                crate::engine::transaction_builder::BuiltTransaction::Versioned {
+                    transaction_bytes,
+                    ..
+                } => {
+                    // Already serialized and signed by transaction_builder
+                    transaction_bytes.clone()
                 }
             };
 
@@ -738,13 +772,19 @@ impl Executor {
             if let Some(helius_api_key) = secrets.rpc_api_key.as_ref() {
                 // Serialize transaction to bytes for Helius Sender
                 let tx_bytes = match &built_tx {
-                    crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
-                        bincode1::serialize(transaction)
-                            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?
-                    },
-                    crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
-                        transaction_bytes.clone()
-                    }
+                    crate::engine::transaction_builder::BuiltTransaction::Legacy {
+                        transaction,
+                        ..
+                    } => bincode1::serialize(transaction).map_err(|e| {
+                        ExecutorError::TransactionFailed(format!(
+                            "Failed to serialize transaction: {}",
+                            e
+                        ))
+                    })?,
+                    crate::engine::transaction_builder::BuiltTransaction::Versioned {
+                        transaction_bytes,
+                        ..
+                    } => transaction_bytes.clone(),
                 };
 
                 match self
@@ -775,14 +815,21 @@ impl Executor {
             trade_uuid = %signal.trade_uuid,
             "Jito bundle submission failed, falling back to standard TPU"
         );
-        
+
         // Sign and send transaction via standard RPC (handles both legacy and versioned)
         let signature = match &built_tx {
-            crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
-                self.submit_transaction(transaction, &wallet_keypair).await?
+            crate::engine::transaction_builder::BuiltTransaction::Legacy {
+                transaction, ..
+            } => {
+                self.submit_transaction(transaction, &wallet_keypair)
+                    .await?
             }
-            crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
-                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?
+            crate::engine::transaction_builder::BuiltTransaction::Versioned {
+                transaction_bytes,
+                ..
+            } => {
+                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair)
+                    .await?
             }
         };
 
@@ -806,7 +853,7 @@ impl Executor {
         // Note: Helius Sender API expects a specific format
         // For now, we'll submit the transaction directly
         // In production, you would create a proper bundle with tip transaction
-        
+
         // Convert Decimal SOL to lamports (1 SOL = 1_000_000_000 lamports)
         let tip_lamports = (tip_sol * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or_else(|| {
             tracing::warn!(tip_sol = %tip_sol, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
@@ -840,8 +887,7 @@ impl Executor {
             };
             return Err(ExecutorError::Rpc(format!(
                 "Helius Sender API error: {} - {}",
-                status,
-                error_text
+                status, error_text
             )));
         }
 
@@ -884,26 +930,38 @@ impl Executor {
         tracing::debug!(rpc_url = %active_url, "Proceeding with trade execution");
 
         // Load wallet keypair from vault
-        let secrets = load_secrets_with_fallback()
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e)))?;
-        let wallet_keypair = load_wallet_keypair(&secrets)
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e)))?;
+        let secrets = load_secrets_with_fallback().map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
+        })?;
+        let wallet_keypair = load_wallet_keypair(&secrets).map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e))
+        })?;
 
         // Build transaction (use active RPC client)
         let active_client = self.active_rpc_client();
-        let transaction_builder = TransactionBuilder::new(active_client.clone(), self.config.clone());
+        let transaction_builder =
+            TransactionBuilder::new(active_client.clone(), self.config.clone());
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
+            })?;
 
         // Submit transaction via RPC
         let signature = match &built_tx {
-            crate::engine::transaction_builder::BuiltTransaction::Legacy { transaction, .. } => {
-                self.submit_transaction(transaction, &wallet_keypair).await?
+            crate::engine::transaction_builder::BuiltTransaction::Legacy {
+                transaction, ..
+            } => {
+                self.submit_transaction(transaction, &wallet_keypair)
+                    .await?
             }
-            crate::engine::transaction_builder::BuiltTransaction::Versioned { transaction_bytes, .. } => {
-                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?
+            crate::engine::transaction_builder::BuiltTransaction::Versioned {
+                transaction_bytes,
+                ..
+            } => {
+                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair)
+                    .await?
             }
         };
 
@@ -934,18 +992,22 @@ impl Executor {
     ) -> Result<String, ExecutorError> {
         // Ensure transaction is signed
         // Note: TransactionBuilder should have already signed it, but we verify here
-        
+
         // Validate transaction size before submission
         let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to serialize transaction: {}", e))
+            })?;
         self.validate_transaction_size(&tx_bytes)?;
-        
+
         // Send transaction via RPC (use active RPC client)
         let active_client = self.active_rpc_client();
         let signature = active_client
             .send_and_confirm_transaction(transaction)
             .await
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Transaction submission failed: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Transaction submission failed: {}", e))
+            })?;
 
         tracing::info!(
             signature = %signature,
@@ -963,21 +1025,24 @@ impl Executor {
         wallet_keypair: &solana_sdk::signature::Keypair,
     ) -> Result<String, ExecutorError> {
         tracing::debug!("Starting VersionedTransaction signing and submission");
-        
+
         // Validate transaction size before processing
         self.validate_transaction_size(transaction_bytes)?;
-        
+
         // Parse the versioned transaction using legacy bincode format for Solana compatibility
-        let versioned_tx: VersionedTransaction = 
+        let versioned_tx: VersionedTransaction =
             bincode::serde::decode_from_slice(transaction_bytes, bincode::config::legacy())
                 .map_err(|e| {
                     tracing::error!(error = %e, "Failed to deserialize versioned transaction");
-                    ExecutorError::TransactionFailed(format!("Failed to deserialize versioned transaction: {}", e))
+                    ExecutorError::TransactionFailed(format!(
+                        "Failed to deserialize versioned transaction: {}",
+                        e
+                    ))
                 })?
                 .0;
-        
+
         tracing::debug!("Parsed VersionedTransaction successfully");
-        
+
         // Validate Jupiter's blockhash
         let jupiter_blockhash = versioned_tx.message.recent_blockhash();
         let active_client = self.active_rpc_client();
@@ -998,19 +1063,19 @@ impl Executor {
 
         // Get recent blockhash (use active RPC client)
         // We need this for both validation and reconstruction
-        let recent_blockhash = active_client
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Failed to get blockhash");
-                ExecutorError::Rpc(format!("Failed to get blockhash: {}", e))
-            })?;
-        
+        let recent_blockhash = active_client.get_latest_blockhash().await.map_err(|e| {
+            tracing::error!(error = %e, "Failed to get blockhash");
+            ExecutorError::Rpc(format!("Failed to get blockhash: {}", e))
+        })?;
+
         tracing::debug!(blockhash = %recent_blockhash, "Got recent blockhash");
 
         if !is_valid {
             // Check if this is a V0 transaction (uses ALTs)
-            let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
+            let is_v0 = matches!(
+                versioned_tx.message,
+                solana_sdk::message::VersionedMessage::V0(_)
+            );
             if is_v0 {
                 tracing::warn!(
                     blockhash = %jupiter_blockhash,
@@ -1025,17 +1090,17 @@ impl Executor {
                 return Err(ExecutorError::BlockhashExpired);
             }
         }
-        
+
         // For VersionedTransaction, we need to manually sign the message hash
         // The transaction from Jupiter is unsigned, so we need to:
         // 1. Update the message's recent_blockhash (if needed)
         // 2. Sign the message hash with our keypair
         // 3. Add the signature to the transaction
-        
+
+        use crate::engine::v0_reconstruction;
         use solana_sdk::message::VersionedMessage;
         use solana_sdk::signature::Signer;
-        use crate::engine::v0_reconstruction;
-        
+
         // Update the message's recent_blockhash
         // For VersionedMessage, we need to handle V0 and Legacy differently
         let updated_message = match &versioned_tx.message {
@@ -1044,17 +1109,17 @@ impl Executor {
                 if self.config.jupiter.reject_v0_transactions {
                     tracing::error!("V0 transaction rejected due to configuration (reject_v0_transactions=true)");
                     return Err(ExecutorError::TransactionFailed(
-                        "V0 transactions are disabled by configuration".to_string()
+                        "V0 transactions are disabled by configuration".to_string(),
                     ));
                 }
-                
+
                 // V0 messages use Address Lookup Tables (ALTs) and require reconstruction
                 // to update the blockhash. Attempt to reconstruct with fresh blockhash if enabled.
                 if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
                     tracing::debug!(
                         "V0 transaction detected: Attempting to reconstruct message with fresh blockhash"
                     );
-                    
+
                     match v0_reconstruction::reconstruct_v0_message_with_blockhash(
                         &versioned_tx,
                         recent_blockhash,
@@ -1063,7 +1128,9 @@ impl Executor {
                     .await
                     {
                         Ok(reconstructed) => {
-                            tracing::info!("Successfully reconstructed V0 message with fresh blockhash");
+                            tracing::info!(
+                                "Successfully reconstructed V0 message with fresh blockhash"
+                            );
                             reconstructed
                         }
                         Err(e) => {
@@ -1092,21 +1159,22 @@ impl Executor {
                 VersionedMessage::Legacy(new_msg)
             }
         };
-        
+
         // Get the message hash that needs to be signed (with updated blockhash)
         let message_hash = updated_message.hash();
-        
+
         // Sign the message hash with our keypair
         // Use try_sign_message which is available on Signer trait
         tracing::debug!("Signing message hash");
-        let signature = wallet_keypair.try_sign_message(&message_hash.to_bytes())
+        let signature = wallet_keypair
+            .try_sign_message(&message_hash.to_bytes())
             .map_err(|e| {
                 tracing::error!(error = %e, "Failed to sign message");
                 ExecutorError::TransactionFailed(format!("Failed to sign message: {}", e))
             })?;
-        
+
         tracing::debug!(signature = %signature, "Message signed successfully");
-        
+
         // Create a new transaction with our signature
         // The transaction from Jupiter may have placeholder signatures
         // We need to replace the first signature (or add it if empty)
@@ -1117,32 +1185,39 @@ impl Executor {
             // Replace the first signature (assuming it's a placeholder for our keypair)
             new_signatures[0] = signature;
         }
-        
+
         // Create signed transaction with updated message and signature
         let signed_tx = VersionedTransaction {
             signatures: new_signatures,
             message: updated_message,
         };
-        
+
         tracing::debug!("Created signed VersionedTransaction");
-        
+
         // Serialize the signed transaction using bincode 1.3 for Solana compatibility
-        // bincode 2.0 (standard) uses u64 for lengths, but Solana requires u16/u32 logic 
+        // bincode 2.0 (standard) uses u64 for lengths, but Solana requires u16/u32 logic
         // consistent with bincode 1.3
-        let signed_bytes = bincode1::serialize(&signed_tx)
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize versioned transaction: {}", e)))?;
-        
+        let signed_bytes = bincode1::serialize(&signed_tx).map_err(|e| {
+            ExecutorError::TransactionFailed(format!(
+                "Failed to serialize versioned transaction: {}",
+                e
+            ))
+        })?;
+
         // Validate signed transaction size before submission
         self.validate_transaction_size(&signed_bytes)?;
-        
+
         let tx_base64 = BASE64.encode(&signed_bytes);
-        
-        tracing::debug!(tx_base64_len = tx_base64.len(), "Serialized transaction, submitting to RPC");
-        
+
+        tracing::debug!(
+            tx_base64_len = tx_base64.len(),
+            "Serialized transaction, submitting to RPC"
+        );
+
         // Use direct HTTP POST with reqwest for proper timeout control
         // The RPC client's send() method doesn't respect timeouts properly
         let rpc_timeout = Duration::from_secs(30); // 30 second timeout for transaction submission
-        
+
         // Construct RPC request payload
         let rpc_payload = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1157,36 +1232,34 @@ impl Executor {
                 }
             ]
         });
-        
+
         let active_url = self.active_rpc_url();
         tracing::debug!(rpc_url = %active_url, "Submitting transaction via direct HTTP");
-        
+
         // Submit via direct HTTP POST with proper timeout (use active RPC URL)
         let response_result = timeout(
             rpc_timeout,
-            self.http_client
-                .post(active_url)
-                .json(&rpc_payload)
-                .send()
+            self.http_client.post(active_url).json(&rpc_payload).send(),
         )
         .await;
-        
+
         let response = match response_result {
-            Ok(Ok(resp)) => {
-                resp.json::<serde_json::Value>()
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "Failed to parse RPC response");
-                        ExecutorError::TransactionFailed(format!("Failed to parse RPC response: {}", e))
-                    })?
-            }
+            Ok(Ok(resp)) => resp.json::<serde_json::Value>().await.map_err(|e| {
+                tracing::error!(error = %e, "Failed to parse RPC response");
+                ExecutorError::TransactionFailed(format!("Failed to parse RPC response: {}", e))
+            })?,
             Ok(Err(e)) => {
                 tracing::error!(error = %e, "RPC HTTP request failed");
-                return Err(ExecutorError::TransactionFailed(format!("RPC HTTP request failed: {}", e)));
+                return Err(ExecutorError::TransactionFailed(format!(
+                    "RPC HTTP request failed: {}",
+                    e
+                )));
             }
             Err(_) => {
                 tracing::error!("RPC sendTransaction timed out after 30 seconds");
-                return Err(ExecutorError::TransactionFailed("Transaction submission timed out".to_string()));
+                return Err(ExecutorError::TransactionFailed(
+                    "Transaction submission timed out".to_string(),
+                ));
             }
         };
 
@@ -1197,11 +1270,13 @@ impl Executor {
             let error_code = err.get("code").and_then(|c| c.as_i64());
             // Extract error message with better error handling
             // Store as String to avoid lifetime issues
-            let error_msg = err.get("message")
+            let error_msg = err
+                .get("message")
                 .and_then(|m| m.as_str().map(|s| s.to_string()))
                 .or_else(|| {
                     // Try to extract error as JSON string if message is not a string
-                    err.get("message").and_then(|m| serde_json::to_string(m).ok())
+                    err.get("message")
+                        .and_then(|m| serde_json::to_string(m).ok())
                 })
                 .unwrap_or_else(|| {
                     // If all else fails, format the entire error object
@@ -1211,20 +1286,21 @@ impl Executor {
                     );
                     "Unknown RPC error (see logs for details)".to_string()
                 });
-            
+
             tracing::error!(
                 error_code = ?error_code,
                 error = %error_msg,
                 error_obj = ?err,
                 "RPC returned error"
             );
-            
+
             // Check for blockhash not found error (common with V0 transactions)
             // This can happen if Jupiter's blockhash expires between quote and submission
             // Error code -32004 is "Blockhash not found" in Solana RPC
-            if error_code == Some(-32004) || 
-               error_msg.to_lowercase().contains("blockhash not found") ||
-               error_msg.to_lowercase().contains("blockhash expired") {
+            if error_code == Some(-32004)
+                || error_msg.to_lowercase().contains("blockhash not found")
+                || error_msg.to_lowercase().contains("blockhash expired")
+            {
                 tracing::warn!(
                     error_code = ?error_code,
                     error = %error_msg,
@@ -1233,13 +1309,14 @@ impl Executor {
                 );
                 return Err(ExecutorError::BlockhashExpired);
             }
-            
+
             // Check for address lookup table error specifically
             // V0 transactions use Address Lookup Tables (ALTs) which are mainnet-specific
             // Devnet doesn't have the same ALTs, causing this error
-            if error_msg.contains("address table account") || 
-               error_msg.contains("address lookup table") ||
-               error_msg.contains("address table") {
+            if error_msg.contains("address table account")
+                || error_msg.contains("address lookup table")
+                || error_msg.contains("address table")
+            {
                 let detailed_error = format!(
                     "Address Lookup Table (ALT) error: {}. \
                     Jupiter returns V0 transactions that use ALTs not available on devnet. \
@@ -1250,13 +1327,18 @@ impl Executor {
                 tracing::error!(error = %detailed_error, "ALT error detected");
                 return Err(ExecutorError::TransactionFailed(detailed_error));
             }
-            
-            return Err(ExecutorError::TransactionFailed(format!("RPC error: {}", error_msg)));
+
+            return Err(ExecutorError::TransactionFailed(format!(
+                "RPC error: {}",
+                error_msg
+            )));
         } else if let Some(sig) = response.get("result").and_then(|r| r.as_str()) {
             sig
         } else {
             tracing::error!(response = ?response, "Invalid RPC response format");
-            return Err(ExecutorError::TransactionFailed("Invalid RPC response format".to_string()));
+            return Err(ExecutorError::TransactionFailed(
+                "Invalid RPC response format".to_string(),
+            ));
         };
 
         tracing::info!(
@@ -1279,14 +1361,17 @@ impl Executor {
                 Strategy::Shield => self.config.jito.tip_floor_sol,
                 Strategy::Spear => {
                     // Use higher tip for Spear to ensure bundle inclusion
-                    (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol) / Decimal::from(2)
+                    (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol)
+                        / Decimal::from(2)
                 }
                 Strategy::Exit => self.config.jito.tip_ceiling_sol, // Max tip for exits
             };
 
             // Apply percentage cap
             let max_by_percent = signal.payload.amount_sol * self.config.jito.tip_percent_max;
-            let tip = base_tip.min(max_by_percent).min(self.config.jito.tip_ceiling_sol);
+            let tip = base_tip
+                .min(max_by_percent)
+                .min(self.config.jito.tip_ceiling_sol);
 
             tip.max(self.config.jito.tip_floor_sol)
         }
@@ -1344,7 +1429,8 @@ impl Executor {
 
     /// Get time spent in fallback mode
     pub fn fallback_duration(&self) -> Option<chrono::Duration> {
-        self.fallback_since.map(|t| Utc::now().signed_duration_since(t))
+        self.fallback_since
+            .map(|t| Utc::now().signed_duration_since(t))
     }
 
     /// Get the active RPC client based on current mode
@@ -1404,7 +1490,10 @@ pub enum ExecutorError {
 
     /// Insufficient balance
     #[error("Insufficient balance: required {required} SOL, available {available} SOL")]
-    InsufficientBalance { required: Decimal, available: Decimal },
+    InsufficientBalance {
+        required: Decimal,
+        available: Decimal,
+    },
 
     /// Circuit breaker tripped
     #[error("Circuit breaker tripped: {0}")]
@@ -1437,7 +1526,7 @@ mod tests {
         use std::str::FromStr;
         let err = ExecutorError::AmountTooSmall(
             Decimal::from_str("0.001").unwrap(),
-            Decimal::from_str("0.01").unwrap()
+            Decimal::from_str("0.01").unwrap(),
         );
         assert!(err.to_string().contains("0.001"));
         assert!(err.to_string().contains("0.01"));

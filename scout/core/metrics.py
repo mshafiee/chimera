@@ -10,8 +10,7 @@ Exports Scout-specific metrics for monitoring:
 
 import os
 import logging
-from typing import List, Dict, Optional
-from datetime import datetime
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 

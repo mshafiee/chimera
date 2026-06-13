@@ -5,10 +5,10 @@
 //! - Consensus BUY: Medium tip (0.002-0.005 SOL)
 //! - Single BUY: Low tip (0.001-0.002 SOL)
 
-use std::sync::Arc;
-use rust_decimal::prelude::*;
 use crate::config::MevProtectionConfig;
 use crate::models::{Signal, Strategy};
+use rust_decimal::prelude::*;
+use std::sync::Arc;
 
 /// MEV protection manager
 pub struct MevProtection {

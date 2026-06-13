@@ -269,7 +269,8 @@ class BacktestConfig:
     
     def __post_init__(self):
         """Coerce all Decimal fields so tests can pass plain floats/ints."""
-        _d = lambda v: Decimal(str(v)) if not isinstance(v, Decimal) else v
+        def _d(v):
+            return Decimal(str(v)) if not isinstance(v, Decimal) else v
         self.min_liquidity_shield_usd = _d(self.min_liquidity_shield_usd)
         self.min_liquidity_spear_usd = _d(self.min_liquidity_spear_usd)
         self.dex_fee_percent = _d(self.dex_fee_percent)

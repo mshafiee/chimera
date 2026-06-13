@@ -6,10 +6,10 @@
 //! - Average return per trade
 //! - Exit timing accuracy
 
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use crate::db::DbPool;
 use rust_decimal::prelude::*;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Wallet performance tracker
 pub struct WalletPerformanceTracker {
@@ -19,7 +19,6 @@ pub struct WalletPerformanceTracker {
     /// Whether auto-demotion is enabled
     auto_demote_enabled: bool,
 }
-
 
 /// Wallet copy trading metrics
 #[derive(Debug, Clone)]
@@ -59,17 +58,18 @@ impl WalletPerformanceTracker {
     ) -> Result<(), String> {
         // Get or create metrics
         let mut cache = self.metrics_cache.write().await;
-        let metrics = cache.entry(wallet_address.to_string()).or_insert_with(|| {
-            WalletCopyMetrics {
-                wallet_address: wallet_address.to_string(),
-                copy_pnl_7d: Decimal::ZERO,
-                signal_success_rate: 0.0,
-                avg_return_per_trade: Decimal::ZERO,
-                total_trades: 0,
-                winning_trades: 0,
-                last_updated: std::time::SystemTime::now(),
-            }
-        });
+        let metrics =
+            cache
+                .entry(wallet_address.to_string())
+                .or_insert_with(|| WalletCopyMetrics {
+                    wallet_address: wallet_address.to_string(),
+                    copy_pnl_7d: Decimal::ZERO,
+                    signal_success_rate: 0.0,
+                    avg_return_per_trade: Decimal::ZERO,
+                    total_trades: 0,
+                    winning_trades: 0,
+                    last_updated: std::time::SystemTime::now(),
+                });
 
         // Update metrics
         metrics.total_trades += 1;
@@ -78,12 +78,13 @@ impl WalletPerformanceTracker {
         }
 
         // Recalculate averages
-        metrics.signal_success_rate = (metrics.winning_trades as f64 / metrics.total_trades as f64) * 100.0;
-        
+        metrics.signal_success_rate =
+            (metrics.winning_trades as f64 / metrics.total_trades as f64) * 100.0;
+
         // Update 7-day PnL from database (actual 7-day window)
         let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
         let from_date_str = seven_days_ago.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        
+
         let trades = crate::db::get_trades(
             &self.db,
             Some(&from_date_str),
@@ -111,7 +112,8 @@ impl WalletPerformanceTracker {
         metrics.last_updated = std::time::SystemTime::now();
 
         // Update WQS in database based on copy performance
-        self.update_wqs_from_copy_performance(wallet_address, metrics).await?;
+        self.update_wqs_from_copy_performance(wallet_address, metrics)
+            .await?;
 
         Ok(())
     }
@@ -135,11 +137,11 @@ impl WalletPerformanceTracker {
             // If copy PnL < original PnL * 0.7 for 7 days, reduce WQS
             // For now, we'll use a simple adjustment based on success rate
             let copy_performance_factor = if metrics.signal_success_rate >= 60.0 {
-                1.0  // Good copy performance
+                1.0 // Good copy performance
             } else if metrics.signal_success_rate >= 50.0 {
-                0.9  // Moderate copy performance
+                0.9 // Moderate copy performance
             } else {
-                0.8  // Poor copy performance
+                0.8 // Poor copy performance
             };
 
             // Adjust WQS (but don't go below 40% of original)
@@ -147,7 +149,7 @@ impl WalletPerformanceTracker {
 
             // Update wallet WQS in database
             wallet.wqs_score = Some(adjusted_wqs);
-            
+
             // Update database (would need an update_wallet_wqs function)
             // For now, we'll log it - full update would require roster merge
             tracing::info!(
@@ -164,20 +166,22 @@ impl WalletPerformanceTracker {
                     wallet_address = %wallet_address,
                     "Auto-demoting wallet due to poor copy performance"
                 );
-                
+
                 // Update wallet status from ACTIVE to CANDIDATE
                 let reason = format!(
                     "Auto-demoted: Copy PnL ({:.2} SOL) < 70% of expected for 7+ days",
                     metrics.copy_pnl_7d
                 );
-                
+
                 match crate::db::update_wallet_status(
                     &self.db,
                     wallet_address,
                     "CANDIDATE",
                     None, // No TTL
                     Some(&reason),
-                ).await {
+                )
+                .await
+                {
                     Ok(true) => {
                         tracing::info!(
                             wallet_address = %wallet_address,
@@ -223,13 +227,15 @@ impl WalletPerformanceTracker {
             if let Some(metrics) = self.get_metrics(wallet_address).await {
                 // Get original wallet ROI (from Scout analysis)
                 let original_roi_7d = wallet.roi_7d.unwrap_or(0.0);
-                
+
                 // Calculate expected copy PnL (simplified: assume same ROI)
                 // In reality, we'd need to track original wallet's actual PnL
-                let expected_copy_pnl = Decimal::from_f64_retain(original_roi_7d * 0.01).unwrap_or(Decimal::ZERO); // Rough estimate
-                
+                let expected_copy_pnl =
+                    Decimal::from_f64_retain(original_roi_7d * 0.01).unwrap_or(Decimal::ZERO); // Rough estimate
+
                 // If copy PnL is significantly worse than expected (less than 70% of expected)
-                let threshold = expected_copy_pnl * Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
+                let threshold =
+                    expected_copy_pnl * Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
                 if metrics.copy_pnl_7d < threshold {
                     // Check if this has been the case for 7+ days
                     if let Ok(elapsed) = metrics.last_updated.elapsed() {

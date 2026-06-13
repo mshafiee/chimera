@@ -64,11 +64,15 @@ impl JitoSearcherClient {
         let tip_transaction = self
             .create_tip_transaction(tip_lamports, tip_keypair)
             .await
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to create tip transaction: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to create tip transaction: {}", e))
+            })?;
 
         // Build bundle: tip transaction first, then swap transaction
-        let tip_tx_bytes = bincode::serde::encode_to_vec(&tip_transaction, bincode::config::legacy())
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e)))?;
+        let tip_tx_bytes =
+            bincode::serde::encode_to_vec(&tip_transaction, bincode::config::legacy()).map_err(
+                |e| ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e)),
+            )?;
         let tip_tx_base64 = BASE64.encode(&tip_tx_bytes);
 
         // Encode the pre-serialized swap transaction
@@ -128,27 +132,23 @@ impl JitoSearcherClient {
     ) -> Result<Transaction, ExecutorError> {
         // Jito tip account (mainnet)
         let jito_tip_account = Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4")
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Invalid Jito tip account: {}", e)))?;
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Invalid Jito tip account: {}", e))
+            })?;
 
         // Get recent blockhash from RPC
-        let recent_blockhash = self
-            .rpc_client
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| ExecutorError::Rpc(format!("Failed to get recent blockhash: {}", e)))?;
+        let recent_blockhash =
+            self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                ExecutorError::Rpc(format!("Failed to get recent blockhash: {}", e))
+            })?;
 
         // Create tip instruction
-        let tip_instruction = system_instruction::transfer(
-            &tip_keypair.pubkey(),
-            &jito_tip_account,
-            tip_lamports,
-        );
+        let tip_instruction =
+            system_instruction::transfer(&tip_keypair.pubkey(), &jito_tip_account, tip_lamports);
 
         // Build transaction
-        let mut transaction = Transaction::new_with_payer(
-            &[tip_instruction],
-            Some(&tip_keypair.pubkey()),
-        );
+        let mut transaction =
+            Transaction::new_with_payer(&[tip_instruction], Some(&tip_keypair.pubkey()));
 
         // Set recent blockhash
         transaction.message.recent_blockhash = recent_blockhash;
@@ -167,17 +167,27 @@ mod tests {
 
     #[test]
     fn test_jito_searcher_client_creation() {
-        let rpc_client = Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
-        let client = JitoSearcherClient::new("https://mainnet.block-engine.jito.wtf".to_string(), rpc_client);
+        let rpc_client = Arc::new(RpcClient::new(
+            "https://api.mainnet-beta.solana.com".to_string(),
+        ));
+        let client = JitoSearcherClient::new(
+            "https://mainnet.block-engine.jito.wtf".to_string(),
+            rpc_client,
+        );
         assert_eq!(client.endpoint, "https://mainnet.block-engine.jito.wtf");
     }
 
     #[tokio::test]
     async fn test_tip_transaction_creation() {
         let keypair = Keypair::new();
-        let rpc_client = Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
-        let client = JitoSearcherClient::new("https://mainnet.block-engine.jito.wtf".to_string(), rpc_client);
-        
+        let rpc_client = Arc::new(RpcClient::new(
+            "https://api.mainnet-beta.solana.com".to_string(),
+        ));
+        let client = JitoSearcherClient::new(
+            "https://mainnet.block-engine.jito.wtf".to_string(),
+            rpc_client,
+        );
+
         // This will fail without recent blockhash, but tests structure
         let result = client.create_tip_transaction(1_000_000, &keypair).await;
         // In real implementation, would need RPC client to get blockhash

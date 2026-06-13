@@ -5,8 +5,8 @@
 
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
-use std::sync::Arc;
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 /// Market regime type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +34,8 @@ impl std::fmt::Display for MarketRegime {
 pub struct MarketRegimeDetector {
     price_cache: Arc<PriceCache>,
     /// Price history for trend analysis (last 24 hours)
-    price_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>>,
+    price_history:
+        Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>>,
     /// Volume history for trend analysis (weekly snapshots of total Solana DEX volume)
     volume_history: Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, Decimal)>>>,
     /// SOL mint address
@@ -57,10 +58,10 @@ impl MarketRegimeDetector {
         if let Some(price_entry) = self.price_cache.get_price(&self.sol_mint) {
             let mut history = self.price_history.write();
             let now = chrono::Utc::now();
-            
+
             // Add current price
             history.push_back((now, price_entry.price_usd));
-            
+
             // Keep only last 24 hours (assuming updates every hour = 24 entries)
             let cutoff = now - chrono::Duration::hours(24);
             while let Some(front) = history.front() {
@@ -79,7 +80,7 @@ impl MarketRegimeDetector {
     /// MarketRegime based on price trend
     pub fn detect_regime(&self) -> MarketRegime {
         let history = self.price_history.read();
-        
+
         if history.len() < 3 {
             // Not enough data, default to sideways
             return MarketRegime::Sideways;
@@ -89,7 +90,7 @@ impl MarketRegimeDetector {
         let prices: Vec<rust_decimal::Decimal> = history.iter().map(|(_, price)| *price).collect();
         let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
         let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
-        
+
         if first_price.is_zero() || last_price.is_zero() {
             return MarketRegime::Sideways;
         }
@@ -104,9 +105,11 @@ impl MarketRegimeDetector {
         };
 
         // Classify regime based on price change (using Decimal comparisons)
-        let five_percent = rust_decimal::Decimal::from_str("5.0").unwrap_or(rust_decimal::Decimal::ZERO);
-        let neg_five_percent = rust_decimal::Decimal::from_str("-5.0").unwrap_or(rust_decimal::Decimal::ZERO);
-        
+        let five_percent =
+            rust_decimal::Decimal::from_str("5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+        let neg_five_percent =
+            rust_decimal::Decimal::from_str("-5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+
         if price_change_percent > five_percent {
             MarketRegime::Bull
         } else if price_change_percent < neg_five_percent {
@@ -117,16 +120,16 @@ impl MarketRegimeDetector {
     }
 
     /// Update volume history (called periodically, e.g., daily)
-    /// 
+    ///
     /// # Arguments
     /// * `total_dex_volume_usd` - Total Solana DEX volume in USD for the period
     pub fn update_volume_history(&self, total_dex_volume_usd: Decimal) {
         let mut history = self.volume_history.write();
         let now = chrono::Utc::now();
-        
+
         // Add current volume snapshot
         history.push_back((now, total_dex_volume_usd));
-        
+
         // Keep only last 2 weeks (14 entries if called daily)
         let cutoff = now - chrono::Duration::days(14);
         while let Some(front) = history.front() {
@@ -149,7 +152,7 @@ impl MarketRegimeDetector {
     /// Returns Decimal for precision in financial calculations.
     pub fn get_volume_trend_multiplier(&self) -> Decimal {
         let history = self.volume_history.read();
-        
+
         if history.len() < 7 {
             // Need at least 7 days of data (1 week)
             return Decimal::ONE;
@@ -158,7 +161,7 @@ impl MarketRegimeDetector {
         // Get volumes from last week and previous week
         let now = chrono::Utc::now();
         let one_week_ago = now - chrono::Duration::days(7);
-        
+
         let mut last_week_volume = Decimal::ZERO;
         let mut last_week_count = 0;
         let mut previous_week_volume = Decimal::ZERO;
@@ -196,7 +199,7 @@ impl MarketRegimeDetector {
         let threshold_80 = Decimal::from_str("0.8").unwrap_or(Decimal::ZERO);
         let threshold_90 = Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
         let threshold_120 = Decimal::from_str("1.2").unwrap_or(Decimal::ZERO);
-        
+
         if volume_change_ratio < threshold_80 {
             // Volume dropped >20%
             Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
@@ -218,7 +221,7 @@ impl MarketRegimeDetector {
     /// Multiplier to apply to base position size (0.5 - 2.0) as Decimal for precision
     pub fn get_position_sizing_multiplier(&self) -> Decimal {
         let volume_multiplier = self.get_volume_trend_multiplier();
-        
+
         // In low volume regimes, reduce position sizes globally
         // This prevents getting stuck in illiquid positions
         let min_mult = Decimal::from_str("0.5").unwrap_or(Decimal::ONE);
@@ -237,18 +240,18 @@ impl MarketRegimeDetector {
                 Decimal::from_str("100.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("200.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("500.0").unwrap_or(Decimal::ZERO),
-            ],  // Higher targets in bull
+            ], // Higher targets in bull
             MarketRegime::Bear => vec![
                 Decimal::from_str("15.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("30.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("50.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("100.0").unwrap_or(Decimal::ZERO),
-            ],   // Lower targets in bear
+            ], // Lower targets in bear
             MarketRegime::Sideways => vec![
                 Decimal::from_str("10.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("20.0").unwrap_or(Decimal::ZERO),
                 Decimal::from_str("30.0").unwrap_or(Decimal::ZERO),
-            ],      // Quick scalps in sideways
+            ], // Quick scalps in sideways
         }
     }
 }
@@ -260,7 +263,3 @@ mod tests {
         // This would be tested with actual price history in integration tests
     }
 }
-
-
-
-

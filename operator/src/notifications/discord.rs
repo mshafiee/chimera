@@ -65,7 +65,9 @@ impl RateLimiter {
             NotificationEvent::CircuitBreakerTriggered { .. } => "circuit_breaker".to_string(),
             NotificationEvent::WalletDrained { .. } => "wallet_drained".to_string(),
             NotificationEvent::SystemCrash { component } => format!("system_crash:{}", component),
-            NotificationEvent::PositionExited { token, strategy, .. } => {
+            NotificationEvent::PositionExited {
+                token, strategy, ..
+            } => {
                 format!("position:{}:{}", token, strategy)
             }
             NotificationEvent::RpcFallback { .. } => "rpc_fallback".to_string(),
@@ -124,9 +126,9 @@ impl DiscordNotifier {
     async fn send_message(&self, content: &str, level: AlertLevel) -> anyhow::Result<()> {
         // Discord webhook payload
         let color = match level {
-            AlertLevel::Critical => 0xff0000, // Red
+            AlertLevel::Critical => 0xff0000,  // Red
             AlertLevel::Important => 0xffaa00, // Orange
-            AlertLevel::Info => 0x0099ff, // Blue
+            AlertLevel::Info => 0x0099ff,      // Blue
         };
 
         let payload = serde_json::json!({
@@ -142,7 +144,12 @@ impl DiscordNotifier {
             }]
         });
 
-        let response = self.client.post(&self.webhook_url).json(&payload).send().await?;
+        let response = self
+            .client
+            .post(&self.webhook_url)
+            .json(&payload)
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();

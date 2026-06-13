@@ -88,7 +88,9 @@ pub struct AppState {
 /// Health check handler
 ///
 /// GET /api/v1/health
-pub async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Json<HealthResponse>) {
+pub async fn health_check(
+    State(state): State<Arc<AppState>>,
+) -> (StatusCode, Json<HealthResponse>) {
     let now = Utc::now();
     let uptime = (now - state.started_at).num_seconds();
 
@@ -121,7 +123,11 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> (StatusCode, Js
         None => {
             // No cached health, perform a quick check (non-blocking if possible)
             // For now, mark as degraded if no health info available
-            (HealthStatus::Degraded, 0, Some("RPC health not yet checked".to_string()))
+            (
+                HealthStatus::Degraded,
+                0,
+                Some("RPC health not yet checked".to_string()),
+            )
         }
     };
 
@@ -206,11 +212,10 @@ async fn check_database(pool: &DbPool) -> ComponentHealth {
 
 /// Get the timestamp of the last trade
 async fn get_last_trade_time(pool: &DbPool) -> Option<String> {
-    let result: Result<(String,), _> = sqlx::query_as(
-        "SELECT created_at FROM trades ORDER BY created_at DESC LIMIT 1"
-    )
-    .fetch_one(pool)
-    .await;
+    let result: Result<(String,), _> =
+        sqlx::query_as("SELECT created_at FROM trades ORDER BY created_at DESC LIMIT 1")
+            .fetch_one(pool)
+            .await;
 
     result.ok().map(|(ts,)| ts)
 }

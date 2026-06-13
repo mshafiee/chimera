@@ -60,7 +60,7 @@ impl RpcCache {
     /// * `ttl` - Time to live
     pub fn set(&self, key: String, data: Vec<u8>, ttl: Duration) {
         let mut cache = self.cache.write();
-        
+
         // If cache is full, remove oldest entry (simple FIFO for now)
         if cache.len() >= self.max_size {
             // Remove first entry (oldest)
@@ -82,9 +82,7 @@ impl RpcCache {
     /// Clear expired entries
     pub fn clear_expired(&self) {
         let mut cache = self.cache.write();
-        cache.retain(|_, cached| {
-            cached.cached_at.elapsed().unwrap_or_default() < cached.ttl
-        });
+        cache.retain(|_, cached| cached.cached_at.elapsed().unwrap_or_default() < cached.ttl);
     }
 
     /// Clear all cache entries
@@ -117,10 +115,14 @@ mod tests {
     #[test]
     fn test_rpc_cache() {
         let cache = RpcCache::new(100);
-        
+
         // Store and retrieve
-        cache.set("test_key".to_string(), b"test_data".to_vec(), Duration::from_secs(10));
-        
+        cache.set(
+            "test_key".to_string(),
+            b"test_data".to_vec(),
+            Duration::from_secs(10),
+        );
+
         let data = cache.get("test_key", Duration::from_secs(10));
         assert!(data.is_some());
         assert_eq!(data.unwrap(), b"test_data");
@@ -129,20 +131,18 @@ mod tests {
     #[test]
     fn test_rpc_cache_expiration() {
         let cache = RpcCache::new(100);
-        
+
         // Store with short TTL
-        cache.set("test_key".to_string(), b"test_data".to_vec(), Duration::from_secs(1));
-        
+        cache.set(
+            "test_key".to_string(),
+            b"test_data".to_vec(),
+            Duration::from_secs(1),
+        );
+
         // Should be available immediately
         assert!(cache.get("test_key", Duration::from_secs(1)).is_some());
-        
+
         // After expiration, should return None
         // (This would need actual time passing in integration tests)
     }
 }
-
-
-
-
-
-

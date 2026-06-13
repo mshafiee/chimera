@@ -4,9 +4,9 @@
 //! Environment variables override YAML values.
 
 use config::{Config, ConfigError, Environment, File};
+use rust_decimal::Decimal;
 use serde::Deserialize;
 use std::path::PathBuf;
-use rust_decimal::Decimal;
 use std::str::FromStr;
 
 /// Root configuration structure
@@ -903,7 +903,8 @@ impl AppConfig {
         }
         if self.security.webhook_secret.len() < 32 {
             return Err(ConfigError::Message(
-                "Webhook secret must be at least 32 characters (use: openssl rand -hex 32)".to_string(),
+                "Webhook secret must be at least 32 characters (use: openssl rand -hex 32)"
+                    .to_string(),
             ));
         }
 

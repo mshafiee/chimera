@@ -12,12 +12,12 @@ async fn test_helius_token_age_fetching() {
     // Get API key from environment or use test key
     let api_key = env::var("HELIUS_API_KEY")
         .unwrap_or_else(|_| "609cb910-17a5-4a76-9d1b-2ca9c42f759e".to_string());
-    
+
     let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
 
     // Test with USDC (known token, should exist)
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    
+
     match client.get_token_age_hours(usdc_mint).await {
         Ok(Some(age_hours)) => {
             println!("USDC token age: {:.2} hours", age_hours);
@@ -39,21 +39,21 @@ async fn test_helius_token_age_fetching() {
 async fn test_helius_token_age_caching() {
     let api_key = env::var("HELIUS_API_KEY")
         .unwrap_or_else(|_| "609cb910-17a5-4a76-9d1b-2ca9c42f759e".to_string());
-    
+
     let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
     let token_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     // First call should query API
     let result1 = client.get_token_age_hours(token_mint).await;
-    
+
     // Second call should use cache (within TTL)
     let result2 = client.get_token_age_hours(token_mint).await;
 
     // Results should be the same (cached)
-    match (&result1, &result2) {
-        (Ok(v1), Ok(v2)) => assert_eq!(v1, v2, "Second call should use cache"),
-        _ => {} // If either errors, just pass (network issues)
+    if let (Ok(v1), Ok(v2)) = (&result1, &result2) {
+        assert_eq!(v1, v2, "Second call should use cache");
     }
+    // If either errors, just pass (network issues)
 }
 
 #[tokio::test]
@@ -61,12 +61,12 @@ async fn test_helius_token_age_invalid_token() {
     // Test with invalid token address
     let api_key = "test-key".to_string();
     let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
-    
+
     let invalid_mint = "InvalidTokenAddress111111111111111111111111";
-    
+
     // Should handle gracefully (return None or error)
     let result = client.get_token_age_hours(invalid_mint).await;
-    
+
     // Should not panic
     match result {
         Ok(None) | Err(_) => {
@@ -77,9 +77,3 @@ async fn test_helius_token_age_invalid_token() {
         }
     }
 }
-
-
-
-
-
-

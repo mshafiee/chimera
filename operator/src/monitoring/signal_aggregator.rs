@@ -5,13 +5,13 @@
 //! - Divergence: Some wallets exiting while others hold
 //! - Clusters: Wallets that trade together
 
+use crate::db::DbPool;
+use rust_decimal::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
-use rust_decimal::prelude::*;
-use crate::db::DbPool;
 
 /// Signal aggregator state
 pub struct SignalAggregator {
@@ -94,12 +94,17 @@ impl SignalAggregator {
         });
 
         // Add new signal
-        let token_signals = signals.entry(token_address.to_string()).or_insert_with(Vec::new);
+        let token_signals = signals
+            .entry(token_address.to_string())
+            .or_insert_with(Vec::new);
         token_signals.push(signal);
 
         // Check for consensus (2+ wallets buying same token within 5 minutes)
         if token_signals.len() >= 2 {
-            let wallets: Vec<String> = token_signals.iter().map(|s| s.wallet_address.clone()).collect();
+            let wallets: Vec<String> = token_signals
+                .iter()
+                .map(|s| s.wallet_address.clone())
+                .collect();
             let total_amount: Decimal = token_signals.iter().map(|s| s.amount_sol).sum();
             let confidence = (token_signals.len() as f64 / 5.0).min(1.0); // Max confidence at 5+ wallets
 
@@ -128,15 +133,16 @@ impl SignalAggregator {
     /// True if divergence detected (others still hold)
     pub async fn check_divergence(&self, token_address: &str, exiting_wallet: &str) -> bool {
         let signals = self.recent_signals.read().await;
-        
+
         if let Some(token_signals) = signals.get(token_address) {
             // Check if there are other wallets that bought this token recently
             let other_buyers: Vec<&TokenSignal> = token_signals
                 .iter()
                 .filter(|s| {
-                    s.direction == "BUY" 
+                    s.direction == "BUY"
                         && s.wallet_address != exiting_wallet
-                        && s.timestamp > Instant::now() - Duration::from_secs(3600) // Within 1 hour
+                        && s.timestamp > Instant::now() - Duration::from_secs(3600)
+                    // Within 1 hour
                 })
                 .collect();
 

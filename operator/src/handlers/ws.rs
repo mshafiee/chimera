@@ -14,8 +14,8 @@ use axum::{
     response::Response,
 };
 use futures_util::{SinkExt, StreamExt};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use serde::Serialize;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -70,7 +70,10 @@ pub enum WsEvent {
 pub struct PositionUpdateData {
     pub trade_uuid: String,
     pub state: String,
-    #[serde(skip_serializing_if = "Option::is_none", serialize_with = "serialize_decimal_option")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_decimal_option"
+    )]
     pub unrealized_pnl_percent: Option<Decimal>,
 }
 
@@ -109,10 +112,7 @@ pub struct AlertData {
 /// WebSocket upgrade handler
 ///
 /// GET /ws
-pub async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<WsState>>,
-) -> Response {
+pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WsState>>) -> Response {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 

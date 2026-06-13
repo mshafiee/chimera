@@ -102,7 +102,7 @@ impl DexComparator {
 
         // Collect all successful results
         let mut results = Vec::new();
-        
+
         if let Ok(result) = jupiter_result {
             results.push(result);
         }
@@ -160,22 +160,17 @@ impl DexComparator {
         let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
             .to_u64()
             .unwrap_or(0);
-        
+
         // Jupiter API endpoint (using configured URL, migrated from deprecated v6)
         let url = format!(
             "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
-            self.jupiter_api_url,
-            token_in,
-            token_out,
-            lamports
+            self.jupiter_api_url, token_in, token_out, lamports
         );
 
-        let response = self
-            .http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| crate::error::AppError::Internal(format!("Jupiter API error: {}", e)))?;
+        let response =
+            self.http_client.get(&url).send().await.map_err(|e| {
+                crate::error::AppError::Internal(format!("Jupiter API error: {}", e))
+            })?;
 
         if !response.status().is_success() {
             return Err(crate::error::AppError::Internal(format!(
@@ -184,10 +179,9 @@ impl DexComparator {
             )));
         }
 
-        let quote: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| crate::error::AppError::Internal(format!("Failed to parse Jupiter response: {}", e)))?;
+        let quote: serde_json::Value = response.json().await.map_err(|e| {
+            crate::error::AppError::Internal(format!("Failed to parse Jupiter response: {}", e))
+        })?;
 
         // Extract fee and slippage from quote, convert to Decimal
         let fee_percent = quote
@@ -228,7 +222,7 @@ impl DexComparator {
         let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
             .to_u64()
             .unwrap_or(0);
-        
+
         // Raydium API endpoint (v2)
         let url = format!(
             "https://api.raydium.io/v2/swap/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
@@ -246,10 +240,12 @@ impl DexComparator {
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                let quote: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| crate::error::AppError::Internal(format!("Failed to parse Raydium response: {}", e)))?;
+                let quote: serde_json::Value = resp.json().await.map_err(|e| {
+                    crate::error::AppError::Internal(format!(
+                        "Failed to parse Raydium response: {}",
+                        e
+                    ))
+                })?;
 
                 let fee_percent = quote
                     .get("fee")
@@ -274,7 +270,9 @@ impl DexComparator {
                     dex_url: "https://api.raydium.io/v2".to_string(),
                 })
             }
-            _ => Err(crate::error::AppError::Internal("Raydium API unavailable".to_string())),
+            _ => Err(crate::error::AppError::Internal(
+                "Raydium API unavailable".to_string(),
+            )),
         }
     }
 
@@ -289,13 +287,11 @@ impl DexComparator {
         let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
             .to_u64()
             .unwrap_or(0);
-        
+
         // Orca API endpoint
         let url = format!(
             "https://api.orca.so/v1/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
-            token_in,
-            token_out,
-            lamports
+            token_in, token_out, lamports
         );
 
         let response = self
@@ -307,10 +303,12 @@ impl DexComparator {
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                let quote: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| crate::error::AppError::Internal(format!("Failed to parse Orca response: {}", e)))?;
+                let quote: serde_json::Value = resp.json().await.map_err(|e| {
+                    crate::error::AppError::Internal(format!(
+                        "Failed to parse Orca response: {}",
+                        e
+                    ))
+                })?;
 
                 let fee_percent = quote
                     .get("fee")
@@ -335,7 +333,9 @@ impl DexComparator {
                     dex_url: "https://api.orca.so/v1".to_string(),
                 })
             }
-            _ => Err(crate::error::AppError::Internal("Orca API unavailable".to_string())),
+            _ => Err(crate::error::AppError::Internal(
+                "Orca API unavailable".to_string(),
+            )),
         }
     }
 
@@ -350,7 +350,7 @@ impl DexComparator {
         let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
             .to_u64()
             .unwrap_or(0);
-        
+
         // Meteora DLMM API endpoint
         let url = format!(
             "https://dlmm-api.meteora.ag/pair/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
@@ -368,10 +368,12 @@ impl DexComparator {
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                let quote: serde_json::Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| crate::error::AppError::Internal(format!("Failed to parse Meteora response: {}", e)))?;
+                let quote: serde_json::Value = resp.json().await.map_err(|e| {
+                    crate::error::AppError::Internal(format!(
+                        "Failed to parse Meteora response: {}",
+                        e
+                    ))
+                })?;
 
                 let fee_percent = quote
                     .get("fee")
@@ -396,16 +398,16 @@ impl DexComparator {
                     dex_url: "https://dlmm-api.meteora.ag".to_string(),
                 })
             }
-            _ => Err(crate::error::AppError::Internal("Meteora API unavailable".to_string())),
+            _ => Err(crate::error::AppError::Internal(
+                "Meteora API unavailable".to_string(),
+            )),
         }
     }
 
     /// Clear expired cache entries
     pub fn clear_expired_cache(&self) {
         let mut cache = self.cache.write();
-        cache.retain(|_, cached| {
-            cached.cached_at.elapsed().unwrap_or_default() < self.cache_ttl
-        });
+        cache.retain(|_, cached| cached.cached_at.elapsed().unwrap_or_default() < self.cache_ttl);
     }
 }
 
@@ -422,11 +424,11 @@ mod tests {
     #[tokio::test]
     async fn test_dex_comparison_caching() {
         let comparator = DexComparator::new();
-        
+
         // First call should query API
         let _result1 = comparator
             .compare_and_select(
-                "So11111111111111111111111111111111111111112", // SOL
+                "So11111111111111111111111111111111111111112",  // SOL
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
                 Decimal::from(1u64),
             )
@@ -436,7 +438,3 @@ mod tests {
         // (This would be tested with actual API in integration tests)
     }
 }
-
-
-
-

@@ -68,7 +68,9 @@ impl RateLimiter {
             NotificationEvent::CircuitBreakerTriggered { .. } => "circuit_breaker".to_string(),
             NotificationEvent::WalletDrained { .. } => "wallet_drained".to_string(),
             NotificationEvent::SystemCrash { component } => format!("system_crash:{}", component),
-            NotificationEvent::PositionExited { token, strategy, .. } => {
+            NotificationEvent::PositionExited {
+                token, strategy, ..
+            } => {
                 format!("position:{}:{}", token, strategy)
             }
             NotificationEvent::RpcFallback { .. } => "rpc_fallback".to_string(),
@@ -130,10 +132,7 @@ impl TelegramNotifier {
 
     /// Send a message to Telegram
     async fn send_message(&self, text: &str) -> anyhow::Result<()> {
-        let url = format!(
-            "https://api.telegram.org/bot{}/sendMessage",
-            self.bot_token
-        );
+        let url = format!("https://api.telegram.org/bot{}/sendMessage", self.bot_token);
 
         let payload = serde_json::json!({
             "chat_id": self.chat_id,

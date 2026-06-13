@@ -16,12 +16,16 @@ async fn test_volatility_calculation() {
 
     // Add price history with some volatility
     let prices: Vec<f64> = vec![
-        100.0, 101.0, 99.0, 102.0, 98.0, 103.0, 97.0, 104.0, 96.0, 105.0,
-        95.0, 104.0, 96.0, 103.0, 97.0, 102.0, 98.0, 101.0, 99.0, 100.0,
+        100.0, 101.0, 99.0, 102.0, 98.0, 103.0, 97.0, 104.0, 96.0, 105.0, 95.0, 104.0, 96.0, 103.0,
+        97.0, 102.0, 98.0, 101.0, 99.0, 100.0,
     ];
 
     for price in prices {
-        cache.set_price(sol_mint, Decimal::from_f64(price).unwrap_or_default(), PriceSource::Jupiter);
+        cache.set_price(
+            sol_mint,
+            Decimal::from_f64(price).unwrap_or_default(),
+            PriceSource::Jupiter,
+        );
         // Small delay to ensure different timestamps
         sleep(Duration::from_millis(10)).await;
     }
@@ -29,7 +33,10 @@ async fn test_volatility_calculation() {
     // Calculate volatility
     let volatility = cache.calculate_volatility(sol_mint);
 
-    assert!(volatility.is_some(), "Should calculate volatility with sufficient data");
+    assert!(
+        volatility.is_some(),
+        "Should calculate volatility with sufficient data"
+    );
     let vol = volatility.unwrap();
     assert!(vol > 0.0, "Volatility should be positive");
     println!("Calculated volatility: {:.2}%", vol);
@@ -45,7 +52,10 @@ async fn test_volatility_insufficient_data() {
 
     // Should return None (insufficient data)
     let volatility = cache.calculate_volatility(sol_mint);
-    assert!(volatility.is_none(), "Should return None with insufficient data");
+    assert!(
+        volatility.is_none(),
+        "Should return None with insufficient data"
+    );
 }
 
 #[tokio::test]
@@ -61,7 +71,10 @@ async fn test_volatility_24h_window() {
     }
 
     let volatility = cache.calculate_volatility(sol_mint);
-    assert!(volatility.is_some(), "Should calculate volatility within 24h window");
+    assert!(
+        volatility.is_some(),
+        "Should calculate volatility within 24h window"
+    );
 }
 
 #[tokio::test]
@@ -72,7 +85,11 @@ async fn test_get_sol_volatility() {
     // Add some price history
     let prices: Vec<f64> = vec![100.0, 105.0, 95.0, 110.0, 90.0];
     for price in prices {
-        cache.set_price(sol_mint, Decimal::from_f64(price).unwrap_or_default(), PriceSource::Jupiter);
+        cache.set_price(
+            sol_mint,
+            Decimal::from_f64(price).unwrap_or_default(),
+            PriceSource::Jupiter,
+        );
         sleep(Duration::from_millis(10)).await;
     }
 
@@ -93,7 +110,11 @@ async fn test_volatility_high_volatility_detection() {
     ];
 
     for price in prices {
-        cache.set_price(sol_mint, Decimal::from_f64(price).unwrap_or_default(), PriceSource::Jupiter);
+        cache.set_price(
+            sol_mint,
+            Decimal::from_f64(price).unwrap_or_default(),
+            PriceSource::Jupiter,
+        );
         sleep(Duration::from_millis(10)).await;
     }
 

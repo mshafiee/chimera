@@ -8,9 +8,9 @@
 //! - Position size capped at configured maximum
 //! - Low-WQS wallet gets performance penalty
 
-use chimera_operator::engine::position_sizer::{PositionSizer, SizingFactors};
 use chimera_operator::config::{DatabaseConfig, PositionSizingConfig};
 use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::engine::position_sizer::{PositionSizer, SizingFactors};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -76,7 +76,7 @@ async fn insert_active_positions(pool: &chimera_operator::db::DbPool, count: usi
         sqlx::query(
             "INSERT INTO positions (trade_uuid, wallet_address, token_address, strategy, \
              entry_amount_sol, entry_price, entry_tx_signature, state) \
-             VALUES (?, 'wallet_x', 'token_x', 'SHIELD', 1.0, 1.0, 'sig', 'ACTIVE')"
+             VALUES (?, 'wallet_x', 'token_x', 'SHIELD', 1.0, 1.0, 'sig', 'ACTIVE')",
         )
         .bind(&uuid)
         .execute(pool)
@@ -128,7 +128,8 @@ async fn test_max_concurrent_positions_enforced() {
 
     assert!(
         !can_open,
-        "At {} active positions (= max), can_open_position must return false", max
+        "At {} active positions (= max), can_open_position must return false",
+        max
     );
 }
 
@@ -145,7 +146,12 @@ async fn test_one_below_max_allows_new_position() {
     let sizer = PositionSizer::new(pool, cfg);
     let can_open = sizer.can_open_position().await;
 
-    assert!(can_open, "At {}/{} active positions, one more should be allowed", max - 1, max);
+    assert!(
+        can_open,
+        "At {}/{} active positions, one more should be allowed",
+        max - 1,
+        max
+    );
 }
 
 // ─── Test 29 (plan) ── new token age penalty ─────────────────────────────────
@@ -171,13 +177,15 @@ async fn test_new_token_age_penalty_halves_size() {
     assert!(
         size_new < size_old,
         "New token (2h) must get smaller position than established token (48h): {} vs {}",
-        size_new, size_old
+        size_new,
+        size_old
     );
 
     let ratio = size_new / size_old;
     assert!(
         (ratio - Decimal::from_str("0.5").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
-        "New token penalty should halve the size (ratio ≈ 0.5), got {}", ratio
+        "New token penalty should halve the size (ratio ≈ 0.5), got {}",
+        ratio
     );
 }
 
@@ -202,7 +210,9 @@ async fn test_consensus_multiplier_increases_size() {
 
     assert!(
         size_with > size_without,
-        "Consensus signal must produce larger position: {} vs {}", size_with, size_without
+        "Consensus signal must produce larger position: {} vs {}",
+        size_with,
+        size_without
     );
 }
 
@@ -217,11 +227,11 @@ async fn test_position_size_capped_at_max() {
     let sizer = PositionSizer::new(pool, cfg);
 
     let factors = SizingFactors {
-        is_consensus: true,          // 1.5x
-        wallet_wqs: 90.0,            // 1.2x
-        wallet_success_rate: Decimal::from_str("0.8").unwrap(), // 1.1x
-        token_age_hours: Some(100.0), // no penalty
-        estimated_slippage: Decimal::from_str("0.5").unwrap(), // no penalty
+        is_consensus: true,                                       // 1.5x
+        wallet_wqs: 90.0,                                         // 1.2x
+        wallet_success_rate: Decimal::from_str("0.8").unwrap(),   // 1.1x
+        token_age_hours: Some(100.0),                             // no penalty
+        estimated_slippage: Decimal::from_str("0.5").unwrap(),    // no penalty
         signal_quality: Some(Decimal::from_str("0.95").unwrap()), // 1.3x
         token_volatility_24h: None,
     };
@@ -231,7 +241,8 @@ async fn test_position_size_capped_at_max() {
 
     assert!(
         size <= max,
-        "Position size must not exceed max_size_sol=6.0, got {}", size
+        "Position size must not exceed max_size_sol=6.0, got {}",
+        size
     );
 }
 
@@ -248,10 +259,10 @@ async fn test_position_size_floor_at_minimum() {
 
     let factors = SizingFactors {
         is_consensus: false,
-        wallet_wqs: 10.0,             // low: no WQS bonus
-        wallet_success_rate: Decimal::from_str("0.2").unwrap(), // 0.8x penalty
-        token_age_hours: Some(1.0),   // 0.5x penalty
-        estimated_slippage: Decimal::from_str("5.0").unwrap(), // 0.7x penalty
+        wallet_wqs: 10.0,                                        // low: no WQS bonus
+        wallet_success_rate: Decimal::from_str("0.2").unwrap(),  // 0.8x penalty
+        token_age_hours: Some(1.0),                              // 0.5x penalty
+        estimated_slippage: Decimal::from_str("5.0").unwrap(),   // 0.7x penalty
         signal_quality: Some(Decimal::from_str("0.5").unwrap()), // 0.7x penalty
         token_volatility_24h: Some(Decimal::from_str("50.0").unwrap()), // additional reduction
     };
@@ -261,7 +272,8 @@ async fn test_position_size_floor_at_minimum() {
 
     assert!(
         size >= min,
-        "Position size must not go below min_size_sol=0.5, got {}", size
+        "Position size must not go below min_size_sol=0.5, got {}",
+        size
     );
 }
 
@@ -283,10 +295,14 @@ async fn test_high_wqs_multiplier_applied() {
     let size_high = sizer.calculate_size(high_wqs).await;
     let size_base = sizer.calculate_size(base_wqs).await;
 
-    assert!(size_high > size_base, "High WQS must produce larger position");
+    assert!(
+        size_high > size_base,
+        "High WQS must produce larger position"
+    );
     let ratio = size_high / size_base;
     assert!(
         (ratio - Decimal::from_str("1.2").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
-        "High WQS ratio should be ≈1.2, got {}", ratio
+        "High WQS ratio should be ≈1.2, got {}",
+        ratio
     );
 }

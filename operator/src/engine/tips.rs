@@ -99,7 +99,11 @@ impl TipManager {
 
     /// Calculate optimal tip for a given strategy and trade size
     /// Uses Decimal for precision in financial calculations
-    pub fn calculate_tip(&self, strategy: Strategy, trade_size_sol: rust_decimal::Decimal) -> rust_decimal::Decimal {
+    pub fn calculate_tip(
+        &self,
+        strategy: Strategy,
+        trade_size_sol: rust_decimal::Decimal,
+    ) -> rust_decimal::Decimal {
         let is_cold_start = *self.cold_start.read();
 
         let base_tip = if is_cold_start {
@@ -112,7 +116,9 @@ impl TipManager {
         let max_by_percent = trade_size_sol * self.config.tip_percent_max;
 
         // Apply ceiling using Decimal
-        let tip = base_tip.min(max_by_percent).min(self.config.tip_ceiling_sol);
+        let tip = base_tip
+            .min(max_by_percent)
+            .min(self.config.tip_ceiling_sol);
 
         // Ensure minimum
         tip.max(self.config.tip_floor_sol)
@@ -122,7 +128,11 @@ impl TipManager {
     fn cold_start_tip(&self, strategy: Strategy) -> Decimal {
         match strategy {
             Strategy::Shield => self.config.tip_floor_sol * cold_start_multiplier(),
-            Strategy::Spear => self.config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap(),
+            Strategy::Spear => {
+                self.config.tip_floor_sol
+                    * cold_start_multiplier()
+                    * Decimal::from_str("1.5").unwrap()
+            }
             Strategy::Exit => self.config.tip_ceiling_sol, // Max tip for exits
         }
     }
@@ -141,24 +151,24 @@ impl TipManager {
 
         // Calculate percentile index
         let percentile = match strategy {
-            Strategy::Shield => 25,  // Conservative: 25th percentile
+            Strategy::Shield => 25, // Conservative: 25th percentile
             Strategy::Spear => self.config.tip_percentile as usize, // Configured percentile (default 50)
-            Strategy::Exit => 75,    // Higher: 75th percentile for exits
+            Strategy::Exit => 75, // Higher: 75th percentile for exits
         };
 
         let index = (tips.len() * percentile / 100).min(tips.len() - 1);
         let percentile_tip = tips[index];
 
         // For Spear/Exit, use max of percentile and config floor
-        
-        
+
         match strategy {
             Strategy::Shield => percentile_tip.max(self.config.tip_floor_sol),
             Strategy::Spear => percentile_tip.max(self.config.tip_floor_sol),
             Strategy::Exit => {
-                let mid = (self.config.tip_floor_sol + self.config.tip_ceiling_sol) / Decimal::from(2);
+                let mid =
+                    (self.config.tip_floor_sol + self.config.tip_ceiling_sol) / Decimal::from(2);
                 percentile_tip.max(mid)
-            },
+            }
         }
     }
 
@@ -168,7 +178,7 @@ impl TipManager {
         // Calculate range using Decimal for precision (avoid f64 constants)
         let min_tip = tip_amount_sol * Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
         let max_tip = tip_amount_sol * Decimal::from_str("1.1").unwrap_or(Decimal::ZERO);
-        
+
         // Convert to f64 only for database query (database stores as f64)
         let min_tip_f64 = min_tip.to_f64().unwrap_or(0.0);
         let max_tip_f64 = max_tip.to_f64().unwrap_or(0.0);
@@ -257,10 +267,7 @@ impl TipManager {
                 let count = self.history.read().len() as u32;
                 if count >= MIN_SAMPLES_FOR_PERCENTILE {
                     *self.cold_start.write() = false;
-                    tracing::info!(
-                        "Exiting cold start mode after {} successful tips",
-                        count
-                    );
+                    tracing::info!("Exiting cold start mode after {} successful tips", count);
                 }
             }
         }
@@ -338,7 +345,11 @@ mod tests {
     #[test]
     fn test_cold_start_multiplier_value() {
         let expected = Decimal::from_str("2.0").unwrap();
-        assert_eq!(cold_start_multiplier(), expected, "Cold start multiplier should be 2.0");
+        assert_eq!(
+            cold_start_multiplier(),
+            expected,
+            "Cold start multiplier should be 2.0"
+        );
     }
 
     #[test]
@@ -346,7 +357,10 @@ mod tests {
         let config = test_config();
         let cold_tip = config.tip_floor_sol * cold_start_multiplier();
         let expected = Decimal::from_str("0.002").unwrap();
-        assert!((cold_tip - expected).abs() < Decimal::from_str("0.0001").unwrap(), "Cold start tip should be 0.002 SOL");
+        assert!(
+            (cold_tip - expected).abs() < Decimal::from_str("0.0001").unwrap(),
+            "Cold start tip should be 0.002 SOL"
+        );
     }
 
     #[test]
@@ -355,16 +369,23 @@ mod tests {
         // Shield uses floor * 2
         let tip = config.tip_floor_sol * cold_start_multiplier();
         let expected = Decimal::from_str("0.002").unwrap();
-        assert!((tip - expected).abs() < Decimal::from_str("0.0001").unwrap(), "Shield cold start tip should be 0.002");
+        assert!(
+            (tip - expected).abs() < Decimal::from_str("0.0001").unwrap(),
+            "Shield cold start tip should be 0.002"
+        );
     }
 
     #[test]
     fn test_cold_start_spear_tip() {
         let config = test_config();
         // Spear uses floor * 2 * 1.5
-        let tip = config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap();
+        let tip =
+            config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap();
         let expected = Decimal::from_str("0.003").unwrap();
-        assert!((tip - expected).abs() < Decimal::from_str("0.0001").unwrap(), "Spear cold start tip should be 0.003");
+        assert!(
+            (tip - expected).abs() < Decimal::from_str("0.0001").unwrap(),
+            "Spear cold start tip should be 0.003"
+        );
     }
 
     #[test]
@@ -372,7 +393,10 @@ mod tests {
         let config = test_config();
         // Exit uses ceiling during cold start
         let tip = config.tip_ceiling_sol;
-        assert!((tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Exit cold start tip should be ceiling");
+        assert!(
+            (tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(),
+            "Exit cold start tip should be ceiling"
+        );
     }
 
     // ==========================================================================
@@ -381,7 +405,10 @@ mod tests {
 
     #[test]
     fn test_min_samples_constant() {
-        assert_eq!(MIN_SAMPLES_FOR_PERCENTILE, 10, "Minimum samples should be 10");
+        assert_eq!(
+            MIN_SAMPLES_FOR_PERCENTILE, 10,
+            "Minimum samples should be 10"
+        );
     }
 
     #[test]
@@ -405,48 +432,54 @@ mod tests {
     #[test]
     fn test_percentile_50th() {
         let mut tips: Vec<f64> = vec![
-            0.001, 0.002, 0.003, 0.004, 0.005,
-            0.006, 0.007, 0.008, 0.009, 0.010,
+            0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010,
         ];
         tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let percentile = 50_usize;
         let index = (tips.len() * percentile / 100).min(tips.len() - 1);
         let tip = tips[index];
-        
-        assert!((tip - 0.006).abs() < 0.0001, "50th percentile should be 0.006");
+
+        assert!(
+            (tip - 0.006).abs() < 0.0001,
+            "50th percentile should be 0.006"
+        );
     }
 
     #[test]
     fn test_percentile_25th() {
         let mut tips: Vec<f64> = vec![
-            0.001, 0.002, 0.003, 0.004, 0.005,
-            0.006, 0.007, 0.008, 0.009, 0.010,
+            0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010,
         ];
         tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let percentile = 25_usize;
         let index = (tips.len() * percentile / 100).min(tips.len() - 1);
         let tip = tips[index];
-        
+
         // 25th percentile for Shield (conservative)
-        assert!((tip - 0.003).abs() < 0.0001, "25th percentile should be around 0.003");
+        assert!(
+            (tip - 0.003).abs() < 0.0001,
+            "25th percentile should be around 0.003"
+        );
     }
 
     #[test]
     fn test_percentile_75th() {
         let mut tips: Vec<f64> = vec![
-            0.001, 0.002, 0.003, 0.004, 0.005,
-            0.006, 0.007, 0.008, 0.009, 0.010,
+            0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010,
         ];
         tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let percentile = 75_usize;
         let index = (tips.len() * percentile / 100).min(tips.len() - 1);
         let tip = tips[index];
-        
+
         // 75th percentile for Exit (high priority)
-        assert!((tip - 0.008).abs() < 0.0001, "75th percentile should be around 0.008");
+        assert!(
+            (tip - 0.008).abs() < 0.0001,
+            "75th percentile should be around 0.008"
+        );
     }
 
     // ==========================================================================
@@ -458,7 +491,11 @@ mod tests {
         let config = test_config();
         let percentile_tip = Decimal::from_str("0.015").unwrap(); // Above ceiling
         let capped_tip = percentile_tip.min(config.tip_ceiling_sol);
-        assert!((capped_tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Tip should be capped at ceiling");
+        assert!(
+            (capped_tip - Decimal::from_str("0.01").unwrap()).abs()
+                < Decimal::from_str("0.0001").unwrap(),
+            "Tip should be capped at ceiling"
+        );
     }
 
     #[test]
@@ -466,7 +503,11 @@ mod tests {
         let config = test_config();
         let percentile_tip = Decimal::from_str("0.0005").unwrap(); // Below floor
         let floored_tip = percentile_tip.max(config.tip_floor_sol);
-        assert!((floored_tip - Decimal::from_str("0.001").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Tip should be floored at minimum");
+        assert!(
+            (floored_tip - Decimal::from_str("0.001").unwrap()).abs()
+                < Decimal::from_str("0.0001").unwrap(),
+            "Tip should be floored at minimum"
+        );
     }
 
     #[test]
@@ -476,7 +517,11 @@ mod tests {
         let max_by_percent = trade_size_sol * config.tip_percent_max;
 
         // Max tip = 0.05 * 0.10 = 0.005 SOL
-        assert!((max_by_percent - Decimal::from_str("0.005").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Max by percent should be 0.005");
+        assert!(
+            (max_by_percent - Decimal::from_str("0.005").unwrap()).abs()
+                < Decimal::from_str("0.0001").unwrap(),
+            "Max by percent should be 0.005"
+        );
     }
 
     #[test]
@@ -494,7 +539,11 @@ mod tests {
         // Ensure minimum
         let final_tip = tip.max(config.tip_floor_sol);
 
-        assert!((final_tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Final tip should be 0.01 (ceiling applies)");
+        assert!(
+            (final_tip - Decimal::from_str("0.01").unwrap()).abs()
+                < Decimal::from_str("0.0001").unwrap(),
+            "Final tip should be 0.01 (ceiling applies)"
+        );
     }
 
     // ==========================================================================
@@ -519,16 +568,28 @@ mod tests {
             Decimal::from_str("0.004").unwrap(),
             Decimal::from_str("0.005").unwrap(),
         ];
-        
+
         let sum: Decimal = tips.iter().sum();
         let count = Decimal::from(tips.len());
         let avg = sum / count;
         let min = tips.iter().cloned().min().unwrap_or(Decimal::ZERO);
         let max = tips.iter().cloned().max().unwrap_or(Decimal::ZERO);
-        
-        assert_eq!(avg, Decimal::from_str("0.003").unwrap(), "Average should be 0.003");
-        assert_eq!(min, Decimal::from_str("0.001").unwrap(), "Min should be 0.001");
-        assert_eq!(max, Decimal::from_str("0.005").unwrap(), "Max should be 0.005");
+
+        assert_eq!(
+            avg,
+            Decimal::from_str("0.003").unwrap(),
+            "Average should be 0.003"
+        );
+        assert_eq!(
+            min,
+            Decimal::from_str("0.001").unwrap(),
+            "Min should be 0.001"
+        );
+        assert_eq!(
+            max,
+            Decimal::from_str("0.005").unwrap(),
+            "Max should be 0.005"
+        );
     }
 
     // ==========================================================================
@@ -539,7 +600,7 @@ mod tests {
     fn test_history_rolling_window() {
         let max_history_size = 100_usize;
         let mut history: Vec<f64> = Vec::new();
-        
+
         // Add 105 entries
         for i in 0..105 {
             history.push(0.001 * (i as f64 + 1.0));
@@ -547,10 +608,17 @@ mod tests {
                 history.remove(0);
             }
         }
-        
-        assert_eq!(history.len(), max_history_size, "History should be capped at 100");
+
+        assert_eq!(
+            history.len(),
+            max_history_size,
+            "History should be capped at 100"
+        );
         // First entry should be the 6th one added (0.006)
-        assert!((history[0] - 0.006).abs() < 0.0001, "Oldest entries should be trimmed");
+        assert!(
+            (history[0] - 0.006).abs() < 0.0001,
+            "Oldest entries should be trimmed"
+        );
     }
 
     // ==========================================================================
@@ -560,12 +628,16 @@ mod tests {
     #[test]
     fn test_strategy_tip_ordering() {
         let config = test_config();
-        
+
         let shield_tip = config.tip_floor_sol * cold_start_multiplier();
-        let spear_tip = config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap();
+        let spear_tip =
+            config.tip_floor_sol * cold_start_multiplier() * Decimal::from_str("1.5").unwrap();
         let exit_tip = config.tip_ceiling_sol;
-        
-        assert!(shield_tip < spear_tip, "Shield tip should be less than Spear");
+
+        assert!(
+            shield_tip < spear_tip,
+            "Shield tip should be less than Spear"
+        );
         assert!(spear_tip < exit_tip, "Spear tip should be less than Exit");
     }
 
@@ -584,12 +656,15 @@ mod tests {
         let tips: Vec<f64> = vec![0.005];
         let mut sorted = tips.clone();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        
+
         let percentile = 50_usize;
         let index = (sorted.len() * percentile / 100).min(sorted.len() - 1);
         let tip = sorted[index];
-        
-        assert!((tip - 0.005).abs() < 0.0001, "Single tip should return that value");
+
+        assert!(
+            (tip - 0.005).abs() < 0.0001,
+            "Single tip should return that value"
+        );
     }
 
     #[test]
@@ -601,7 +676,11 @@ mod tests {
         let max_by_percent = trade_size_sol * config.tip_percent_max;
         let final_tip = max_by_percent.min(config.tip_ceiling_sol);
 
-        assert!((final_tip - Decimal::from_str("0.01").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Large trade should still be capped at ceiling");
+        assert!(
+            (final_tip - Decimal::from_str("0.01").unwrap()).abs()
+                < Decimal::from_str("0.0001").unwrap(),
+            "Large trade should still be capped at ceiling"
+        );
     }
 
     #[test]
@@ -613,6 +692,10 @@ mod tests {
         let max_by_percent = trade_size_sol * config.tip_percent_max;
         let final_tip = max_by_percent.max(config.tip_floor_sol);
 
-        assert!((final_tip - Decimal::from_str("0.001").unwrap()).abs() < Decimal::from_str("0.0001").unwrap(), "Small trade should use floor");
+        assert!(
+            (final_tip - Decimal::from_str("0.001").unwrap()).abs()
+                < Decimal::from_str("0.0001").unwrap(),
+            "Small trade should use floor"
+        );
     }
 }

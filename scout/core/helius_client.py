@@ -4,7 +4,6 @@ Helius API client for wallet discovery and transaction fetching.
 
 import os
 import time
-import json
 import re
 import asyncio
 import logging
@@ -13,7 +12,6 @@ from typing import List, Optional, Dict, Any, Set, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 import aiohttp
 
@@ -375,7 +373,7 @@ class HeliusClient:
             else:
                 return await _do_request()
         except asyncio.TimeoutError:
-            print(f"[Helius] API request timeout")
+            print("[Helius] API request timeout")
             return None
         except aiohttp.ClientError as e:
             print(f"[Helius] API request failed: {_redact(str(e))}")
@@ -765,7 +763,7 @@ class HeliusClient:
 
         if use_parallel and len(token_addresses) > 1:
             # Use parallel processing with rate limiting (asyncio, not ThreadPoolExecutor)
-            max_workers = min(5, len(token_addresses))  # Limit concurrent requests
+            min(5, len(token_addresses))  # Limit concurrent requests
 
             # Create async tasks for all tokens
             tasks = [
@@ -805,7 +803,7 @@ class HeliusClient:
             # Sequential processing
             for token_addr in token_addresses:
                 if self._api_calls_made >= self._max_api_calls:
-                    print(f"[Helius] Reached max API calls, stopping token queries")
+                    print("[Helius] Reached max API calls, stopping token queries")
                     break
                 
                 token_addr, transactions = await self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
@@ -1036,7 +1034,7 @@ class HeliusClient:
             print("[Helius] Warning: No Helius API key configured, cannot discover wallets")
             return []
 
-        print(f"[Helius] Discovering wallets from recent swaps...")
+        print("[Helius] Discovering wallets from recent swaps...")
         print(f"[Helius] Config: min_trades={min_trade_count}, max_wallets={max_wallets}, hours_back={hours_back}")
 
         # Check discovery cache
@@ -1147,7 +1145,7 @@ class HeliusClient:
         
         time_taken = time.time() - start_time
         
-        print(f"[Helius] Discovery complete:")
+        print("[Helius] Discovery complete:")
         print(f"[Helius]   Strategy: {strategy_used}")
         print(f"[Helius]   Wallets found: {len(candidate_wallets)}")
         print(f"[Helius]   API calls: {self._api_calls_made}")

@@ -14,9 +14,9 @@ pub mod telegram;
 pub use discord::DiscordNotifier;
 pub use telegram::TelegramNotifier;
 
+use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use rust_decimal::prelude::*;
 
 /// Alert level for notifications
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,7 +46,10 @@ pub enum NotificationEvent {
     /// Circuit breaker was triggered
     CircuitBreakerTriggered { reason: String },
     /// Wallet balance dropped significantly
-    WalletDrained { delta_sol: Decimal, timeframe: String },
+    WalletDrained {
+        delta_sol: Decimal,
+        timeframe: String,
+    },
     /// System component crashed
     SystemCrash { component: String },
     /// Position was exited
@@ -88,7 +91,10 @@ impl NotificationEvent {
             NotificationEvent::CircuitBreakerTriggered { reason } => {
                 format!("🚨 Circuit breaker triggered: {}", reason)
             }
-            NotificationEvent::WalletDrained { delta_sol, timeframe } => {
+            NotificationEvent::WalletDrained {
+                delta_sol,
+                timeframe,
+            } => {
                 format!(
                     "🚨 EMERGENCY: Balance dropped {:.4} SOL in {}",
                     delta_sol, timeframe
@@ -104,7 +110,11 @@ impl NotificationEvent {
                 pnl_sol,
             } => {
                 let pnl_percent_f64 = pnl_percent.to_f64().unwrap_or(0.0);
-                let emoji = if *pnl_percent >= Decimal::ZERO { "💰" } else { "📉" };
+                let emoji = if *pnl_percent >= Decimal::ZERO {
+                    "💰"
+                } else {
+                    "📉"
+                };
                 format!(
                     "{} {} {}: {:+.2}% ({:+.4} SOL)",
                     emoji, token, strategy, pnl_percent_f64, pnl_sol
@@ -127,7 +137,11 @@ impl NotificationEvent {
                 win_rate,
             } => {
                 let pnl_usd_f64 = pnl_usd.to_f64().unwrap_or(0.0);
-                let emoji = if *pnl_usd >= Decimal::ZERO { "📈" } else { "📉" };
+                let emoji = if *pnl_usd >= Decimal::ZERO {
+                    "📈"
+                } else {
+                    "📉"
+                };
                 format!(
                     "{} Daily: {:+.2} USD | Trades: {} | Win: {:.1}%",
                     emoji, pnl_usd_f64, trade_count, win_rate

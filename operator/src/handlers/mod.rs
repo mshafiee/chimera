@@ -14,4 +14,6 @@ pub use health::*;
 pub use monitoring::*;
 pub use roster::*;
 pub use webhook::*;
-pub use ws::{ws_handler, WsEvent, WsState, TradeUpdateData, PositionUpdateData, HealthUpdateData, AlertData};
+pub use ws::{
+    ws_handler, AlertData, HealthUpdateData, PositionUpdateData, TradeUpdateData, WsEvent, WsState,
+};

@@ -80,7 +80,7 @@ mod tests {
             HeaderName::from_bytes(name.as_bytes()).unwrap(),
             HeaderValue::from_str(value).unwrap(),
         );
-        
+
         let mut req = Request::builder()
             .method(Method::GET)
             .uri(Uri::from_static("/"))
@@ -127,21 +127,20 @@ mod tests {
     fn test_priority_x_forwarded_for_over_forwarded() {
         let extractor = ProxyAwareKeyExtractor;
         let mut headers = HeaderMap::new();
-        headers.insert("X-Forwarded-For", HeaderValue::from_str("192.168.1.1").unwrap());
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_str("192.168.1.1").unwrap(),
+        );
         headers.insert("Forwarded", HeaderValue::from_str("for=10.0.0.1").unwrap());
-        
+
         let mut req = Request::builder()
             .method(Method::GET)
             .uri(Uri::from_static("/"))
             .body(())
             .unwrap();
         *req.headers_mut() = headers;
-        
+
         let key = extractor.extract(&req).unwrap();
         assert_eq!(key, "192.168.1.1");
     }
 }
-
-
-
-

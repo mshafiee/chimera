@@ -20,7 +20,6 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import random
-import requests
 
 from .models import LiquidityData
 
@@ -719,7 +718,6 @@ class LiquidityProvider:
             liquidity = base_liquidity * (0.8 + random.random() * 0.4)
         else:
             # Unknown token: random liquidity between $1k and $500k
-            symbol = "UNKNOWN"
             liquidity = random.uniform(1000, 500000)
         
         # Simulate price (not critical for liquidity checks)

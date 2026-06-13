@@ -49,19 +49,36 @@ async fn test_trade_idempotency() {
 
     // First insert should succeed
     db::insert_trade(
-        &pool, uuid, wallet, token, Some("BONK"), "SHIELD", "BUY",
-        Decimal::from_str("0.1").unwrap(), "PENDING",
+        &pool,
+        uuid,
+        wallet,
+        token,
+        Some("BONK"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("0.1").unwrap(),
+        "PENDING",
     )
     .await
     .expect("First insert should succeed");
 
     // Second insert with same UUID should fail
     let second = db::insert_trade(
-        &pool, uuid, wallet, token, Some("BONK"), "SHIELD", "BUY",
-        Decimal::from_str("0.1").unwrap(), "PENDING",
+        &pool,
+        uuid,
+        wallet,
+        token,
+        Some("BONK"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("0.1").unwrap(),
+        "PENDING",
     )
     .await;
-    assert!(second.is_err(), "Duplicate trade_uuid should be rejected by DB");
+    assert!(
+        second.is_err(),
+        "Duplicate trade_uuid should be rejected by DB"
+    );
 
     // Confirm only one row exists
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = ?")
@@ -82,14 +99,23 @@ async fn test_circuit_breaker_loss_tracking() {
     let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
     db::insert_trade(
-        &pool, uuid, wallet, token, Some("BONK"), "SHIELD", "BUY",
-        Decimal::from_str("1.0").unwrap(), "CLOSED",
+        &pool,
+        uuid,
+        wallet,
+        token,
+        Some("BONK"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("1.0").unwrap(),
+        "CLOSED",
     )
     .await
     .unwrap();
 
     let big_loss = Decimal::from_str("-2.5").unwrap();
-    db::update_trade_net_pnl(&pool, uuid, big_loss).await.unwrap();
+    db::update_trade_net_pnl(&pool, uuid, big_loss)
+        .await
+        .unwrap();
 
     // Verify the loss is stored correctly
     let row: (f64,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
@@ -97,7 +123,10 @@ async fn test_circuit_breaker_loss_tracking() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert!(row.0 < 0.0, "net_pnl_sol should be negative for a losing trade");
+    assert!(
+        row.0 < 0.0,
+        "net_pnl_sol should be negative for a losing trade"
+    );
     assert!((row.0 + 2.5).abs() < 0.0001, "net_pnl_sol should be -2.5");
 }
 
@@ -111,8 +140,15 @@ async fn test_trade_status_update() {
     let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
     db::insert_trade(
-        &pool, uuid, wallet, token, Some("BONK"), "SHIELD", "BUY",
-        Decimal::from_str("0.5").unwrap(), "PENDING",
+        &pool,
+        uuid,
+        wallet,
+        token,
+        Some("BONK"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("0.5").unwrap(),
+        "PENDING",
     )
     .await
     .unwrap();

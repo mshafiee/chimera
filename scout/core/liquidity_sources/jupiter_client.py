@@ -1,6 +1,5 @@
 """Jupiter API client for price and liquidity proxy data."""
 
-import os
 import asyncio
 import time
 from datetime import datetime

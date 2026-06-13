@@ -37,7 +37,8 @@ impl KellySizer {
     pub fn new(db: DbPool) -> Self {
         Self {
             db,
-            conservative_multiplier: Decimal::from_f64_retain(0.25).unwrap_or(Decimal::from_f64_retain(0.25).unwrap_or(Decimal::ZERO)), // Use 25% of full Kelly
+            conservative_multiplier: Decimal::from_f64_retain(0.25)
+                .unwrap_or(Decimal::from_f64_retain(0.25).unwrap_or(Decimal::ZERO)), // Use 25% of full Kelly
         }
     }
 
@@ -168,7 +169,6 @@ impl KellySizer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_kelly_calculation() {
@@ -180,7 +180,3 @@ mod tests {
         // This would be tested with actual database in integration tests
     }
 }
-
-
-
-

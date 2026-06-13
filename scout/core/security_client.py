@@ -6,9 +6,8 @@ including them in wallet analysis or copy trading.
 """
 
 import logging
-import os
 import aiohttp
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 # Import config module if available
 try:

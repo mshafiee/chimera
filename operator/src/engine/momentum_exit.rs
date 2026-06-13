@@ -8,11 +8,11 @@
 //! This helps cut losses faster and avoid holding losing positions.
 
 use crate::db::DbPool;
-use crate::price_cache::PriceCache;
 use crate::engine::volume_cache::VolumeCache;
+use crate::price_cache::PriceCache;
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 use std::time::SystemTime;
-use rust_decimal::prelude::*;
 
 /// Momentum exit action
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,7 +53,11 @@ impl MomentumExit {
     }
 
     /// Create with volume cache
-    pub fn with_volume_cache(db: DbPool, price_cache: Arc<PriceCache>, volume_cache: Arc<VolumeCache>) -> Self {
+    pub fn with_volume_cache(
+        db: DbPool,
+        price_cache: Arc<PriceCache>,
+        volume_cache: Arc<VolumeCache>,
+    ) -> Self {
         Self {
             db,
             price_cache,
@@ -148,19 +152,22 @@ impl MomentumExit {
         // Get price history from price cache
         let history = self.price_cache.price_history.read();
         let token_history = history.get(token_address)?;
-        
+
         if token_history.len() < 15 {
             // Need at least 15 data points for 14-period RSI
             return None;
         }
-        
+
         // Get last 14 price changes (convert Decimal to f64 for RSI calculation - RSI is a statistical metric)
-        let prices: Vec<f64> = token_history.iter().rev().take(15)
+        let prices: Vec<f64> = token_history
+            .iter()
+            .rev()
+            .take(15)
             .map(|(_, price)| price.to_f64().unwrap_or(0.0))
             .collect();
         let mut gains = Vec::new();
         let mut losses = Vec::new();
-        
+
         for i in 1..prices.len() {
             let change = prices[i - 1] - prices[i]; // Reversed order
             if change > 0.0 {
@@ -171,25 +178,25 @@ impl MomentumExit {
                 losses.push(change.abs());
             }
         }
-        
+
         if gains.is_empty() || losses.is_empty() {
             return None;
         }
-        
+
         // Calculate average gain and loss
         let avg_gain: f64 = gains.iter().sum::<f64>() / gains.len() as f64;
         let avg_loss: f64 = losses.iter().sum::<f64>() / losses.len() as f64;
-        
+
         if avg_loss == 0.0 {
             return Some(100.0); // All gains, RSI = 100
         }
-        
+
         // Calculate RS (Relative Strength)
         let rs = avg_gain / avg_loss;
-        
+
         // Calculate RSI: 100 - (100 / (1 + RS))
         let rsi = 100.0 - (100.0 / (1.0 + rs));
-        
+
         Some(rsi)
     }
 
@@ -203,7 +210,8 @@ impl MomentumExit {
         entry_time: SystemTime,
     ) -> bool {
         matches!(
-            self.check_momentum(trade_uuid, token_address, entry_price, entry_time).await,
+            self.check_momentum(trade_uuid, token_address, entry_price, entry_time)
+                .await,
             MomentumExitAction::Exit
         )
     }
@@ -211,7 +219,6 @@ impl MomentumExit {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_momentum_exit_price_drop() {
@@ -219,7 +226,3 @@ mod tests {
         // Test case: Price drops 6% within 3 minutes -> should exit
     }
 }
-
-
-
-

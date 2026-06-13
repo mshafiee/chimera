@@ -97,11 +97,16 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     count = metrics.trade_count_30d or 0
     
     # Monotonic increase up to saturation
-    if count >= 5: score += 2.0
-    if count >= 10: score += 3.0
-    if count >= 20: score += 5.0
-    if count >= 50: score += 5.0
-    if count >= 100: score += 5.0  # Grinder bonus
+    if count >= 5:
+        score += 2.0
+    if count >= 10:
+        score += 3.0
+    if count >= 20:
+        score += 5.0
+    if count >= 50:
+        score += 5.0
+    if count >= 100:
+        score += 5.0  # Grinder bonus
     
     # 4) Penalties (Drawdown & Pump-Dump)
     dd = metrics.max_drawdown_30d or 0.0

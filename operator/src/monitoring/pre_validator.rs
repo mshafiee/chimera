@@ -6,13 +6,13 @@
 //! - Slippage estimation
 //! - Token age check
 
-use std::sync::Arc;
 use crate::config::AppConfig;
 use crate::monitoring::HeliusClient;
 use crate::price_cache::PriceCache;
 use crate::token::TokenMetadataFetcher;
-use rust_decimal::prelude::*;
 use anyhow::Result;
+use rust_decimal::prelude::*;
+use std::sync::Arc;
 
 /// Validation result
 #[derive(Debug, Clone)]
@@ -32,7 +32,11 @@ pub struct PreValidator {
 
 impl PreValidator {
     pub fn new(config: Arc<AppConfig>) -> Self {
-        Self { config, helius_client: None, token_fetcher: None }
+        Self {
+            config,
+            helius_client: None,
+            token_fetcher: None,
+        }
     }
 
     /// Attach a Helius client to enable token age checks.
@@ -98,7 +102,9 @@ impl PreValidator {
         };
 
         // Estimate slippage (simplified - would need DEX-specific calculation)
-        let estimated_slippage = self.estimate_slippage(token_address, amount_sol, price_cache.clone()).await;
+        let estimated_slippage = self
+            .estimate_slippage(token_address, amount_sol, price_cache.clone())
+            .await;
 
         // Check slippage threshold (3%)
         let slippage_threshold = Decimal::from_str("3.0").unwrap_or(Decimal::ZERO);
@@ -155,7 +161,8 @@ impl PreValidator {
         // Fallback: size-only heuristic (0.5% base + 0.1% per 0.1 SOL)
         let base = Decimal::from_str("0.5").unwrap_or(Decimal::ZERO);
         let size_unit = Decimal::from_str("0.1").unwrap_or(Decimal::ONE);
-        let size_part = (amount_sol / size_unit) * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
+        let size_part =
+            (amount_sol / size_unit) * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
         (base + size_part).min(max_slippage)
     }
 

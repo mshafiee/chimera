@@ -10,7 +10,9 @@
 //! - Bonus: Profitable close records correct positive PnL
 
 use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
-use chimera_operator::db::{close_position, init_pool, insert_trade, open_position, run_migrations};
+use chimera_operator::db::{
+    close_position, init_pool, insert_trade, open_position, run_migrations,
+};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
@@ -137,7 +139,10 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
             .await
             .unwrap();
 
-    assert_eq!(state, "CLOSED", "Position must be CLOSED after stop-loss exit");
+    assert_eq!(
+        state, "CLOSED",
+        "Position must be CLOSED after stop-loss exit"
+    );
     let expected_pnl = -0.25_f64;
     assert!(
         (pnl - expected_pnl).abs() < 1e-9,
@@ -209,7 +214,10 @@ async fn test_profit_capture_positive_pnl_recorded() {
             .await
             .unwrap();
 
-    assert_eq!(state, "CLOSED", "Position must be CLOSED after profitable exit");
+    assert_eq!(
+        state, "CLOSED",
+        "Position must be CLOSED after profitable exit"
+    );
     let expected_pnl = 0.6_f64; // (140−100)/100 × 1.5 = 0.4 × 1.5 = 0.6 SOL
     assert!(
         (pnl - expected_pnl).abs() < 1e-9,

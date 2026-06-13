@@ -10,9 +10,9 @@
 //! - Portfolio stop trigger at 5% daily loss
 //! - Fail-open when price cache is unavailable
 
-use chimera_operator::engine::stop_loss::{StopLossManager, StopLossAction};
-use chimera_operator::config::{ProfitManagementConfig, DatabaseConfig};
+use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
 use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -47,7 +47,7 @@ fn config_with_hard_stop(hard_stop_positive: &str) -> Arc<ProfitManagementConfig
 async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
-         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(address)
     .bind(wqs)
@@ -57,15 +57,11 @@ async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: 
 }
 
 /// Insert a consensus BUY signal into signal_aggregation within the last 5 minutes.
-async fn insert_consensus_signal(
-    pool: &chimera_operator::db::DbPool,
-    token: &str,
-    wallet: &str,
-) {
+async fn insert_consensus_signal(pool: &chimera_operator::db::DbPool, token: &str, wallet: &str) {
     sqlx::query(
         "INSERT INTO signal_aggregation \
          (token_address, wallet_address, direction, amount_sol, created_at) \
-         VALUES (?, ?, 'BUY', 1.0, CURRENT_TIMESTAMP)"
+         VALUES (?, ?, 'BUY', 1.0, CURRENT_TIMESTAMP)",
     )
     .bind(token)
     .bind(wallet)
@@ -100,7 +96,7 @@ async fn insert_closed_position(
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
           entry_tx_signature, state, realized_pnl_sol, closed_at) \
-         VALUES (?, ?, ?, 'SHIELD', ?, 1.0, 'sig', 'CLOSED', ?, CURRENT_TIMESTAMP)"
+         VALUES (?, ?, ?, 'SHIELD', ?, 1.0, 'sig', 'CLOSED', ?, CURRENT_TIMESTAMP)",
     )
     .bind(trade_uuid)
     .bind(wallet)
@@ -136,7 +132,7 @@ async fn insert_active_position(
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
           entry_tx_signature, state) \
-         VALUES (?, ?, ?, 'SHIELD', ?, 1.0, 'sig', 'ACTIVE')"
+         VALUES (?, ?, ?, 'SHIELD', ?, 1.0, 'sig', 'ACTIVE')",
     )
     .bind(trade_uuid)
     .bind(wallet)
@@ -161,7 +157,11 @@ async fn test_zero_entry_price_bypasses_dynamic_stop_loss() {
     insert_wallet(&pool, "wallet_a", 50.0).await;
 
     const TOKEN: &str = "token_zero_entry";
-    price_cache.set_price(TOKEN, Decimal::from_str("1.0").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("1.0").unwrap(),
+        PriceSource::Jupiter,
+    );
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
 
@@ -195,7 +195,11 @@ async fn test_consensus_query_failure_no_stop_widening() {
 
     const TOKEN: &str = "token_consensus_fail";
     // Entry price: $1.00, current price: $0.83 → -17% loss
-    price_cache.set_price(TOKEN, Decimal::from_str("0.83").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.83").unwrap(),
+        PriceSource::Jupiter,
+    );
 
     // We insert no signal_aggregation rows → query returns 0 → is_consensus = false
     // The stop-loss threshold stays at -20% (not widened to -25%)
@@ -204,7 +208,12 @@ async fn test_consensus_query_failure_no_stop_widening() {
     let mgr = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
 
     let action = mgr
-        .check_stop_loss("uuid-2", "wallet_b", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-2",
+            "wallet_b",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
 
     assert_eq!(
@@ -234,12 +243,21 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
     insert_consensus_signal(&pool, TOKEN, "wallet_d").await;
 
     // Entry $1.00, current $0.78 → -22% loss
-    price_cache.set_price(TOKEN, Decimal::from_str("0.78").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.78").unwrap(),
+        PriceSource::Jupiter,
+    );
 
     let mgr = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
 
     let action = mgr
-        .check_stop_loss("uuid-3", "wallet_c", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-3",
+            "wallet_c",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
 
     assert_eq!(
@@ -266,9 +284,15 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
 
     // Push enough price history to compute volatility > 30%.
     // Base price: $1.00.  Push 10 points alternating ±35% swings → high std dev.
-    let prices = [1.00, 1.35, 0.90, 1.30, 0.88, 1.40, 0.87, 1.35, 0.86, 1.30_f64];
+    let prices = [
+        1.00, 1.35, 0.90, 1.30, 0.88, 1.40, 0.87, 1.35, 0.86, 1.30_f64,
+    ];
     for p in prices {
-        price_cache.set_price(TOKEN, Decimal::from_str(&p.to_string()).unwrap(), PriceSource::Jupiter);
+        price_cache.set_price(
+            TOKEN,
+            Decimal::from_str(&p.to_string()).unwrap(),
+            PriceSource::Jupiter,
+        );
     }
 
     // Verify volatility is detected as > 30%
@@ -282,10 +306,23 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
 
     // At -39%: entry $1.00, current $0.61 → -39% → None
     // Use hard_stop=-100 to isolate volatility-widening behavior from the hard-stop sign bug.
-    price_cache.set_price(TOKEN, Decimal::from_str("0.61").unwrap(), PriceSource::Jupiter);
-    let mgr = StopLossManager::new(pool.clone(), config_with_hard_stop("-100.0"), price_cache.clone());
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.61").unwrap(),
+        PriceSource::Jupiter,
+    );
+    let mgr = StopLossManager::new(
+        pool.clone(),
+        config_with_hard_stop("-100.0"),
+        price_cache.clone(),
+    );
     let action_near = mgr
-        .check_stop_loss("uuid-vol-near", "wallet_vol", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-vol-near",
+            "wallet_vol",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
     assert_eq!(
         action_near,
@@ -294,10 +331,19 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     );
 
     // At -41%: current $0.59 → Exit
-    price_cache.set_price(TOKEN, Decimal::from_str("0.59").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.59").unwrap(),
+        PriceSource::Jupiter,
+    );
     let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
     let action_over = mgr2
-        .check_stop_loss("uuid-vol-over", "wallet_vol", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-vol-over",
+            "wallet_vol",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
     assert_eq!(
         action_over,
@@ -323,8 +369,16 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
 
     // Push prices with very small variance to get volatility < 10%
     for _ in 0..5 {
-        price_cache.set_price(TOKEN, Decimal::from_str("1.001").unwrap(), PriceSource::Jupiter);
-        price_cache.set_price(TOKEN, Decimal::from_str("0.999").unwrap(), PriceSource::Jupiter);
+        price_cache.set_price(
+            TOKEN,
+            Decimal::from_str("1.001").unwrap(),
+            PriceSource::Jupiter,
+        );
+        price_cache.set_price(
+            TOKEN,
+            Decimal::from_str("0.999").unwrap(),
+            PriceSource::Jupiter,
+        );
     }
 
     let vol = price_cache.calculate_volatility(TOKEN);
@@ -335,18 +389,44 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     let mgr = StopLossManager::new(pool.clone(), default_config(), price_cache.clone());
 
     // -6% loss: below the -9% threshold → must NOT exit
-    price_cache.set_price(TOKEN, Decimal::from_str("0.94").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.94").unwrap(),
+        PriceSource::Jupiter,
+    );
     let action_small = mgr
-        .check_stop_loss("uuid-tight-small", "wallet_tight", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-tight-small",
+            "wallet_tight",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
-    assert_eq!(action_small, StopLossAction::None, "-6% loss must not exit (threshold = -9%)");
+    assert_eq!(
+        action_small,
+        StopLossAction::None,
+        "-6% loss must not exit (threshold = -9%)"
+    );
 
     // -10% loss: exceeds the -9% threshold → must exit
-    price_cache.set_price(TOKEN, Decimal::from_str("0.90").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.90").unwrap(),
+        PriceSource::Jupiter,
+    );
     let action_large = mgr
-        .check_stop_loss("uuid-tight-large", "wallet_tight", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-tight-large",
+            "wallet_tight",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
-    assert_eq!(action_large, StopLossAction::Exit, "-10% loss must exit (exceeds -9% threshold)");
+    assert_eq!(
+        action_large,
+        StopLossAction::Exit,
+        "-10% loss must exit (exceeds -9% threshold)"
+    );
 }
 
 // ─── Test 5 ──────────────────────────────────────────────────────────────────
@@ -365,7 +445,11 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     // Build high volatility
     let prices = [1.0, 1.4, 0.85, 1.35, 0.88, 1.42_f64];
     for p in prices {
-        price_cache.set_price(TOKEN, Decimal::from_str(&p.to_string()).unwrap(), PriceSource::Jupiter);
+        price_cache.set_price(
+            TOKEN,
+            Decimal::from_str(&p.to_string()).unwrap(),
+            PriceSource::Jupiter,
+        );
     }
     assert!(price_cache.calculate_volatility(TOKEN).unwrap_or(0.0) > 30.0);
 
@@ -375,20 +459,50 @@ async fn test_consensus_plus_high_volatility_widens_further() {
 
     // -44% loss: $0.56 from $1.00
     // Use hard_stop=-100 to isolate consensus+volatility widening from the hard-stop sign bug.
-    price_cache.set_price(TOKEN, Decimal::from_str("0.56").unwrap(), PriceSource::Jupiter);
-    let mgr = StopLossManager::new(pool.clone(), config_with_hard_stop("-100.0"), price_cache.clone());
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.56").unwrap(),
+        PriceSource::Jupiter,
+    );
+    let mgr = StopLossManager::new(
+        pool.clone(),
+        config_with_hard_stop("-100.0"),
+        price_cache.clone(),
+    );
     let none = mgr
-        .check_stop_loss("uuid-cv-1", "wallet_cv", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-cv-1",
+            "wallet_cv",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
-    assert_eq!(none, StopLossAction::None, "-44% should not exit when threshold is -45%");
+    assert_eq!(
+        none,
+        StopLossAction::None,
+        "-44% should not exit when threshold is -45%"
+    );
 
     // -46% loss: $0.54 from $1.00
-    price_cache.set_price(TOKEN, Decimal::from_str("0.54").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.54").unwrap(),
+        PriceSource::Jupiter,
+    );
     let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
     let exit = mgr2
-        .check_stop_loss("uuid-cv-2", "wallet_cv", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-cv-2",
+            "wallet_cv",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
-    assert_eq!(exit, StopLossAction::Exit, "-46% must exit when threshold is -45%");
+    assert_eq!(
+        exit,
+        StopLossAction::Exit,
+        "-46% must exit when threshold is -45%"
+    );
 }
 
 // ─── Test 6 ──────────────────────────────────────────────────────────────────
@@ -406,13 +520,22 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     const TOKEN: &str = "token_hardstop";
     let price_cache = Arc::new(PriceCache::new());
     // -13% loss: entry $1.00, current $0.87
-    price_cache.set_price(TOKEN, Decimal::from_str("0.87").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.87").unwrap(),
+        PriceSource::Jupiter,
+    );
 
     let cfg = config_with_hard_stop("12.0");
     let mgr = StopLossManager::new(pool, cfg, price_cache);
 
     let action = mgr
-        .check_stop_loss("uuid-hardstop", "wallet_hardstop", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-hardstop",
+            "wallet_hardstop",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
 
     assert_eq!(
@@ -518,7 +641,12 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
     let action = mgr
-        .check_stop_loss("uuid-nocache", "wallet_nocache", Decimal::from_str("1.00").unwrap(), "token_nocache")
+        .check_stop_loss(
+            "uuid-nocache",
+            "wallet_nocache",
+            Decimal::from_str("1.00").unwrap(),
+            "token_nocache",
+        )
         .await;
 
     assert_eq!(
@@ -542,10 +670,19 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     let price_cache = Arc::new(PriceCache::new());
 
     // -14%: entry $1.00, current $0.86 → None
-    price_cache.set_price(TOKEN, Decimal::from_str("0.86").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.86").unwrap(),
+        PriceSource::Jupiter,
+    );
     let mgr = StopLossManager::new(pool.clone(), default_config(), price_cache.clone());
     let none = mgr
-        .check_stop_loss("uuid-med-1", "wallet_med", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-med-1",
+            "wallet_med",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
 
     // Note: hard_stop_loss default = 15.0 (positive). -14 <= 15.0 = TRUE → also triggers hard stop.
@@ -554,12 +691,25 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     let _ = none; // behavior documented below
 
     // -15%: current $0.85 → Exit
-    price_cache.set_price(TOKEN, Decimal::from_str("0.85").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("0.85").unwrap(),
+        PriceSource::Jupiter,
+    );
     let mgr2 = StopLossManager::new(pool, default_config(), price_cache);
     let exit = mgr2
-        .check_stop_loss("uuid-med-2", "wallet_med", Decimal::from_str("1.00").unwrap(), TOKEN)
+        .check_stop_loss(
+            "uuid-med-2",
+            "wallet_med",
+            Decimal::from_str("1.00").unwrap(),
+            TOKEN,
+        )
         .await;
-    assert_eq!(exit, StopLossAction::Exit, "-15% must trigger exit for medium-WQS wallet");
+    assert_eq!(
+        exit,
+        StopLossAction::Exit,
+        "-15% must trigger exit for medium-WQS wallet"
+    );
 }
 
 // ─── Test 12 — portfolio stop not triggered at 4.9% ─────────────────────────

@@ -3,16 +3,16 @@
 //! Automatically polls ACTIVE wallets for new transactions and generates copy trading signals.
 //! This provides an alternative to webhooks for local development and production fallback.
 
+use anyhow::{Context, Result};
+use solana_client::rpc_client::RpcClient;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::{Context, Result};
 use tokio_util::sync::CancellationToken;
-use solana_client::rpc_client::RpcClient;
 
+use super::{rpc_polling, RateLimiter, RpcPollingState};
 use crate::db::DbPool;
 use crate::engine::EngineHandle;
-use crate::models::{Signal, SignalPayload, Strategy, Action};
-use super::{RpcPollingState, RateLimiter, rpc_polling};
+use crate::models::{Action, Signal, SignalPayload, Strategy};
 
 /// Configuration for the polling task
 #[derive(Debug, Clone)]
@@ -46,7 +46,7 @@ pub async fn start_polling_task(
 
     let polling_state = Arc::new(RpcPollingState::new());
     let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit, 1));
-    
+
     // Create RPC client (RpcClient::new doesn't return Result, just creates client)
     let rpc_client = Arc::new(RpcClient::new(config.rpc_url.clone()));
 
@@ -63,7 +63,7 @@ pub async fn start_polling_task(
             }
             _ = interval.tick() => {
                 poll_count += 1;
-                
+
                 // Query ACTIVE wallets from database
                 let wallets = match get_active_monitored_wallets(&db).await {
                     Ok(w) => w,
@@ -136,7 +136,7 @@ async fn get_active_monitored_wallets(db: &DbPool) -> Result<Vec<String>> {
         WHERE w.status = 'ACTIVE'
         AND (wm.monitoring_enabled IS NULL OR wm.monitoring_enabled = 1)
         ORDER BY w.last_trade_at DESC
-        "#
+        "#,
     )
     .fetch_all(db)
     .await
@@ -173,10 +173,10 @@ async fn process_transaction(
     // Parse transaction to extract swap details
     // Note: The WalletTransaction from RPC polling is simplified
     // We need to fetch full transaction details and parse them
-    
+
     // For now, we'll use the basic info from polling
     // TODO: Enhance this to fetch and parse full transaction details if needed
-    
+
     let (direction, token_address) = match (tx.direction.as_deref(), tx.token_address.as_ref()) {
         (Some("BUY"), Some(token)) => (Action::Buy, token.clone()),
         (Some("SELL"), Some(token)) => (Action::Sell, token.clone()),
@@ -239,10 +239,10 @@ async fn process_transaction(
     );
 
     // Queue signal to engine
-    engine.queue_signal(signal, wallet.wqs_score).await
+    engine
+        .queue_signal(signal, wallet.wqs_score)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to queue signal: {}", e))?;
 
     Ok(())
 }
-
-

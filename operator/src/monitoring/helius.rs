@@ -2,15 +2,15 @@
 //!
 //! Handles webhook registration, receiving, and processing for ACTIVE wallets.
 
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-use parking_lot::RwLock;
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
 use anyhow::{Context, Result};
+use parking_lot::RwLock;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Duration};
 
 /// Cache entry for token creation time
@@ -137,7 +137,7 @@ impl HeliusClient {
 
         // Fetch from API
         let creation_timestamp = self.get_token_creation_time(mint_address).await?;
-        
+
         if let Some(timestamp) = creation_timestamp {
             // Cache the result
             {
@@ -225,7 +225,9 @@ impl HeliusClient {
 
         for chunk in wallets.chunks(batch_size) {
             // Rate limit before each batch
-            rate_limiter.acquire_standard(RequestPriority::Polling).await;
+            rate_limiter
+                .acquire_standard(RequestPriority::Polling)
+                .await;
 
             let webhook_id = self
                 .register_webhook(chunk, webhook_url)
@@ -247,11 +249,7 @@ impl HeliusClient {
     }
 
     /// Register a single webhook for multiple wallets
-    pub async fn register_webhook(
-        &self,
-        wallets: &[String],
-        webhook_url: &str,
-    ) -> Result<String> {
+    pub async fn register_webhook(&self, wallets: &[String], webhook_url: &str) -> Result<String> {
         let registration = WebhookRegistration {
             webhook_url: webhook_url.to_string(),
             transaction_types: vec!["SWAP".to_string()],

@@ -7,13 +7,13 @@ use crate::config::AppConfig;
 use crate::error::AppResult;
 use crate::models::{Action, Signal};
 use crate::vault::VaultSecrets;
+use rust_decimal::prelude::*;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     pubkey::Pubkey,
     signature::{Keypair, Signer},
     transaction::{Transaction, VersionedTransaction},
 };
-use rust_decimal::prelude::*;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ impl TransactionBuilder {
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()); // Fallback to default if builder fails
-        
+
         Self {
             rpc_client,
             config,
@@ -76,33 +76,40 @@ impl TransactionBuilder {
                 amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
                 "Devnet simulation mode: skipping Jupiter API, creating simulated transaction"
             );
-            return self.build_simulated_transaction(signal, wallet_keypair).await;
+            return self
+                .build_simulated_transaction(signal, wallet_keypair)
+                .await;
         }
 
         // Determine input and output mints
         let (input_mint, output_mint, amount) = match signal.payload.action {
             Action::Buy => {
                 // Buying token with SOL
-                let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
-                    .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
-                let token_mint = Pubkey::from_str(signal.token_address())
-                    .map_err(|e| crate::error::AppError::Validation(format!("Invalid token mint: {}", e)))?;
-                
+                let sol_mint = Pubkey::from_str(crate::constants::mints::SOL).map_err(|e| {
+                    crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e))
+                })?;
+                let token_mint = Pubkey::from_str(signal.token_address()).map_err(|e| {
+                    crate::error::AppError::Validation(format!("Invalid token mint: {}", e))
+                })?;
+
                 // Convert SOL amount to lamports
                 let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
                 (sol_mint, token_mint, amount_lamports)
             }
             Action::Sell => {
                 // Selling token for SOL
-                let token_mint = Pubkey::from_str(signal.token_address())
-                    .map_err(|e| crate::error::AppError::Validation(format!("Invalid token mint: {}", e)))?;
-                let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
-                    .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
+                let token_mint = Pubkey::from_str(signal.token_address()).map_err(|e| {
+                    crate::error::AppError::Validation(format!("Invalid token mint: {}", e))
+                })?;
+                let sol_mint = Pubkey::from_str(crate::constants::mints::SOL).map_err(|e| {
+                    crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e))
+                })?;
 
                 // Try to fetch the actual on-chain token balance; fall back to price estimate.
-                let amount_lamports = match self.fetch_token_balance(
-                    &wallet_keypair.pubkey(), &token_mint,
-                ).await {
+                let amount_lamports = match self
+                    .fetch_token_balance(&wallet_keypair.pubkey(), &token_mint)
+                    .await
+                {
                     Some(bal) if bal > 0 => {
                         tracing::info!(
                             wallet = %wallet_keypair.pubkey(),
@@ -141,7 +148,9 @@ impl TransactionBuilder {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         let tx_bytes = BASE64
             .decode(&swap_response.swap_transaction)
-            .map_err(|e| crate::error::AppError::Parse(format!("Failed to decode transaction: {}", e)))?;
+            .map_err(|e| {
+                crate::error::AppError::Parse(format!("Failed to decode transaction: {}", e))
+            })?;
 
         tracing::debug!(
             tx_bytes_len = tx_bytes.len(),
@@ -150,11 +159,10 @@ impl TransactionBuilder {
         );
 
         // Get recent blockhash first (needed for both transaction types)
-        let blockhash = self
-            .rpc_client
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e)))?;
+        let blockhash =
+            self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
+            })?;
 
         // Jupiter v1 API returns VersionedTransaction (starts with version byte 0x01)
         // Check the first byte to determine transaction type
@@ -162,11 +170,16 @@ impl TransactionBuilder {
             // VersionedTransaction (version 1) - may be V0 or Legacy
             // Parse to sign
             // Use bincode 1.3 (bincode1) to match Solana wire format
-            let mut versioned_tx: VersionedTransaction = bincode1::deserialize(&tx_bytes)
-                .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize V0 tx: {}", e)))?;
-            
+            let mut versioned_tx: VersionedTransaction =
+                bincode1::deserialize(&tx_bytes).map_err(|e| {
+                    crate::error::AppError::Parse(format!("Failed to deserialize V0 tx: {}", e))
+                })?;
+
             // Check if Jupiter ignored our asLegacyTransaction request
-            let is_v0 = matches!(versioned_tx.message, solana_sdk::message::VersionedMessage::V0(_));
+            let is_v0 = matches!(
+                versioned_tx.message,
+                solana_sdk::message::VersionedMessage::V0(_)
+            );
             if is_v0 {
                 // Check if V0 transactions should be rejected
                 if self.config.jupiter.reject_v0_transactions {
@@ -174,13 +187,13 @@ impl TransactionBuilder {
                         "V0 transactions are disabled by configuration (reject_v0_transactions=true)".to_string()
                     ));
                 }
-                
+
                 if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
                     tracing::warn!(
                         "Jupiter returned V0 transaction despite asLegacyTransaction=true. \
                         Attempting to reconstruct with fresh blockhash to reduce expiration risk."
                     );
-                    
+
                     // Attempt to reconstruct V0 message with fresh blockhash
                     use crate::engine::v0_reconstruction;
                     match v0_reconstruction::reconstruct_v0_message_with_blockhash(
@@ -214,8 +227,11 @@ impl TransactionBuilder {
 
             // Sign with our keypair
             let message_hash = versioned_tx.message.hash();
-            let signature = wallet_keypair.try_sign_message(&message_hash.to_bytes())
-                .map_err(|e| crate::error::AppError::Validation(format!("Signing failed: {}", e)))?;
+            let signature = wallet_keypair
+                .try_sign_message(&message_hash.to_bytes())
+                .map_err(|e| {
+                    crate::error::AppError::Validation(format!("Signing failed: {}", e))
+                })?;
 
             // Replace signature (Jupiter sends placeholder or empty)
             if versioned_tx.signatures.is_empty() {
@@ -226,8 +242,9 @@ impl TransactionBuilder {
 
             // Re-serialize signed transaction
             // Use bincode 1.3 (bincode1) to ensure correct wire format for RPC
-            let signed_bytes = bincode1::serialize(&versioned_tx)
-                .map_err(|e| crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e)))?;
+            let signed_bytes = bincode1::serialize(&versioned_tx).map_err(|e| {
+                crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e))
+            })?;
 
             Ok(BuiltTransaction::Versioned {
                 transaction_bytes: signed_bytes, // Return signed bytes
@@ -236,17 +253,23 @@ impl TransactionBuilder {
         } else {
             // Legacy Transaction
             if tx_bytes.is_empty() {
-                return Err(crate::error::AppError::Parse("Transaction bytes are empty".to_string()));
+                return Err(crate::error::AppError::Parse(
+                    "Transaction bytes are empty".to_string(),
+                ));
             }
-            
+
             // Use bincode 1.3 (bincode1) for legacy transactions as well
-            let mut tx: Transaction = bincode1::deserialize(&tx_bytes)
-                .map_err(|e| crate::error::AppError::Parse(format!("Failed to deserialize legacy transaction: {}", e)))?;
+            let mut tx: Transaction = bincode1::deserialize(&tx_bytes).map_err(|e| {
+                crate::error::AppError::Parse(format!(
+                    "Failed to deserialize legacy transaction: {}",
+                    e
+                ))
+            })?;
 
             // Update blockhash and re-sign
             tx.message.recent_blockhash = blockhash;
             tx.sign(&[wallet_keypair], blockhash);
-            
+
             Ok(BuiltTransaction::Legacy {
                 transaction: tx,
                 blockhash,
@@ -262,11 +285,10 @@ impl TransactionBuilder {
         wallet_keypair: &Keypair,
     ) -> AppResult<BuiltTransaction> {
         // Get recent blockhash (still needed for transaction structure)
-        let blockhash = self
-            .rpc_client
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e)))?;
+        let blockhash =
+            self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+                crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
+            })?;
 
         // Create a minimal empty transaction for simulation
         // This transaction will be marked as simulated and won't be submitted to RPC
@@ -284,9 +306,13 @@ impl TransactionBuilder {
     ///
     /// Returns the largest balance found across all token accounts for that
     /// (owner, mint) pair, or `None` if the RPC call fails or no accounts exist.
-    async fn fetch_token_balance(&self, wallet_pubkey: &Pubkey, token_mint: &Pubkey) -> Option<u64> {
-        use solana_client::rpc_request::TokenAccountsFilter;
+    async fn fetch_token_balance(
+        &self,
+        wallet_pubkey: &Pubkey,
+        token_mint: &Pubkey,
+    ) -> Option<u64> {
         use solana_account_decoder::UiAccountData;
+        use solana_client::rpc_request::TokenAccountsFilter;
 
         let accounts = self
             .rpc_client
@@ -315,11 +341,7 @@ impl TransactionBuilder {
     /// Estimate token amount from SOL value using recent price data.
     ///
     /// Fallback for SELL orders when on-chain balance fetch is unavailable.
-    fn estimate_token_amount_from_price(
-        &self,
-        sol_value: Decimal,
-        token_mint: &str,
-    ) -> u64 {
+    fn estimate_token_amount_from_price(&self, sol_value: Decimal, token_mint: &str) -> u64 {
         // Try to get price from cache if available
         // If cache is unavailable or token not found, use conservative default
         let price_usd = Decimal::from_str("0.10").unwrap_or(Decimal::from(1));
@@ -347,7 +369,9 @@ impl TransactionBuilder {
         user_public_key: Pubkey,
     ) -> AppResult<JupiterSwapResponse> {
         // First get a quote
-        let quote = self.get_jupiter_quote(input_mint, output_mint, amount).await?;
+        let quote = self
+            .get_jupiter_quote(input_mint, output_mint, amount)
+            .await?;
 
         // Then get the swap transaction
         // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
@@ -364,17 +388,19 @@ impl TransactionBuilder {
             "asLegacyTransaction": true  // Request legacy format (may be ignored by lite API)
         });
 
-        let response = self.http_client
+        let response = self
+            .http_client
             .post(url)
             .json(&payload)
             .send()
             .await
-            .map_err(|e| crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e)))?;
+            .map_err(|e| {
+                crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e))
+            })?;
 
-        let swap_response: JupiterSwapResponse = response
-            .json()
-            .await
-            .map_err(|e| crate::error::AppError::Parse(format!("Failed to parse Jupiter swap: {}", e)))?;
+        let swap_response: JupiterSwapResponse = response.json().await.map_err(|e| {
+            crate::error::AppError::Parse(format!("Failed to parse Jupiter swap: {}", e))
+        })?;
 
         Ok(swap_response)
     }
@@ -394,14 +420,13 @@ impl TransactionBuilder {
         );
 
         tracing::debug!(url = %url, "Requesting Jupiter quote");
-        let response = self.http_client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, url = %url, "Jupiter quote request failed");
-                crate::error::AppError::Http(format!("Jupiter quote request failed: {} (URL: {})", e, url))
-            })?;
+        let response = self.http_client.get(&url).send().await.map_err(|e| {
+            tracing::error!(error = %e, url = %url, "Jupiter quote request failed");
+            crate::error::AppError::Http(format!(
+                "Jupiter quote request failed: {} (URL: {})",
+                e, url
+            ))
+        })?;
 
         if !response.status().is_success() {
             return Err(crate::error::AppError::Http(format!(
@@ -410,10 +435,9 @@ impl TransactionBuilder {
             )));
         }
 
-        let quote: JupiterQuote = response
-            .json()
-            .await
-            .map_err(|e| crate::error::AppError::Parse(format!("Failed to parse Jupiter quote: {}", e)))?;
+        let quote: JupiterQuote = response.json().await.map_err(|e| {
+            crate::error::AppError::Parse(format!("Failed to parse Jupiter quote: {}", e))
+        })?;
 
         Ok(quote)
     }
@@ -433,24 +457,25 @@ pub struct JupiterSwapResponse {
 
 /// Load wallet keypair from vault
 pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
-    use secrecy::ExposeSecret; 
+    use secrecy::ExposeSecret;
 
-    let key_secret = secrets
-        .wallet_private_key
-        .as_ref()
-        .ok_or_else(|| crate::error::AppError::Validation("Wallet private key not found in vault".to_string()))?;
+    let key_secret = secrets.wallet_private_key.as_ref().ok_or_else(|| {
+        crate::error::AppError::Validation("Wallet private key not found in vault".to_string())
+    })?;
 
     // Expose secret safely only for this operation
     let key_hex = key_secret.expose_secret();
-    
+
     // Decode hex string to bytes
-    let key_bytes = hex::decode(key_hex.trim())
-        .map_err(|e| crate::error::AppError::Validation(format!("Invalid private key hex: {}", e)))?;
+    let key_bytes = hex::decode(key_hex.trim()).map_err(|e| {
+        crate::error::AppError::Validation(format!("Invalid private key hex: {}", e))
+    })?;
 
     if key_bytes.len() != 64 {
-        return Err(crate::error::AppError::Validation(
-            format!("Invalid keypair length (expected 64 bytes, got {})", key_bytes.len())
-        ));
+        return Err(crate::error::AppError::Validation(format!(
+            "Invalid keypair length (expected 64 bytes, got {})",
+            key_bytes.len()
+        )));
     }
 
     // Solana keypair format in vault: 64 bytes = 32 secret + 32 public
@@ -459,19 +484,18 @@ pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
         .as_slice()
         .try_into()
         .map_err(|_| crate::error::AppError::Validation("Invalid keypair length".to_string()))?;
-    
-    // Use try_from with the full 64-byte array
-    let keypair = Keypair::try_from(keypair_bytes.as_slice())
-        .map_err(|e| {
-            crate::error::AppError::Validation(format!(
-                "Failed to create keypair from 64-byte array: {:?}. \
-                Ensure the keypair bytes are in the correct format (32 secret + 32 public).",
-                e
-            ))
-        })?;
 
-    // The secrets struct will zeroize itself when dropped (out of scope), 
-    // but the Keypair (Solana SDK) persists. This is unavoidable as we need it 
+    // Use try_from with the full 64-byte array
+    let keypair = Keypair::try_from(keypair_bytes.as_slice()).map_err(|e| {
+        crate::error::AppError::Validation(format!(
+            "Failed to create keypair from 64-byte array: {:?}. \
+                Ensure the keypair bytes are in the correct format (32 secret + 32 public).",
+            e
+        ))
+    })?;
+
+    // The secrets struct will zeroize itself when dropped (out of scope),
+    // but the Keypair (Solana SDK) persists. This is unavoidable as we need it
     // for signing, but at least the source buffer is cleaned.
 
     Ok(keypair)

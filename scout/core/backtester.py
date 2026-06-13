@@ -16,7 +16,6 @@ A wallet FAILS backtest if:
 - Too many trades would be rejected due to liquidity
 """
 
-from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
@@ -214,8 +213,8 @@ class BacktestSimulator:
                 else:
                     # Don't fail, but note the risk
                     logger.info(
-                        f"Backtest passed but with survivorship bias risk. "
-                        f"Consider requiring Birdeye historical data for production."
+                        "Backtest passed but with survivorship bias risk. "
+                        "Consider requiring Birdeye historical data for production."
                     )
         
         return SimulatedResult(
@@ -356,7 +355,6 @@ class BacktestSimulator:
         """
         # Get liquidity data (historical-at-trade if available).
         liquidity_data = None
-        low_confidence_liquidity = False
         if trade.liquidity_at_trade_usd is not None:
             liquidity_data = LiquidityData(
                 token_address=trade.token_address,
@@ -373,7 +371,6 @@ class BacktestSimulator:
             )
             # Check if liquidity data is from fallback (low confidence)
             if liquidity_data and "fallback_capped" in liquidity_data.source:
-                low_confidence_liquidity = True
                 logger.warning(
                     f"Using low-confidence fallback liquidity for trade simulation: "
                     f"{trade.token_address[:8]}... at {trade.timestamp.isoformat()}. "

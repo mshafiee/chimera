@@ -5,10 +5,8 @@ Provides Redis-backed caching with automatic fallback to SQLite
 if Redis is unavailable. This ensures graceful degradation.
 """
 
-import os
-import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)

@@ -9,10 +9,10 @@
 //!   F4    — Trailing stop ratchet: stop_price never updates after initial activation
 //!   F6    — Silent status update: update_trade_status returns Ok on non-existent UUID
 
-use chimera_operator::engine::profit_targets::{ProfitTargetManager, ProfitTargetAction};
-use chimera_operator::engine::stop_loss::{StopLossManager, StopLossAction};
-use chimera_operator::config::{ProfitManagementConfig, DatabaseConfig};
-use chimera_operator::db::{init_pool, run_migrations, update_trade_status, insert_trade};
+use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
+use chimera_operator::db::{init_pool, insert_trade, run_migrations, update_trade_status};
+use chimera_operator::engine::profit_targets::{ProfitTargetAction, ProfitTargetManager};
+use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -32,6 +32,7 @@ async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
     (pool, temp_dir)
 }
 
+#[allow(dead_code)]
 fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
     Arc::new(ProfitManagementConfig {
         hard_stop_loss: Decimal::from_str(hard_stop).unwrap(),
@@ -43,7 +44,7 @@ fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
 async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
-         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(address)
     .bind(wqs)
@@ -55,8 +56,15 @@ async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: 
 /// Insert a trade row so update_trade_status has something real to update.
 async fn seed_trade(pool: &chimera_operator::db::DbPool, trade_uuid: &str) {
     insert_trade(
-        pool, trade_uuid, "wallet_fix", "token_fix", Some("FIX"), "SHIELD", "BUY",
-        Decimal::from_str("1.0").unwrap(), "PENDING",
+        pool,
+        trade_uuid,
+        "wallet_fix",
+        "token_fix",
+        Some("FIX"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("1.0").unwrap(),
+        "PENDING",
     )
     .await
     .unwrap();
@@ -90,15 +98,25 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
     // Dynamic threshold at WQS=75: -20% (not hit at -2%)
     // Hard stop at -15% (after fix): not hit at -2%
     // Hard stop at +15.0 (with bug): -2.0 <= 15.0 → EXIT fires → BUG
-    price_cache.set_price(TOKEN, Decimal::from_str("100.00").unwrap(), PriceSource::Jupiter);
-    price_cache.set_price(TOKEN, Decimal::from_str("98.00").unwrap(), PriceSource::Jupiter);
-
-    let action = mgr.check_stop_loss(
-        "uuid-hard-stop-fix",
-        WALLET,
-        Decimal::from_str("100.00").unwrap(),
+    price_cache.set_price(
         TOKEN,
-    ).await;
+        Decimal::from_str("100.00").unwrap(),
+        PriceSource::Jupiter,
+    );
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("98.00").unwrap(),
+        PriceSource::Jupiter,
+    );
+
+    let action = mgr
+        .check_stop_loss(
+            "uuid-hard-stop-fix",
+            WALLET,
+            Decimal::from_str("100.00").unwrap(),
+            TOKEN,
+        )
+        .await;
 
     assert_eq!(
         action,
@@ -125,26 +143,30 @@ async fn should_fire_hard_stop_at_16pct_loss_with_default_config() {
 
     // With low WQS (threshold = -10%), the dynamic stop fires first at -10%.
     // Use a high WQS so dynamic threshold = -20%, making hard stop (-15%) fire first.
-    sqlx::query(
-        "UPDATE wallets SET wqs_score = 75.0 WHERE address = ?"
-    )
-    .bind(WALLET)
-    .execute(&pool)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE wallets SET wqs_score = 75.0 WHERE address = ?")
+        .bind(WALLET)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let cfg = Arc::new(ProfitManagementConfig::default());
     let mgr = StopLossManager::new(pool, cfg, price_cache.clone());
 
     // Entry = $100, Current = $84 → loss = -16% (exceeds hard stop of -15%)
-    price_cache.set_price(TOKEN, Decimal::from_str("84.00").unwrap(), PriceSource::Jupiter);
-
-    let action = mgr.check_stop_loss(
-        "uuid-hard-stop-16",
-        WALLET,
-        Decimal::from_str("100.00").unwrap(),
+    price_cache.set_price(
         TOKEN,
-    ).await;
+        Decimal::from_str("84.00").unwrap(),
+        PriceSource::Jupiter,
+    );
+
+    let action = mgr
+        .check_stop_loss(
+            "uuid-hard-stop-16",
+            WALLET,
+            Decimal::from_str("100.00").unwrap(),
+            TOKEN,
+        )
+        .await;
 
     assert_eq!(
         action,
@@ -183,24 +205,41 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
     });
     let mgr = ProfitTargetManager::new(pool, cfg, price_cache.clone());
 
-    price_cache.set_price(TOKEN, Decimal::from_str("1.00").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("1.00").unwrap(),
+        PriceSource::Jupiter,
+    );
     mgr.register_position(
         "uuid-ratchet-fix",
         Decimal::from_str("1.00").unwrap(),
         Decimal::from_str("5.0").unwrap(),
         TOKEN,
-    ).await;
+    )
+    .await;
 
     // Activate trailing stop at $1.20
-    price_cache.set_price(TOKEN, Decimal::from_str("1.20").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("1.20").unwrap(),
+        PriceSource::Jupiter,
+    );
     let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN).await;
 
     // New peak at $2.00 → correct ratcheted stop = $1.60
-    price_cache.set_price(TOKEN, Decimal::from_str("2.00").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("2.00").unwrap(),
+        PriceSource::Jupiter,
+    );
     let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN).await;
 
     // Price falls to $1.40 — below ratcheted stop $1.60 → must Exit
-    price_cache.set_price(TOKEN, Decimal::from_str("1.40").unwrap(), PriceSource::Jupiter);
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("1.40").unwrap(),
+        PriceSource::Jupiter,
+    );
     let action = mgr.check_targets("uuid-ratchet-fix", TOKEN).await;
 
     assert!(
@@ -232,7 +271,8 @@ async fn should_return_error_on_status_update_for_missing_uuid() {
         "QUEUED",
         None,
         None,
-    ).await;
+    )
+    .await;
 
     assert!(
         result.is_err(),

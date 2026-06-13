@@ -10,8 +10,9 @@ In production, this connects to:
 - On-chain token data for position tracking
 """
 
+import asyncio
 import os
-import requests
+import time
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -350,7 +351,7 @@ class WalletAnalyzer:
                         self._candidate_wallets = wallets[:self._max_wallets]
                         print(f"[Analyzer] Loaded {len(self._candidate_wallets)} wallets from {wallet_list_file}")
                     else:
-                        print(f"[Analyzer] Wallet list file empty, trying discovery...")
+                        print("[Analyzer] Wallet list file empty, trying discovery...")
                         await self._try_discover_wallets_async()
             except Exception as e:
                 print(f"[Analyzer] Warning: Failed to load wallet list: {e}")
@@ -420,12 +421,12 @@ class WalletAnalyzer:
                             WHERE status IN ('ACTIVE', 'CANDIDATE')
                             ORDER BY wqs_score DESC NULLS LAST
                             LIMIT ?
-                        """, (max_wallets,))
+                        """, (self._max_wallets,))
                         existing_wallets = [row[0] for row in cursor.fetchall()]
                         conn.close()
-                        
+
                         if existing_wallets:
-                            self._candidate_wallets = existing_wallets[:max_wallets]
+                            self._candidate_wallets = existing_wallets[:self._max_wallets]
                             print(f"[Analyzer] Loaded {len(self._candidate_wallets)} wallets from existing database ({db_path})")
                             return
                     else:
@@ -1054,7 +1055,7 @@ class WalletAnalyzer:
                                 # Check mint_authority (offset 0-3: MintAuthOption)
                                 # If mint_authority is None (0), supply is fixed (good)
                                 # If mint_authority exists (1), supply can be inflated (risky)
-                                mint_auth_opt = int.from_bytes(raw[0:4], 'little')
+                                int.from_bytes(raw[0:4], 'little')
                                 # Note: mint_authority = None (0) is actually SAFE (fixed supply)
                                 # mint_authority = Some(address) means supply can be minted (risky)
                                 # However, most legitimate tokens have mint_authority, so this is
@@ -1465,8 +1466,7 @@ class WalletAnalyzer:
             sell_trades = [t for t in sorted_trades if t.action == TradeAction.SELL]
             
             # Find tokens that have buys but may not have been fully sold
-            tokens_with_buys = set(t.token_address for t in buy_trades)
-            tokens_fully_sold = set()
+            set(t.token_address for t in buy_trades)
             
             # Track sell amounts per token (use Decimal)
             sell_amounts = {}
@@ -1640,23 +1640,22 @@ class WalletAnalyzer:
                         # Bag held > 30 days - apply penalty
                         bag_count += 1
 
-        # Reduce profit_factor by 10% per held bag (capped at 50% reduction)
-        if bag_count > 0:
-            bag_penalty = min(Decimal('0.5'), Decimal(bag_count) * Decimal('0.1'))
-            profit_factor = decimal_to_float(
-                (Decimal(str(profit_factor)) * (Decimal('1.0') - bag_penalty))
-            )
-
-
         avg_win = decimal_to_float(safe_decimal_divide(sum_wins, Decimal(str(len(wins))))) if wins else None
         avg_loss = decimal_to_float(safe_decimal_divide(sum_losses, Decimal(str(len(losses))))) if losses else None
-        
+
         # Profit Factor Calculation (Robust + Rug Aware)
         profit_factor = 0.0
         if sum_losses == Decimal('0'):
             profit_factor = 100.0 if sum_wins > Decimal('0') else 0.0
         else:
             profit_factor = decimal_to_float(safe_decimal_divide(sum_wins, sum_losses))
+
+        # Reduce profit_factor by 10% per held bag (capped at 50% reduction)
+        if bag_count > 0:
+            bag_penalty = min(Decimal('0.5'), Decimal(bag_count) * Decimal('0.1'))
+            profit_factor = decimal_to_float(
+                (Decimal(str(profit_factor)) * (Decimal('1.0') - bag_penalty))
+            )
 
         # Ensure pnls sum is computed with Decimal
         total_realized_pnl = sum(pnls, Decimal('0')) if pnls else Decimal('0')
@@ -1851,7 +1850,7 @@ class WalletAnalyzer:
         self._enrich_trades_with_realized_pnl(trades)
 
         # Build equity curve from realized PnL over SELL trades (use Decimal for precision)
-        equity = Decimal('0')
+        Decimal('0')
         peak = Decimal('0')
         max_dd = Decimal('0')
 

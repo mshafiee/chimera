@@ -6,17 +6,22 @@
 //! - Recovery threshold configuration
 
 use chimera_operator::engine::recovery::{RecoveryAction, DEFAULT_STUCK_THRESHOLD_SECS};
-use chrono::Utc;
 
 #[test]
 fn test_recovery_action_display() {
     assert_eq!(RecoveryAction::MarkedClosed.to_string(), "MARKED_CLOSED");
-    assert_eq!(RecoveryAction::RevertedToActive.to_string(), "REVERTED_TO_ACTIVE");
+    assert_eq!(
+        RecoveryAction::RevertedToActive.to_string(),
+        "REVERTED_TO_ACTIVE"
+    );
 }
 
 #[test]
 fn test_default_stuck_threshold() {
-    assert_eq!(DEFAULT_STUCK_THRESHOLD_SECS, 60, "Default stuck threshold should be 60 seconds");
+    assert_eq!(
+        DEFAULT_STUCK_THRESHOLD_SECS, 60,
+        "Default stuck threshold should be 60 seconds"
+    );
 }
 
 #[test]
@@ -25,7 +30,7 @@ fn test_recovery_action_variants() {
     let marked_closed = RecoveryAction::MarkedClosed;
     let reverted = RecoveryAction::RevertedToActive;
     let still_pending = RecoveryAction::StillPending;
-    
+
     // Verify they can be created and displayed
     assert!(!marked_closed.to_string().is_empty());
     assert!(!reverted.to_string().is_empty());
@@ -38,7 +43,7 @@ fn test_stuck_threshold_validation() {
     let stuck_seconds = 61;
     let threshold = DEFAULT_STUCK_THRESHOLD_SECS;
     let is_stuck = stuck_seconds > threshold;
-    
+
     assert!(is_stuck, "Position stuck for 61s should be detected");
 }
 
@@ -48,7 +53,7 @@ fn test_not_stuck_below_threshold() {
     let stuck_seconds = 59;
     let threshold = DEFAULT_STUCK_THRESHOLD_SECS;
     let is_stuck = stuck_seconds > threshold;
-    
+
     assert!(!is_stuck, "Position stuck for 59s should not be detected");
 }
 
@@ -56,6 +61,8 @@ fn test_not_stuck_below_threshold() {
 fn test_recovery_check_interval() {
     // Recovery should check every 30 seconds (from recovery.rs)
     const RECOVERY_CHECK_INTERVAL_SECS: u64 = 30;
-    assert_eq!(RECOVERY_CHECK_INTERVAL_SECS, 30, "Recovery check interval should be 30 seconds");
+    assert_eq!(
+        RECOVERY_CHECK_INTERVAL_SECS, 30,
+        "Recovery check interval should be 30 seconds"
+    );
 }
-

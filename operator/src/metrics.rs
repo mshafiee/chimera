@@ -7,13 +7,7 @@
 //! - Circuit breaker state gauge
 //! - Position count gauge
 
-use axum::{
-    extract::State,
-    http::StatusCode,
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntGauge, Opts, Registry, TextEncoder,
 };
@@ -122,10 +116,7 @@ impl MetricsState {
 
         // RPC latency histogram by endpoint
         let rpc_latency = HistogramVec::new(
-            HistogramOpts::new(
-                "chimera_rpc_latency_ms",
-                "RPC call latency in milliseconds",
-            ),
+            HistogramOpts::new("chimera_rpc_latency_ms", "RPC call latency in milliseconds"),
             &["endpoint", "method"],
         )
         .expect("Failed to create rpc_latency histogram");
@@ -185,10 +176,7 @@ impl MetricsState {
 
         // Cost per trade histogram (by cost type)
         let cost_per_trade = HistogramVec::new(
-            HistogramOpts::new(
-                "chimera_cost_per_trade_sol",
-                "Cost per trade in SOL",
-            ),
+            HistogramOpts::new("chimera_cost_per_trade_sol", "Cost per trade in SOL"),
             &["cost_type"], // "jito_tip", "dex_fee", "slippage", "total"
         )
         .expect("Failed to create cost_per_trade histogram");
@@ -289,7 +277,7 @@ mod tests {
         let state = MetricsState::new();
         state.queue_depth.set(42);
         assert_eq!(state.queue_depth.get(), 42);
-        
+
         state.rpc_health.set(1);
         assert_eq!(state.rpc_health.get(), 1);
     }

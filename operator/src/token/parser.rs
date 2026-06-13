@@ -14,11 +14,11 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Known safe token mints that are allowed to have freeze/mint authority
-/// 
+///
 /// These should match the constants in crate::constants::mints
 pub mod known_tokens {
     use crate::constants;
-    
+
     /// USDC mint address
     pub const USDC: &str = constants::mints::USDC;
     /// USDT mint address
@@ -95,8 +95,8 @@ impl Default for TokenSafetyConfig {
         Self {
             freeze_authority_whitelist: freeze_whitelist,
             mint_authority_whitelist: mint_whitelist,
-            min_liquidity_shield_usd: Decimal::from_str("12000.0").unwrap(),  // 20% buffer over 10k
-            min_liquidity_spear_usd: Decimal::from_str("6000.0").unwrap(),    // 20% buffer over 5k
+            min_liquidity_shield_usd: Decimal::from_str("12000.0").unwrap(), // 20% buffer over 10k
+            min_liquidity_spear_usd: Decimal::from_str("6000.0").unwrap(),   // 20% buffer over 5k
             honeypot_detection_enabled: true,
         }
     }
@@ -228,10 +228,7 @@ impl TokenParser {
         // Check if we have a full cached result
         if let Some(cached) = self.cache.get(&cache_key) {
             if cached.honeypot_checked && cached.liquidity_checked {
-                tracing::debug!(
-                    token = token_address,
-                    "Slow check using cached result"
-                );
+                tracing::debug!(token = token_address, "Slow check using cached result");
                 return Ok(cached);
             }
         }
@@ -269,16 +266,16 @@ impl TokenParser {
             }
         };
         if liquidity_usd < min_liquidity {
-                    return Ok(TokenSafetyResult {
-                        safe: false,
-                        rejection_reason: Some(format!(
-                            "Insufficient liquidity: ${:.2} < ${:.2} minimum",
-                            liquidity_usd, min_liquidity
-                        )),
-                        honeypot_checked: false,
-                        liquidity_checked: true,
-                        liquidity_usd: Some(liquidity_usd),
-                    });
+            return Ok(TokenSafetyResult {
+                safe: false,
+                rejection_reason: Some(format!(
+                    "Insufficient liquidity: ${:.2} < ${:.2} minimum",
+                    liquidity_usd, min_liquidity
+                )),
+                honeypot_checked: false,
+                liquidity_checked: true,
+                liquidity_usd: Some(liquidity_usd),
+            });
         }
 
         // Check liquidity/market cap ratio (Liquidity vs FDV)
@@ -337,10 +334,12 @@ impl TokenParser {
                     if !can_sell {
                         return Ok(TokenSafetyResult {
                             safe: false,
-                        rejection_reason: Some("Honeypot detected: sell simulation failed".to_string()),
-                        honeypot_checked: true,
-                        liquidity_checked: true,
-                        liquidity_usd: Some(liquidity_usd),
+                            rejection_reason: Some(
+                                "Honeypot detected: sell simulation failed".to_string(),
+                            ),
+                            honeypot_checked: true,
+                            liquidity_checked: true,
+                            liquidity_usd: Some(liquidity_usd),
                         });
                     }
                 }
@@ -429,26 +428,40 @@ mod tests {
     fn test_default_config_liquidity_thresholds() {
         let config = TokenSafetyConfig::default();
         // Default includes 20% buffer: 10k * 1.2 = 12k, 5k * 1.2 = 6k
-        assert_eq!(config.min_liquidity_shield_usd, Decimal::from_str("12000.0").unwrap(),
-            "Shield liquidity threshold should be $12,000 (10k + 20% buffer)");
-        assert_eq!(config.min_liquidity_spear_usd, Decimal::from_str("6000.0").unwrap(),
-            "Spear liquidity threshold should be $6,000 (5k + 20% buffer)");
+        assert_eq!(
+            config.min_liquidity_shield_usd,
+            Decimal::from_str("12000.0").unwrap(),
+            "Shield liquidity threshold should be $12,000 (10k + 20% buffer)"
+        );
+        assert_eq!(
+            config.min_liquidity_spear_usd,
+            Decimal::from_str("6000.0").unwrap(),
+            "Spear liquidity threshold should be $6,000 (5k + 20% buffer)"
+        );
     }
 
     #[test]
     fn test_default_config_whitelist() {
         let config = TokenSafetyConfig::default();
-        assert!(config.freeze_authority_whitelist.contains(known_tokens::USDC));
-        assert!(config.freeze_authority_whitelist.contains(known_tokens::USDT));
-        assert!(config.freeze_authority_whitelist.contains(known_tokens::WSOL));
+        assert!(config
+            .freeze_authority_whitelist
+            .contains(known_tokens::USDC));
+        assert!(config
+            .freeze_authority_whitelist
+            .contains(known_tokens::USDT));
+        assert!(config
+            .freeze_authority_whitelist
+            .contains(known_tokens::WSOL));
         assert!(config.mint_authority_whitelist.contains(known_tokens::USDC));
     }
 
     #[test]
     fn test_default_config_honeypot_enabled() {
         let config = TokenSafetyConfig::default();
-        assert!(config.honeypot_detection_enabled,
-            "Honeypot detection should be enabled by default");
+        assert!(
+            config.honeypot_detection_enabled,
+            "Honeypot detection should be enabled by default"
+        );
     }
 
     // ==========================================================================
@@ -469,7 +482,10 @@ mod tests {
     fn test_safety_result_unsafe() {
         let result = TokenSafetyResult::unsafe_with_reason("Freeze authority detected");
         assert!(!result.safe, "Unsafe result should have safe=false");
-        assert_eq!(result.rejection_reason, Some("Freeze authority detected".to_string()));
+        assert_eq!(
+            result.rejection_reason,
+            Some("Freeze authority detected".to_string())
+        );
     }
 
     // ==========================================================================
@@ -481,11 +497,14 @@ mod tests {
         let config = TokenSafetyConfig::default();
         let token_address = known_tokens::USDC;
         let has_freeze_authority = true;
-        
+
         let is_whitelisted = config.freeze_authority_whitelist.contains(token_address);
         let should_reject = has_freeze_authority && !is_whitelisted;
-        
-        assert!(!should_reject, "Whitelisted token with freeze authority should be allowed");
+
+        assert!(
+            !should_reject,
+            "Whitelisted token with freeze authority should be allowed"
+        );
     }
 
     #[test]
@@ -493,11 +512,14 @@ mod tests {
         let config = TokenSafetyConfig::default();
         let token_address = "RandomToken11111111111111111111111111111111";
         let has_freeze_authority = true;
-        
+
         let is_whitelisted = config.freeze_authority_whitelist.contains(token_address);
         let should_reject = has_freeze_authority && !is_whitelisted;
-        
-        assert!(should_reject, "Non-whitelisted token with freeze authority should be rejected");
+
+        assert!(
+            should_reject,
+            "Non-whitelisted token with freeze authority should be rejected"
+        );
     }
 
     #[test]
@@ -505,9 +527,13 @@ mod tests {
         let config = TokenSafetyConfig::default();
         let token_address = "RandomToken11111111111111111111111111111111";
         let has_freeze_authority = false;
-        
-        let should_reject = has_freeze_authority && !config.freeze_authority_whitelist.contains(token_address);
-        assert!(!should_reject, "Token without freeze authority should be allowed");
+
+        let should_reject =
+            has_freeze_authority && !config.freeze_authority_whitelist.contains(token_address);
+        assert!(
+            !should_reject,
+            "Token without freeze authority should be allowed"
+        );
     }
 
     // ==========================================================================
@@ -526,11 +552,14 @@ mod tests {
         let config = TokenSafetyConfig::default();
         let token_address = "RandomToken11111111111111111111111111111111";
         let has_mint_authority = true;
-        
+
         let is_whitelisted = config.mint_authority_whitelist.contains(token_address);
         let should_reject = has_mint_authority && !is_whitelisted;
-        
-        assert!(should_reject, "Non-whitelisted token with mint authority should be rejected");
+
+        assert!(
+            should_reject,
+            "Non-whitelisted token with mint authority should be rejected"
+        );
     }
 
     // ==========================================================================
@@ -550,7 +579,10 @@ mod tests {
         let config = TokenSafetyConfig::default();
         let liquidity_usd = Decimal::from(5_000u32);
         let should_reject = liquidity_usd < config.min_liquidity_shield_usd;
-        assert!(should_reject, "Shield with $5k liquidity should be rejected");
+        assert!(
+            should_reject,
+            "Shield with $5k liquidity should be rejected"
+        );
     }
 
     #[test]
@@ -585,8 +617,10 @@ mod tests {
     #[test]
     fn test_shield_threshold_higher_than_spear() {
         let config = TokenSafetyConfig::default();
-        assert!(config.min_liquidity_shield_usd > config.min_liquidity_spear_usd,
-            "Shield threshold should be higher than Spear (more conservative)");
+        assert!(
+            config.min_liquidity_shield_usd > config.min_liquidity_spear_usd,
+            "Shield threshold should be higher than Spear (more conservative)"
+        );
     }
 
     #[test]
@@ -595,7 +629,10 @@ mod tests {
         let min_liquidity_exit = 0.0_f64;
         let liquidity_usd = 100.0;
         let should_reject = liquidity_usd < min_liquidity_exit;
-        assert!(!should_reject, "Exit strategy should not have liquidity requirement");
+        assert!(
+            !should_reject,
+            "Exit strategy should not have liquidity requirement"
+        );
     }
 
     // ==========================================================================

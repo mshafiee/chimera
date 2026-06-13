@@ -54,13 +54,28 @@ impl std::fmt::Display for TripReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MaxLoss24h { loss, threshold } => {
-                write!(f, "24h loss ${:.2} exceeded threshold ${:.2}", loss, threshold)
+                write!(
+                    f,
+                    "24h loss ${:.2} exceeded threshold ${:.2}",
+                    loss, threshold
+                )
             }
             Self::ConsecutiveLosses { count, threshold } => {
-                write!(f, "{} consecutive losses exceeded threshold {}", count, threshold)
+                write!(
+                    f,
+                    "{} consecutive losses exceeded threshold {}",
+                    count, threshold
+                )
             }
-            Self::MaxDrawdown { drawdown, threshold } => {
-                write!(f, "Drawdown {:.1}% exceeded threshold {:.1}%", drawdown, threshold)
+            Self::MaxDrawdown {
+                drawdown,
+                threshold,
+            } => {
+                write!(
+                    f,
+                    "Drawdown {:.1}% exceeded threshold {:.1}%",
+                    drawdown, threshold
+                )
             }
             Self::Manual { reason } => write!(f, "Manual: {}", reason),
         }
@@ -277,7 +292,10 @@ impl CircuitBreaker {
             Some("TRIPPED"),
             "COOLDOWN",
             "SYSTEM",
-            Some(&format!("Cooldown for {} minutes", self.config.cooldown_minutes)),
+            Some(&format!(
+                "Cooldown for {} minutes",
+                self.config.cooldown_minutes
+            )),
         )
         .await?;
 
@@ -414,7 +432,10 @@ mod tests {
             threshold: 500.0,
         };
         let display = reason.to_string();
-        assert!(display.contains("525.50"), "Should include actual loss amount");
+        assert!(
+            display.contains("525.50"),
+            "Should include actual loss amount"
+        );
         assert!(display.contains("500"), "Should include threshold");
         assert!(display.contains("24h"), "Should indicate 24h period");
     }
@@ -428,7 +449,10 @@ mod tests {
         let display = reason.to_string();
         assert!(display.contains("6"), "Should include actual count");
         assert!(display.contains("5"), "Should include threshold");
-        assert!(display.contains("consecutive"), "Should indicate consecutive losses");
+        assert!(
+            display.contains("consecutive"),
+            "Should indicate consecutive losses"
+        );
     }
 
     #[test]
@@ -449,7 +473,10 @@ mod tests {
         };
         let display = reason.to_string();
         assert!(display.contains("Manual"), "Should indicate manual trip");
-        assert!(display.contains("Emergency halt"), "Should include reason text");
+        assert!(
+            display.contains("Emergency halt"),
+            "Should include reason text"
+        );
     }
 
     // ==========================================================================
@@ -462,7 +489,10 @@ mod tests {
         let loss = 500.0_f64;
         let threshold = 500.0_f64;
         let should_trip = loss.abs() >= threshold;
-        assert!(should_trip, "Exact boundary ($500) should trigger circuit breaker");
+        assert!(
+            should_trip,
+            "Exact boundary ($500) should trigger circuit breaker"
+        );
     }
 
     #[test]
@@ -470,7 +500,10 @@ mod tests {
         let loss = 499.99_f64;
         let threshold = 500.0_f64;
         let should_trip = loss.abs() >= threshold;
-        assert!(!should_trip, "Below threshold should not trigger circuit breaker");
+        assert!(
+            !should_trip,
+            "Below threshold should not trigger circuit breaker"
+        );
     }
 
     #[test]
@@ -478,7 +511,10 @@ mod tests {
         let consecutive: u32 = 5;
         let threshold: u32 = 5;
         let should_trip = consecutive >= threshold;
-        assert!(should_trip, "Exact 5 consecutive losses should trigger circuit breaker");
+        assert!(
+            should_trip,
+            "Exact 5 consecutive losses should trigger circuit breaker"
+        );
     }
 
     #[test]
@@ -494,7 +530,10 @@ mod tests {
         let drawdown = 15.0_f64;
         let threshold = 15.0_f64;
         let should_trip = drawdown >= threshold;
-        assert!(should_trip, "Exact 15% drawdown should trigger circuit breaker");
+        assert!(
+            should_trip,
+            "Exact 15% drawdown should trigger circuit breaker"
+        );
     }
 
     #[test]
@@ -523,7 +562,10 @@ mod tests {
         let pnl_24h = 1000.0_f64; // Profit of $1000
         let threshold = 500.0_f64;
         let should_trip = pnl_24h < 0.0 && pnl_24h.abs() >= threshold;
-        assert!(!should_trip, "Positive PnL should never trip loss-based circuit breaker");
+        assert!(
+            !should_trip,
+            "Positive PnL should never trip loss-based circuit breaker"
+        );
     }
 
     #[test]
@@ -566,8 +608,11 @@ mod tests {
         let elapsed = Utc::now().signed_duration_since(tripped_at);
         let remaining_secs = (cooldown_duration - elapsed).num_seconds().max(0);
         // Should be approximately 10 minutes = 600 seconds remaining
-        assert!(remaining_secs > 500 && remaining_secs < 700, 
-            "Should have ~10 minutes remaining, got {} seconds", remaining_secs);
+        assert!(
+            remaining_secs > 500 && remaining_secs < 700,
+            "Should have ~10 minutes remaining, got {} seconds",
+            remaining_secs
+        );
     }
 
     // ==========================================================================

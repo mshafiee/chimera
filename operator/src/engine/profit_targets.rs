@@ -5,15 +5,15 @@
 //! - Trailing stops (after +50%, set trailing stop at -20% from peak)
 //! - Time-based exits (auto-exit after 24h if profitable)
 
+use crate::config::ProfitManagementConfig;
+use crate::db::DbPool;
+use crate::engine::market_regime::MarketRegimeDetector;
+use crate::engine::momentum_exit::MomentumExit;
+use crate::price_cache::PriceCache;
+use rust_decimal::prelude::*;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use rust_decimal::prelude::*;
-use crate::config::ProfitManagementConfig;
-use crate::db::DbPool;
-use crate::price_cache::PriceCache;
-use crate::engine::momentum_exit::MomentumExit;
-use crate::engine::market_regime::MarketRegimeDetector;
 
 /// Profit target state
 pub struct ProfitTargetManager {
@@ -133,7 +133,8 @@ impl ProfitTargetManager {
         entry_amount_sol: Decimal,
         token_address: &str,
     ) {
-        let current_price = self.price_cache
+        let current_price = self
+            .price_cache
             .get_price_usd(token_address)
             .unwrap_or(entry_price);
 
@@ -216,18 +217,19 @@ impl ProfitTargetManager {
         // Ratchet trailing stop price on new high
         if state.trailing_stop_active && is_new_peak {
             let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
-            state.trailing_stop_price = state.current_price * (Decimal::ONE - trailing_distance_ratio);
+            state.trailing_stop_price =
+                state.current_price * (Decimal::ONE - trailing_distance_ratio);
         }
 
         // Refined time-based exit logic
         if let Ok(elapsed) = state.entry_time.elapsed() {
             let elapsed_hours = elapsed.as_secs() / 3600;
-            
+
             // Use Decimal for threshold comparisons to avoid f64 precision issues
             let ten_percent = Decimal::from_str("10.0").unwrap_or(Decimal::ZERO);
             let five_percent = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
             let zero = Decimal::ZERO;
-            
+
             // If profitable >10%: Extend to 48h
             if profit_percent > ten_percent {
                 if elapsed_hours >= 48 {
@@ -255,7 +257,12 @@ impl ProfitTargetManager {
         // Check momentum exit (early exit on negative momentum)
         if let Some(ref momentum) = self.momentum_exit {
             if momentum
-                .should_exit(trade_uuid, token_address, state.entry_price, state.entry_time)
+                .should_exit(
+                    trade_uuid,
+                    token_address,
+                    state.entry_price,
+                    state.entry_time,
+                )
                 .await
             {
                 tracing::info!(

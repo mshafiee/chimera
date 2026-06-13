@@ -3,9 +3,9 @@
 //! Queries Raydium and Orca pools directly via RPC to get accurate liquidity data.
 
 use crate::error::AppError;
+use rust_decimal::Decimal;
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use rust_decimal::Decimal;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -132,8 +132,14 @@ impl PoolEnumerator {
 
     /// Get liquidity from both Raydium and Orca pools
     pub async fn get_combined_liquidity(&self, token_address: &str) -> Result<Decimal, AppError> {
-        let raydium_liq = self.get_raydium_liquidity(token_address).await.unwrap_or(Decimal::ZERO);
-        let orca_liq = self.get_orca_liquidity(token_address).await.unwrap_or(Decimal::ZERO);
+        let raydium_liq = self
+            .get_raydium_liquidity(token_address)
+            .await
+            .unwrap_or(Decimal::ZERO);
+        let orca_liq = self
+            .get_orca_liquidity(token_address)
+            .await
+            .unwrap_or(Decimal::ZERO);
 
         Ok(raydium_liq + orca_liq)
     }
@@ -186,21 +192,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_enumerator_creation() {
-        let rpc_client = Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
+        let rpc_client = Arc::new(RpcClient::new(
+            "https://api.mainnet-beta.solana.com".to_string(),
+        ));
         let enumerator = PoolEnumerator::new(rpc_client, 100, 300);
-        
+
         // Test that it was created successfully
         assert_eq!(enumerator.cache_ttl.as_secs(), 300);
     }
 
     #[tokio::test]
     async fn test_cache_operations() {
-        let rpc_client = Arc::new(RpcClient::new("https://api.mainnet-beta.solana.com".to_string()));
+        let rpc_client = Arc::new(RpcClient::new(
+            "https://api.mainnet-beta.solana.com".to_string(),
+        ));
         let enumerator = PoolEnumerator::new(rpc_client, 10, 60);
-        
+
         // Test caching
-        enumerator.cache_result("test_token", Decimal::from(1000), vec![]).await;
-        
+        enumerator
+            .cache_result("test_token", Decimal::from(1000), vec![])
+            .await;
+
         // Should be able to retrieve from cache
         let cached = enumerator.get_from_cache("test_token").await;
         assert!(cached.is_some());

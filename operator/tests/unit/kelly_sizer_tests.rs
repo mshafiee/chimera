@@ -44,22 +44,62 @@ mod tests {
         // Insert 6 winning trades (+0.1 SOL each) and 4 losing trades (-0.05 SOL each)
         for i in 0..6u32 {
             let uuid = format!("win-{}", i);
-            db::insert_trade(&pool, &uuid, wallet, token, Some("BONK"), "SHIELD", "BUY", Decimal::from_str("0.1").unwrap(), "CLOSED").await.unwrap();
-            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("0.1").unwrap()).await.unwrap();
+            db::insert_trade(
+                &pool,
+                &uuid,
+                wallet,
+                token,
+                Some("BONK"),
+                "SHIELD",
+                "BUY",
+                Decimal::from_str("0.1").unwrap(),
+                "CLOSED",
+            )
+            .await
+            .unwrap();
+            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("0.1").unwrap())
+                .await
+                .unwrap();
         }
         for i in 0..4u32 {
             let uuid = format!("loss-{}", i);
-            db::insert_trade(&pool, &uuid, wallet, token, Some("BONK"), "SHIELD", "BUY", Decimal::from_str("0.05").unwrap(), "CLOSED").await.unwrap();
-            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("-0.05").unwrap()).await.unwrap();
+            db::insert_trade(
+                &pool,
+                &uuid,
+                wallet,
+                token,
+                Some("BONK"),
+                "SHIELD",
+                "BUY",
+                Decimal::from_str("0.05").unwrap(),
+                "CLOSED",
+            )
+            .await
+            .unwrap();
+            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("-0.05").unwrap())
+                .await
+                .unwrap();
         }
 
         let sizer = KellySizer::new(pool);
         let result = sizer.calculate_kelly(wallet, 30).await.unwrap();
 
-        assert!(result.full_kelly > Decimal::ZERO, "full_kelly should be positive with positive edge");
-        assert!(result.conservative_kelly > Decimal::ZERO, "conservative_kelly should be positive");
-        assert!(result.conservative_kelly <= result.full_kelly, "conservative should be <= full kelly");
-        assert!(result.win_rate > Decimal::ZERO && result.win_rate <= Decimal::ONE, "win_rate should be 0-1");
+        assert!(
+            result.full_kelly > Decimal::ZERO,
+            "full_kelly should be positive with positive edge"
+        );
+        assert!(
+            result.conservative_kelly > Decimal::ZERO,
+            "conservative_kelly should be positive"
+        );
+        assert!(
+            result.conservative_kelly <= result.full_kelly,
+            "conservative should be <= full kelly"
+        );
+        assert!(
+            result.win_rate > Decimal::ZERO && result.win_rate <= Decimal::ONE,
+            "win_rate should be 0-1"
+        );
     }
 
     #[tokio::test]
@@ -73,20 +113,56 @@ mod tests {
         // 3 wins of 0.05 and 7 losses of 0.1 → negative edge
         for i in 0..3u32 {
             let uuid = format!("neg-win-{}", i);
-            db::insert_trade(&pool, &uuid, wallet, token, Some("BONK"), "SHIELD", "BUY", Decimal::from_str("0.05").unwrap(), "CLOSED").await.unwrap();
-            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("0.05").unwrap()).await.unwrap();
+            db::insert_trade(
+                &pool,
+                &uuid,
+                wallet,
+                token,
+                Some("BONK"),
+                "SHIELD",
+                "BUY",
+                Decimal::from_str("0.05").unwrap(),
+                "CLOSED",
+            )
+            .await
+            .unwrap();
+            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("0.05").unwrap())
+                .await
+                .unwrap();
         }
         for i in 0..7u32 {
             let uuid = format!("neg-loss-{}", i);
-            db::insert_trade(&pool, &uuid, wallet, token, Some("BONK"), "SHIELD", "BUY", Decimal::from_str("0.1").unwrap(), "CLOSED").await.unwrap();
-            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("-0.1").unwrap()).await.unwrap();
+            db::insert_trade(
+                &pool,
+                &uuid,
+                wallet,
+                token,
+                Some("BONK"),
+                "SHIELD",
+                "BUY",
+                Decimal::from_str("0.1").unwrap(),
+                "CLOSED",
+            )
+            .await
+            .unwrap();
+            db::update_trade_net_pnl(&pool, &uuid, Decimal::from_str("-0.1").unwrap())
+                .await
+                .unwrap();
         }
 
         let sizer = KellySizer::new(pool);
         let result = sizer.calculate_kelly(wallet, 30).await.unwrap();
 
         // Negative edge: kelly is clamped to zero (implementation uses .max(Decimal::ZERO))
-        assert_eq!(result.full_kelly, Decimal::ZERO, "full_kelly should be 0 when edge is negative");
-        assert_eq!(result.recommended_size_percent, Decimal::ZERO, "Position size must be 0 with negative edge");
+        assert_eq!(
+            result.full_kelly,
+            Decimal::ZERO,
+            "full_kelly should be 0 when edge is negative"
+        );
+        assert_eq!(
+            result.recommended_size_percent,
+            Decimal::ZERO,
+            "Position size must be 0 with negative edge"
+        );
     }
 }

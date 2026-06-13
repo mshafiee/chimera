@@ -1,8 +1,8 @@
 //! Signal models - represents incoming webhook signals
 
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use rust_decimal::Decimal;
 
 /// Trading strategy types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

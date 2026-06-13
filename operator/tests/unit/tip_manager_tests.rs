@@ -5,7 +5,6 @@
 //! - Percentile calculation with history
 //! - Tip capping (floor, ceiling, percent max)
 
-use chimera_operator::engine::tips::TipManager;
 use chimera_operator::JitoConfig;
 use rust_decimal::prelude::*;
 
@@ -14,7 +13,10 @@ const MIN_SAMPLES_FOR_PERCENTILE: u32 = 10;
 
 #[test]
 fn test_cold_start_multiplier() {
-    assert_eq!(COLD_START_MULTIPLIER, 2.0, "Cold start multiplier should be 2.0");
+    assert_eq!(
+        COLD_START_MULTIPLIER, 2.0,
+        "Cold start multiplier should be 2.0"
+    );
 }
 
 #[test]
@@ -30,7 +32,10 @@ fn test_cold_start_tip_calculation() {
     };
 
     let cold_tip = config.tip_floor_sol.to_f64().unwrap() * COLD_START_MULTIPLIER;
-    assert!((cold_tip - 0.002).abs() < 0.0001, "Cold start tip should be 0.002 SOL");
+    assert!(
+        (cold_tip - 0.002).abs() < 0.0001,
+        "Cold start tip should be 0.002 SOL"
+    );
 }
 
 #[test]
@@ -47,7 +52,10 @@ fn test_cold_start_shield_tip() {
 
     // Shield uses floor * 2
     let tip = config.tip_floor_sol.to_f64().unwrap() * COLD_START_MULTIPLIER;
-    assert!((tip - 0.002).abs() < 0.0001, "Shield cold start tip should be 0.002");
+    assert!(
+        (tip - 0.002).abs() < 0.0001,
+        "Shield cold start tip should be 0.002"
+    );
 }
 
 #[test]
@@ -64,7 +72,10 @@ fn test_cold_start_spear_tip() {
 
     // Spear uses floor * 2 * 1.5
     let tip = config.tip_floor_sol.to_f64().unwrap() * COLD_START_MULTIPLIER * 1.5;
-    assert!((tip - 0.003).abs() < 0.0001, "Spear cold start tip should be 0.003");
+    assert!(
+        (tip - 0.003).abs() < 0.0001,
+        "Spear cold start tip should be 0.003"
+    );
 }
 
 #[test]
@@ -81,12 +92,18 @@ fn test_cold_start_exit_tip() {
 
     // Exit uses ceiling during cold start
     let tip = config.tip_ceiling_sol.to_f64().unwrap();
-    assert!((tip - 0.01).abs() < 0.0001, "Exit cold start tip should be ceiling");
+    assert!(
+        (tip - 0.01).abs() < 0.0001,
+        "Exit cold start tip should be ceiling"
+    );
 }
 
 #[test]
 fn test_min_samples_for_percentile() {
-    assert_eq!(MIN_SAMPLES_FOR_PERCENTILE, 10, "Minimum samples should be 10");
+    assert_eq!(
+        MIN_SAMPLES_FOR_PERCENTILE, 10,
+        "Minimum samples should be 10"
+    );
 }
 
 #[test]
@@ -106,8 +123,7 @@ fn test_exit_cold_start_with_enough_samples() {
 #[test]
 fn test_percentile_50th_calculation() {
     let mut tips: Vec<f64> = vec![
-        0.001, 0.002, 0.003, 0.004, 0.005,
-        0.006, 0.007, 0.008, 0.009, 0.010,
+        0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010,
     ];
     tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -115,14 +131,16 @@ fn test_percentile_50th_calculation() {
     let index = (tips.len() * percentile / 100).min(tips.len() - 1);
     let tip = tips[index];
 
-    assert!((tip - 0.006).abs() < 0.0001, "50th percentile should be 0.006");
+    assert!(
+        (tip - 0.006).abs() < 0.0001,
+        "50th percentile should be 0.006"
+    );
 }
 
 #[test]
 fn test_percentile_25th_calculation() {
     let mut tips: Vec<f64> = vec![
-        0.001, 0.002, 0.003, 0.004, 0.005,
-        0.006, 0.007, 0.008, 0.009, 0.010,
+        0.001, 0.002, 0.003, 0.004, 0.005, 0.006, 0.007, 0.008, 0.009, 0.010,
     ];
     tips.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
@@ -130,7 +148,10 @@ fn test_percentile_25th_calculation() {
     let index = (tips.len() * percentile / 100).min(tips.len() - 1);
     let tip = tips[index];
 
-    assert!((tip - 0.003).abs() < 0.0001, "25th percentile should be 0.003");
+    assert!(
+        (tip - 0.003).abs() < 0.0001,
+        "25th percentile should be 0.003"
+    );
 }
 
 #[test]
@@ -148,7 +169,10 @@ fn test_tip_ceiling_cap() {
     let calculated_tip: f64 = 0.015; // Above ceiling
     let capped_tip = calculated_tip.min(config.tip_ceiling_sol.to_f64().unwrap());
 
-    assert!((capped_tip - 0.01).abs() < 0.0001, "Tip should be capped at ceiling");
+    assert!(
+        (capped_tip - 0.01).abs() < 0.0001,
+        "Tip should be capped at ceiling"
+    );
 }
 
 #[test]
@@ -166,7 +190,10 @@ fn test_tip_floor_minimum() {
     let calculated_tip: f64 = 0.0005; // Below floor
     let floored_tip = calculated_tip.max(config.tip_floor_sol.to_f64().unwrap());
 
-    assert!((floored_tip - 0.001).abs() < 0.0001, "Tip should be floored at minimum");
+    assert!(
+        (floored_tip - 0.001).abs() < 0.0001,
+        "Tip should be floored at minimum"
+    );
 }
 
 #[test]
@@ -186,5 +213,8 @@ fn test_tip_percent_max_cap() {
     let max_tip_by_percent = trade_amount_sol * config.tip_percent_max.to_f64().unwrap();
     let capped_tip = calculated_tip.min(max_tip_by_percent);
 
-    assert!((capped_tip - 0.10).abs() < 0.0001, "Tip should be capped at 10% of trade");
+    assert!(
+        (capped_tip - 0.10).abs() < 0.0001,
+        "Tip should be capped at 10% of trade"
+    );
 }

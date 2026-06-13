@@ -34,7 +34,7 @@ impl PriorityQueue {
     pub fn new(capacity: usize, load_shed_threshold_percent: u32) -> Self {
         // High-WQS SPEAR queue capacity is 10% of total capacity (minimum 10, maximum 50)
         let spear_high_wqs_capacity = (capacity / 10).clamp(10, 50);
-        
+
         Self {
             high: Mutex::new(VecDeque::new()),
             medium: Mutex::new(VecDeque::new()),
@@ -48,8 +48,8 @@ impl PriorityQueue {
 
     /// Get total queue length
     pub fn len(&self) -> usize {
-        self.high.lock().len() 
-            + self.medium.lock().len() 
+        self.high.lock().len()
+            + self.medium.lock().len()
             + self.spear_high_wqs.lock().len()
             + self.low.lock().len()
     }
@@ -100,7 +100,10 @@ impl PriorityQueue {
                                     queue_depth = self.len(),
                                     "High-WQS SPEAR queue full and load shedding active, dropping signal"
                                 );
-                                return Err("Load shedding active: SPEAR signals temporarily rejected".to_string());
+                                return Err(
+                                    "Load shedding active: SPEAR signals temporarily rejected"
+                                        .to_string(),
+                                );
                             }
                             // Fall through to regular SPEAR queue
                         } else {
@@ -117,7 +120,7 @@ impl PriorityQueue {
                         }
                     }
                 }
-                
+
                 // Check load shedding for regular Spear signals (low WQS or no WQS data)
                 if self.should_shed_load() {
                     tracing::warn!(
@@ -126,7 +129,9 @@ impl PriorityQueue {
                         capacity = self.capacity,
                         "Load shedding: dropping low-WQS Spear signal"
                     );
-                    return Err("Load shedding active: Spear signals temporarily rejected".to_string());
+                    return Err(
+                        "Load shedding active: Spear signals temporarily rejected".to_string()
+                    );
                 }
 
                 if self.len() >= self.capacity {
@@ -216,8 +221,14 @@ mod tests {
         let queue = PriorityQueue::new(100, 80);
 
         // Push in reverse priority order
-        queue.push(make_signal(Strategy::Spear), None).await.unwrap();
-        queue.push(make_signal(Strategy::Shield), None).await.unwrap();
+        queue
+            .push(make_signal(Strategy::Spear), None)
+            .await
+            .unwrap();
+        queue
+            .push(make_signal(Strategy::Shield), None)
+            .await
+            .unwrap();
         queue.push(make_signal(Strategy::Exit), None).await.unwrap();
 
         // Should pop in priority order
@@ -240,7 +251,10 @@ mod tests {
 
         // Fill up to threshold
         for _ in 0..8 {
-            queue.push(make_signal(Strategy::Shield), None).await.unwrap();
+            queue
+                .push(make_signal(Strategy::Shield), None)
+                .await
+                .unwrap();
         }
 
         // Low-WQS Spear signals should be rejected now
@@ -249,10 +263,16 @@ mod tests {
         assert!(result.unwrap_err().contains("Load shedding"));
 
         // But high-WQS SPEAR should still work (routed to dedicated queue)
-        assert!(queue.push(make_signal(Strategy::Spear), Some(75.0)).await.is_ok());
-        
+        assert!(queue
+            .push(make_signal(Strategy::Spear), Some(75.0))
+            .await
+            .is_ok());
+
         // Shield and Exit should still work
-        assert!(queue.push(make_signal(Strategy::Shield), None).await.is_ok());
+        assert!(queue
+            .push(make_signal(Strategy::Shield), None)
+            .await
+            .is_ok());
         assert!(queue.push(make_signal(Strategy::Exit), None).await.is_ok());
     }
 
@@ -260,8 +280,14 @@ mod tests {
     async fn test_capacity_limit() {
         let queue = PriorityQueue::new(2, 100); // No load shedding
 
-        queue.push(make_signal(Strategy::Shield), None).await.unwrap();
-        queue.push(make_signal(Strategy::Shield), None).await.unwrap();
+        queue
+            .push(make_signal(Strategy::Shield), None)
+            .await
+            .unwrap();
+        queue
+            .push(make_signal(Strategy::Shield), None)
+            .await
+            .unwrap();
 
         // Third should fail - queue full
         let result = queue.push(make_signal(Strategy::Shield), None).await;
@@ -274,15 +300,21 @@ mod tests {
         let queue = PriorityQueue::new(100, 80);
 
         // High-WQS SPEAR should go to dedicated queue
-        queue.push(make_signal(Strategy::Spear), Some(75.0)).await.unwrap();
-        
+        queue
+            .push(make_signal(Strategy::Spear), Some(75.0))
+            .await
+            .unwrap();
+
         let depths = queue.depths();
         assert_eq!(depths.spear_high_wqs, 1);
         assert_eq!(depths.low, 0);
 
         // Low-WQS SPEAR should go to regular queue
-        queue.push(make_signal(Strategy::Spear), Some(50.0)).await.unwrap();
-        
+        queue
+            .push(make_signal(Strategy::Spear), Some(50.0))
+            .await
+            .unwrap();
+
         let depths = queue.depths();
         assert_eq!(depths.spear_high_wqs, 1);
         assert_eq!(depths.low, 1);
@@ -290,7 +322,7 @@ mod tests {
         // Pop should prioritize high-WQS SPEAR over regular SPEAR
         let s1 = queue.pop().await.unwrap();
         assert_eq!(s1.payload.strategy, Strategy::Spear);
-        
+
         // Next pop should get regular SPEAR
         let s2 = queue.pop().await.unwrap();
         assert_eq!(s2.payload.strategy, Strategy::Spear);

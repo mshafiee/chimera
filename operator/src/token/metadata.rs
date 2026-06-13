@@ -6,19 +6,19 @@
 //! - Honeypot detection via sell simulation
 
 use crate::error::{AppError, AppResult};
-use crate::token::pools::PoolEnumerator;
 use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority, RequestWeight};
+use crate::token::pools::PoolEnumerator;
+use bincode;
 use parking_lot::RwLock;
+use reqwest;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use reqwest;
-use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
-use bincode;
 
 /// Transaction simulation result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,10 +71,14 @@ impl TokenMetadataFetcher {
     pub fn new(rpc_url: &str) -> Self {
         Self::new_with_rate_limiter(rpc_url, None)
     }
-    
+
     /// Create a new metadata fetcher with optional rate limiter
     pub fn new_with_rate_limiter(rpc_url: &str, rate_limiter: Option<Arc<RateLimiter>>) -> Self {
-        Self::new_with_rate_limiter_and_jupiter(rpc_url, rate_limiter, "https://api.jup.ag/swap/v1".to_string())
+        Self::new_with_rate_limiter_and_jupiter(
+            rpc_url,
+            rate_limiter,
+            "https://api.jup.ag/swap/v1".to_string(),
+        )
     }
 
     /// Create a new metadata fetcher with optional rate limiter and Jupiter API URL
@@ -91,8 +95,8 @@ impl TokenMetadataFetcher {
             metadata_cache: RwLock::new(HashMap::new()),
             pool_enumerator: Some(Arc::new(PoolEnumerator::new(
                 rpc_client_arc,
-                100,  // cache capacity
-                300,  // cache TTL seconds
+                100, // cache capacity
+                300, // cache TTL seconds
             ))),
             rate_limiter,
             jupiter_api_url,
@@ -109,13 +113,17 @@ impl TokenMetadataFetcher {
     pub fn with_client(rpc_client: Arc<RpcClient>) -> Self {
         Self::with_client_and_rate_limiter(rpc_client, None)
     }
-    
+
     /// Create from an existing RPC client with optional rate limiter
     pub fn with_client_and_rate_limiter(
         rpc_client: Arc<RpcClient>,
         rate_limiter: Option<Arc<RateLimiter>>,
     ) -> Self {
-        Self::with_client_rate_limiter_and_jupiter(rpc_client, rate_limiter, "https://api.jup.ag/swap/v1".to_string())
+        Self::with_client_rate_limiter_and_jupiter(
+            rpc_client,
+            rate_limiter,
+            "https://api.jup.ag/swap/v1".to_string(),
+        )
     }
 
     /// Create from an existing RPC client with optional rate limiter and Jupiter API URL
@@ -124,11 +132,7 @@ impl TokenMetadataFetcher {
         rate_limiter: Option<Arc<RateLimiter>>,
         jupiter_api_url: String,
     ) -> Self {
-        let pool_enumerator = Some(Arc::new(PoolEnumerator::new(
-            rpc_client.clone(),
-            100,
-            300,
-        )));
+        let pool_enumerator = Some(Arc::new(PoolEnumerator::new(rpc_client.clone(), 100, 300)));
 
         Self {
             rpc_client,
@@ -176,9 +180,8 @@ impl TokenMetadataFetcher {
 
     /// Fetch metadata directly from RPC
     async fn fetch_metadata_from_rpc(&self, token_address: &str) -> AppResult<TokenMetadata> {
-        let mint_pubkey = Pubkey::from_str(token_address).map_err(|e| {
-            AppError::Validation(format!("Invalid token address: {}", e))
-        })?;
+        let mint_pubkey = Pubkey::from_str(token_address)
+            .map_err(|e| AppError::Validation(format!("Invalid token address: {}", e)))?;
 
         // Clone what we need for the blocking task
         let rpc_client = self.rpc_client.clone();
@@ -240,7 +243,7 @@ impl TokenMetadataFetcher {
     pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<Decimal> {
         // Get token metadata (includes supply and decimals)
         let metadata = self.get_metadata(token_address).await?;
-        
+
         // Get current price from Jupiter
         let price_url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
         let response = reqwest::get(&price_url)
@@ -260,22 +263,27 @@ impl TokenMetadataFetcher {
             .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter response: {}", e)))?;
 
         // Extract price and convert to Decimal immediately
-        let price_usd_f64 = if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
-            if let Some(price) = token_data.get("price").and_then(|p| p.as_f64()) {
-                price
+        let price_usd_f64 =
+            if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
+                if let Some(price) = token_data.get("price").and_then(|p| p.as_f64()) {
+                    price
+                } else {
+                    // Try alternative field names
+                    token_data
+                        .get("priceUsd")
+                        .and_then(|p| p.as_f64())
+                        .ok_or_else(|| {
+                            AppError::Parse("No price found in Jupiter response".to_string())
+                        })?
+                }
             } else {
-                // Try alternative field names
-                token_data.get("priceUsd")
-                    .and_then(|p| p.as_f64())
-                    .ok_or_else(|| AppError::Parse("No price found in Jupiter response".to_string()))?
-            }
-        } else {
-            return Err(AppError::Parse("Token not found in Jupiter response".to_string()));
-        };
+                return Err(AppError::Parse(
+                    "Token not found in Jupiter response".to_string(),
+                ));
+            };
 
         // Convert price to Decimal immediately to avoid precision loss
-        let price_usd = Decimal::from_f64_retain(price_usd_f64)
-            .unwrap_or(Decimal::ZERO);
+        let price_usd = Decimal::from_f64_retain(price_usd_f64).unwrap_or(Decimal::ZERO);
 
         // Calculate FDV = price * total_supply (adjusted for decimals)
         // Use Decimal for all calculations to maintain precision
@@ -301,6 +309,7 @@ impl TokenMetadataFetcher {
     /// If a token is not indexed by DexScreener, behavior depends on `allow_unlisted_heuristic`:
     /// - false (default): returns $0, causing the BUY safety gate to reject the token.
     /// - true: falls back to a supply-based heuristic estimate (legacy behavior).
+    ///
     /// EXIT/SELL paths are unaffected — their liquidity threshold is $0.
     pub async fn get_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         let dex_liquidity = self
@@ -386,7 +395,10 @@ impl TokenMetadataFetcher {
             .fold(0f64, f64::max);
 
         if max_liq == 0.0 {
-            tracing::debug!(token = token_address, "DexScreener: no Solana pairs with liquidity");
+            tracing::debug!(
+                token = token_address,
+                "DexScreener: no Solana pairs with liquidity"
+            );
         }
 
         Ok(Decimal::from_f64_retain(max_liq).unwrap_or(Decimal::ZERO))
@@ -420,7 +432,7 @@ impl TokenMetadataFetcher {
         // Jupiter Price API may include liquidity data in the response
         // For now, we'll use a placeholder - Jupiter's actual liquidity endpoint may differ
         // In production, check Jupiter's API documentation for liquidity fields
-        
+
         // Try to extract liquidity from response
         if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
             // Check for liquidity fields (may vary by API version)
@@ -478,7 +490,10 @@ impl TokenMetadataFetcher {
     /// This creates a minimal test sell transaction (token -> SOL) and simulates it
     /// via RPC. If the simulation fails, the token is likely a honeypot.
     pub async fn simulate_sell(&self, token_address: &str) -> AppResult<bool> {
-        tracing::debug!(token = token_address, "Simulating sell transaction for honeypot detection");
+        tracing::debug!(
+            token = token_address,
+            "Simulating sell transaction for honeypot detection"
+        );
 
         // Build a minimal test sell transaction
         // We'll use Jupiter Swap API to get a swap transaction, then simulate it
@@ -495,26 +510,24 @@ impl TokenMetadataFetcher {
             .await?;
 
         // Simulate the transaction via RPC
-        let simulation_result = self
-            .simulate_transaction_rpc(&swap_tx)
-            .await?;
+        let simulation_result = self.simulate_transaction_rpc(&swap_tx).await?;
 
         if let Some(err) = simulation_result.err {
             let err_str = format!("{:?}", err).to_lowercase();
-            
+
             // Check logs for specific failure reasons
             let logs = simulation_result.logs.join("\n").to_lowercase();
 
             // If the failure is due to us using a dummy wallet with no funds,
             // we cannot determine if it's a honeypot.
-            // In high-frequency context, false positives (rejecting good tokens) 
-            // are better than false negatives (buying honeypots), 
+            // In high-frequency context, false positives (rejecting good tokens)
+            // are better than false negatives (buying honeypots),
             // BUT "Insufficient Funds" is guaranteed to happen with a dummy wallet.
-            
-            if logs.contains("insufficient funds") 
-               || logs.contains("account not found") 
-               || err_str.contains("accountnotfound") {
-                
+
+            if logs.contains("insufficient funds")
+                || logs.contains("account not found")
+                || err_str.contains("accountnotfound")
+            {
                 tracing::warn!(
                     token = token_address,
                     "Honeypot check inconclusive (insufficient funds in sim). Allowing trade cautiously."
@@ -525,13 +538,16 @@ impl TokenMetadataFetcher {
 
             // If it's a custom program error (usually 0x1770 or similar for frozen assets), reject
             if logs.contains("custom program error") || logs.contains("transfer failed") {
-                tracing::warn!(token = token_address, "Honeypot detected via simulation error");
+                tracing::warn!(
+                    token = token_address,
+                    "Honeypot detected via simulation error"
+                );
                 return Ok(false);
             }
-            
+
             // Default to safe if error is obscure, or unsafe if you want max security
             // Here we default to unsafe for unknown errors
-            return Ok(false); 
+            return Ok(false);
         }
 
         // If we got here, simulation succeeded or was inconclusive (but allowed)
@@ -617,7 +633,10 @@ impl TokenMetadataFetcher {
     }
 
     /// Simulate a transaction via RPC
-    async fn simulate_transaction_rpc(&self, transaction_base64: &str) -> AppResult<SimulationResult> {
+    async fn simulate_transaction_rpc(
+        &self,
+        transaction_base64: &str,
+    ) -> AppResult<SimulationResult> {
         // Rate limit simulation calls (they are heavier than standard RPC calls)
         // Simulation calls typically count 5-10x more towards rate limits on Helius/RPC providers
         if let Some(ref rate_limiter) = self.rate_limiter {
@@ -639,10 +658,13 @@ impl TokenMetadataFetcher {
         // Run simulation in blocking task
         let result = tokio::task::spawn_blocking(move || {
             // Deserialize transaction
-            let transaction: solana_sdk::transaction::Transaction = bincode::serde::decode_from_slice(&tx_bytes_clone, bincode::config::standard())
-                .map_err(|e| AppError::Parse(format!("Failed to deserialize transaction: {}", e)))?
-                .0;
-            
+            let transaction: solana_sdk::transaction::Transaction =
+                bincode::serde::decode_from_slice(&tx_bytes_clone, bincode::config::standard())
+                    .map_err(|e| {
+                        AppError::Parse(format!("Failed to deserialize transaction: {}", e))
+                    })?
+                    .0;
+
             // Use Solana RPC client's simulate_transaction method
             rpc_client
                 .simulate_transaction(&transaction)
@@ -659,7 +681,7 @@ impl TokenMetadataFetcher {
                 "error": format!("{:?}", e)
             })
         });
-        
+
         let simulation_result = SimulationResult {
             err: err_value,
             logs: result.value.logs.unwrap_or_default(),
@@ -717,8 +739,8 @@ mod tests {
         // Option tag = 1 means Some
         data[0] = 1;
         // Fill pubkey with non-zero bytes
-        for i in 4..36 {
-            data[i] = (i - 4) as u8;
+        for (i, byte) in data[4..36].iter_mut().enumerate() {
+            *byte = i as u8;
         }
 
         let result = parse_optional_pubkey(&data);

@@ -30,9 +30,7 @@ pub struct V0Components {
 }
 
 /// Extract all necessary components from a V0 message
-pub fn extract_v0_components(
-    v0_message: &v0::Message,
-) -> Result<V0Components, String> {
+pub fn extract_v0_components(v0_message: &v0::Message) -> Result<V0Components, String> {
     // V0 message fields are accessed directly, not via methods
     // Get payer (first account in account_keys)
     let payer = *v0_message
@@ -168,7 +166,7 @@ pub async fn reconstruct_v0_message_with_blockhash(
     // Use the message's account_keys field to get all accounts in order
     // This includes static accounts + resolved ALT accounts in the correct order
     let all_account_keys: Vec<Pubkey> = v0_message.account_keys.clone();
-    
+
     // Get message header for signer/writable determination (field, not method)
     let header = &v0_message.header;
     let num_required_signatures = header.num_required_signatures as usize;
@@ -178,7 +176,7 @@ pub async fn reconstruct_v0_message_with_blockhash(
     let num_static_accounts = components.static_account_keys.len();
 
     // Convert CompiledInstructions to Instructions by resolving account indices
-    use solana_sdk::instruction::{Instruction, AccountMeta};
+    use solana_sdk::instruction::{AccountMeta, Instruction};
     let mut resolved_instructions = Vec::new();
 
     for compiled_ix in &components.instructions {
@@ -196,16 +194,17 @@ pub async fn reconstruct_v0_message_with_blockhash(
                 let account_key = *all_account_keys
                     .get(idx as usize)
                     .ok_or_else(|| format!("Account index {} out of range", idx))?;
-                
+
                 // Determine if account is a signer (must be in first num_required_signatures)
                 let is_signer = (idx as usize) < num_required_signatures;
-                
+
                 // Determine if account is writable based on message structure
                 let is_writable = if (idx as usize) < num_static_accounts {
                     // Static account: check header structure
-                    (idx as usize) < num_writable_signed || 
-                    ((idx as usize) >= num_required_signatures && 
-                     (idx as usize) < num_static_accounts - num_readonly_unsigned_accounts)
+                    (idx as usize) < num_writable_signed
+                        || ((idx as usize) >= num_required_signatures
+                            && (idx as usize)
+                                < num_static_accounts - num_readonly_unsigned_accounts)
                 } else {
                     // Account from ALT: check if it's in writable_indexes of any ALT lookup
                     let mut current_alt_start = num_static_accounts;
@@ -216,14 +215,16 @@ pub async fn reconstruct_v0_message_with_blockhash(
                             .ok_or_else(|| {
                                 format!("ALT account {} not found", alt_lookup.account_key)
                             })?;
-                        
+
                         let alt_size = alt_account.addresses.len();
-                        if (idx as usize) >= current_alt_start && 
-                           (idx as usize) < current_alt_start + alt_size {
+                        if (idx as usize) >= current_alt_start
+                            && (idx as usize) < current_alt_start + alt_size
+                        {
                             // This account is from this ALT
                             let alt_index = (idx as usize) - current_alt_start;
                             // Check if this index is in writable_indexes
-                            let is_writable = alt_lookup.writable_indexes.contains(&(alt_index as u8));
+                            let is_writable =
+                                alt_lookup.writable_indexes.contains(&(alt_index as u8));
                             return Ok::<AccountMeta, String>(AccountMeta {
                                 pubkey: account_key,
                                 is_signer,
@@ -235,7 +236,7 @@ pub async fn reconstruct_v0_message_with_blockhash(
                     // Default to writable if we can't determine (conservative)
                     true
                 };
-                
+
                 Ok(AccountMeta {
                     pubkey: account_key,
                     is_signer,

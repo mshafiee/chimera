@@ -2,14 +2,21 @@
 //!
 //! Detects when tracked wallets exit positions and generates EXIT signals.
 
+use crate::monitoring::transaction_parser::{ParsedSwap, SwapDirection};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::monitoring::transaction_parser::{ParsedSwap, SwapDirection};
 
 /// Exit detector state
 pub struct ExitDetector {
     /// Pending exits (wallet -> token -> exit time)
-    pending_exits: Arc<RwLock<std::collections::HashMap<String, std::collections::HashMap<String, std::time::SystemTime>>>>,
+    pending_exits: Arc<
+        RwLock<
+            std::collections::HashMap<
+                String,
+                std::collections::HashMap<String, std::time::SystemTime>,
+            >,
+        >,
+    >,
 }
 
 /// Exit signal
@@ -66,7 +73,9 @@ impl ExitDetector {
 
         // Store pending exit
         let mut pending = self.pending_exits.write().await;
-        let wallet_exits = pending.entry(wallet_address.to_string()).or_insert_with(std::collections::HashMap::new);
+        let wallet_exits = pending
+            .entry(wallet_address.to_string())
+            .or_insert_with(std::collections::HashMap::new);
         wallet_exits.insert(exited_token.clone(), std::time::SystemTime::now());
 
         Some(ExitSignal {
@@ -80,7 +89,7 @@ impl ExitDetector {
     /// Check if exit signal should be generated (after delay)
     pub async fn should_generate_exit(&self, signal: &ExitSignal) -> bool {
         let pending = self.pending_exits.read().await;
-        
+
         if let Some(wallet_exits) = pending.get(&signal.wallet_address) {
             if let Some(&exit_time) = wallet_exits.get(&signal.token_address) {
                 if let Ok(elapsed) = exit_time.elapsed() {

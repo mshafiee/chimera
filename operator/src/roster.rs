@@ -76,9 +76,7 @@ fn normalize_sqlite_type(ty: &str) -> &str {
 
 /// Validate that the attached roster database's wallets table schema
 /// matches the expected schema from database/schema/wallets.sql
-async fn validate_wallets_schema(
-    conn: &mut sqlx::SqliteConnection,
-) -> AppResult<()> {
+async fn validate_wallets_schema(conn: &mut sqlx::SqliteConnection) -> AppResult<()> {
     // Query table_info for the attached database
     // PRAGMA table_info returns: (cid, name, type, notnull, dflt_value, pk)
     #[allow(clippy::type_complexity)]
@@ -86,17 +84,17 @@ async fn validate_wallets_schema(
         sqlx::query_as("PRAGMA new_roster.table_info(wallets)")
             .fetch_all(&mut *conn)
             .await?;
-    
+
     // Build map of actual columns
     let mut actual_columns: HashMap<String, String> = HashMap::new();
     for (_, name, col_type, _, _, _) in columns {
         actual_columns.insert(name.to_lowercase(), col_type.to_uppercase());
     }
-    
+
     // Validate each expected column exists with correct type
     let mut missing = Vec::new();
     let mut type_mismatches = Vec::new();
-    
+
     for (expected_name, expected_type) in EXPECTED_WALLETS_COLUMNS {
         let key = expected_name.to_lowercase();
         match actual_columns.get(&key) {
@@ -106,16 +104,12 @@ async fn validate_wallets_schema(
                 let normalized_expected = normalize_sqlite_type(expected_type);
                 let normalized_actual = normalize_sqlite_type(actual_type);
                 if normalized_expected != normalized_actual {
-                    type_mismatches.push((
-                        *expected_name,
-                        *expected_type,
-                        actual_type.clone(),
-                    ));
+                    type_mismatches.push((*expected_name, *expected_type, actual_type.clone()));
                 }
             }
         }
     }
-    
+
     // Check for extra columns (warn but don't fail)
     let expected_names: HashSet<String> = EXPECTED_WALLETS_COLUMNS
         .iter()
@@ -126,7 +120,7 @@ async fn validate_wallets_schema(
         .filter(|k| !expected_names.contains(*k))
         .cloned()
         .collect();
-    
+
     if !missing.is_empty() || !type_mismatches.is_empty() {
         let mut error_msg = String::from("Schema mismatch detected in roster database:\n");
         if !missing.is_empty() {
@@ -135,20 +129,23 @@ async fn validate_wallets_schema(
         if !type_mismatches.is_empty() {
             error_msg.push_str("  Type mismatches:\n");
             for (name, expected, actual) in type_mismatches {
-                error_msg.push_str(&format!("    {}: expected {}, got {}\n", name, expected, actual));
+                error_msg.push_str(&format!(
+                    "    {}: expected {}, got {}\n",
+                    name, expected, actual
+                ));
             }
         }
         error_msg.push_str("\nExpected schema is defined in database/schema/wallets.sql");
         return Err(crate::error::AppError::Internal(error_msg));
     }
-    
+
     if !extra.is_empty() {
         warn!(
             extra_columns = ?extra,
             "Roster database has extra columns not in expected schema"
         );
     }
-    
+
     Ok(())
 }
 
@@ -208,8 +205,9 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
             Ok(_) => break,
             Err(e) if retries > 0 => {
                 if let Some(sqlite_err) = e.as_database_error() {
-                    if sqlite_err.message().contains("database is locked") || 
-                       sqlite_err.message().contains("SQLITE_BUSY") {
+                    if sqlite_err.message().contains("database is locked")
+                        || sqlite_err.message().contains("SQLITE_BUSY")
+                    {
                         retries -= 1;
                         warn!(
                             retries_left = retries,
@@ -228,10 +226,9 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
     info!("Attached roster database");
 
     // Step 2: Run integrity check on attached database
-    let integrity_result: Vec<(String,)> =
-        sqlx::query_as("PRAGMA new_roster.integrity_check")
-            .fetch_all(&mut *conn)
-            .await?;
+    let integrity_result: Vec<(String,)> = sqlx::query_as("PRAGMA new_roster.integrity_check")
+        .fetch_all(&mut *conn)
+        .await?;
 
     let integrity_ok = integrity_result
         .first()
@@ -254,7 +251,7 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
 
     // Step 2.5: Check if new_roster has wallets table
     let table_check: Result<(i32,), _> = sqlx::query_as(
-        "SELECT COUNT(*) FROM new_roster.sqlite_master WHERE type='table' AND name='wallets'"
+        "SELECT COUNT(*) FROM new_roster.sqlite_master WHERE type='table' AND name='wallets'",
     )
     .fetch_one(&mut *conn)
     .await;
@@ -266,7 +263,8 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
 
         return Err(crate::error::AppError::Internal(
             "Roster database missing 'wallets' table. Ensure Scout's RosterWriter \
-            creates the table using the schema from database/schema/wallets.sql".to_string(),
+            creates the table using the schema from database/schema/wallets.sql"
+                .to_string(),
         ));
     }
 
@@ -301,10 +299,10 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
 
     let batch_size = 500;
     let mut offset = 0;
-    
+
     // Step 6: Merge in batches to prevent locking the DB for too long
     // Using a limit/offset strategy
-    
+
     // Define a struct to hold the row data (sqlx only supports tuples up to 9-16 elements)
     #[derive(sqlx::FromRow)]
     struct RosterTransferRow {
@@ -407,21 +405,21 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
             .execute(&mut *tx)
             .await?;
         }
-        
+
         tx.commit().await?;
-        
+
         offset += batch_size;
-        
+
         // Yield to allow other readers/writers
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        
+
         info!(
             merged = offset.min(new_count),
             total = new_count,
             "Roster merge progress"
         );
     }
-    
+
     // Log success (no single result object anymore, since we batched)
     info!(
         wallets_merged = new_count,
@@ -472,10 +470,9 @@ pub async fn validate_roster(pool: &DbPool, roster_path: &Path) -> AppResult<boo
     }
 
     // Check integrity
-    let integrity_result: Vec<(String,)> =
-        sqlx::query_as("PRAGMA check_roster.integrity_check")
-            .fetch_all(&mut *conn)
-            .await?;
+    let integrity_result: Vec<(String,)> = sqlx::query_as("PRAGMA check_roster.integrity_check")
+        .fetch_all(&mut *conn)
+        .await?;
 
     let is_valid = integrity_result
         .first()

@@ -39,7 +39,7 @@ impl VolumeCache {
         let mut history = self.volume_history.write();
         let token_history = history.entry(token_address.to_string()).or_default();
         token_history.push_back((now, volume_usd));
-        
+
         // Keep only last 24 hours
         let cutoff = now - Duration::hours(24);
         while let Some(front) = token_history.front() {
@@ -57,14 +57,14 @@ impl VolumeCache {
     pub fn get_24h_average_volume(&self, token_address: &str) -> Option<Decimal> {
         let history = self.volume_history.read();
         let token_history = history.get(token_address)?;
-        
+
         if token_history.is_empty() {
             return None;
         }
-        
+
         let total_volume: Decimal = token_history.iter().map(|(_, volume)| *volume).sum();
         let count = Decimal::from(token_history.len());
-        
+
         Some(total_volume / count)
     }
 
@@ -96,9 +96,3 @@ impl Default for VolumeCache {
         Self::new()
     }
 }
-
-
-
-
-
-

@@ -2,8 +2,8 @@
 
 use super::{Action, Signal, Strategy};
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 
 /// Trade status representing the state machine
 ///
@@ -399,22 +399,34 @@ mod tests {
 
     #[test]
     fn test_closed_is_terminal() {
-        assert!(TradeStatus::Closed.is_terminal(), "CLOSED should be terminal");
+        assert!(
+            TradeStatus::Closed.is_terminal(),
+            "CLOSED should be terminal"
+        );
     }
 
     #[test]
     fn test_dead_letter_is_terminal() {
-        assert!(TradeStatus::DeadLetter.is_terminal(), "DEAD_LETTER should be terminal");
+        assert!(
+            TradeStatus::DeadLetter.is_terminal(),
+            "DEAD_LETTER should be terminal"
+        );
     }
 
     #[test]
     fn test_active_not_terminal() {
-        assert!(!TradeStatus::Active.is_terminal(), "ACTIVE should not be terminal");
+        assert!(
+            !TradeStatus::Active.is_terminal(),
+            "ACTIVE should not be terminal"
+        );
     }
 
     #[test]
     fn test_pending_not_terminal() {
-        assert!(!TradeStatus::Pending.is_terminal(), "PENDING should not be terminal");
+        assert!(
+            !TradeStatus::Pending.is_terminal(),
+            "PENDING should not be terminal"
+        );
     }
 
     // ==========================================================================
@@ -423,17 +435,26 @@ mod tests {
 
     #[test]
     fn test_active_is_active_position() {
-        assert!(TradeStatus::Active.is_active_position(), "ACTIVE is an active position");
+        assert!(
+            TradeStatus::Active.is_active_position(),
+            "ACTIVE is an active position"
+        );
     }
 
     #[test]
     fn test_exiting_is_active_position() {
-        assert!(TradeStatus::Exiting.is_active_position(), "EXITING is an active position (still holding)");
+        assert!(
+            TradeStatus::Exiting.is_active_position(),
+            "EXITING is an active position (still holding)"
+        );
     }
 
     #[test]
     fn test_closed_not_active_position() {
-        assert!(!TradeStatus::Closed.is_active_position(), "CLOSED is not an active position");
+        assert!(
+            !TradeStatus::Closed.is_active_position(),
+            "CLOSED is not an active position"
+        );
     }
 
     // ==========================================================================
@@ -442,22 +463,55 @@ mod tests {
 
     #[test]
     fn test_status_from_string_uppercase() {
-        assert_eq!("PENDING".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
-        assert_eq!("QUEUED".parse::<TradeStatus>().unwrap(), TradeStatus::Queued);
-        assert_eq!("EXECUTING".parse::<TradeStatus>().unwrap(), TradeStatus::Executing);
-        assert_eq!("ACTIVE".parse::<TradeStatus>().unwrap(), TradeStatus::Active);
-        assert_eq!("EXITING".parse::<TradeStatus>().unwrap(), TradeStatus::Exiting);
-        assert_eq!("CLOSED".parse::<TradeStatus>().unwrap(), TradeStatus::Closed);
-        assert_eq!("FAILED".parse::<TradeStatus>().unwrap(), TradeStatus::Failed);
+        assert_eq!(
+            "PENDING".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Pending
+        );
+        assert_eq!(
+            "QUEUED".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Queued
+        );
+        assert_eq!(
+            "EXECUTING".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Executing
+        );
+        assert_eq!(
+            "ACTIVE".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Active
+        );
+        assert_eq!(
+            "EXITING".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Exiting
+        );
+        assert_eq!(
+            "CLOSED".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Closed
+        );
+        assert_eq!(
+            "FAILED".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Failed
+        );
         assert_eq!("RETRY".parse::<TradeStatus>().unwrap(), TradeStatus::Retry);
-        assert_eq!("DEAD_LETTER".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
+        assert_eq!(
+            "DEAD_LETTER".parse::<TradeStatus>().unwrap(),
+            TradeStatus::DeadLetter
+        );
     }
 
     #[test]
     fn test_status_from_string_lowercase() {
-        assert_eq!("pending".parse::<TradeStatus>().unwrap(), TradeStatus::Pending);
-        assert_eq!("active".parse::<TradeStatus>().unwrap(), TradeStatus::Active);
-        assert_eq!("dead_letter".parse::<TradeStatus>().unwrap(), TradeStatus::DeadLetter);
+        assert_eq!(
+            "pending".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Pending
+        );
+        assert_eq!(
+            "active".parse::<TradeStatus>().unwrap(),
+            TradeStatus::Active
+        );
+        assert_eq!(
+            "dead_letter".parse::<TradeStatus>().unwrap(),
+            TradeStatus::DeadLetter
+        );
     }
 
     #[test]
@@ -472,19 +526,28 @@ mod tests {
 
     #[test]
     fn test_max_retry_attempts_constant() {
-        assert_eq!(MAX_RETRY_ATTEMPTS, 3, "Max retry attempts should be 3 per PDD");
+        assert_eq!(
+            MAX_RETRY_ATTEMPTS, 3,
+            "Max retry attempts should be 3 per PDD"
+        );
     }
 
     #[test]
     fn test_max_retries_exceeded() {
         let retry_count: u32 = 3;
-        assert!(retry_count >= MAX_RETRY_ATTEMPTS, "3 retries should exceed max of 3");
+        assert!(
+            retry_count >= MAX_RETRY_ATTEMPTS,
+            "3 retries should exceed max of 3"
+        );
     }
 
     #[test]
     fn test_max_retries_not_exceeded() {
         let retry_count: u32 = 2;
-        assert!(retry_count < MAX_RETRY_ATTEMPTS, "2 retries should not exceed max");
+        assert!(
+            retry_count < MAX_RETRY_ATTEMPTS,
+            "2 retries should not exceed max"
+        );
     }
 
     // ==========================================================================

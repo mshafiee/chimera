@@ -10,7 +10,7 @@ use rust_decimal::Decimal;
 #[ignore] // Requires network access - run with: cargo test -- --ignored
 async fn test_dex_comparison_jupiter() {
     let comparator = DexComparator::new();
-    
+
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     let amount_sol = Decimal::from(1u64);
@@ -26,7 +26,7 @@ async fn test_dex_comparison_jupiter() {
             println!("Total cost: {} SOL", dex_result.total_cost_sol);
             println!("Fee: {} SOL", dex_result.fee_sol);
             println!("Slippage: {} SOL", dex_result.slippage_sol);
-            
+
             assert_eq!(dex_result.selected_dex, "Jupiter");
             assert!(dex_result.total_cost_sol > Decimal::ZERO);
             assert!(dex_result.fee_sol > Decimal::ZERO);
@@ -42,7 +42,7 @@ async fn test_dex_comparison_jupiter() {
 #[ignore]
 async fn test_dex_comparison_caching() {
     let comparator = DexComparator::new();
-    
+
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     let amount_sol = Decimal::from(1u64);
@@ -68,7 +68,7 @@ async fn test_dex_comparison_caching() {
 #[ignore]
 async fn test_dex_comparison_multiple_dexs() {
     let comparator = DexComparator::new();
-    
+
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
     let amount_sol = Decimal::from(1u64);
@@ -82,13 +82,13 @@ async fn test_dex_comparison_multiple_dexs() {
         Ok(dex_result) => {
             println!("Selected DEX: {}", dex_result.selected_dex);
             println!("Total cost: {} SOL", dex_result.total_cost_sol);
-            
+
             // Should select one of the DEXs
             assert!(
-                dex_result.selected_dex == "Jupiter" ||
-                dex_result.selected_dex == "Raydium" ||
-                dex_result.selected_dex == "Orca" ||
-                dex_result.selected_dex == "Meteora"
+                dex_result.selected_dex == "Jupiter"
+                    || dex_result.selected_dex == "Raydium"
+                    || dex_result.selected_dex == "Orca"
+                    || dex_result.selected_dex == "Meteora"
             );
         }
         Err(e) => {
@@ -101,7 +101,7 @@ async fn test_dex_comparison_multiple_dexs() {
 #[tokio::test]
 async fn test_dex_comparison_fallback() {
     let comparator = DexComparator::new();
-    
+
     // Use invalid token addresses to trigger fallback
     let invalid_token1 = "InvalidToken111111111111111111111111111111";
     let invalid_token2 = "InvalidToken222222222222222222222222222222";
@@ -115,12 +115,12 @@ async fn test_dex_comparison_fallback() {
     // Should still return a result — either a real quote or the Jupiter fallback
     assert!(result.is_ok(), "Should fallback gracefully");
     let dex_result = result.unwrap();
-    assert!(!dex_result.selected_dex.is_empty(), "Selected DEX should not be empty");
-    assert!(dex_result.total_cost_sol >= rust_decimal::Decimal::ZERO, "Total cost should be non-negative");
+    assert!(
+        !dex_result.selected_dex.is_empty(),
+        "Selected DEX should not be empty"
+    );
+    assert!(
+        dex_result.total_cost_sol >= rust_decimal::Decimal::ZERO,
+        "Total cost should be non-negative"
+    );
 }
-
-
-
-
-
-

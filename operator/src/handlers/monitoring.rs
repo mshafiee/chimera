@@ -2,18 +2,18 @@
 //!
 //! Handles Helius webhook endpoint and monitoring status
 
+use crate::models::{Action, Signal, SignalPayload, Strategy};
+use crate::monitoring::transaction_parser::parse_helius_webhook;
+use crate::monitoring::HeliusWebhookPayload;
+use crate::monitoring::MonitoringState;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Json,
 };
 use serde::Serialize;
-use std::sync::Arc;
 use sqlx;
-use crate::monitoring::HeliusWebhookPayload;
-use crate::monitoring::MonitoringState;
-use crate::monitoring::transaction_parser::parse_helius_webhook;
-use crate::models::{Signal, SignalPayload, Strategy, Action};
+use std::sync::Arc;
 
 /// Helius webhook endpoint
 pub async fn helius_webhook_handler(
@@ -34,7 +34,8 @@ pub async fn helius_webhook_handler(
     // Parse webhook to extract swap information
     if let Ok(Some(swap)) = parse_helius_webhook(&payload) {
         // Find wallet address from account data
-        let wallet_address = payload.account_data
+        let wallet_address = payload
+            .account_data
             .iter()
             .find_map(|acc| {
                 if acc.account != payload.signature {
@@ -48,7 +49,7 @@ pub async fn helius_webhook_handler(
         if !wallet_address.is_empty() {
             // Check if wallet exists in database
             let wallet_opt = crate::db::get_wallet_by_address(&state.db, &wallet_address).await;
-            
+
             // If wallet doesn't exist, automatically add it as CANDIDATE
             let wallet = if let Ok(Some(w)) = wallet_opt {
                 w
@@ -58,22 +59,23 @@ pub async fn helius_webhook_handler(
                     wallet = %wallet_address,
                     "New wallet detected, adding to database"
                 );
-                
+
                 // Add wallet with minimal info (will be analyzed by Scout later)
                 let _ = crate::db::upsert_wallet(
                     &state.db,
                     &wallet_address,
-                    None, // wqs_score - will be calculated by Scout
-                    None, // roi_7d
-                    None, // roi_30d
-                    Some(1), // trade_count_30d - at least 1 trade detected
-                    None, // win_rate
-                    None, // max_drawdown_30d
+                    None,                 // wqs_score - will be calculated by Scout
+                    None,                 // roi_7d
+                    None,                 // roi_30d
+                    Some(1),              // trade_count_30d - at least 1 trade detected
+                    None,                 // win_rate
+                    None,                 // max_drawdown_30d
                     Some(swap.amount_in), // avg_trade_size_sol
                     Some(&chrono::Utc::now().to_rfc3339()), // last_trade_at
                     Some("Auto-added from webhook detection"), // notes
-                ).await;
-                
+                )
+                .await;
+
                 // Fetch the newly added wallet
                 match crate::db::get_wallet_by_address(&state.db, &wallet_address).await {
                     Ok(Some(w)) => w,
@@ -86,7 +88,7 @@ pub async fn helius_webhook_handler(
                     }
                 }
             };
-            
+
             // Only process signals from ACTIVE wallets
             if wallet.status == "ACTIVE" {
                 // Generate signal
@@ -101,7 +103,6 @@ pub async fn helius_webhook_handler(
                 } else {
                     Strategy::Spear
                 };
-
 
                 let target_token = if direction == Action::Buy {
                     swap.token_out.clone()
@@ -160,7 +161,12 @@ pub async fn get_monitoring_status(
     let rpc_credits = state.rpc_rate_limiter.credit_usage();
 
     Json(MonitoringStatus {
-        enabled: state.config.monitoring.as_ref().map(|m| m.enabled).unwrap_or(false),
+        enabled: state
+            .config
+            .monitoring
+            .as_ref()
+            .map(|m| m.enabled)
+            .unwrap_or(false),
         webhook_rate,
         rpc_rate,
         webhook_credits,
@@ -168,7 +174,7 @@ pub async fn get_monitoring_status(
         active_wallets: {
             // Query active wallets count from database
             match sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM wallet_monitoring WHERE monitoring_enabled = 1"
+                "SELECT COUNT(*) FROM wallet_monitoring WHERE monitoring_enabled = 1",
             )
             .fetch_one(&state.db)
             .await
@@ -241,7 +247,8 @@ pub async fn enable_wallet_monitoring(
 
     // Register Helius webhook for this wallet
     let wallets = vec![wallet_address.clone()];
-    let webhook_id = match state.helius_client
+    let webhook_id = match state
+        .helius_client
         .register_webhook(&wallets, webhook_url)
         .await
     {
@@ -257,13 +264,9 @@ pub async fn enable_wallet_monitoring(
     };
 
     // Update database
-    if let Err(e) = crate::db::upsert_wallet_monitoring(
-        &state.db,
-        &wallet_address,
-        Some(&webhook_id),
-        true,
-    )
-    .await
+    if let Err(e) =
+        crate::db::upsert_wallet_monitoring(&state.db, &wallet_address, Some(&webhook_id), true)
+            .await
     {
         tracing::error!(
             wallet = %wallet_address,
@@ -292,7 +295,9 @@ pub async fn disable_wallet_monitoring(
     tracing::info!(wallet = %wallet_address, "Disable monitoring requested");
 
     // Get current monitoring record
-    let monitoring = match crate::db::get_wallet_monitoring_by_address(&state.db, &wallet_address).await {
+    let monitoring = match crate::db::get_wallet_monitoring_by_address(&state.db, &wallet_address)
+        .await
+    {
         Ok(Some(m)) => m,
         Ok(None) => {
             tracing::warn!(wallet = %wallet_address, "Wallet monitoring not found");
@@ -327,7 +332,7 @@ pub async fn disable_wallet_monitoring(
     if let Err(e) = crate::db::upsert_wallet_monitoring(
         &state.db,
         &wallet_address,
-        None, // Clear webhook_id
+        None,  // Clear webhook_id
         false, // Disable monitoring
     )
     .await

@@ -41,16 +41,12 @@ pub async fn wallet_auth(
 ) -> Result<impl IntoResponse, AppError> {
     // Verify the message contains expected format
     if !req.message.contains("Chimera Dashboard Authentication") {
-        return Err(AppError::Auth(
-            "Invalid authentication message".to_string(),
-        ));
+        return Err(AppError::Auth("Invalid authentication message".to_string()));
     }
 
     // Verify the wallet address in message matches the provided wallet address
     if !req.message.contains(&req.wallet_address) {
-        return Err(AppError::Auth(
-            "Wallet address mismatch".to_string(),
-        ));
+        return Err(AppError::Auth("Wallet address mismatch".to_string()));
     }
 
     // Decode signature
@@ -59,12 +55,10 @@ pub async fn wallet_auth(
         .map_err(|_| AppError::Auth("Invalid signature encoding".to_string()))?;
 
     // Verify signature using Solana SDK
-    use solana_sdk::{
-        pubkey::Pubkey,
-        signature::Signature,
-    };
+    use solana_sdk::{pubkey::Pubkey, signature::Signature};
 
-    let pubkey = req.wallet_address
+    let pubkey = req
+        .wallet_address
         .parse::<Pubkey>()
         .map_err(|_| AppError::Auth("Invalid wallet address format".to_string()))?;
 
@@ -96,23 +90,21 @@ pub async fn wallet_auth(
 /// Check if wallet is registered as admin
 async fn check_wallet_role(db: &SqlitePool, wallet_address: &str) -> Result<String, AppError> {
     // Check admin_wallets table
-    let result = sqlx::query_scalar::<_, String>(
-        "SELECT role FROM admin_wallets WHERE wallet_address = ?",
-    )
-    .bind(wallet_address)
-    .fetch_optional(db)
-    .await?;
+    let result =
+        sqlx::query_scalar::<_, String>("SELECT role FROM admin_wallets WHERE wallet_address = ?")
+            .bind(wallet_address)
+            .fetch_optional(db)
+            .await?;
 
     match result {
         Some(role) => Ok(role),
         None => {
             // Check if wallet is in wallets table (readonly access for tracked wallets)
-            let in_roster = sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM wallets WHERE address = ?",
-            )
-            .bind(wallet_address)
-            .fetch_one(db)
-            .await?;
+            let in_roster =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallets WHERE address = ?")
+                    .bind(wallet_address)
+                    .fetch_one(db)
+                    .await?;
 
             if in_roster > 0 {
                 Ok("readonly".to_string())
@@ -137,8 +129,8 @@ struct Claims {
 
 /// Generate a JWT token using jsonwebtoken crate
 fn generate_jwt(wallet_address: &str, role: &str, secret: &str) -> Result<String, AppError> {
-    use jsonwebtoken::{encode, Header, EncodingKey};
-    
+    use jsonwebtoken::{encode, EncodingKey, Header};
+
     let expiration = Utc::now()
         .checked_add_signed(TimeDelta::hours(24))
         .expect("valid timestamp")

@@ -34,7 +34,9 @@ fn parse_args() -> (PathBuf, PathBuf) {
             }
             "--help" | "-h" => {
                 println!("Usage: merge_roster [--roster-path PATH] [--db-path PATH]");
-                println!("  --roster-path PATH  Path to roster_new.db (default: data/roster_new.db)");
+                println!(
+                    "  --roster-path PATH  Path to roster_new.db (default: data/roster_new.db)"
+                );
                 println!("  --db-path PATH      Path to chimera.db (default: data/chimera.db)");
                 std::process::exit(0);
             }
@@ -80,15 +82,22 @@ async fn main() -> anyhow::Result<()> {
             println!("✓ Merge completed successfully!");
             println!("  Wallets merged: {}", result.wallets_merged);
             println!("  Wallets removed: {}", result.wallets_removed);
-            println!("  Integrity check: {}", if result.integrity_ok { "PASSED" } else { "FAILED" });
-            
+            println!(
+                "  Integrity check: {}",
+                if result.integrity_ok {
+                    "PASSED"
+                } else {
+                    "FAILED"
+                }
+            );
+
             if !result.warnings.is_empty() {
                 println!("  Warnings:");
                 for warning in &result.warnings {
                     println!("    - {}", warning);
                 }
             }
-            
+
             Ok(())
         }
         Err(e) => {

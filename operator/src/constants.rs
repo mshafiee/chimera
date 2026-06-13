@@ -1,5 +1,5 @@
 /// Solana token mint addresses (shared constants)
-/// 
+///
 /// These constants are used across both Rust (Operator) and Python (Scout)
 /// to ensure consistency. When updating these values, ensure they match
 /// the corresponding constants in the Scout codebase.

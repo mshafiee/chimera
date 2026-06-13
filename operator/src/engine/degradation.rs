@@ -53,14 +53,14 @@ where
             }
             Err(e) => {
                 let error_str = e.to_string().to_lowercase();
-                
+
                 // Check if it's a lock error
-                if error_str.contains("locked") 
+                if error_str.contains("locked")
                     || error_str.contains("database is locked")
                     || error_str.contains("busy")
                 {
                     attempt += 1;
-                    
+
                     if attempt >= MAX_SQLITE_RETRIES {
                         tracing::error!(
                             attempt = attempt,
@@ -78,7 +78,7 @@ where
                     );
 
                     sleep(Duration::from_millis(backoff_ms)).await;
-                    
+
                     // Exponential backoff: double the delay, cap at max
                     backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                 } else {
@@ -99,10 +99,10 @@ pub async fn check_memory_pressure() -> AppResult<f64> {
             .await
             .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
             .map_err(|e| AppError::Internal(format!("Failed to read /proc/meminfo: {}", e)))?;
-        
+
         let mut total_kb = 0u64;
         let mut available_kb = 0u64;
-        
+
         for line in meminfo.lines() {
             if line.starts_with("MemTotal:") {
                 total_kb = line
@@ -118,20 +118,25 @@ pub async fn check_memory_pressure() -> AppResult<f64> {
                     .unwrap_or(0);
             }
         }
-        
+
         if total_kb == 0 {
-            return Err(AppError::Internal("Could not determine total memory".to_string()));
+            return Err(AppError::Internal(
+                "Could not determine total memory".to_string(),
+            ));
         }
-        
+
         let used_kb = total_kb.saturating_sub(available_kb);
         let usage_percent = (used_kb as f64 / total_kb as f64) * 100.0;
-        
+
         // Update global flag
-        MEMORY_PRESSURE.store(usage_percent >= (MEMORY_PRESSURE_THRESHOLD * 100.0), Ordering::Relaxed);
-        
+        MEMORY_PRESSURE.store(
+            usage_percent >= (MEMORY_PRESSURE_THRESHOLD * 100.0),
+            Ordering::Relaxed,
+        );
+
         Ok(usage_percent / 100.0)
     }
-    
+
     #[cfg(not(target_os = "linux"))]
     {
         // For non-Linux systems, use a simple heuristic
@@ -168,7 +173,10 @@ pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
 
             let cols: Vec<&str> = line.split_whitespace().collect();
             if cols.len() < 5 {
-                return Err(AppError::Internal(format!("Unexpected df output: {}", line)));
+                return Err(AppError::Internal(format!(
+                    "Unexpected df output: {}",
+                    line
+                )));
             }
 
             let total: f64 = cols[1].parse().unwrap_or(1.0);
@@ -178,8 +186,13 @@ pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
                 return Ok(0.0);
             }
 
-            tracing::debug!(path = path_str, total_kb = total, avail_kb = avail,
-                free_pct = avail / total, "Disk space check");
+            tracing::debug!(
+                path = path_str,
+                total_kb = total,
+                avail_kb = avail,
+                free_pct = avail / total,
+                "Disk space check"
+            );
             Ok(avail / total)
         })
         .await
@@ -199,20 +212,20 @@ pub async fn check_disk_space(path: &std::path::Path) -> AppResult<f64> {
 pub async fn handle_rpc_rate_limit() -> Duration {
     let multiplier = RPC_BACKOFF_MULTIPLIER.load(Ordering::Relaxed);
     let delay_ms = INITIAL_BACKOFF_MS * multiplier;
-    
+
     // Cap at max backoff
     let capped_delay = delay_ms.min(MAX_BACKOFF_MS);
-    
+
     tracing::warn!(
         multiplier = multiplier,
         delay_ms = capped_delay,
         "RPC rate limit hit, applying exponential backoff"
     );
-    
+
     // Increase multiplier for next time (with cap)
     let new_multiplier = (multiplier * 2).min(64);
     RPC_BACKOFF_MULTIPLIER.store(new_multiplier, Ordering::Relaxed);
-    
+
     Duration::from_millis(capped_delay)
 }
 
@@ -254,12 +267,11 @@ pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) 
             if let Ok(meta) = entry.metadata() {
                 if let Ok(modified) = meta.modified() {
                     if let Ok(age) = now.duration_since(modified) {
-                        if age > max_age {
-                            if std::fs::remove_file(&path).is_ok() {
+                        if age > max_age
+                            && std::fs::remove_file(&path).is_ok() {
                                 pruned += 1;
                                 tracing::debug!(file = ?path, age_days = age.as_secs() / 86400, "Pruned log file");
                             }
-                        }
                     }
                 }
             }
@@ -291,7 +303,7 @@ mod tests {
             }
         })
         .await;
-        
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 42);
         assert_eq!(*attempts.lock().unwrap(), 2);
@@ -313,7 +325,7 @@ mod tests {
     fn test_memory_pressure_flag() {
         MEMORY_PRESSURE.store(false, Ordering::Relaxed);
         assert!(!is_memory_pressure_high());
-        
+
         MEMORY_PRESSURE.store(true, Ordering::Relaxed);
         assert!(is_memory_pressure_high());
     }

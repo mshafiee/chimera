@@ -13,8 +13,8 @@ use axum::{
     Router,
 };
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use serde_json::{json, Value};
+use sha2::Sha256;
 use tower::ServiceExt;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -44,16 +44,19 @@ async fn test_valid_hmac_signature() {
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     })
     .to_string();
-    
+
     let signature = generate_signature(secret, timestamp, &body);
 
     // Simulate HMAC verification
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(timestamp.as_bytes());
     mac.update(body.as_bytes());
-    
+
     let expected = hex::decode(&signature).unwrap();
-    assert!(mac.verify_slice(&expected).is_ok(), "Valid signature should verify");
+    assert!(
+        mac.verify_slice(&expected).is_ok(),
+        "Valid signature should verify"
+    );
 }
 
 /// Test invalid HMAC signature fails
@@ -63,17 +66,20 @@ async fn test_invalid_hmac_signature() {
     let wrong_secret = "wrong-secret";
     let timestamp = "1733500000";
     let body = r#"{"test": "data"}"#;
-    
+
     // Generate with wrong secret
     let bad_signature = generate_signature(wrong_secret, timestamp, body);
-    
+
     // Try to verify with correct secret
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(timestamp.as_bytes());
     mac.update(body.as_bytes());
-    
+
     let bad_sig_bytes = hex::decode(&bad_signature).unwrap();
-    assert!(mac.verify_slice(&bad_sig_bytes).is_err(), "Invalid signature should fail");
+    assert!(
+        mac.verify_slice(&bad_sig_bytes).is_err(),
+        "Invalid signature should fail"
+    );
 }
 
 /// Test signature with empty body
@@ -82,9 +88,12 @@ async fn test_signature_empty_body() {
     let secret = "test-secret";
     let timestamp = "1733500000";
     let body = "";
-    
+
     let signature = generate_signature(secret, timestamp, body);
-    assert!(!signature.is_empty(), "Should generate signature for empty body");
+    assert!(
+        !signature.is_empty(),
+        "Should generate signature for empty body"
+    );
 }
 
 // =============================================================================
@@ -96,11 +105,14 @@ async fn test_signature_empty_body() {
 async fn test_timestamp_within_drift() {
     let now = chrono::Utc::now().timestamp();
     let max_drift_secs: i64 = 60;
-    
+
     // 30 seconds ago - should be valid
     let req_time = now - 30;
     let diff = (now - req_time).abs();
-    assert!(diff <= max_drift_secs, "30 second old request should be valid");
+    assert!(
+        diff <= max_drift_secs,
+        "30 second old request should be valid"
+    );
 }
 
 /// Test timestamp outside allowed drift
@@ -108,11 +120,14 @@ async fn test_timestamp_within_drift() {
 async fn test_timestamp_outside_drift() {
     let now = chrono::Utc::now().timestamp();
     let max_drift_secs: i64 = 60;
-    
+
     // 120 seconds ago - should be rejected
     let req_time = now - 120;
     let diff = (now - req_time).abs();
-    assert!(diff > max_drift_secs, "120 second old request should be rejected");
+    assert!(
+        diff > max_drift_secs,
+        "120 second old request should be rejected"
+    );
 }
 
 /// Test future timestamp
@@ -120,7 +135,7 @@ async fn test_timestamp_outside_drift() {
 async fn test_future_timestamp() {
     let now = chrono::Utc::now().timestamp();
     let max_drift_secs: i64 = 60;
-    
+
     // 120 seconds in the future - should be rejected
     let req_time = now + 120;
     let diff = (now - req_time).abs();
@@ -132,11 +147,14 @@ async fn test_future_timestamp() {
 async fn test_timestamp_at_boundary() {
     let now = chrono::Utc::now().timestamp();
     let max_drift_secs: i64 = 60;
-    
+
     // Exactly at boundary
     let req_time = now - 60;
     let diff = (now - req_time).abs();
-    assert!(diff <= max_drift_secs, "Request at exact boundary should be valid");
+    assert!(
+        diff <= max_drift_secs,
+        "Request at exact boundary should be valid"
+    );
 }
 
 // =============================================================================
@@ -153,7 +171,7 @@ async fn test_shield_payload_parsing() {
         "amount_sol": 0.5,
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     });
-    
+
     assert_eq!(payload["strategy"], "SHIELD");
     assert_eq!(payload["action"], "BUY");
     assert!(payload["amount_sol"].as_f64().unwrap() > 0.0);
@@ -169,7 +187,7 @@ async fn test_spear_payload_parsing() {
         "amount_sol": 0.3,
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     });
-    
+
     assert_eq!(payload["strategy"], "SPEAR");
 }
 
@@ -183,7 +201,7 @@ async fn test_exit_payload_parsing() {
         "amount_sol": 0.5,
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     });
-    
+
     assert_eq!(payload["strategy"], "EXIT");
     assert_eq!(payload["action"], "SELL");
 }
@@ -199,7 +217,7 @@ async fn test_payload_with_trade_uuid() {
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
         "trade_uuid": "custom-uuid-12345"
     });
-    
+
     assert_eq!(payload["trade_uuid"], "custom-uuid-12345");
 }
 
@@ -213,7 +231,7 @@ async fn test_payload_without_trade_uuid() {
         "amount_sol": 0.5,
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     });
-    
+
     assert!(payload.get("trade_uuid").is_none());
 }
 
@@ -225,19 +243,19 @@ async fn test_payload_without_trade_uuid() {
 #[tokio::test]
 async fn test_deterministic_uuid_generation() {
     use sha2::{Digest, Sha256};
-    
+
     let timestamp = "1733500000";
     let token = "BONK";
     let action = "BUY";
     let amount = "0.5";
-    
+
     // Same inputs should generate same UUID
     let input1 = format!("{}{}{}{}", timestamp, token, action, amount);
     let input2 = format!("{}{}{}{}", timestamp, token, action, amount);
-    
+
     let hash1 = Sha256::digest(input1.as_bytes());
     let hash2 = Sha256::digest(input2.as_bytes());
-    
+
     assert_eq!(hash1, hash2, "Same inputs should produce same hash");
 }
 
@@ -245,14 +263,17 @@ async fn test_deterministic_uuid_generation() {
 #[tokio::test]
 async fn test_unique_uuid_for_different_inputs() {
     use sha2::{Digest, Sha256};
-    
+
     let input1 = "1733500000BONKBUY0.5";
     let input2 = "1733500000BONKBUY0.6"; // Different amount
-    
+
     let hash1 = Sha256::digest(input1.as_bytes());
     let hash2 = Sha256::digest(input2.as_bytes());
-    
-    assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
+
+    assert_ne!(
+        hash1, hash2,
+        "Different inputs should produce different hashes"
+    );
 }
 
 /// Test duplicate trade_uuid rejection
@@ -320,7 +341,7 @@ async fn test_accepted_response_format() {
         "status": "accepted",
         "trade_uuid": "uuid-12345"
     });
-    
+
     assert_eq!(response["status"], "accepted");
     assert!(response.get("trade_uuid").is_some());
 }
@@ -332,7 +353,7 @@ async fn test_rejected_response_format() {
         "status": "rejected",
         "reason": "duplicate_signal"
     });
-    
+
     assert_eq!(response["status"], "rejected");
     assert_eq!(response["reason"], "duplicate_signal");
 }
@@ -344,7 +365,7 @@ async fn test_circuit_breaker_rejection_response() {
         "status": "rejected",
         "reason": "circuit_breaker_triggered"
     });
-    
+
     assert_eq!(response["reason"], "circuit_breaker_triggered");
 }
 
@@ -361,7 +382,7 @@ async fn test_full_webhook_flow() {
             // Check headers
             let has_signature = req.headers().get("X-Signature").is_some();
             let has_timestamp = req.headers().get("X-Timestamp").is_some();
-            
+
             if !has_signature || !has_timestamp {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -371,7 +392,7 @@ async fn test_full_webhook_flow() {
                     })),
                 );
             }
-            
+
             (
                 StatusCode::OK,
                 axum::Json(json!({
@@ -392,7 +413,7 @@ async fn test_full_webhook_flow() {
         "wallet_address": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
     })
     .to_string();
-    
+
     let signature = generate_signature(secret, &timestamp, &body);
 
     let response = app
@@ -415,7 +436,7 @@ async fn test_full_webhook_flow() {
         .await
         .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    
+
     assert_eq!(json["status"], "accepted");
 }
 
@@ -426,7 +447,7 @@ async fn test_webhook_missing_signature() {
         "/api/v1/webhook",
         post(|req: Request<Body>| async move {
             let has_signature = req.headers().get("X-Signature").is_some();
-            
+
             if !has_signature {
                 return (
                     StatusCode::UNAUTHORIZED,
@@ -436,7 +457,7 @@ async fn test_webhook_missing_signature() {
                     })),
                 );
             }
-            
+
             (StatusCode::OK, axum::Json(json!({"status": "accepted"})))
         }),
     );
@@ -456,4 +477,3 @@ async fn test_webhook_missing_signature() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
-

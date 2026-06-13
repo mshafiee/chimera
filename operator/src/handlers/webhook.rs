@@ -199,8 +199,8 @@ pub async fn webhook_handler(
     let wallet_data = if signal.payload.action == crate::models::Action::Buy {
         match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
             Ok(Some(wallet)) => Some((wallet.wqs_score.unwrap_or(50.0), wallet.wqs_score)),
-            Ok(None) => Some((50.0, None)),  // Default if wallet not found
-            Err(_) => Some((50.0, None)),  // Default on error
+            Ok(None) => Some((50.0, None)), // Default if wallet not found
+            Err(_) => Some((50.0, None)),   // Default on error
         }
     } else {
         None
@@ -208,7 +208,11 @@ pub async fn webhook_handler(
 
     // Signal quality check (for BUY signals only, EXIT/SELL don't need quality check)
     if signal.payload.action == crate::models::Action::Buy {
-        let wallet_wqs = wallet_data.as_ref().map(|(wqs, _)| wqs).copied().unwrap_or(50.0);
+        let wallet_wqs = wallet_data
+            .as_ref()
+            .map(|(wqs, _)| wqs)
+            .copied()
+            .unwrap_or(50.0);
 
         // Check if consensus signal using SignalAggregator
         let is_consensus = if let Some(ref aggregator) = state.signal_aggregator {
@@ -266,7 +270,11 @@ pub async fn webhook_handler(
         let liquidity_usd = if let Some(ref token_address) = signal.payload.token_address {
             // Try to get liquidity from token parser cache or metadata
             // For now, use a conservative estimate - will be checked in slow path
-            match state.token_parser.fast_check(token_address, signal.payload.strategy).await {
+            match state
+                .token_parser
+                .fast_check(token_address, signal.payload.strategy)
+                .await
+            {
                 Ok(result) => result.liquidity_usd.unwrap_or(rust_decimal::Decimal::ZERO),
                 Err(_) => rust_decimal::Decimal::ZERO,
             }
@@ -297,12 +305,8 @@ pub async fn webhook_handler(
         };
 
         // Calculate signal quality
-        let quality = SignalQuality::calculate(
-            wallet_wqs,
-            is_consensus,
-            liquidity_usd,
-            token_age_hours,
-        );
+        let quality =
+            SignalQuality::calculate(wallet_wqs, is_consensus, liquidity_usd, token_age_hours);
 
         // Reject if quality too low
         if !quality.should_enter(0.7) {
@@ -345,7 +349,10 @@ pub async fn webhook_handler(
 
     // Check portfolio heat (if enabled)
     if let Some(ref portfolio_heat) = state.portfolio_heat {
-        match portfolio_heat.can_open_position(signal.payload.amount_sol).await {
+        match portfolio_heat
+            .can_open_position(signal.payload.amount_sol)
+            .await
+        {
             Ok(false) => {
                 tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
@@ -410,7 +417,7 @@ pub async fn webhook_handler(
     );
 
     // Use cached wallet data for queue routing
-    let wallet_wqs = wallet_data.as_ref().and_then(|(_, wqs)| wqs.clone());
+    let wallet_wqs = wallet_data.as_ref().and_then(|(_, wqs)| *wqs);
 
     // Queue for execution
     match state.engine.queue_signal(signal.clone(), wallet_wqs).await {

@@ -5,12 +5,12 @@
 //! - Dynamic stops (tighter for low-WQS wallets, wider for high-WQS)
 //! - Portfolio-level stop (pause all trading if daily loss >5%)
 
-use std::sync::Arc;
 use crate::config::ProfitManagementConfig;
-use crate::db::{DbPool, get_wallet_by_address};
+use crate::db::{get_wallet_by_address, DbPool};
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
 use sqlx;
+use std::sync::Arc;
 
 /// Stop-loss manager
 pub struct StopLossManager {
@@ -92,15 +92,15 @@ impl StopLossManager {
                 WHERE token_address = ?
                   AND direction = 'BUY'
                   AND created_at > datetime('now', '-5 minutes')
-                "#
+                "#,
             )
             .bind(token_address)
             .fetch_one(&self.db)
             .await;
-            
+
             match consensus_count {
                 Ok(count) => count >= 2, // 2+ wallets = consensus
-                Err(_) => false, // On error, assume not consensus
+                Err(_) => false,         // On error, assume not consensus
             }
         };
 
@@ -117,7 +117,7 @@ impl StopLossManager {
             // Low WQS: tighter stop (-10%)
             Decimal::from_str("-10.0").unwrap_or(Decimal::ZERO)
         };
-        
+
         // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation)
         // If token is highly volatile, widen stops to avoid getting wicked out
         if let Some(volatility) = self.price_cache.calculate_volatility(token_address) {
@@ -135,14 +135,14 @@ impl StopLossManager {
             } else {
                 Decimal::ONE
             };
-            
+
             stop_loss_threshold *= volatility_multiplier;
-            
+
             // Ensure stop never goes below -5% (too tight) or above -50% (too wide)
             let min_threshold = Decimal::from_str("-50.0").unwrap_or(Decimal::ZERO);
             let max_threshold = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
             stop_loss_threshold = stop_loss_threshold.max(min_threshold).min(max_threshold);
-            
+
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
@@ -151,7 +151,7 @@ impl StopLossManager {
                 "Adaptive stop-loss adjusted based on volatility"
             );
         }
-        
+
         // Widen stop-loss by 5% for consensus signals
         if is_consensus {
             let consensus_adjustment = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
@@ -188,7 +188,7 @@ impl StopLossManager {
             SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
             FROM positions
             WHERE DATE(closed_at) = DATE('now')
-            "#
+            "#,
         )
         .fetch_one(&self.db)
         .await
@@ -208,7 +208,7 @@ impl StopLossManager {
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state = 'ACTIVE'
-            "#
+            "#,
         )
         .fetch_one(&self.db)
         .await
@@ -230,7 +230,7 @@ impl StopLossManager {
             } else {
                 Decimal::ZERO
             };
-            
+
             let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
             if daily_loss_percent < loss_threshold {
                 tracing::warn!(

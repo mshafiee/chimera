@@ -31,7 +31,6 @@ The schema is automatically loaded from the shared file to prevent drift.
 
 import os
 import sqlite3
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path

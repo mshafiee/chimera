@@ -9,7 +9,7 @@
 //! - No hourly loss limit: $500 can be lost in 1 hour without tripping
 //! - Consecutive loss counter resets at any WIN, even one tiny win
 
-use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState, TripReason};
+use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use chimera_operator::config::{CircuitBreakerConfig, DatabaseConfig};
 use chimera_operator::db::{init_pool, run_migrations};
 use rust_decimal::Decimal;
@@ -66,7 +66,7 @@ async fn insert_closed_position_with_pnl(
     sqlx::query(
         "INSERT OR IGNORE INTO trades \
          (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-         VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
+         VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')",
     )
     .bind(trade_uuid)
     .execute(pool)
@@ -77,7 +77,7 @@ async fn insert_closed_position_with_pnl(
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
           entry_tx_signature, state, realized_pnl_sol, closed_at) \
-         VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', ?, CURRENT_TIMESTAMP)"
+         VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', ?, CURRENT_TIMESTAMP)",
     )
     .bind(trade_uuid)
     .bind(pnl_sol)
@@ -323,11 +323,13 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
             "INSERT INTO positions \
              (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
               entry_tx_signature, state, realized_pnl_sol, closed_at) \
-             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 100.0, ?)"
+             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 100.0, ?)",
         )
         .bind(format!("uuid-hist-{}", i))
         .bind(&ts)
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     // Drawdown: -100 SOL each → running PnL drops from 1000 to 400
@@ -344,11 +346,13 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
             "INSERT INTO positions \
              (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
               entry_tx_signature, state, realized_pnl_sol, closed_at) \
-             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', -100.0, ?)"
+             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', -100.0, ?)",
         )
         .bind(format!("uuid-dd-{}", i))
         .bind(&ts)
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     // Partial recovery: +25 SOL each → running PnL goes from 400 to 500
@@ -365,11 +369,13 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
             "INSERT INTO positions \
              (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
               entry_tx_signature, state, realized_pnl_sol, closed_at) \
-             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 25.0, ?)"
+             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 25.0, ?)",
         )
         .bind(format!("uuid-rec-{}", i))
         .bind(&ts)
-        .execute(&pool).await.unwrap();
+        .execute(&pool)
+        .await
+        .unwrap();
     }
 
     // Running PnL: peak = +1000 SOL (first 10 positions), current = +500 SOL

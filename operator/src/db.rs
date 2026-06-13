@@ -9,8 +9,8 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
 // Path removed
 
-use std::str::FromStr;
 use rust_decimal::prelude::*;
+use std::str::FromStr;
 use tracing::info;
 
 /// Type alias for the SQLite connection pool
@@ -19,20 +19,21 @@ pub type DbPool = Pool<Sqlite>;
 /// Initialize the database connection pool
 pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
     // Ensure data directory exists
-        if let Some(parent) = config.path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    AppError::Database(sqlx::Error::Io(std::io::Error::other(
-                        format!("Failed to create database directory: {}", e),
-                    )))
-                })?;
-                info!("Created database directory: {:?}", parent);
-            }
+    if let Some(parent) = config.path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+                    "Failed to create database directory: {}",
+                    e
+                ))))
+            })?;
+            info!("Created database directory: {:?}", parent);
         }
+    }
 
-        let db_url = format!("sqlite:{}?mode=rwc", config.path.display());
+    let db_url = format!("sqlite:{}?mode=rwc", config.path.display());
 
-        let connect_options = SqliteConnectOptions::from_str(&db_url)
+    let connect_options = SqliteConnectOptions::from_str(&db_url)
         .map_err(AppError::Database)?
         // Enable WAL mode for concurrent reads
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -75,24 +76,21 @@ pub async fn run_migrations(pool: &DbPool) -> AppResult<()> {
 /// Check if a trade_uuid already exists (for idempotency)
 pub async fn trade_uuid_exists(pool: &DbPool, trade_uuid: &str) -> AppResult<bool> {
     // Check trades table
-    let trade_exists: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trades WHERE trade_uuid = ?"
-    )
-    .bind(trade_uuid)
-    .fetch_one(pool)
-    .await?;
+    let trade_exists: (i32,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = ?")
+        .bind(trade_uuid)
+        .fetch_one(pool)
+        .await?;
 
     if trade_exists.0 > 0 {
         return Ok(true);
     }
 
     // Check dead letter queue
-    let dlq_exists: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM dead_letter_queue WHERE trade_uuid = ?"
-    )
-    .bind(trade_uuid)
-    .fetch_one(pool)
-    .await?;
+    let dlq_exists: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM dead_letter_queue WHERE trade_uuid = ?")
+            .bind(trade_uuid)
+            .fetch_one(pool)
+            .await?;
 
     Ok(dlq_exists.0 > 0)
 }
@@ -155,7 +153,10 @@ pub async fn update_trade_status(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(AppError::NotFound(format!("trade_uuid '{}' not found", trade_uuid)));
+        return Err(AppError::NotFound(format!(
+            "trade_uuid '{}' not found",
+            trade_uuid
+        )));
     }
 
     Ok(())
@@ -170,7 +171,7 @@ pub async fn update_trade_costs(
     slippage_cost_sol: Decimal,
 ) -> AppResult<()> {
     let total_cost_sol = jito_tip_sol + dex_fee_sol + slippage_cost_sol;
-    
+
     sqlx::query(
         r#"
         UPDATE trades 
@@ -302,15 +303,23 @@ pub async fn get_dead_letter_queue(
 
     // Query as tuple and map to struct (can_retry is INTEGER in DB, need to convert to bool)
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(i64, Option<String>, String, String, Option<String>, Option<String>, i32, i64, String, Option<String>)> = 
-        sqlx::query_as(&query)
-        .fetch_all(pool)
-        .await?;
+    let rows: Vec<(
+        i64,
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i32,
+        i64,
+        String,
+        Option<String>,
+    )> = sqlx::query_as(&query).fetch_all(pool).await?;
 
     let items = rows
         .into_iter()
-        .map(|(id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry_int, received_at, processed_at)| {
-            DeadLetterItem {
+        .map(
+            |(
                 id,
                 trade_uuid,
                 payload,
@@ -318,11 +327,24 @@ pub async fn get_dead_letter_queue(
                 error_details,
                 source_ip,
                 retry_count,
-                can_retry: can_retry_int != 0,
+                can_retry_int,
                 received_at,
                 processed_at,
-            }
-        })
+            )| {
+                DeadLetterItem {
+                    id,
+                    trade_uuid,
+                    payload,
+                    reason,
+                    error_details,
+                    source_ip,
+                    retry_count,
+                    can_retry: can_retry_int != 0,
+                    received_at,
+                    processed_at,
+                }
+            },
+        )
         .collect();
 
     Ok(items)
@@ -385,12 +407,10 @@ pub async fn count_config_audit(pool: &DbPool) -> AppResult<i64> {
 
 /// Get count of trades in a specific status
 pub async fn count_trades_by_status(pool: &DbPool, status: &str) -> AppResult<i64> {
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trades WHERE status = ?"
-    )
-    .bind(status)
-    .fetch_one(pool)
-    .await?;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE status = ?")
+        .bind(status)
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0)
 }
@@ -524,7 +544,7 @@ pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
         } else {
             Decimal::ZERO
         };
-        
+
         // Use Decimal comparison to avoid floating point precision issues
         if pnl < Decimal::ZERO {
             consecutive += 1;
@@ -580,27 +600,27 @@ pub async fn get_recent_tips(pool: &DbPool, limit: u32) -> AppResult<Vec<Decimal
     .fetch_all(pool)
     .await?;
 
-    Ok(tips.into_iter().map(|(t,)| Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO)).collect())
+    Ok(tips
+        .into_iter()
+        .map(|(t,)| Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO))
+        .collect())
 }
 
 /// Get count of successful tips (for cold start detection)
 pub async fn get_tip_count(pool: &DbPool) -> AppResult<u32> {
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM jito_tip_history WHERE success = 1"
-    )
-    .fetch_one(pool)
-    .await?;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM jito_tip_history WHERE success = 1")
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0 as u32)
 }
 
 /// Clean up old tip history (keep only last 7 days)
 pub async fn prune_old_tips(pool: &DbPool) -> AppResult<u64> {
-    let result = sqlx::query(
-        "DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days')"
-    )
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days')")
+            .execute(pool)
+            .await?;
 
     Ok(result.rows_affected())
 }
@@ -629,7 +649,7 @@ pub async fn open_position(
             entry_amount_sol, entry_price, entry_tx_signature, 
             state, unrealized_pnl_sol, unrealized_pnl_percent
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
-        "#
+        "#,
     )
     .bind(trade_uuid)
     .bind(wallet_address)
@@ -660,7 +680,7 @@ pub async fn close_position(
         SELECT id, entry_price, entry_amount_sol 
         FROM positions 
         WHERE wallet_address = ? AND token_address = ? AND state = 'ACTIVE'
-        "#
+        "#,
     )
     .bind(wallet_address)
     .bind(token_address)
@@ -679,8 +699,9 @@ pub async fn close_position(
     for (id, entry_price_f64, entry_amount_sol_f64) in active_positions {
         // Convert from database f64 to Decimal for precision
         let entry_price_dec = Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
-        let entry_amount_dec = Decimal::from_f64_retain(entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
-        
+        let entry_amount_dec =
+            Decimal::from_f64_retain(entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
+
         // Calculate PnL using Decimal for precision
         let pnl_sol = if !entry_price_dec.is_zero() {
             let diff = exit_price - entry_price_dec;
@@ -705,7 +726,7 @@ pub async fn close_position(
                 closed_at = CURRENT_TIMESTAMP,
                 state = 'CLOSED'
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(exit_price.to_f64().unwrap_or(0.0))
         .bind(signature)
@@ -734,9 +755,22 @@ pub struct PositionRecord {
 }
 
 /// Get positions stuck in EXITING state for too long
-pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>> {
+pub async fn get_stuck_positions(
+    pool: &DbPool,
+    stuck_seconds: i64,
+) -> AppResult<Vec<PositionRecord>> {
     #[allow(clippy::type_complexity)]
-    let positions: Vec<(i64, String, String, String, String, String, String, Option<String>, String)> = sqlx::query_as(
+    let positions: Vec<(
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    )> = sqlx::query_as(
         r#"
         SELECT id, trade_uuid, wallet_address, token_address, strategy, state, 
                entry_tx_signature, exit_tx_signature, last_updated
@@ -751,8 +785,8 @@ pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult
 
     positions
         .into_iter()
-        .map(|(id, trade_uuid, wallet_address, token_address, strategy, state, entry_tx_signature, exit_tx_signature, last_updated)| {
-            Ok(PositionRecord {
+        .map(
+            |(
                 id,
                 trade_uuid,
                 wallet_address,
@@ -761,11 +795,23 @@ pub async fn get_stuck_positions(pool: &DbPool, stuck_seconds: i64) -> AppResult
                 state,
                 entry_tx_signature,
                 exit_tx_signature,
-                last_updated: chrono::DateTime::parse_from_rfc3339(&last_updated)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .unwrap_or_else(|_| chrono::Utc::now()),
-            })
-        })
+                last_updated,
+            )| {
+                Ok(PositionRecord {
+                    id,
+                    trade_uuid,
+                    wallet_address,
+                    token_address,
+                    strategy,
+                    state,
+                    entry_tx_signature,
+                    exit_tx_signature,
+                    last_updated: chrono::DateTime::parse_from_rfc3339(&last_updated)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .unwrap_or_else(|_| chrono::Utc::now()),
+                })
+            },
+        )
         .collect()
 }
 
@@ -775,13 +821,11 @@ pub async fn update_position_state(
     trade_uuid: &str,
     new_state: &str,
 ) -> AppResult<()> {
-    sqlx::query(
-        "UPDATE positions SET state = ? WHERE trade_uuid = ?"
-    )
-    .bind(new_state)
-    .bind(trade_uuid)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE positions SET state = ? WHERE trade_uuid = ?")
+        .bind(new_state)
+        .bind(trade_uuid)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }
@@ -857,11 +901,9 @@ pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
 
 /// Get active positions count
 pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'"
-    )
-    .fetch_one(pool)
-    .await?;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'")
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0 as u32)
 }
@@ -882,9 +924,17 @@ pub struct ActivePositionEntry {
 /// Fetch all ACTIVE positions with their entry data for stop-loss / profit-target monitoring
 pub async fn get_active_positions_with_entry(pool: &DbPool) -> AppResult<Vec<ActivePositionEntry>> {
     #[allow(clippy::type_complexity)]
-    let rows: Vec<(String, String, String, Option<String>, String, f64, f64, String)> =
-        sqlx::query_as(
-            r#"
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+        f64,
+        f64,
+        String,
+    )> = sqlx::query_as(
+        r#"
             SELECT
                 p.trade_uuid,
                 p.wallet_address,
@@ -899,29 +949,42 @@ pub async fn get_active_positions_with_entry(pool: &DbPool) -> AppResult<Vec<Act
             WHERE p.state = 'ACTIVE'
             LIMIT 500
             "#,
-        )
-        .fetch_all(pool)
-        .await?;
+    )
+    .fetch_all(pool)
+    .await?;
 
     let entries = rows
         .into_iter()
-        .map(|(trade_uuid, wallet_address, token_address, token_opt, strategy, entry_price_f64, entry_amount_f64, created_at_str)| {
-            let entry_price = Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
-            let entry_amount_sol = Decimal::from_f64_retain(entry_amount_f64).unwrap_or(Decimal::ZERO);
-            let entry_time = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .unwrap_or_else(|_| chrono::Utc::now());
-            ActivePositionEntry {
-                token_symbol: token_opt.unwrap_or_else(|| token_address.clone()),
+        .map(
+            |(
                 trade_uuid,
                 wallet_address,
                 token_address,
+                token_opt,
                 strategy,
-                entry_price,
-                entry_amount_sol,
-                entry_time,
-            }
-        })
+                entry_price_f64,
+                entry_amount_f64,
+                created_at_str,
+            )| {
+                let entry_price =
+                    Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
+                let entry_amount_sol =
+                    Decimal::from_f64_retain(entry_amount_f64).unwrap_or(Decimal::ZERO);
+                let entry_time = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now());
+                ActivePositionEntry {
+                    token_symbol: token_opt.unwrap_or_else(|| token_address.clone()),
+                    trade_uuid,
+                    wallet_address,
+                    token_address,
+                    strategy,
+                    entry_price,
+                    entry_amount_sol,
+                    entry_time,
+                }
+            },
+        )
         .collect();
 
     Ok(entries)
@@ -970,7 +1033,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for PositionDetail {
             token_address: row.try_get("token_address")?,
             token_symbol: row.try_get("token_symbol")?,
             strategy: row.try_get("strategy")?,
-            entry_amount_sol: f64_to_decimal(row.try_get("entry_amount_sol")?).unwrap_or(Decimal::ZERO),
+            entry_amount_sol: f64_to_decimal(row.try_get("entry_amount_sol")?)
+                .unwrap_or(Decimal::ZERO),
             entry_price: f64_to_decimal(row.try_get("entry_price")?).unwrap_or(Decimal::ZERO),
             entry_tx_signature: row.try_get("entry_tx_signature")?,
             current_price: f64_to_decimal(row.try_get("current_price")?),
@@ -989,7 +1053,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for PositionDetail {
 }
 
 /// Get all positions with optional state filter
-pub async fn get_positions(pool: &DbPool, state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>> {
+pub async fn get_positions(
+    pool: &DbPool,
+    state_filter: Option<&str>,
+) -> AppResult<Vec<PositionDetail>> {
     let positions = match state_filter {
         Some(state) => {
             sqlx::query_as::<_, PositionDetail>(
@@ -1002,7 +1069,7 @@ pub async fn get_positions(pool: &DbPool, state_filter: Option<&str>) -> AppResu
                 FROM positions
                 WHERE state = ?
                 ORDER BY last_updated DESC
-                "#
+                "#,
             )
             .bind(state)
             .fetch_all(pool)
@@ -1018,7 +1085,7 @@ pub async fn get_positions(pool: &DbPool, state_filter: Option<&str>) -> AppResu
                        opened_at, last_updated, closed_at
                 FROM positions
                 ORDER BY last_updated DESC
-                "#
+                "#,
             )
             .fetch_all(pool)
             .await?
@@ -1030,28 +1097,27 @@ pub async fn get_positions(pool: &DbPool, state_filter: Option<&str>) -> AppResu
 
 /// Count active positions
 pub async fn count_active_positions(pool: &DbPool) -> AppResult<i64> {
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'"
-    )
-    .fetch_one(pool)
-    .await?;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'")
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0)
 }
 
 /// Count total trades
 pub async fn count_total_trades(pool: &DbPool) -> AppResult<i64> {
-    let count: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM trades"
-    )
-    .fetch_one(pool)
-    .await?;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades")
+        .fetch_one(pool)
+        .await?;
 
     Ok(count.0)
 }
 
 /// Get a single position by trade_uuid
-pub async fn get_position_by_uuid(pool: &DbPool, trade_uuid: &str) -> AppResult<Option<PositionDetail>> {
+pub async fn get_position_by_uuid(
+    pool: &DbPool,
+    trade_uuid: &str,
+) -> AppResult<Option<PositionDetail>> {
     let position = sqlx::query_as::<_, PositionDetail>(
         r#"
         SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
@@ -1061,7 +1127,7 @@ pub async fn get_position_by_uuid(pool: &DbPool, trade_uuid: &str) -> AppResult<
                opened_at, last_updated, closed_at
         FROM positions
         WHERE trade_uuid = ?
-        "#
+        "#,
     )
     .bind(trade_uuid)
     .fetch_optional(pool)
@@ -1194,7 +1260,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WalletDetail {
 }
 
 /// Get all wallets with optional status filter
-pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>> {
+pub async fn get_wallets(
+    pool: &DbPool,
+    status_filter: Option<&str>,
+) -> AppResult<Vec<WalletDetail>> {
     let wallets = match status_filter {
         Some(status) => {
             sqlx::query_as::<_, WalletDetail>(
@@ -1208,7 +1277,7 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
                 WHERE status = ?
                 ORDER BY wqs_score DESC NULLS LAST
                 LIMIT 1000
-                "#
+                "#,
             )
             .bind(status)
             .fetch_all(pool)
@@ -1225,7 +1294,7 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
                 FROM wallets
                 ORDER BY wqs_score DESC NULLS LAST
                 LIMIT 1000
-                "#
+                "#,
             )
             .fetch_all(pool)
             .await?
@@ -1236,7 +1305,10 @@ pub async fn get_wallets(pool: &DbPool, status_filter: Option<&str>) -> AppResul
 }
 
 /// Get a single wallet by address
-pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Option<WalletDetail>> {
+pub async fn get_wallet_by_address(
+    pool: &DbPool,
+    address: &str,
+) -> AppResult<Option<WalletDetail>> {
     let wallet = sqlx::query_as::<_, WalletDetail>(
         r#"
         SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
@@ -1246,7 +1318,7 @@ pub async fn get_wallet_by_address(pool: &DbPool, address: &str) -> AppResult<Op
                promoted_at, ttl_expires_at, notes, created_at, updated_at
         FROM wallets
         WHERE address = ?
-        "#
+        "#,
     )
     .bind(address)
     .fetch_optional(pool)
@@ -1274,12 +1346,10 @@ pub async fn upsert_wallet(
     notes: Option<&str>,
 ) -> AppResult<bool> {
     // Check if wallet exists
-    let exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM wallets WHERE address = ?"
-    )
-    .bind(address)
-    .fetch_one(pool)
-    .await?;
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallets WHERE address = ?")
+        .bind(address)
+        .fetch_one(pool)
+        .await?;
 
     if exists > 0 {
         // Update existing wallet
@@ -1297,7 +1367,7 @@ pub async fn upsert_wallet(
                 notes = COALESCE(?, notes),
                 updated_at = CURRENT_TIMESTAMP
             WHERE address = ?
-            "#
+            "#,
         )
         .bind(wqs_score)
         .bind(roi_7d)
@@ -1311,7 +1381,7 @@ pub async fn upsert_wallet(
         .bind(address)
         .execute(pool)
         .await?;
-        
+
         Ok(true) // Updated
     } else {
         // Insert new wallet
@@ -1324,7 +1394,7 @@ pub async fn upsert_wallet(
                 created_at, updated_at
             )
             VALUES (?, 'CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            "#
+            "#,
         )
         .bind(address)
         .bind(wqs_score)
@@ -1338,7 +1408,7 @@ pub async fn upsert_wallet(
         .bind(notes)
         .execute(pool)
         .await?;
-        
+
         Ok(false) // Created
     }
 }
@@ -1351,9 +1421,7 @@ pub async fn update_wallet_status(
     ttl_hours: Option<i64>,
     reason: Option<&str>,
 ) -> AppResult<bool> {
-    let ttl_expires_at = ttl_hours.map(|hours| {
-        chrono::Utc::now() + chrono::Duration::hours(hours)
-    });
+    let ttl_expires_at = ttl_hours.map(|hours| chrono::Utc::now() + chrono::Duration::hours(hours));
 
     let promoted_at = if status == "ACTIVE" {
         Some(chrono::Utc::now().to_rfc3339())
@@ -1369,7 +1437,7 @@ pub async fn update_wallet_status(
             ttl_expires_at = ?,
             notes = COALESCE(?, notes)
         WHERE address = ?
-        "#
+        "#,
     )
     .bind(status)
     .bind(promoted_at)
@@ -1390,7 +1458,7 @@ pub async fn get_expired_ttl_wallets(pool: &DbPool) -> AppResult<Vec<String>> {
         WHERE status = 'ACTIVE'
         AND ttl_expires_at IS NOT NULL
         AND ttl_expires_at < datetime('now')
-        "#
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -1407,7 +1475,7 @@ pub async fn demote_wallet(pool: &DbPool, address: &str, reason: &str) -> AppRes
             ttl_expires_at = NULL,
             notes = ?
         WHERE address = ?
-        "#
+        "#,
     )
     .bind(reason)
     .bind(address)
@@ -1435,7 +1503,7 @@ pub async fn get_wallet_copy_performance(
             last_updated
         FROM wallet_copy_performance
         WHERE wallet_address = ?
-        "#
+        "#,
     )
     .bind(wallet_address)
     .fetch_optional(pool)
@@ -1469,7 +1537,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WalletCopyPerformance {
             copy_pnl_7d: f64_to_decimal(row.try_get("copy_pnl_7d")?).unwrap_or(Decimal::ZERO),
             copy_pnl_30d: f64_to_decimal(row.try_get("copy_pnl_30d")?).unwrap_or(Decimal::ZERO),
             signal_success_rate: row.try_get("signal_success_rate")?,
-            avg_return_per_trade: f64_to_decimal(row.try_get("avg_return_per_trade")?).unwrap_or(Decimal::ZERO),
+            avg_return_per_trade: f64_to_decimal(row.try_get("avg_return_per_trade")?)
+                .unwrap_or(Decimal::ZERO),
             total_trades: row.try_get("total_trades")?,
             winning_trades: row.try_get("winning_trades")?,
             last_updated: row.try_get("last_updated")?,
@@ -1495,7 +1564,7 @@ pub async fn get_wallet_monitoring(
             updated_at
         FROM wallet_monitoring
         WHERE wallet_address = ?
-        "#
+        "#,
     )
     .bind(wallet_address)
     .fetch_optional(pool)
@@ -1529,7 +1598,7 @@ pub async fn update_wallet_monitoring_signature(
         SET last_transaction_signature = ?,
             last_monitored_at = CURRENT_TIMESTAMP
         WHERE wallet_address = ?
-        "#
+        "#,
     )
     .bind(signature)
     .bind(wallet_address)
@@ -1557,7 +1626,7 @@ pub async fn upsert_wallet_monitoring(
             monitoring_enabled = ?,
             last_monitored_at = CURRENT_TIMESTAMP,
             updated_at = CURRENT_TIMESTAMP
-        "#
+        "#,
     )
     .bind(wallet_address)
     .bind(helius_webhook_id)
@@ -1588,7 +1657,7 @@ pub async fn get_wallet_monitoring_by_address(
             updated_at
         FROM wallet_monitoring
         WHERE wallet_address = ?
-        "#
+        "#,
     )
     .bind(wallet_address)
     .fetch_optional(pool)
@@ -1683,7 +1752,7 @@ pub async fn get_trades(
                total_cost_sol, net_pnl_sol, created_at, updated_at
         FROM trades
         WHERE 1=1
-        "#
+        "#,
     );
 
     let mut bindings: Vec<String> = Vec::new();
@@ -1784,10 +1853,10 @@ pub async fn count_trades(
 /// Generate CSV content from trades
 pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
     let mut csv = String::new();
-    
+
     // Header
     csv.push_str("id,trade_uuid,wallet_address,token_address,token_symbol,strategy,side,amount_sol,price_at_signal,tx_signature,status,pnl_sol,pnl_usd,jito_tip_sol,dex_fee_sol,slippage_cost_sol,total_cost_sol,net_pnl_sol,created_at\n");
-    
+
     // Data rows
     for trade in trades {
         csv.push_str(&format!(
@@ -1800,32 +1869,44 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.strategy,
             trade.side,
             trade.amount_sol,
-            trade.price_at_signal.map(|p| p.to_string()).unwrap_or_default(),
+            trade
+                .price_at_signal
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
             trade.tx_signature.as_deref().unwrap_or(""),
             trade.status,
             trade.pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade.pnl_usd.map(|p| p.to_string()).unwrap_or_default(),
-            trade.jito_tip_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade
+                .jito_tip_sol
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
             trade.dex_fee_sol.map(|p| p.to_string()).unwrap_or_default(),
-            trade.slippage_cost_sol.map(|p| p.to_string()).unwrap_or_default(),
-            trade.total_cost_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade
+                .slippage_cost_sol
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
+            trade
+                .total_cost_sol
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
             trade.net_pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade.created_at,
         ));
     }
-    
+
     csv
 }
 
 /// Generate PDF content from trades
 pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
     use printpdf::*;
-    
+
     let mut doc = PdfDocument::new("Chimera Trade History");
-    
+
     // Build PDF operations
     let mut ops = Vec::new();
-    
+
     // Title
     ops.extend_from_slice(&[
         Op::StartTextSection,
@@ -1843,7 +1924,7 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
         },
         Op::EndTextSection,
     ]);
-    
+
     // Generated time
     let generated_time = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
     ops.extend_from_slice(&[
@@ -1862,7 +1943,7 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
         },
         Op::EndTextSection,
     ]);
-    
+
     // Table header
     let mut y_pos = 260.0;
     ops.extend_from_slice(&[
@@ -1881,7 +1962,7 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
         },
         Op::EndTextSection,
     ]);
-    
+
     // Draw line under header
     y_pos -= 5.0;
     let line_y = y_pos;
@@ -1903,9 +1984,9 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
             winding_order: WindingOrder::NonZero,
         },
     });
-    
+
     y_pos -= 5.0;
-    
+
     // Add trade rows (limit to prevent PDF from being too large)
     // Increased limit to 5000 to support active traders with large trade histories
     // Note: Multi-page PDF support would require additional implementation for page breaks
@@ -1933,13 +2014,15 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
             }
             break;
         }
-        
+
         let row = format!(
             "{} | {}... | {}... | {} | {} | {} | {:.4} | {} | {:.2} | {}",
             trade.id,
             &trade.trade_uuid[..12.min(trade.trade_uuid.len())],
             &trade.wallet_address[..8.min(trade.wallet_address.len())],
-            trade.token_symbol.as_deref()
+            trade
+                .token_symbol
+                .as_deref()
                 .map(|s| s.chars().take(8).collect::<String>())
                 .unwrap_or_else(|| trade.token_address.chars().take(8).collect()),
             trade.strategy,
@@ -1949,7 +2032,7 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
             trade.pnl_usd.and_then(|p| p.to_f64()).unwrap_or(0.0),
             &trade.created_at[..10.min(trade.created_at.len())], // Just date part
         );
-        
+
         ops.extend_from_slice(&[
             Op::StartTextSection,
             Op::SetTextCursor {
@@ -1966,10 +2049,10 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
             },
             Op::EndTextSection,
         ]);
-        
+
         y_pos -= 4.0;
     }
-    
+
     if trades.len() > max_rows {
         ops.extend_from_slice(&[
             Op::StartTextSection,
@@ -1983,19 +2066,24 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
             Op::SetLineHeight { lh: Pt(8.0) },
             Op::WriteTextBuiltinFont {
                 font: BuiltinFont::Helvetica,
-                items: vec![TextItem::Text(format!("... and {} more trades", trades.len() - max_rows))],
+                items: vec![TextItem::Text(format!(
+                    "... and {} more trades",
+                    trades.len() - max_rows
+                ))],
             },
             Op::EndTextSection,
         ]);
     }
-    
+
     // Create page with operations
     let page = PdfPage::new(Mm(210.0), Mm(297.0), ops);
-    
+
     // Add page to document and save
     let mut warnings = Vec::new();
-    let bytes = doc.with_pages(vec![page]).save(&PdfSaveOptions::default(), &mut warnings);
-    
+    let bytes = doc
+        .with_pages(vec![page])
+        .save(&PdfSaveOptions::default(), &mut warnings);
+
     Ok(bytes)
 }
 

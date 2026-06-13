@@ -4,48 +4,48 @@
 
 mod channel;
 mod degradation;
+pub mod dex_comparator;
 pub mod executor;
 mod jito_searcher;
+pub mod kelly_sizer;
+pub mod market_regime;
+pub mod mev_protection;
+pub mod momentum_exit;
+pub mod portfolio_heat;
+pub mod position_sizer;
+pub mod profit_targets;
 pub mod recovery;
+pub mod rpc_cache;
+pub mod signal_quality;
+pub mod stop_loss;
 pub mod tips;
 pub mod transaction_builder;
 mod v0_reconstruction;
-pub mod profit_targets;
-pub mod stop_loss;
-pub mod mev_protection;
-pub mod position_sizer;
-pub mod signal_quality;
-pub mod kelly_sizer;
-pub mod momentum_exit;
-pub mod dex_comparator;
-pub mod market_regime;
-pub mod portfolio_heat;
-pub mod rpc_cache;
 pub mod volume_cache;
 
 pub use channel::*;
 pub use degradation::*;
-pub use executor::*;
-pub use recovery::RecoveryManager;
-pub use tips::TipManager;
-pub use profit_targets::{ProfitTargetManager, ProfitTargetAction};
-pub use stop_loss::{StopLossManager, StopLossAction};
-pub use mev_protection::MevProtection;
-pub use position_sizer::PositionSizer;
-pub use signal_quality::{SignalQuality, SignalFactors, QualityCategory};
-pub use kelly_sizer::{KellySizer, KellyResult};
-pub use momentum_exit::{MomentumExit, MomentumExitAction};
 pub use dex_comparator::{DexComparator, DexComparisonResult};
-pub use market_regime::{MarketRegimeDetector, MarketRegime};
-pub use portfolio_heat::{PortfolioHeat, HeatResult};
-pub use rpc_cache::{RpcCache, CacheStats};
+pub use executor::*;
+pub use kelly_sizer::{KellyResult, KellySizer};
+pub use market_regime::{MarketRegime, MarketRegimeDetector};
+pub use mev_protection::MevProtection;
+pub use momentum_exit::{MomentumExit, MomentumExitAction};
+pub use portfolio_heat::{HeatResult, PortfolioHeat};
+pub use position_sizer::PositionSizer;
+pub use profit_targets::{ProfitTargetAction, ProfitTargetManager};
+pub use recovery::RecoveryManager;
+pub use rpc_cache::{CacheStats, RpcCache};
+pub use signal_quality::{QualityCategory, SignalFactors, SignalQuality};
+pub use stop_loss::{StopLossAction, StopLossManager};
+pub use tips::TipManager;
 pub use volume_cache::VolumeCache;
 
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::handlers::{WsEvent, WsState, TradeUpdateData};
+use crate::handlers::{TradeUpdateData, WsEvent, WsState};
 use crate::metrics::MetricsState;
-use crate::models::{Signal, Action, Strategy};
+use crate::models::{Action, Signal, Strategy};
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
@@ -71,7 +71,11 @@ impl EngineHandle {
     /// # Arguments
     /// * `signal` - Signal to queue
     /// * `wallet_wqs` - Optional wallet WQS score (used to route high-WQS SPEAR signals)
-    pub async fn queue_signal(&self, signal: Signal, wallet_wqs: Option<f64>) -> Result<(), String> {
+    pub async fn queue_signal(
+        &self,
+        signal: Signal,
+        wallet_wqs: Option<f64>,
+    ) -> Result<(), String> {
         self.queue.push(signal, wallet_wqs).await
     }
 
@@ -200,7 +204,13 @@ impl Engine {
         tip_manager: Option<Arc<TipManager>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, tip_manager, None,
+            config,
+            db,
+            notifier,
+            metrics,
+            ws_state,
+            tip_manager,
+            None,
         )
     }
 
@@ -215,7 +225,14 @@ impl Engine {
         price_cache: Option<Arc<PriceCache>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, Some(notifier), metrics, ws_state, tip_manager, price_cache, None,
+            config,
+            db,
+            Some(notifier),
+            metrics,
+            ws_state,
+            tip_manager,
+            price_cache,
+            None,
         )
     }
 
@@ -232,7 +249,14 @@ impl Engine {
         token_parser: Option<Arc<TokenParser>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, Some(notifier), metrics, ws_state, tip_manager, price_cache, token_parser,
+            config,
+            db,
+            Some(notifier),
+            metrics,
+            ws_state,
+            tip_manager,
+            price_cache,
+            token_parser,
         )
     }
 
@@ -248,7 +272,6 @@ impl Engine {
             config, db, notifier, metrics, ws_state, None, None, None,
         )
     }
-
 
     /// Internal helper to create engine with optional extras including tip manager and price cache
     #[allow(clippy::too_many_arguments)]
@@ -271,15 +294,15 @@ impl Engine {
         ));
 
         let mut executor = Executor::new(config.clone(), db.clone());
-        
+
         if let Some(ref notifier) = notifier {
             executor = executor.with_notifier(notifier.clone());
         }
-        
+
         if let Some(ref tip_manager) = tip_manager {
             executor = executor.with_tip_manager(tip_manager.clone());
         }
-        
+
         if let Some(ref price_cache) = price_cache {
             executor = executor.with_price_cache(price_cache.clone());
         }
@@ -349,14 +372,8 @@ impl Engine {
         );
 
         // Update status to EXECUTING
-        if let Err(e) = crate::db::update_trade_status(
-            &self.db,
-            &trade_uuid,
-            "EXECUTING",
-            None,
-            None,
-        )
-        .await
+        if let Err(e) =
+            crate::db::update_trade_status(&self.db, &trade_uuid, "EXECUTING", None, None).await
         {
             tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING");
             return;
@@ -367,12 +384,15 @@ impl Engine {
         if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
             if let Some(ref token_parser) = self.token_parser {
                 if let Some(ref token_address) = signal.payload.token_address {
-                    match token_parser.slow_check(token_address, signal.payload.strategy).await {
+                    match token_parser
+                        .slow_check(token_address, signal.payload.strategy)
+                        .await
+                    {
                         Ok(result) => {
                             if !result.safe {
-                                let reason = result
-                                    .rejection_reason
-                                    .unwrap_or_else(|| "Token failed slow-path safety check".to_string());
+                                let reason = result.rejection_reason.unwrap_or_else(|| {
+                                    "Token failed slow-path safety check".to_string()
+                                });
 
                                 tracing::warn!(
                                     trade_uuid = %trade_uuid,
@@ -548,7 +568,9 @@ impl Engine {
                 // 2. Manage Position Lifecycle
                 if signal.payload.action == Action::Buy {
                     // Calculate entry price (from cache or default to Decimal::ZERO)
-                    let entry_price = self.price_cache.as_ref()
+                    let entry_price = self
+                        .price_cache
+                        .as_ref()
                         .and_then(|c| c.get_price_usd(signal.token_address()))
                         .unwrap_or(Decimal::ZERO);
 
@@ -562,12 +584,16 @@ impl Engine {
                         &signal.payload.strategy.to_string(),
                         signal.payload.amount_sol,
                         entry_price,
-                        &tx_signature
-                    ).await {
-                         tracing::error!(error = %e, "Failed to open position");
+                        &tx_signature,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "Failed to open position");
                     }
                 } else if signal.payload.action == Action::Sell {
-                    let exit_price = self.price_cache.as_ref()
+                    let exit_price = self
+                        .price_cache
+                        .as_ref()
                         .and_then(|c| c.get_price_usd(signal.token_address()))
                         .unwrap_or(Decimal::ZERO);
 
@@ -577,15 +603,23 @@ impl Engine {
                         signal.token_address(),
                         &signal.payload.wallet_address,
                         exit_price,
-                        &tx_signature
-                    ).await {
-                         tracing::error!(error = %e, "Failed to close position");
+                        &tx_signature,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "Failed to close position");
                     }
-                    
+
                     // Update trade status to CLOSED
                     if let Err(e) = crate::db::update_trade_status(
-                        &self.db, &trade_uuid, "CLOSED", Some(&tx_signature), None
-                    ).await {
+                        &self.db,
+                        &trade_uuid,
+                        "CLOSED",
+                        Some(&tx_signature),
+                        None,
+                    )
+                    .await
+                    {
                         tracing::error!(error = %e, "Failed to update trade status to CLOSED");
                     }
                 }

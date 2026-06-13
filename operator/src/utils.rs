@@ -4,7 +4,7 @@ use rust_decimal::prelude::*;
 pub fn sol_to_lamports(sol: Decimal) -> u64 {
     // 1 SOL = 1,000,000,000 Lamports
     let multiplier = Decimal::new(1_000_000_000, 0);
-    
+
     (sol * multiplier).to_u64().unwrap_or(0)
 }
 
@@ -20,6 +20,6 @@ pub fn sol_to_lamports_f64(sol: f64) -> u64 {
 pub fn lamports_to_sol(lamports: u64) -> f64 {
     let lamports_dec = Decimal::from(lamports);
     let divisor = Decimal::new(1_000_000_000, 0);
-    
+
     (lamports_dec / divisor).to_f64().unwrap_or(0.0)
 }

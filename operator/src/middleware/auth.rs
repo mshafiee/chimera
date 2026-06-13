@@ -24,7 +24,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-
 /// User roles for authorization
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -157,8 +156,8 @@ impl AuthState {
         }
 
         // Finally try to decode as JWT
-        use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
-        
+        use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+
         // Define minimal claims struct for verification
         #[derive(Debug, Deserialize)]
         struct Claims {
@@ -169,9 +168,9 @@ impl AuthState {
 
         let validation = Validation::new(Algorithm::HS256);
         match decode::<Claims>(
-            token, 
+            token,
             &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
-            &validation
+            &validation,
         ) {
             Ok(token_data) => {
                 if let Ok(role) = token_data.claims.role.parse::<Role>() {
@@ -211,7 +210,10 @@ pub async fn bearer_auth(
         Some(header) => match header.to_str() {
             Ok(s) => s,
             Err(_) => {
-                return auth_error(StatusCode::BAD_REQUEST, "Invalid Authorization header encoding");
+                return auth_error(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid Authorization header encoding",
+                );
             }
         },
         None => {
@@ -231,10 +233,12 @@ pub async fn bearer_auth(
     // Parse Bearer token
     let token = match auth_header.strip_prefix("Bearer ") {
         Some(t) => t,
-        None => return auth_error(
-            StatusCode::BAD_REQUEST,
-            "Authorization header must use Bearer scheme",
-        ),
+        None => {
+            return auth_error(
+                StatusCode::BAD_REQUEST,
+                "Authorization header must use Bearer scheme",
+            )
+        }
     };
 
     if token.is_empty() {
@@ -266,7 +270,10 @@ pub async fn bearer_auth(
 ///
 /// Use this after bearer_auth to enforce role requirements.
 /// Example: require_role(Role::Admin) for admin-only endpoints.
-pub fn require_role(required: Role) -> impl Fn(Request, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> + Clone {
+pub fn require_role(
+    required: Role,
+) -> impl Fn(Request, Next) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>>
+       + Clone {
     move |request: Request, next: Next| {
         let required = required;
         Box::pin(async move {
@@ -274,10 +281,7 @@ pub fn require_role(required: Role) -> impl Fn(Request, Next) -> std::pin::Pin<B
             let user = match request.extensions().get::<AuthExtension>() {
                 Some(AuthExtension(user)) => user.clone(),
                 None => {
-                    return auth_error(
-                        StatusCode::UNAUTHORIZED,
-                        "Authentication required",
-                    );
+                    return auth_error(StatusCode::UNAUTHORIZED, "Authentication required");
                 }
             };
 
@@ -313,7 +317,10 @@ fn auth_error(status: StatusCode, message: &str) -> Response {
 
 /// Helper to extract authenticated user from request extensions
 pub fn get_auth_user(request: &Request) -> Option<&AuthenticatedUser> {
-    request.extensions().get::<AuthExtension>().map(|ext| &ext.0)
+    request
+        .extensions()
+        .get::<AuthExtension>()
+        .map(|ext| &ext.0)
 }
 
 #[cfg(test)]

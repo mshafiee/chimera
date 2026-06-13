@@ -47,7 +47,11 @@ mod tests {
             .check_momentum("uuid-stable", token, entry_price, SystemTime::now())
             .await;
 
-        assert_eq!(action, MomentumExitAction::None, "Stable price should not trigger exit");
+        assert_eq!(
+            action,
+            MomentumExitAction::None,
+            "Stable price should not trigger exit"
+        );
     }
 
     #[tokio::test]
@@ -70,7 +74,11 @@ mod tests {
             .check_momentum("uuid-drop", token, entry_price, entry_time)
             .await;
 
-        assert_eq!(action, MomentumExitAction::Exit, "6% price drop within 5 min should trigger exit");
+        assert_eq!(
+            action,
+            MomentumExitAction::Exit,
+            "6% price drop within 5 min should trigger exit"
+        );
     }
 
     #[tokio::test]
@@ -88,6 +96,10 @@ mod tests {
             .check_momentum("uuid-noprice", token, entry_price, SystemTime::now())
             .await;
 
-        assert_eq!(action, MomentumExitAction::None, "Missing price data should not trigger exit");
+        assert_eq!(
+            action,
+            MomentumExitAction::None,
+            "Missing price data should not trigger exit"
+        );
     }
 }

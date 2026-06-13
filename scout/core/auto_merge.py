@@ -218,7 +218,7 @@ def auto_merge_roster(
             return True, message
         # If API failed due to auth, try SIGHUP
         if "authentication" in message.lower():
-            print(f"[AutoMerge] API requires auth, trying SIGHUP...")
+            print("[AutoMerge] API requires auth, trying SIGHUP...")
             return merge_via_sighup(operator_container=operator_container)
         # If API failed for other reasons, return the error
         return False, f"API merge failed: {message}"
@@ -228,7 +228,7 @@ def auto_merge_roster(
         if success:
             return True, message
         # Fallback to API
-        print(f"[AutoMerge] SIGHUP failed, trying API...")
+        print("[AutoMerge] SIGHUP failed, trying API...")
         return merge_via_api(
             api_url=api_url,
             roster_path=roster_path,

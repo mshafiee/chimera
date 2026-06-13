@@ -15,7 +15,7 @@
 
 use crate::db::{self, DbPool, PositionRecord};
 use crate::error::{AppError, AppResult};
-use crate::handlers::{WsEvent, WsState, PositionUpdateData};
+use crate::handlers::{PositionUpdateData, WsEvent, WsState};
 use chrono::Utc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::Signature;
@@ -95,7 +95,8 @@ impl RecoveryManager {
             "Starting stuck-state recovery background task"
         );
 
-        let mut check_interval = interval(std::time::Duration::from_secs(RECOVERY_CHECK_INTERVAL_SECS));
+        let mut check_interval =
+            interval(std::time::Duration::from_secs(RECOVERY_CHECK_INTERVAL_SECS));
 
         loop {
             check_interval.tick().await;
@@ -157,9 +158,10 @@ impl RecoveryManager {
         // For EXITING positions, check the exit transaction signature
         // If no exit signature yet, check entry signature as fallback
         let tx_signature = position
-            .exit_tx_signature.as_deref()
+            .exit_tx_signature
+            .as_deref()
             .unwrap_or(&position.entry_tx_signature);
-        
+
         let on_chain_state = self.check_on_chain_state(tx_signature).await?;
 
         match on_chain_state {
@@ -171,7 +173,7 @@ impl RecoveryManager {
                     .exit_tx_signature
                     .as_ref()
                     .unwrap_or(&position.entry_tx_signature);
-                
+
                 db::insert_reconciliation_log(
                     &self.db,
                     &position.trade_uuid,
@@ -253,7 +255,7 @@ impl RecoveryManager {
             max_supported_transaction_version: Some(0),
             ..Default::default()
         };
-        
+
         match self
             .rpc_client
             .get_transaction_with_config(&signature, config)
@@ -287,7 +289,7 @@ impl RecoveryManager {
             Err(e) => {
                 // Check if it's a "transaction not found" error
                 let error_str = e.to_string().to_lowercase();
-                if error_str.contains("not found") 
+                if error_str.contains("not found")
                     || error_str.contains("transaction not found")
                     || error_str.contains("-32004")
                 {
@@ -353,7 +355,10 @@ mod tests {
     #[test]
     fn test_recovery_action_display() {
         assert_eq!(RecoveryAction::MarkedClosed.to_string(), "MARKED_CLOSED");
-        assert_eq!(RecoveryAction::RevertedToActive.to_string(), "REVERTED_TO_ACTIVE");
+        assert_eq!(
+            RecoveryAction::RevertedToActive.to_string(),
+            "REVERTED_TO_ACTIVE"
+        );
     }
 
     #[test]

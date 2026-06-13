@@ -8,14 +8,13 @@
 //!
 //! Signals with quality < 0.7 are rejected to improve win rate.
 
-
 /// Signal quality factors
 #[derive(Debug, Clone)]
 pub struct SignalFactors {
     /// Wallet Quality Score (0-100)
     pub wallet_wqs: f64,
     /// Whether this is a consensus signal (multiple wallets)
-    pub consensus_strength: f64,  // 0.0-1.0 (1.0 = strong consensus)
+    pub consensus_strength: f64, // 0.0-1.0 (1.0 = strong consensus)
     /// Liquidity score (0.0-1.0) based on USD liquidity
     pub liquidity_score: f64,
     /// Token age in hours (None if unknown)
@@ -56,11 +55,7 @@ impl SignalQuality {
         score += wallet_score * 0.4;
 
         // 2. Consensus strength (30% weight)
-        let consensus_score = if is_consensus {
-            1.0
-        } else {
-            0.0
-        };
+        let consensus_score = if is_consensus { 1.0 } else { 0.0 };
         score += consensus_score * 0.3;
 
         // 3. Liquidity score (20% weight) - use Decimal directly for comparisons
@@ -82,16 +77,16 @@ impl SignalQuality {
         // 4. Token age (10% weight) - older tokens are safer
         let age_score = if let Some(age) = token_age_hours {
             if age > 168.0 {
-                1.0  // > 7 days
+                1.0 // > 7 days
             } else if age > 24.0 {
-                0.7  // > 1 day
+                0.7 // > 1 day
             } else if age > 6.0 {
-                0.5  // > 6 hours
+                0.5 // > 6 hours
             } else {
-                0.3  // < 6 hours (very new)
+                0.3 // < 6 hours (very new)
             }
         } else {
-            0.5  // Unknown age - neutral
+            0.5 // Unknown age - neutral
         };
         score += age_score * 0.1;
 
@@ -160,12 +155,7 @@ mod tests {
 
     #[test]
     fn test_high_quality_signal() {
-        let quality = SignalQuality::calculate(
-            90.0,
-            true,
-            Decimal::from(60000u32),
-            Some(200.0),
-        );
+        let quality = SignalQuality::calculate(90.0, true, Decimal::from(60000u32), Some(200.0));
 
         assert!(quality.score >= 0.9);
         assert!(quality.should_enter(0.7));
@@ -174,12 +164,7 @@ mod tests {
 
     #[test]
     fn test_medium_quality_signal() {
-        let quality = SignalQuality::calculate(
-            75.0,
-            true,
-            Decimal::from(25000u32),
-            Some(48.0),
-        );
+        let quality = SignalQuality::calculate(75.0, true, Decimal::from(25000u32), Some(48.0));
 
         assert!(quality.score >= 0.7);
         assert!(quality.score < 0.9);
@@ -189,12 +174,7 @@ mod tests {
 
     #[test]
     fn test_low_quality_signal() {
-        let quality = SignalQuality::calculate(
-            50.0,
-            false,
-            Decimal::from(3000u32),
-            Some(2.0),
-        );
+        let quality = SignalQuality::calculate(50.0, false, Decimal::from(3000u32), Some(2.0));
 
         assert!(quality.score < 0.7);
         assert!(!quality.should_enter(0.7));
@@ -204,7 +184,8 @@ mod tests {
     #[test]
     fn test_consensus_boost() {
         let with_consensus = SignalQuality::calculate(60.0, true, Decimal::from(10000u32), None);
-        let without_consensus = SignalQuality::calculate(60.0, false, Decimal::from(10000u32), None);
+        let without_consensus =
+            SignalQuality::calculate(60.0, false, Decimal::from(10000u32), None);
 
         assert!(with_consensus.score > without_consensus.score);
     }

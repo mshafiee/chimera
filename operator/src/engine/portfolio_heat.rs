@@ -39,7 +39,11 @@ impl PortfolioHeat {
     }
 
     /// Create with custom max heat percentage
-    pub fn with_max_heat(db: DbPool, total_capital_sol: Decimal, max_heat_percent: Decimal) -> Self {
+    pub fn with_max_heat(
+        db: DbPool,
+        total_capital_sol: Decimal,
+        max_heat_percent: Decimal,
+    ) -> Self {
         let max_heat = max_heat_percent.max(Decimal::ZERO).min(Decimal::from(100));
         Self {
             db,
@@ -59,7 +63,7 @@ impl PortfolioHeat {
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state = 'ACTIVE'
-            "#
+            "#,
         )
         .fetch_one(&self.db)
         .await
@@ -97,7 +101,7 @@ impl PortfolioHeat {
     /// true if position can be opened, false otherwise
     pub async fn can_open_position(&self, position_size_sol: Decimal) -> Result<bool, String> {
         let heat = self.calculate_heat().await?;
-        
+
         if !heat.can_open_position {
             return Ok(false);
         }
@@ -123,7 +127,7 @@ impl PortfolioHeat {
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state = 'ACTIVE' AND strategy = 'SHIELD'
-            "#
+            "#,
         )
         .fetch_one(&self.db)
         .await
@@ -135,7 +139,7 @@ impl PortfolioHeat {
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state = 'ACTIVE' AND strategy = 'SPEAR'
-            "#
+            "#,
         )
         .fetch_one(&self.db)
         .await
@@ -148,16 +152,9 @@ impl PortfolioHeat {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn test_heat_calculation() {
         // This would be tested with actual database in integration tests
     }
 }
-
-
-
-
-
-

@@ -6,7 +6,7 @@
 //! - Mint authority whitelist
 //! - Liquidity thresholds per strategy
 
-use chimera_operator::token::{TokenParser, TokenSafetyConfig, TokenSafetyResult};
+use chimera_operator::token::{TokenSafetyConfig, TokenSafetyResult};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -20,10 +20,12 @@ mod known_tokens {
 #[test]
 fn test_freeze_authority_whitelist() {
     let config = TokenSafetyConfig::default();
-    
+
     // USDC has freeze authority but is whitelisted
     assert!(
-        config.freeze_authority_whitelist.contains(known_tokens::USDC),
+        config
+            .freeze_authority_whitelist
+            .contains(known_tokens::USDC),
         "USDC should be in freeze authority whitelist"
     );
 }
@@ -32,19 +34,22 @@ fn test_freeze_authority_whitelist() {
 fn test_freeze_authority_rejection() {
     let config = TokenSafetyConfig::default();
     let unknown_token = "UnknownTokenWithFreezeAuthority";
-    
+
     // Token with freeze authority that's not whitelisted should be rejected
     let has_freeze = true;
     let is_whitelisted = config.freeze_authority_whitelist.contains(unknown_token);
     let should_reject = has_freeze && !is_whitelisted;
-    
-    assert!(should_reject, "Non-whitelisted token with freeze authority should be rejected");
+
+    assert!(
+        should_reject,
+        "Non-whitelisted token with freeze authority should be rejected"
+    );
 }
 
 #[test]
 fn test_mint_authority_whitelist() {
     let config = TokenSafetyConfig::default();
-    
+
     // USDC has mint authority but is whitelisted
     assert!(
         config.mint_authority_whitelist.contains(known_tokens::USDC),
@@ -55,7 +60,7 @@ fn test_mint_authority_whitelist() {
 #[test]
 fn test_liquidity_threshold_shield() {
     let config = TokenSafetyConfig::default();
-    
+
     assert_eq!(
         config.min_liquidity_shield_usd,
         Decimal::from_str("12000.0").unwrap(),
@@ -66,7 +71,7 @@ fn test_liquidity_threshold_shield() {
 #[test]
 fn test_liquidity_threshold_spear() {
     let config = TokenSafetyConfig::default();
-    
+
     assert_eq!(
         config.min_liquidity_spear_usd,
         Decimal::from_str("6000.0").unwrap(),
@@ -119,7 +124,7 @@ fn test_liquidity_zero_rejection() {
     let liquidity_usd = 0.0;
     let threshold = 10_000.0;
     let should_reject = liquidity_usd < threshold;
-    
+
     assert!(should_reject, "Zero liquidity should be rejected");
 }
 
@@ -128,7 +133,6 @@ fn test_liquidity_insufficient_rejection() {
     let liquidity_usd = 5_000.0;
     let threshold = 10_000.0;
     let should_reject = liquidity_usd < threshold;
-    
+
     assert!(should_reject, "Insufficient liquidity should be rejected");
 }
-
