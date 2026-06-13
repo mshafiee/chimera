@@ -190,7 +190,18 @@ async fn process_transaction(
         }
     };
 
-    let amount_sol = tx.amount_sol.unwrap_or_else(|| Decimal::from(1)); // Default to 1 SOL if unknown
+    // Require explicit amount — don't guess or default
+    let amount_sol = match tx.amount_sol {
+        Some(amt) => amt,
+        None => {
+            tracing::warn!(
+                signature = %tx.signature,
+                wallet = %tx.wallet_address,
+                "Cannot determine transaction amount, skipping signal"
+            );
+            return Ok(());
+        }
+    };
 
     // Determine strategy based on wallet quality score
     let strategy = if wallet.wqs_score.unwrap_or(0.0) >= 70.0 {

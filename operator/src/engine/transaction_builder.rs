@@ -98,11 +98,26 @@ impl TransactionBuilder {
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid token mint: {}", e)))?;
                 let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
                     .map_err(|e| crate::error::AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
-                
-                // For sell, we need to get token balance first
-                // For now, use a placeholder - in production, fetch actual token balance
-                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
-                (token_mint, sol_mint, amount_lamports)
+
+                // For SELL: amount_sol represents the SOL value of the position to exit.
+                // Ideally, we'd fetch the on-chain token balance here, but that requires RPC calls
+                // at transaction-build time. Until then, we estimate token amount using a fixed price assumption.
+                // TODO: Pass fetched token balance from executor to avoid estimation.
+
+                // Estimate token amount: assume average token price ~$0.10 per token
+                // This is a conservative placeholder; actual implementation should fetch on-chain balance
+                let estimated_price = Decimal::from_str("0.10").unwrap_or(Decimal::from(1));
+                let token_amount_estimate = signal.payload.amount_sol / estimated_price;
+                let amount_lamports = token_amount_estimate * Decimal::from(1_000_000);
+
+                tracing::warn!(
+                    token = %signal.payload.token,
+                    sol_amount = %signal.payload.amount_sol,
+                    estimated_token_amount = %token_amount_estimate,
+                    "SELL: using estimated token amount (should fetch on-chain balance)"
+                );
+
+                (token_mint, sol_mint, amount_lamports.to_u64().unwrap_or(0))
             }
         };
 
