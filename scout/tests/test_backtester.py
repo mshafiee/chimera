@@ -527,3 +527,122 @@ def test_backtester_slippage_underestimate_large_trade_small_pool():
     else:
         # Trade correctly rejected (slippage too high or liquidity too low)
         assert "slippage" in (rejection or "").lower() or "liquidity" in (rejection or "").lower()
+
+
+# ─── P5: Prove backtester computes positive PnL for known profitable trades ───
+
+def test_backtester_simulated_pnl_positive_for_known_profitable_trades():
+    """Prove: backtester correctly computes positive PnL for 30% gain trades.
+
+    15 BUY/SELL pairs: buy 2.0 SOL / sell 2.6 SOL (+30% gross gain each).
+    After slippage + DEX fees + priority fees, simulated PnL must remain positive.
+    Proves the backtester's round-trip cashflow model gets the math right.
+    """
+    from decimal import Decimal
+
+    liquidity_map = {f"profit_token_{k}": 500_000.0 for k in range(15)}
+    mock_provider = MockLiquidityProvider(liquidity_map=liquidity_map)
+    config = BacktestConfig(
+        min_liquidity_shield_usd=10_000.0,
+        min_trades_required=5,
+    )
+    simulator = BacktestSimulator(mock_provider, config)
+
+    trades = []
+    base_time = datetime.utcnow() - timedelta(days=30)
+    for k in range(15):
+        token = f"profit_token_{k}"
+        trades.append(HistoricalTrade(
+            token_address=token,
+            token_symbol=f"PROF{k}",
+            action=TradeAction.BUY,
+            amount_sol=Decimal("2.0"),
+            price_at_trade=Decimal("100.0"),
+            timestamp=base_time + timedelta(days=2 * k),
+            tx_signature=f"buy_profit_{k}",
+            token_amount=Decimal("1000"),
+        ))
+        trades.append(HistoricalTrade(
+            token_address=token,
+            token_symbol=f"PROF{k}",
+            action=TradeAction.SELL,
+            amount_sol=Decimal("2.6"),      # +30% gross gain
+            price_at_trade=Decimal("130.0"),
+            timestamp=base_time + timedelta(days=2 * k, hours=4),
+            tx_signature=f"sell_profit_{k}",
+            token_amount=Decimal("1000"),
+            pnl_sol=Decimal("0.59"),
+        ))
+
+    result = simulator.simulate_wallet("wallet_profitable", trades, strategy="SHIELD")
+
+    assert result.simulated_pnl_sol > 0, (
+        f"30% gain trades must produce positive simulated PnL. "
+        f"Got: {result.simulated_pnl_sol} SOL. "
+        f"Rejections: {result.rejected_trades}/{result.total_trades} — "
+        f"{result.rejected_trade_details}"
+    )
+    assert result.passed, (
+        f"Profitable trades must pass backtest. Failure: {result.failure_reason}"
+    )
+    assert result.rejected_trades == 0, (
+        f"No trades should be rejected with $500k liquidity. "
+        f"Rejected: {result.rejected_trade_details}"
+    )
+
+
+# ─── P6: Prove backtester detects and rejects loss-making trades ──────────────
+
+def test_backtester_simulated_pnl_negative_for_known_losing_trades():
+    """Prove: backtester correctly identifies loss-making wallets and fails them.
+
+    15 BUY/SELL pairs: buy 2.0 SOL / sell 1.5 SOL (-25% loss each).
+    After costs, simulated PnL must be negative → backtest fails → wallet rejected.
+    Proves the system does not promote wallets who consistently lose money.
+    """
+    from decimal import Decimal
+
+    liquidity_map = {f"loss_token_{k}": 500_000.0 for k in range(15)}
+    mock_provider = MockLiquidityProvider(liquidity_map=liquidity_map)
+    config = BacktestConfig(
+        min_liquidity_shield_usd=10_000.0,
+        min_trades_required=5,
+    )
+    simulator = BacktestSimulator(mock_provider, config)
+
+    trades = []
+    base_time = datetime.utcnow() - timedelta(days=30)
+    for k in range(15):
+        token = f"loss_token_{k}"
+        trades.append(HistoricalTrade(
+            token_address=token,
+            token_symbol=f"LOSS{k}",
+            action=TradeAction.BUY,
+            amount_sol=Decimal("2.0"),
+            price_at_trade=Decimal("100.0"),
+            timestamp=base_time + timedelta(days=2 * k),
+            tx_signature=f"buy_loss_{k}",
+            token_amount=Decimal("1000"),
+        ))
+        trades.append(HistoricalTrade(
+            token_address=token,
+            token_symbol=f"LOSS{k}",
+            action=TradeAction.SELL,
+            amount_sol=Decimal("1.5"),      # -25% loss
+            price_at_trade=Decimal("75.0"),
+            timestamp=base_time + timedelta(days=2 * k, hours=4),
+            tx_signature=f"sell_loss_{k}",
+            token_amount=Decimal("1000"),
+            pnl_sol=Decimal("-0.51"),
+        ))
+
+    result = simulator.simulate_wallet("wallet_losing", trades, strategy="SHIELD")
+
+    assert result.simulated_pnl_sol < 0, (
+        f"25% loss trades must produce negative simulated PnL. "
+        f"Got: {result.simulated_pnl_sol} SOL"
+    )
+    assert not result.passed, (
+        f"Loss-making wallet must fail backtest. "
+        f"Simulated PnL: {result.simulated_pnl_sol} SOL, passed: {result.passed}"
+    )

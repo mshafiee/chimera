@@ -45,3 +45,8 @@ mod dex_comparison_tests;
 #[path = "integration/position_lifecycle_tests.rs"]
 mod position_lifecycle_tests;
 
+// ── Execution correctness & capital-protection proof tests ─────────────────────
+
+#[path = "integration/execution_proof_tests.rs"]
+mod execution_proof_tests;
+

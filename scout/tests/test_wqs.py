@@ -570,3 +570,45 @@ def test_wqs_sniper_detection_not_applied_when_delay_is_none():
     assert score_safe >= score_none, (
         f"Safe delay (5 min) should score >= None delay: {score_safe} vs {score_none}"
     )
+
+
+# ─── P7: Prove high win rate alone does not equal profitability ───────────────
+
+def test_wqs_high_winrate_alone_insufficient_when_profit_factor_low():
+    """80% win rate but profit_factor < 1.0 (gross losses exceed gross wins) → WQS < 40 → REJECTED.
+
+    Proves: win rate alone is not a reliable profitability signal.
+    A Martingale strategy can win 80% of trades and still blow up because
+    the 20% losing trades are catastrophically large.
+    The WQS correctly penalises this with -40 points for PF < 1.0.
+    """
+    metrics = WalletMetrics(
+        address="martingale_wallet",
+        roi_30d=5.0,            # Barely positive ROI (many small wins mask large losses)
+        roi_7d=2.0,
+        trade_count_30d=25,     # Enough for full confidence multiplier
+        win_rate=0.80,          # High win rate — looks great superficially
+        max_drawdown_30d=35.0,  # Large drawdown from the infrequent but massive losses
+        profit_factor=0.85,     # LOSING: total gross losses > total gross wins
+        avg_trade_size_sol=0.2,
+    )
+
+    score = calculate_wqs(metrics)
+
+    # Scoring breakdown (confidence=1.0 since trade_count=25≥20):
+    # roi_30d=5 → min(25, 5/100*25) = 1.25 pts
+    # roi_7d=2 → min(10, 2) = 2 pts
+    # Consistency bonus: roi_7d=2 > -5 AND roi_30d=5 > 20? → NO (5 < 20) → 0
+    # win_rate=0.80 → +5 (≥0.5) + 5 (≥0.65) = +10
+    # trade_count=25 → +2+3+5 = +10
+    # drawdown=35 → -35×0.2 = -7
+    # profit_factor=0.85 < 1.0 → -40 pts (Losing Trader penalty)
+    # Raw ≈ 1.25+2+10+10-7-40 = -23.75 → clamped to 0
+    assert score < 40.0, (
+        f"High win rate (0.80) must NOT earn CANDIDATE status when profit_factor=0.85 "
+        f"(gross losses exceed gross wins). Got WQS={score:.1f}"
+    )
+    assert classify_wallet(score) == "REJECTED", (
+        f"Martingale profile (win_rate=0.80, PF=0.85) must be REJECTED, "
+        f"not {classify_wallet(score)}"
+    )

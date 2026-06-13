@@ -278,11 +278,13 @@ class PrePromotionValidator:
                 )
 
         # 6c. NEW: Max Drawdown Check in Simulator
-        simulated_equity = [0.0]
-        current_eq = 0.0
+        from decimal import Decimal as _D
+        simulated_equity = [_D("0")]
+        current_eq = _D("0")
         for t in trade_list:
-            if t.simulated_pnl_sol:
-                current_eq += t.simulated_pnl_sol
+            pnl = t.simulated_pnl_sol
+            if pnl:
+                current_eq += _D(str(pnl)) if not isinstance(pnl, _D) else pnl
                 simulated_equity.append(current_eq)
         
         if simulated_equity:
