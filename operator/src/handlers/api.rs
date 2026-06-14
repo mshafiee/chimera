@@ -1816,15 +1816,22 @@ pub async fn get_performance_metrics(
     let pnl_7d = db::get_pnl_7d(&state.db).await?;
     let pnl_30d = db::get_pnl_30d(&state.db).await?;
 
-    // Calculate change percentages (simplified - in production, compare to previous period)
-    // For now, we'll return None for change percentages
+    // Compare each period to the equivalent prior window to compute change %.
+    let prev_24h = db::get_pnl_prev_window(&state.db, 48, 24).await.unwrap_or(Decimal::ZERO);
+    let prev_7d  = db::get_pnl_prev_window(&state.db, 336, 168).await.unwrap_or(Decimal::ZERO);
+    let prev_30d = db::get_pnl_prev_window(&state.db, 1440, 720).await.unwrap_or(Decimal::ZERO);
+
+    let change_pct = |curr: Decimal, prev: Decimal| -> Option<f64> {
+        if prev.is_zero() { None } else { ((curr - prev) / prev * Decimal::from(100)).to_f64() }
+    };
+
     Ok(Json(PerformanceMetricsResponse {
         pnl_24h,
         pnl_7d,
         pnl_30d,
-        pnl_24h_change_percent: None,
-        pnl_7d_change_percent: None,
-        pnl_30d_change_percent: None,
+        pnl_24h_change_percent: change_pct(pnl_24h, prev_24h),
+        pnl_7d_change_percent: change_pct(pnl_7d, prev_7d),
+        pnl_30d_change_percent: change_pct(pnl_30d, prev_30d),
     }))
 }
 

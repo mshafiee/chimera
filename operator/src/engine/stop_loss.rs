@@ -66,18 +66,20 @@ impl StopLossManager {
         };
 
         // Calculate loss percentage using Decimal for precision
-        // Negative when price has fallen (e.g. -15.0 for 15% drop), matching negative thresholds
+        // Negative when price has fallen (e.g. -15.0 for 15% drop), matching negative thresholds.
+        // Zero entry_price yields loss_percent=0 — no stop fires, position is held until data is
+        // corrected. Forcing an exit on corrupt data risks selling at an unknown price.
         let loss_percent = if !entry_price.is_zero() {
             let diff = current_price - entry_price;
             let ratio = diff / entry_price;
             ratio * Decimal::from(100)
         } else {
-            tracing::error!(
+            tracing::warn!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
-                "Position has zero entry_price — forcing immediate exit (data corruption guard)"
+                "Position has zero entry_price — stop-loss skipped until entry price is corrected"
             );
-            return StopLossAction::Exit;
+            Decimal::ZERO
         };
 
         // Get wallet WQS for dynamic stop calculation

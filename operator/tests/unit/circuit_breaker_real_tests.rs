@@ -120,8 +120,10 @@ async fn test_evaluate_does_not_trip_below_threshold() {
     let (pool, _tmp) = create_test_db().await;
     let cb = CircuitBreaker::new(tight_config(), pool.clone());
 
-    for i in 0..4 {
-        insert_closed_position_with_pnl(&pool, &format!("uuid-below-{}", i), -100.0).await;
+    // 2 losses × (-200 SOL) = -400 total, consecutive = 2 < threshold of 3.
+    // Using 4 × (-100) would also give -400 but would trigger the consecutive check (4 ≥ 3).
+    for i in 0..2 {
+        insert_closed_position_with_pnl(&pool, &format!("uuid-below-{}", i), -200.0).await;
     }
 
     cb.evaluate().await.unwrap();
@@ -173,16 +175,35 @@ async fn test_consecutive_losses_resets_at_intervening_win() {
     let (pool, _tmp) = create_test_db().await;
     let cb = CircuitBreaker::new(tight_config(), pool.clone());
 
-    // Insert in reverse chronological order (ORDER BY created_at DESC):
-    // Most recent: 3 losses
-    for i in 0..3 {
-        insert_closed_trade_with_pnl(&pool, &format!("uuid-loss-recent-{}", i), -50.0).await;
+    // Use insert_closed_position_with_pnl so both tables are populated for the JOIN in
+    // get_consecutive_losses(). insert_closed_trade_with_pnl only inserts into trades.
+    //
+    // After inserting, backdate the timestamps to ensure deterministic ORDER BY created_at DESC:
+    //   3 recent losses  → created_at = now (newest, offsets -1s, -2s, -3s)
+    //   1 win            → created_at = now - 10s
+    //   2 old losses     → created_at = now - 20s, -21s
+    for i in 0..3_i64 {
+        let uuid = format!("uuid-loss-recent-{}", i);
+        insert_closed_position_with_pnl(&pool, &uuid, -50.0).await;
+        let offset = format!("-{} seconds", i + 1);
+        sqlx::query("UPDATE trades    SET created_at = datetime('now', ?) WHERE trade_uuid = ?")
+            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE positions SET closed_at  = datetime('now', ?) WHERE trade_uuid = ?")
+            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
     }
-    // Then a win
-    insert_closed_trade_with_pnl(&pool, "uuid-win", 10.0).await;
-    // Then 2 old losses
-    for i in 0..2 {
-        insert_closed_trade_with_pnl(&pool, &format!("uuid-loss-old-{}", i), -50.0).await;
+    insert_closed_position_with_pnl(&pool, "uuid-win", 10.0).await;
+    sqlx::query("UPDATE trades    SET created_at = datetime('now', '-10 seconds') WHERE trade_uuid = 'uuid-win'")
+        .execute(&pool).await.unwrap();
+    sqlx::query("UPDATE positions SET closed_at  = datetime('now', '-10 seconds') WHERE trade_uuid = 'uuid-win'")
+        .execute(&pool).await.unwrap();
+    for i in 0..2_i64 {
+        let uuid = format!("uuid-loss-old-{}", i);
+        insert_closed_position_with_pnl(&pool, &uuid, -50.0).await;
+        let offset = format!("-{} seconds", 20 + i);
+        sqlx::query("UPDATE trades    SET created_at = datetime('now', ?) WHERE trade_uuid = ?")
+            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE positions SET closed_at  = datetime('now', ?) WHERE trade_uuid = ?")
+            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
     }
 
     cb.evaluate().await.unwrap();

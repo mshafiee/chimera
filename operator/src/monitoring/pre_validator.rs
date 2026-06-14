@@ -120,8 +120,27 @@ impl PreValidator {
             };
         }
 
-        // Check liquidity (would need to fetch from DEX)
-        // For now, assume liquidity check is done elsewhere
+        // Check liquidity via DexScreener when token_fetcher is available.
+        // Use the lower of shield/spear thresholds to be conservative regardless of strategy.
+        if let Some(ref fetcher) = self.token_fetcher {
+            let min_liq = self.config.token_safety.min_liquidity_spear_usd
+                .min(self.config.token_safety.min_liquidity_shield_usd);
+            match fetcher.get_liquidity(token_address).await {
+                Ok(liq_usd) if liq_usd < min_liq => {
+                    return ValidationResult {
+                        valid: false,
+                        reason: Some(format!(
+                            "Liquidity ${:.0} below minimum ${:.0}",
+                            liq_usd.to_f64().unwrap_or(0.0),
+                            min_liq.to_f64().unwrap_or(0.0)
+                        )),
+                        estimated_slippage,
+                        price_drift_percent: price_drift,
+                    };
+                }
+                _ => {}
+            }
+        }
 
         ValidationResult {
             valid: true,

@@ -318,18 +318,43 @@ async fn main() -> anyhow::Result<()> {
                 }
                 _ = interval.tick() => {
                     // Fetch retryable items from DLQ
-                    match sqlx::query_as::<_, (String, String)>(
-                        "SELECT trade_uuid, payload FROM dead_letter_queue WHERE can_retry = 1 AND processed_at IS NULL LIMIT 50"
+                    match sqlx::query_as::<_, (String, String, i64)>(
+                        "SELECT trade_uuid, payload, retry_count FROM dead_letter_queue WHERE can_retry = 1 AND processed_at IS NULL LIMIT 50"
                     )
                     .fetch_all(&dlq_pool)
                     .await {
                         Ok(items) => {
+                            const MAX_DLQ_RETRIES: i64 = 3;
                             tracing::info!(count = items.len(), "Processing DLQ retry items");
-                            for (trade_uuid, payload_str) in items {
+                            for (trade_uuid, payload_str, retry_count) in items {
+                                // Increment retry_count and enforce max-retry limit
+                                let new_count = retry_count + 1;
+                                let can_still_retry = if new_count >= MAX_DLQ_RETRIES { 0i64 } else { 1i64 };
+                                if let Err(e) = sqlx::query(
+                                    "UPDATE dead_letter_queue SET retry_count = ?, can_retry = ? WHERE trade_uuid = ? AND processed_at IS NULL"
+                                )
+                                .bind(new_count)
+                                .bind(can_still_retry)
+                                .bind(&trade_uuid)
+                                .execute(&dlq_pool)
+                                .await {
+                                    tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to increment DLQ retry_count");
+                                    continue;
+                                }
+
+                                if can_still_retry == 0 {
+                                    tracing::warn!(
+                                        uuid = %trade_uuid,
+                                        retry_count = new_count,
+                                        "DLQ item permanently failed after max retries"
+                                    );
+                                    continue;
+                                }
+
                                 // Parse payload and re-queue
                                 match serde_json::from_str::<serde_json::Value>(&payload_str) {
                                     Ok(_) => {
-                                        // Update DLQ item status to mark as processed and moved to RETRY
+                                        // Mark as processed and update trade status to RETRY
                                         if let Err(e) = sqlx::query(
                                             "UPDATE dead_letter_queue SET processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = ?"
                                         )
@@ -337,13 +362,10 @@ async fn main() -> anyhow::Result<()> {
                                         .execute(&dlq_pool)
                                         .await {
                                             tracing::warn!(error = %e, "Failed to mark DLQ item as processed");
+                                        } else if let Err(e) = crate::db::update_trade_status(&dlq_pool, &trade_uuid, "RETRY", None, None).await {
+                                            tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to update trade status to RETRY");
                                         } else {
-                                            // Update trade status to RETRY
-                                            if let Err(e) = crate::db::update_trade_status(&dlq_pool, &trade_uuid, "RETRY", None, None).await {
-                                                tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to update trade status to RETRY");
-                                            } else {
-                                                tracing::info!(uuid = %trade_uuid, "DLQ item re-queued to RETRY");
-                                            }
+                                            tracing::info!(uuid = %trade_uuid, retry_count = new_count, "DLQ item re-queued to RETRY");
                                         }
                                     }
                                     Err(e) => {

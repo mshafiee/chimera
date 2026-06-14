@@ -1311,11 +1311,38 @@ class HeliusClient:
                 return None
 
             # 2. Handle LP / Staking
+            # Helius enriches these types with token_transfers + native_transfers.
+            # We summarise each as a structured event so the wallet analyser can
+            # adjust metrics appropriately (LP wallets have different risk profiles).
             elif tx_type in ("ADD_LIQUIDITY", "REMOVE_LIQUIDITY", "STAKE_TOKEN", "UNSTAKE_TOKEN"):
-                # Extract token deltas - currently stubbed pending LP pool structure docs
-                # TODO: Implement LP position tracking for Raydium/Orca/Marinade
-                # Would require parsing pool account structures and delta computation
-                return None
+                token_transfers = tx.get("tokenTransfers", [])
+                native_transfers = tx.get("nativeTransfers", [])
+                # Collect inbound and outbound deltas relative to wallet_address
+                tokens_in, tokens_out = [], []
+                for tt in token_transfers:
+                    mint = tt.get("mint") or tt.get("token")
+                    amount = tt.get("tokenAmount", 0)
+                    if tt.get("toUserAccount") == wallet_address:
+                        tokens_in.append({"mint": mint, "amount": amount})
+                    elif tt.get("fromUserAccount") == wallet_address:
+                        tokens_out.append({"mint": mint, "amount": amount})
+                sol_delta = 0.0
+                for nt in native_transfers:
+                    lamports = nt.get("amount", 0)
+                    if nt.get("toUserAccount") == wallet_address:
+                        sol_delta += lamports / 1e9
+                    elif nt.get("fromUserAccount") == wallet_address:
+                        sol_delta -= lamports / 1e9
+                is_lp = tx_type in ("ADD_LIQUIDITY", "REMOVE_LIQUIDITY")
+                return {
+                    "type": "LIQUIDITY_EVENT" if is_lp else "STAKE_EVENT",
+                    "subtype": tx_type,
+                    "tokens_in": tokens_in,
+                    "tokens_out": tokens_out,
+                    "sol_delta": sol_delta,
+                    "signature": tx.get("signature", ""),
+                    "timestamp": tx.get("timestamp", 0),
+                }
 
             # For now, we rely on the existing parse_swap_transaction for the core logic
             # and this method serves as the entry point for expanding coverage.

@@ -84,6 +84,8 @@ pub struct Executor {
     jito_searcher: Option<crate::engine::jito_searcher::JitoSearcherClient>,
     /// Price cache for volatility calculation
     price_cache: Option<Arc<PriceCache>>,
+    /// Price impact from the most recent Jupiter quote (set by execute_jito/execute_standard)
+    last_price_impact: parking_lot::Mutex<Option<Decimal>>,
 }
 
 impl Executor {
@@ -139,6 +141,7 @@ impl Executor {
             tip_manager: None,
             jito_searcher,
             price_cache: None,
+            last_price_impact: parking_lot::Mutex::new(None),
         }
     }
 
@@ -347,13 +350,18 @@ impl Executor {
                     // Track costs: Jito tip, DEX fee, slippage
                     let dex_fee_rate = Decimal::from_str("0.003").unwrap(); // 0.3% DEX fee
                     let dex_fee_sol = signal.payload.amount_sol * dex_fee_rate;
-                    // Estimate slippage (conservative estimate: 0.5% for small trades, 1% for larger)
-                    let half_sol = Decimal::from_str("0.5").unwrap();
-                    let slippage_percent = if signal.payload.amount_sol < half_sol {
-                        Decimal::from_str("0.005").unwrap() // 0.5% for trades < 0.5 SOL
-                    } else {
-                        Decimal::from_str("0.01").unwrap() // 1% for larger trades
-                    };
+                    // Use actual price impact from Jupiter quote when available;
+                    // fall back to a size-based conservative estimate otherwise.
+                    let slippage_percent = self.last_price_impact.lock().take()
+                        .map(|pct| pct / Decimal::from(100)) // convert 1.5% → 0.015 fraction
+                        .unwrap_or_else(|| {
+                            let half_sol = Decimal::from_str("0.5").unwrap();
+                            if signal.payload.amount_sol < half_sol {
+                                Decimal::from_str("0.005").unwrap()
+                            } else {
+                                Decimal::from_str("0.01").unwrap()
+                            }
+                        });
                     let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
 
                     // Update trade costs in database
@@ -707,6 +715,9 @@ impl Executor {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
             })?;
 
+        // Capture actual price impact from Jupiter quote for cost accounting
+        *self.last_price_impact.lock() = built_tx.price_impact_pct();
+
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
         tracing::debug!(
@@ -947,6 +958,9 @@ impl Executor {
             .map_err(|e| {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
             })?;
+
+        // Capture actual price impact from Jupiter quote for cost accounting
+        *self.last_price_impact.lock() = built_tx.price_impact_pct();
 
         // Submit transaction via RPC
         let signature = match &built_tx {

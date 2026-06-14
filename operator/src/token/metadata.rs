@@ -476,39 +476,39 @@ impl TokenMetadataFetcher {
 
     /// Fetch liquidity from Raydium pools via RPC.
     ///
-    /// Note: pool stubs return Decimal::ZERO. Superseded by `fetch_dexscreener_liquidity`.
+    /// On-chain pool parsing is not implemented. Delegates to `PoolEnumerator` which
+    /// returns an error; callers should use `fetch_dexscreener_liquidity` instead.
     #[allow(dead_code)]
     async fn fetch_raydium_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         if let Some(ref pool_enumerator) = self.pool_enumerator {
             pool_enumerator
                 .get_raydium_liquidity(token_address)
                 .await
-                .map_err(|e| AppError::Http(format!("Raydium liquidity fetch failed: {}", e)))
+                .map_err(|e| AppError::Http(format!("Raydium liquidity unavailable: {}", e)))
         } else {
-            tracing::debug!(
-                token = token_address,
-                "Pool enumerator not available, returning 0.0 for Raydium liquidity"
-            );
-            Ok(Decimal::ZERO)
+            Err(AppError::Http(format!(
+                "Pool enumerator not available for Raydium liquidity ({}); use DexScreener",
+                token_address
+            )))
         }
     }
 
     /// Fetch liquidity from Orca pools via RPC.
     ///
-    /// Note: pool stubs return Decimal::ZERO. Superseded by `fetch_dexscreener_liquidity`.
+    /// On-chain pool parsing is not implemented. Delegates to `PoolEnumerator` which
+    /// returns an error; callers should use `fetch_dexscreener_liquidity` instead.
     #[allow(dead_code)]
     async fn fetch_orca_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
         if let Some(ref pool_enumerator) = self.pool_enumerator {
             pool_enumerator
                 .get_orca_liquidity(token_address)
                 .await
-                .map_err(|e| AppError::Http(format!("Orca liquidity fetch failed: {}", e)))
+                .map_err(|e| AppError::Http(format!("Orca liquidity unavailable: {}", e)))
         } else {
-            tracing::debug!(
-                token = token_address,
-                "Pool enumerator not available, returning 0.0 for Orca liquidity"
-            );
-            Ok(Decimal::ZERO)
+            Err(AppError::Http(format!(
+                "Pool enumerator not available for Orca liquidity ({}); use DexScreener",
+                token_address
+            )))
         }
     }
 

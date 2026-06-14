@@ -37,6 +37,8 @@ pub struct SizingFactors {
     pub wallet_address: String,
     /// Total trading capital in SOL (for Kelly sizing)
     pub total_capital_sol: Decimal,
+    /// Trading strategy — determines per-strategy max position size
+    pub strategy: crate::models::Strategy,
 }
 
 impl PositionSizer {
@@ -60,7 +62,7 @@ impl PositionSizer {
     /// Position size in SOL (using Decimal for precision)
     pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
         // Kelly Criterion override: derive base size from historical win/loss ratio.
-        // Falls back to config.base_size_sol when Kelly can't compute (< 10 trades).
+        // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
         let mut size = if let Some(ref kelly) = self.kelly_sizer {
             match kelly.calculate_kelly(&factors.wallet_address, 30).await {
                 Ok(result) => {
@@ -75,10 +77,32 @@ impl PositionSizer {
                         .max(self.config.min_size_sol)
                         .min(self.config.max_size_sol)
                 }
-                Err(_) => self.config.base_size_sol, // < 10 trades: use fixed base
+                Err(_) => {
+                    // < 10 closed trades: scale base size by WQS quality and sample confidence
+                    let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
+                        .await
+                        .unwrap_or(0);
+                    // Floor at 0.2 so wallets with 0 trades still get a non-zero base
+                    // that downstream penalties (token age, slippage) can still reduce.
+                    let confidence = Decimal::from_f64_retain(((trade_count as f64 / 10.0).max(0.2)).min(1.0))
+                        .unwrap_or(Decimal::ONE);
+                    let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
+                        .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
+                    (self.config.base_size_sol * wqs_factor * confidence).max(self.config.min_size_sol)
+                }
             }
         } else {
-            self.config.base_size_sol
+            // Kelly not enabled: apply WQS + confidence scaling directly
+            let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
+                .await
+                .unwrap_or(0);
+            // Floor at 0.2 so wallets with 0 trades still get a non-zero base
+            // that downstream penalties (token age, slippage) can still reduce.
+            let confidence = Decimal::from_f64_retain(((trade_count as f64 / 10.0).max(0.2)).min(1.0))
+                .unwrap_or(Decimal::ONE);
+            let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
+                .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
+            (self.config.base_size_sol * wqs_factor * confidence).max(self.config.min_size_sol)
         };
 
         // Confidence multiplier (using Decimal)
@@ -175,9 +199,14 @@ impl PositionSizer {
         size *= quality_mult;
         size *= volatility_mult;
 
-        // Apply min/max bounds
+        // Apply strategy-specific max cap (Barbell: Shield gets larger allocation, Spear smaller)
+        let strategy_max = match factors.strategy {
+            crate::models::Strategy::Shield => self.config.shield_max_size_sol,
+            crate::models::Strategy::Spear => self.config.spear_max_size_sol,
+            crate::models::Strategy::Exit => self.config.max_size_sol,
+        };
         size = size.max(self.config.min_size_sol);
-        size = size.min(self.config.max_size_sol);
+        size = size.min(strategy_max);
 
         size
     }
@@ -244,6 +273,7 @@ impl PositionSizer {
             token_volatility_24h: None, // Will be set by caller if available
             wallet_address: wallet_address.to_string(),
             total_capital_sol,
+            strategy: crate::models::Strategy::Shield, // caller can override
         }
     }
 

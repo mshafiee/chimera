@@ -59,6 +59,7 @@ fn neutral_factors() -> SizingFactors {
         token_volatility_24h: None,
         wallet_address: "test_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
+        strategy: chimera_operator::models::Strategy::Shield,
     }
 }
 
@@ -238,6 +239,7 @@ async fn test_position_size_capped_at_max() {
         token_volatility_24h: None,
         wallet_address: "test_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
+        strategy: chimera_operator::models::Strategy::Shield,
     };
 
     let size = sizer.calculate_size(factors).await;
@@ -271,6 +273,7 @@ async fn test_position_size_floor_at_minimum() {
         token_volatility_24h: Some(Decimal::from_str("50.0").unwrap()), // additional reduction
         wallet_address: "test_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
+        strategy: chimera_operator::models::Strategy::Spear,
     };
 
     let size = sizer.calculate_size(factors).await;

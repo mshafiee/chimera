@@ -112,6 +112,8 @@ async fn test_close_position_no_active_position_is_noop() {
         "wallet_nosell",
         Decimal::from_str("2.0").unwrap(),
         "sig_exit",
+        "uuid-nosell",
+        None,
     )
     .await;
 
@@ -179,6 +181,8 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         "wallet_f",
         Decimal::from_str("110.0").unwrap(),
         "sig_sell_f",
+        uuid,
+        None,
     )
     .await
     .unwrap();
@@ -318,6 +322,8 @@ async fn test_full_trade_status_progression() {
         "wallet",
         Decimal::from_str("60.0").unwrap(),
         "sig_exit",
+        uuid,
+        None,
     )
     .await
     .unwrap();

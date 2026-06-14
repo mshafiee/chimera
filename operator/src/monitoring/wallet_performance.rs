@@ -147,11 +147,24 @@ impl WalletPerformanceTracker {
             // Adjust WQS (but don't go below 40% of original)
             let adjusted_wqs = (original_wqs * copy_performance_factor).max(original_wqs * 0.4);
 
-            // Update wallet WQS in database
+            // Persist adjusted WQS back to the wallets table
             wallet.wqs_score = Some(adjusted_wqs);
 
-            // Update database (would need an update_wallet_wqs function)
-            // For now, we'll log it - full update would require roster merge
+            if let Err(e) = crate::db::upsert_wallet(
+                &self.db,
+                wallet_address,
+                Some(adjusted_wqs),
+                None, None, None, None, None, None, None, None,
+            )
+            .await
+            {
+                tracing::warn!(
+                    wallet_address = %wallet_address,
+                    error = %e,
+                    "Failed to persist adjusted WQS to database"
+                );
+            }
+
             tracing::info!(
                 wallet_address = %wallet_address,
                 original_wqs = original_wqs,

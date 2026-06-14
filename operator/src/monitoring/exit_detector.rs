@@ -17,6 +17,8 @@ pub struct ExitDetector {
             >,
         >,
     >,
+    /// Database pool for position lookup (used to detect partial vs full exit)
+    db: Option<crate::db::DbPool>,
 }
 
 /// Exit signal
@@ -41,7 +43,13 @@ impl ExitDetector {
     pub fn new() -> Self {
         Self {
             pending_exits: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            db: None,
         }
+    }
+
+    pub fn with_db(mut self, db: crate::db::DbPool) -> Self {
+        self.db = Some(db);
+        self
     }
 
     /// Process swap and detect if it's an exit
@@ -64,9 +72,9 @@ impl ExitDetector {
             return None;
         }
 
-        // Check if this is a full or partial exit
-        // For now, assume full exit (would need position tracking to determine partial)
-        let exit_type = ExitType::Full;
+        // Determine if this is a full or partial exit by comparing tokens sold
+        // against the tracked position size.
+        let exit_type = self.classify_exit_type(wallet_address, &swap.token_in, swap.amount_in).await;
 
         // For SELL swaps, the exited token is token_in (what we're selling), not token_out (SOL)
         let exited_token = swap.token_in.clone();
@@ -99,6 +107,45 @@ impl ExitDetector {
         }
 
         false
+    }
+
+    /// Classify a sell as Full or Partial by comparing tokens sold to the tracked position.
+    ///
+    /// If the wallet's ACTIVE/EXITING position can be found, the sell is classified as Full
+    /// when `amount_in >= 90%` of the estimated position token size, else Partial.
+    /// Falls back to Full when no position data is available.
+    async fn classify_exit_type(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+        amount_in: rust_decimal::Decimal,
+    ) -> ExitType {
+        let Some(ref pool) = self.db else { return ExitType::Full };
+
+        let row: Option<(f64, f64)> = sqlx::query_as(
+            "SELECT entry_amount_sol, entry_price FROM positions \
+             WHERE wallet_address = ? AND token_address = ? AND state IN ('ACTIVE', 'EXITING') \
+             ORDER BY id DESC LIMIT 1",
+        )
+        .bind(wallet_address)
+        .bind(token_address)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        if let Some((entry_amount_sol, entry_price)) = row {
+            if entry_price > 0.0 && entry_amount_sol > 0.0 {
+                use rust_decimal::prelude::*;
+                let est_tokens = Decimal::from_f64_retain(entry_amount_sol / entry_price)
+                    .unwrap_or(Decimal::ZERO);
+                let threshold = est_tokens * Decimal::from_str("0.9").unwrap_or(Decimal::ONE);
+                if amount_in < threshold {
+                    return ExitType::Partial;
+                }
+            }
+        }
+
+        ExitType::Full
     }
 
     /// Mark exit as processed

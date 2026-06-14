@@ -19,6 +19,14 @@ from datetime import datetime
 
 
 @dataclass
+class WqsResult:
+    """Result of a WQS calculation with quality score and sample confidence separated."""
+    score: float          # Raw quality score before confidence weighting (0-100)
+    confidence: float     # Sample confidence 0.0-1.0 (reaches 1.0 at 20+ trades)
+    adjusted_score: float # score * confidence, clamped 0-100 — use for routing decisions
+
+
+@dataclass
 class WalletMetrics:
     """Wallet performance metrics for WQS calculation."""
     address: str
@@ -41,29 +49,13 @@ class WalletMetrics:
     uses_mev_protection: bool = False  # Detected Jito bundle/MEV protection usage
 
 
-def calculate_wqs(metrics: WalletMetrics) -> float:
+def _calculate_raw_score(metrics: WalletMetrics) -> float:
     """
-    Calculate Wallet Quality Score (WQS) v2 (0-100).
+    Compute the raw quality score (0-100) *without* the confidence multiplier.
 
-    This implementation matches the Scout test suite expectations and the PDD's
-    core intent: favor repeatable profitability with low drawdowns, penalize
-    recent ROI spikes, and discount low-sample wallets.
-
-    Scoring breakdown:
-    - ROI performance: up to 25 points (capped at 100% ROI)
-    - Consistency: up to 25 points (win_streak_consistency)
-    - Win rate fallback: up to 25 points (if consistency unavailable)
-    - Activity bonus: +5 points if trade_count_30d >= 50
-    - Anti-pump-and-dump: -15 points if 7d ROI > 2x 30d ROI (and 30d ROI > 0)
-    - Statistical significance: smooth confidence multiplier based on
-      realized closes (`trade_count_30d`), reaching 1.0 at 20+
-    - Drawdown penalty: -0.2 * drawdown_percent
-    
-    Args:
-        metrics: WalletMetrics object with wallet data
-        
-    Returns:
-        WQS score from 0 to 100
+    Separating quality from sample-size confidence lets callers decide how to
+    weight the two independently (e.g. `calculate_wqs_with_confidence`).
+    Returns 0.0 immediately for wallets that are categorically uncopyable (snipers).
     """
     # PDD specification: score starts at 0.
     score = 0.0
@@ -240,13 +232,53 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
         except (ValueError, TypeError):
             pass
 
-    # Confidence multiplier: discount low-sample wallets (smooth ramp to 1.0 at 20+ trades)
+    # Clamp to 0-100 range before returning the raw quality score.
+    return max(0.0, min(score, 100.0))
+
+
+def calculate_wqs(metrics: WalletMetrics) -> float:
+    """
+    Calculate Wallet Quality Score (WQS) v2 (0-100).
+
+    This implementation matches the Scout test suite expectations and the PDD's
+    core intent: favor repeatable profitability with low drawdowns, penalize
+    recent ROI spikes, and discount low-sample wallets.
+
+    Scoring breakdown:
+    - ROI performance: up to 25 points (capped at 100% ROI)
+    - Consistency: up to 25 points (win_streak_consistency)
+    - Win rate fallback: up to 25 points (if consistency unavailable)
+    - Activity bonus: +5 points if trade_count_30d >= 50
+    - Anti-pump-and-dump: -15 points if 7d ROI > 2x 30d ROI (and 30d ROI > 0)
+    - Statistical significance: smooth confidence multiplier based on
+      realized closes (`trade_count_30d`), reaching 1.0 at 20+
+    - Drawdown penalty: -0.2 * drawdown_percent
+
+    Args:
+        metrics: WalletMetrics object with wallet data
+
+    Returns:
+        WQS score from 0 to 100
+    """
+    raw = _calculate_raw_score(metrics)
     trade_count = metrics.trade_count_30d or 0
     confidence = min(trade_count / 20.0, 1.0)
-    score = score * confidence
+    return max(0.0, min(raw * confidence, 100.0))
 
-    # Clamp to 0-100 range
-    return max(0.0, min(score, 100.0))
+
+def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
+    """
+    Like calculate_wqs() but returns quality score and sample confidence separately.
+
+    Use when the caller needs to distinguish between a wallet that is *bad* vs one
+    that is *unproven* — they both produce a low adjusted_score but for different
+    reasons, and the Operator's position sizer handles them differently.
+    """
+    raw_score = _calculate_raw_score(metrics)
+    trade_count = metrics.trade_count_30d or 0
+    confidence = min(trade_count / 20.0, 1.0)
+    adjusted_score = max(0.0, min(raw_score * confidence, 100.0))
+    return WqsResult(score=raw_score, confidence=confidence, adjusted_score=adjusted_score)
 
 
 def classify_wallet(

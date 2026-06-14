@@ -471,6 +471,7 @@ pub async fn webhook_handler(
                 token_volatility_24h: None,
                 wallet_address: signal.payload.wallet_address.clone(),
                 total_capital_sol: state.total_capital_sol,
+                strategy: signal.payload.strategy,
             };
             trade_amount_sol = sizer.calculate_size(factors).await;
             tracing::info!(

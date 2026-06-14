@@ -127,6 +127,8 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         WALLET,
         Decimal::from_str("150.0").unwrap(),
         "sig_exit_r3",
+        UUID,
+        None,
     )
     .await
     .unwrap();
@@ -203,6 +205,8 @@ async fn test_profit_capture_positive_pnl_recorded() {
         WALLET,
         Decimal::from_str("140.0").unwrap(),
         "sig_exit_profit",
+        UUID,
+        None,
     )
     .await
     .unwrap();

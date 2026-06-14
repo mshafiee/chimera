@@ -772,7 +772,7 @@ class WalletAnalyzer:
             # Token metadata enrichment (symbol/decimals)
             token_symbol = swap.get("token_symbol") or None
             if not token_symbol or token_symbol == "UNKNOWN":
-                token_symbol = self._get_token_symbol(token_mint) or "UNKNOWN"
+                token_symbol = await self._get_token_symbol_async(token_mint) or "UNKNOWN"
 
             trade = HistoricalTrade(
                 token_address=token_mint,
@@ -838,18 +838,6 @@ class WalletAnalyzer:
                     pass
             return symbol
 
-        # 2) Birdeye (if available) - Note: This is sync method, birdeye call is async
-        # For now, we skip async birdeye call here to avoid making this method async
-        # Token metadata is not critical for core functionality
-        # TODO: Make _get_token_symbol async if needed for full birdeye integration
-        try:
-            if getattr(self.liquidity_provider, "birdeye_client", None):
-                # Skip async birdeye call in sync context
-                # Token symbol is primarily for logging/display, not critical
-                pass
-        except Exception:
-            pass
-
         self._token_meta_cache[token_mint] = {}
         # Cache empty result in Redis to avoid repeated API calls
         if self._redis_client and self._redis_client.is_available():
@@ -859,6 +847,38 @@ class WalletAnalyzer:
                 self._redis_client.set(cache_key, json.dumps({}), ttl_seconds=24 * 3600)  # 1 day for empty results
             except Exception:
                 pass
+        return None
+
+    async def _get_token_symbol_async(self, token_mint: str) -> Optional[str]:
+        """Async variant of _get_token_symbol that also queries Birdeye when available."""
+        # Check sync caches first (avoids an I/O round-trip for already-known tokens)
+        symbol = self._get_token_symbol(token_mint)
+        if symbol:
+            return symbol
+
+        birdeye = getattr(self.liquidity_provider, "birdeye_client", None)
+        if birdeye is None:
+            return None
+
+        try:
+            meta = await birdeye.get_token_metadata(token_mint)
+            if meta and meta.get("symbol"):
+                enriched = {"symbol": meta["symbol"]}
+                self._token_meta_cache[token_mint] = enriched
+                if self._redis_client and self._redis_client.is_available():
+                    try:
+                        import json as _json
+                        self._redis_client.set(
+                            f"token_meta:{token_mint}",
+                            _json.dumps(enriched),
+                            ttl_seconds=7 * 24 * 3600,
+                        )
+                    except Exception:
+                        pass
+                return meta["symbol"]
+        except Exception as exc:
+            logger.debug(f"Birdeye symbol lookup failed for {token_mint[:8]}: {exc}")
+
         return None
 
     def _enrich_trades_with_realized_pnl(self, trades: List[HistoricalTrade]) -> List[HistoricalTrade]:
@@ -1046,28 +1066,43 @@ class WalletAnalyzer:
                         if val and val.get("data"):
                             raw = base64.b64decode(val["data"][0])
                             
-                            # Check if this is Token-2022 (different program ID)
-                            # Token-2022 uses TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb
-                            # For now, we check the standard SPL Token layout
-                            # TODO: Add full Token-2022 support with transfer hooks check
-                            
-                            # Mint Layout: Freeze Option at offset 46 (u32)
-                            # 0-3: MintAuthOption, 4-35: MintAuth, 36-43: Supply, 44: Decimals, 45: Init
-                            # 46-49: FreezeAuthOption. If 1, Authority follows.
-                            if len(raw) >= 50:
-                                freeze_opt = int.from_bytes(raw[46:50], 'little')
-                                if freeze_opt == 1:
-                                    return False # Has freeze authority -> REJECT
-                                
-                                # Check mint_authority (offset 0-3: MintAuthOption)
-                                # If mint_authority is None (0), supply is fixed (good)
-                                # If mint_authority exists (1), supply can be inflated (risky)
-                                int.from_bytes(raw[0:4], 'little')
-                                # Note: mint_authority = None (0) is actually SAFE (fixed supply)
-                                # mint_authority = Some(address) means supply can be minted (risky)
-                                # However, most legitimate tokens have mint_authority, so this is
-                                # primarily a check for tokens that explicitly disabled it (very safe)
-                                # For now, we rely on RugCheck for comprehensive mint authority checks
+                            TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
+                            account_owner = val.get("owner", "")
+
+                            if account_owner == TOKEN_2022_PROGRAM:
+                                # Token-2022 extension check: scan extension headers after
+                                # the base mint layout (offset 165) for risky extension types.
+                                # Extension type 1 = TransferFeeConfig (fee on every transfer)
+                                # Extension type 4 = TransferHook (arbitrary code on transfer)
+                                RISKY_EXTENSIONS = {1, 4}
+                                if len(raw) > 165:
+                                    offset = 165
+                                    while offset + 4 <= len(raw):
+                                        ext_type = int.from_bytes(raw[offset:offset+2], 'little')
+                                        ext_len = int.from_bytes(raw[offset+2:offset+4], 'little')
+                                        if ext_type in RISKY_EXTENSIONS:
+                                            import logging as _logging
+                                            _logging.getLogger(__name__).warning(
+                                                f"Token-2022 risky extension type={ext_type} found for {token_address}"
+                                            )
+                                            return False  # REJECT: TransferFee or TransferHook
+                                        if ext_type == 0:  # End of extensions sentinel
+                                            break
+                                        offset += 4 + ext_len
+                                # No risky extensions found; pass this check
+                            else:
+                                # Standard SPL Token layout
+                                # Mint Layout: Freeze Option at offset 46 (u32)
+                                # 0-3: MintAuthOption, 4-35: MintAuth, 36-43: Supply, 44: Decimals, 45: Init
+                                # 46-49: FreezeAuthOption. If 1, Authority follows.
+                                if len(raw) >= 50:
+                                    freeze_opt = int.from_bytes(raw[46:50], 'little')
+                                    if freeze_opt == 1:
+                                        return False  # Has freeze authority -> REJECT
+
+                                    # mint_authority == 0 means fixed supply (safe);
+                                    # rely on RugCheck for comprehensive mint authority analysis
+                                    int.from_bytes(raw[0:4], 'little')
         except Exception as e:
             # Log error but don't fail silently - conservative approach
             import traceback

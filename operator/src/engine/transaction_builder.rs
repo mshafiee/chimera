@@ -36,12 +36,25 @@ pub enum BuiltTransaction {
     Legacy {
         transaction: Transaction,
         blockhash: solana_sdk::hash::Hash,
+        /// Actual price impact from Jupiter quote (e.g. 1.5 = 1.5%).  `None` if unavailable.
+        price_impact_pct: Option<Decimal>,
     },
     /// Versioned transaction (v0/v1) - stored as raw bytes for RPC submission
     Versioned {
         transaction_bytes: Vec<u8>,
         blockhash: solana_sdk::hash::Hash,
+        /// Actual price impact from Jupiter quote (e.g. 1.5 = 1.5%).  `None` if unavailable.
+        price_impact_pct: Option<Decimal>,
     },
+}
+
+impl BuiltTransaction {
+    pub fn price_impact_pct(&self) -> Option<Decimal> {
+        match self {
+            BuiltTransaction::Legacy { price_impact_pct, .. } => *price_impact_pct,
+            BuiltTransaction::Versioned { price_impact_pct, .. } => *price_impact_pct,
+        }
+    }
 }
 
 impl TransactionBuilder {
@@ -149,6 +162,9 @@ impl TransactionBuilder {
             .get_jupiter_swap(input_mint, output_mint, amount, wallet_keypair.pubkey())
             .await?;
 
+        // Extract price impact from the quote before consuming swap_response
+        let price_impact_pct = swap_response.price_impact_pct;
+
         // Decode the base64 transaction
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         let tx_bytes = BASE64
@@ -252,8 +268,9 @@ impl TransactionBuilder {
             })?;
 
             Ok(BuiltTransaction::Versioned {
-                transaction_bytes: signed_bytes, // Return signed bytes
+                transaction_bytes: signed_bytes,
                 blockhash,
+                price_impact_pct,
             })
         } else {
             // Legacy Transaction
@@ -278,32 +295,28 @@ impl TransactionBuilder {
             Ok(BuiltTransaction::Legacy {
                 transaction: tx,
                 blockhash,
+                price_impact_pct,
             })
         }
     }
 
     /// Build a simulated transaction for devnet testing
-    /// This creates a minimal transaction that won't be submitted to RPC
     async fn build_simulated_transaction(
         &self,
         _signal: &Signal,
         wallet_keypair: &Keypair,
     ) -> AppResult<BuiltTransaction> {
-        // Get recent blockhash (still needed for transaction structure)
         let blockhash =
             self.rpc_client.get_latest_blockhash().await.map_err(|e| {
                 crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
             })?;
 
-        // Create a minimal empty transaction for simulation
-        // This transaction will be marked as simulated and won't be submitted to RPC
         let empty_tx = Transaction::new_with_payer(&[], Some(&wallet_keypair.pubkey()));
 
-        // Return as Legacy transaction with the blockhash
-        // The executor will detect this is a simulated transaction and skip RPC submission
         Ok(BuiltTransaction::Legacy {
             transaction: empty_tx,
             blockhash,
+            price_impact_pct: None,
         })
     }
 
@@ -378,6 +391,14 @@ impl TransactionBuilder {
             .get_jupiter_quote(input_mint, output_mint, amount)
             .await?;
 
+        // Extract priceImpactPct from the quote for cost tracking in the executor
+        // Jupiter returns this as a decimal string, e.g. "0.01234" = 1.234%
+        let price_impact_pct: Option<Decimal> = quote
+            .get("priceImpactPct")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok())
+            .map(|pct| pct * Decimal::from(100)); // convert 0.01234 → 1.234
+
         // Then get the swap transaction
         // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
         // Note: Jupiter lite API may ignore asLegacyTransaction and still return V0 transactions
@@ -403,9 +424,11 @@ impl TransactionBuilder {
                 crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e))
             })?;
 
-        let swap_response: JupiterSwapResponse = response.json().await.map_err(|e| {
+        let mut swap_response: JupiterSwapResponse = response.json().await.map_err(|e| {
             crate::error::AppError::Parse(format!("Failed to parse Jupiter swap: {}", e))
         })?;
+
+        swap_response.price_impact_pct = price_impact_pct;
 
         Ok(swap_response)
     }
@@ -487,6 +510,10 @@ pub struct JupiterSwapResponse {
     /// Swap transaction (base64 encoded)
     #[serde(rename = "swapTransaction")]
     pub swap_transaction: String,
+    /// Actual price impact from the Jupiter quote, as a percentage (e.g. 1.5 = 1.5%).
+    /// Populated from the quote's `priceImpactPct` field; `None` if unavailable.
+    #[serde(skip)]
+    pub price_impact_pct: Option<Decimal>,
 }
 
 /// Load wallet keypair from vault

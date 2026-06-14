@@ -415,6 +415,42 @@ pub async fn count_trades_by_status(pool: &DbPool, status: &str) -> AppResult<i6
     Ok(count.0)
 }
 
+/// Count closed trades for a specific wallet (used for Kelly/WQS confidence sizing)
+pub async fn get_closed_trade_count(pool: &DbPool, wallet_address: &str) -> AppResult<i64> {
+    let result: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM trades WHERE wallet_address = ? AND status = 'CLOSED'",
+    )
+    .bind(wallet_address)
+    .fetch_one(pool)
+    .await?;
+    Ok(result.0)
+}
+
+/// Get PnL for a trailing window offset by a prior period.
+///
+/// `from_hours` and `to_hours` define the look-back range relative to now:
+/// e.g. `(48, 24)` returns the 24-to-48 hour ago window (the "prior 24h").
+pub async fn get_pnl_prev_window(
+    pool: &DbPool,
+    from_hours: u32,
+    to_hours: u32,
+) -> AppResult<Decimal> {
+    let result: (Option<f64>,) = sqlx::query_as(&format!(
+        r#"
+        SELECT CAST(COALESCE(SUM(realized_pnl_sol), 0) AS REAL)
+        FROM positions
+        WHERE state = 'CLOSED'
+        AND closed_at >= datetime('now', '-{from_hours} hours')
+        AND closed_at < datetime('now', '-{to_hours} hours')
+        "#,
+        from_hours = from_hours,
+        to_hours = to_hours,
+    ))
+    .fetch_one(pool)
+    .await?;
+    Ok(Decimal::from_f64_retain(result.0.unwrap_or(0.0)).unwrap_or(Decimal::ZERO))
+}
+
 /// Get total PnL for the last 24 hours
 /// Uses positions.realized_pnl_sol (the field actually populated by close_position)
 pub async fn get_pnl_24h(pool: &DbPool) -> AppResult<Decimal> {
@@ -667,21 +703,25 @@ pub async fn open_position(
     Ok(result.last_insert_rowid())
 }
 
-/// Close a position from a successful sell trade
+/// Close a position from a successful sell trade.
+///
+/// Computes realized PnL from entry vs exit price, writes it to the `positions` table,
+/// and propagates net PnL (gross PnL minus recorded trade costs) to `trades.net_pnl_sol`.
 pub async fn close_position(
     pool: &DbPool,
     token_address: &str,
     wallet_address: &str,
     exit_price: Decimal,
     signature: &str,
+    trade_uuid: &str,
+    sol_price_usd: Option<Decimal>,
 ) -> AppResult<()> {
-    // Calculate realized PnL based on entry vs exit
-    // Find ALL active positions for this wallet and token
+    // Find all ACTIVE (or EXITING) positions for this wallet+token
     let active_positions: Vec<(i64, f64, f64)> = sqlx::query_as(
         r#"
-        SELECT id, entry_price, entry_amount_sol 
-        FROM positions 
-        WHERE wallet_address = ? AND token_address = ? AND state = 'ACTIVE'
+        SELECT id, entry_price, entry_amount_sol
+        FROM positions
+        WHERE wallet_address = ? AND token_address = ? AND state IN ('ACTIVE', 'EXITING')
         "#,
     )
     .bind(wallet_address)
@@ -698,13 +738,42 @@ pub async fn close_position(
         return Ok(());
     }
 
-    for (id, entry_price_f64, entry_amount_sol_f64) in active_positions {
-        // Convert from database f64 to Decimal for precision
+    // Fetch recorded trade costs so they can be deducted from gross PnL
+    let trade_costs: Option<(f64, f64, f64)> = sqlx::query_as(
+        "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
+    )
+    .bind(trade_uuid)
+    .fetch_optional(pool)
+    .await?;
+
+    let (tip, dex_fee, slippage) = trade_costs
+        .map(|(t, d, s)| {
+            (
+                Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO),
+                Decimal::from_f64_retain(d).unwrap_or(Decimal::ZERO),
+                Decimal::from_f64_retain(s).unwrap_or(Decimal::ZERO),
+            )
+        })
+        .unwrap_or((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+
+    let total_costs = tip + dex_fee + slippage;
+
+    // Use provided SOL/USD price; fall back to $150 and warn if unavailable
+    let sol_usd = sol_price_usd.unwrap_or_else(|| {
+        tracing::warn!(
+            trade_uuid = %trade_uuid,
+            "SOL/USD price unavailable for PnL calculation; using $150 fallback"
+        );
+        Decimal::from_str("150.0").unwrap_or(Decimal::ZERO)
+    });
+
+    let mut gross_pnl = Decimal::ZERO;
+
+    for &(id, entry_price_f64, entry_amount_sol_f64) in active_positions.iter() {
         let entry_price_dec = Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
         let entry_amount_dec =
             Decimal::from_f64_retain(entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
 
-        // Calculate PnL using Decimal for precision
         let pnl_sol = if !entry_price_dec.is_zero() {
             let diff = exit_price - entry_price_dec;
             let ratio = diff / entry_price_dec;
@@ -713,9 +782,9 @@ pub async fn close_position(
             Decimal::ZERO
         };
 
-        // Compute USD PnL: pnl_sol * current SOL/USD price
-        // Fetch SOL price from price cache if available, otherwise use fallback rate
-        let pnl_usd = pnl_sol * Decimal::from_str("180.0").unwrap_or(Decimal::ZERO); // ~$180 SOL price fallback
+        gross_pnl += pnl_sol;
+
+        let pnl_usd = pnl_sol * sol_usd;
 
         sqlx::query(
             r#"
@@ -737,6 +806,12 @@ pub async fn close_position(
         .bind(id)
         .execute(pool)
         .await?;
+    }
+
+    // Propagate net PnL (gross PnL minus all recorded trade costs) to the trades table
+    let net_pnl = gross_pnl - total_costs;
+    if let Err(e) = update_trade_net_pnl(pool, trade_uuid, net_pnl).await {
+        tracing::warn!(trade_uuid = %trade_uuid, error = %e, "Failed to write net_pnl_sol to trades table");
     }
 
     Ok(())

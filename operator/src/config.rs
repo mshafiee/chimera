@@ -753,12 +753,18 @@ pub struct PositionSizingConfig {
     /// Base position size in SOL
     #[serde(default = "default_base_size_sol")]
     pub base_size_sol: Decimal,
-    /// Maximum position size in SOL
+    /// Maximum position size in SOL (legacy; overridden per-strategy by shield/spear max)
     #[serde(default = "default_max_size_sol")]
     pub max_size_sol: Decimal,
     /// Minimum position size in SOL
     #[serde(default = "default_min_size_sol")]
     pub min_size_sol: Decimal,
+    /// Maximum position size for Shield strategy (conservative, larger allocation)
+    #[serde(default = "default_shield_max_size_sol")]
+    pub shield_max_size_sol: Decimal,
+    /// Maximum position size for Spear strategy (aggressive, smaller allocation)
+    #[serde(default = "default_spear_max_size_sol")]
+    pub spear_max_size_sol: Decimal,
     /// Consensus multiplier (when multiple wallets buy same token)
     #[serde(default = "default_consensus_multiplier")]
     pub consensus_multiplier: Decimal,
@@ -785,6 +791,14 @@ fn default_min_size_sol() -> Decimal {
     Decimal::from_str("0.02").unwrap()
 }
 
+fn default_shield_max_size_sol() -> Decimal {
+    Decimal::from_str("2.0").unwrap()
+}
+
+fn default_spear_max_size_sol() -> Decimal {
+    Decimal::from_str("0.5").unwrap()
+}
+
 fn default_consensus_multiplier() -> Decimal {
     Decimal::from_str("1.5").unwrap()
 }
@@ -807,6 +821,8 @@ impl Default for PositionSizingConfig {
             base_size_sol: default_base_size_sol(),
             max_size_sol: default_max_size_sol(),
             min_size_sol: default_min_size_sol(),
+            shield_max_size_sol: default_shield_max_size_sol(),
+            spear_max_size_sol: default_spear_max_size_sol(),
             consensus_multiplier: default_consensus_multiplier(),
             max_concurrent_positions: default_max_concurrent_positions(),
             use_kelly_sizing: default_use_kelly_sizing(),

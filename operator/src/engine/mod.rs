@@ -597,20 +597,40 @@ impl Engine {
                         .and_then(|c| c.get_price_usd(signal.token_address()))
                         .unwrap_or(Decimal::ZERO);
 
-                    // Close Position
+                    let sol_price_usd = self
+                        .price_cache
+                        .as_ref()
+                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
+
+                    // Transition to EXITING before closing so reconciliation can detect mid-close failures
+                    if let Err(e) = crate::db::update_trade_status(
+                        &self.db,
+                        &trade_uuid,
+                        "EXITING",
+                        Some(&tx_signature),
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "Failed to update trade status to EXITING");
+                    }
+
+                    // Close Position and write net PnL to trades table
                     if let Err(e) = crate::db::close_position(
                         &self.db,
                         signal.token_address(),
                         &signal.payload.wallet_address,
                         exit_price,
                         &tx_signature,
+                        &trade_uuid,
+                        sol_price_usd,
                     )
                     .await
                     {
                         tracing::error!(error = %e, "Failed to close position");
                     }
 
-                    // Update trade status to CLOSED
+                    // Transition to CLOSED after position is confirmed closed
                     if let Err(e) = crate::db::update_trade_status(
                         &self.db,
                         &trade_uuid,

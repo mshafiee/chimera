@@ -70,64 +70,36 @@ impl PoolEnumerator {
         }
     }
 
-    /// Get liquidity for a token from Raydium pools
+    /// Get liquidity for a token from Raydium pools.
+    ///
+    /// On-chain Raydium pool parsing is not implemented; DexScreener is the authoritative
+    /// liquidity source. Returns an error so callers fall through to DexScreener.
     pub async fn get_raydium_liquidity(&self, token_address: &str) -> Result<Decimal, AppError> {
-        // Check cache first
+        // Check cache first (only valid entries are cached; we never cache a zero/stub result)
         if let Some(cached) = self.get_from_cache(token_address).await {
             return Ok(cached.liquidity_usd);
         }
 
-        // Query Raydium pools
-        // Note: This is a simplified implementation
-        // In production, you would:
-        // 1. Use getProgramAccounts to get all Raydium pool accounts
-        // 2. Parse pool account data to extract token pairs and reserves
-        // 3. Filter pools containing the target token
-        // 4. Calculate liquidity from reserves
-
-        tracing::debug!(
-            token = token_address,
-            "Querying Raydium pools (simplified implementation)"
-        );
-
-        // For now, return 0.0 as placeholder
-        // Full implementation would require:
-        // - Understanding Raydium pool account structure
-        // - Parsing account data (token A, token B, reserves)
-        // - Calculating liquidity from reserves * price
-
-        let liquidity = Decimal::ZERO;
-
-        // Cache the result (even if 0.0)
-        self.cache_result(token_address, liquidity, vec![]).await;
-
-        Ok(liquidity)
+        Err(AppError::Http(format!(
+            "Raydium on-chain liquidity not implemented for {}; use DexScreener",
+            token_address
+        )))
     }
 
-    /// Get liquidity for a token from Orca pools
+    /// Get liquidity for a token from Orca pools.
+    ///
+    /// On-chain Orca pool parsing is not implemented; DexScreener is the authoritative
+    /// liquidity source. Returns an error so callers fall through to DexScreener.
     pub async fn get_orca_liquidity(&self, token_address: &str) -> Result<Decimal, AppError> {
-        // Check cache first
+        // Check cache first (only valid entries are cached; we never cache a zero/stub result)
         if let Some(cached) = self.get_from_cache(token_address).await {
             return Ok(cached.liquidity_usd);
         }
 
-        // Query Orca pools
-        // Similar to Raydium, this requires:
-        // 1. getProgramAccounts for Orca program
-        // 2. Parse pool account structure
-        // 3. Filter and calculate liquidity
-
-        tracing::debug!(
-            token = token_address,
-            "Querying Orca pools (simplified implementation)"
-        );
-
-        let liquidity = Decimal::ZERO;
-
-        // Cache the result
-        self.cache_result(token_address, liquidity, vec![]).await;
-
-        Ok(liquidity)
+        Err(AppError::Http(format!(
+            "Orca on-chain liquidity not implemented for {}; use DexScreener",
+            token_address
+        )))
     }
 
     /// Get liquidity from both Raydium and Orca pools
@@ -158,7 +130,8 @@ impl PoolEnumerator {
         None
     }
 
-    /// Cache a result
+    /// Cache a result (reserved for future on-chain liquidity implementations)
+    #[allow(dead_code)]
     async fn cache_result(
         &self,
         token_address: &str,

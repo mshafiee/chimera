@@ -81,7 +81,7 @@ impl MonitoringState {
             pv = pv.with_token_fetcher(tf);
         }
         let pre_validator = Arc::new(pv);
-        let exit_detector = Arc::new(ExitDetector::new());
+        let exit_detector = Arc::new(ExitDetector::new().with_db(db.clone()));
         let auto_demote_enabled = config
             .monitoring
             .as_ref()

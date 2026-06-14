@@ -147,10 +147,11 @@ async fn insert_active_position(
 
 #[tokio::test]
 async fn test_zero_entry_price_bypasses_dynamic_stop_loss() {
-    // When entry_price=0, loss_percent is Decimal::ZERO.
+    // When entry_price=0, loss_percent is computed as Decimal::ZERO (safe fallback).
     // Dynamic threshold (WQS=50 → -15%): 0 <= -15 → FALSE → no dynamic exit.
     // Hard stop (-15.0): 0 <= -15.0 → FALSE → no hard stop exit.
-    // Correct behavior: no stop fires on a zero-entry position.
+    // No stop fires — position is held until the entry price data is corrected.
+    // Forcing a sale on corrupt data risks exiting at an unknown/unfavorable price.
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
@@ -549,9 +550,9 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
 
 #[tokio::test]
 async fn test_portfolio_stop_db_error_returns_none() {
-    // When the daily PnL or exposure query fails, check_portfolio_stop() must return None
-    // (fail-open). This documents that a DB outage disables the portfolio-level guard.
-    // The associated risk: bot continues trading even when daily loss exceeds 5%.
+    // When the daily PnL or exposure query fails, check_portfolio_stop() returns PauseAll
+    // (fail-safe). Trading is halted rather than continuing blind — capital preservation
+    // takes precedence over uptime. The operator must recover the DB to resume trading.
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
@@ -567,8 +568,8 @@ async fn test_portfolio_stop_db_error_returns_none() {
 
     assert_eq!(
         action,
-        StopLossAction::None,
-        "DB error must return None (fail-open). This documents the portfolio stop bypass risk."
+        StopLossAction::PauseAll,
+        "DB error must return PauseAll (fail-safe): halt trading rather than continue blind"
     );
 }
 
