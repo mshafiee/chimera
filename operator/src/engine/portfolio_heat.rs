@@ -62,11 +62,14 @@ impl PortfolioHeat {
         // Use entry_amount_sol only: heat measures capital at risk (deployed capital),
         // not mark-to-market value. Including unrealized PnL inflates heat on winners
         // (blocking new trades) and deflates it on losers (allowing over-exposure).
+        // Exclude EXITING positions that have been stuck for >15 minutes (900 seconds)
+        // so that permanently failed recovery attempts don't lock capital forever.
         let total_exposure_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING')
+            WHERE state = 'ACTIVE' 
+               OR (state = 'EXITING' AND updated_at >= datetime('now', '-900 seconds'))
             "#,
         )
         .fetch_one(&self.db)
@@ -165,7 +168,8 @@ impl PortfolioHeat {
             r#"
             SELECT strategy, COALESCE(SUM(entry_amount_sol), 0.0) as heat
             FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING')
+            WHERE state = 'ACTIVE' 
+               OR (state = 'EXITING' AND updated_at >= datetime('now', '-900 seconds'))
             GROUP BY strategy
             "#,
         )

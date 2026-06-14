@@ -98,7 +98,9 @@ impl KellySizer {
                 if !entry_size.is_zero() {
                     let pnl_pct = pnl / entry_size;
                     if pnl > Decimal::ZERO {
-                        wins.push(pnl_pct);
+                        // Cap individual wins at 300% (3.0) to prevent outliers from skewing avg_win
+                        let capped_pnl_pct = pnl_pct.min(Decimal::from(3));
+                        wins.push(capped_pnl_pct);
                         valid_trades_count += 1;
                     } else if pnl < Decimal::ZERO {
                         losses.push(pnl_pct.abs()); // Store as positive for calculation
@@ -116,9 +118,9 @@ impl KellySizer {
             return Err("No valid trades for Kelly calculation".to_string());
         }
 
-        if valid_trades_count < 10 {
+        if valid_trades_count < 20 {
             return Err(format!(
-                "Insufficient trade history for reliable Kelly calculation ({valid_trades_count} trades, need ≥10)"
+                "Insufficient trade history for reliable Kelly calculation ({valid_trades_count} trades, need ≥20)"
             ));
         }
 
