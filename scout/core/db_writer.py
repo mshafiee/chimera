@@ -197,7 +197,7 @@ class RosterWriter:
             )
             
             # Insert wallets
-            now = datetime.utcnow().isoformat()
+            now = datetime.utcnow().isoformat() + "Z"
             
             for wallet in wallets:
                 cursor.execute(

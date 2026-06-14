@@ -280,6 +280,9 @@ CREATE TABLE IF NOT EXISTS exit_targets (
 CREATE INDEX IF NOT EXISTS idx_exit_targets_trade ON exit_targets(trade_uuid);
 
 -- Signal aggregation: Multi-wallet signal tracking
+-- NOTE: signature is nullable (polling-sourced signals may lack one).
+-- SQLite allows multiple NULLs under a plain UNIQUE constraint, so uniqueness
+-- is enforced via two partial indexes instead of an inline UNIQUE clause.
 CREATE TABLE IF NOT EXISTS signal_aggregation (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_address TEXT NOT NULL,
@@ -289,13 +292,22 @@ CREATE TABLE IF NOT EXISTS signal_aggregation (
     signature TEXT,
     is_consensus INTEGER DEFAULT 0,
     consensus_wallet_count INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(token_address, wallet_address, signature)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time 
+-- Unique dedup for signals that carry an on-chain signature
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_aggregation_unique_with_sig
+    ON signal_aggregation(token_address, wallet_address, signature)
+    WHERE signature IS NOT NULL;
+
+-- Unique dedup for signals without a signature (one per wallet+token per direction per second)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_aggregation_unique_no_sig
+    ON signal_aggregation(token_address, wallet_address, direction, created_at)
+    WHERE signature IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time
     ON signal_aggregation(token_address, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus 
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus
     ON signal_aggregation(is_consensus) WHERE is_consensus = 1;
 
 -- Wallet copy performance: Per-wallet copy trading metrics

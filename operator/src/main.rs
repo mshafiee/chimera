@@ -416,6 +416,8 @@ async fn main() -> anyhow::Result<()> {
     let price_cache_clone = price_cache.clone();
     tokio::spawn(async move {
         price_cache_clone.start_updater().await;
+        // start_updater only returns on error or shutdown; log so silent crashes are visible.
+        tracing::error!("Price cache updater exited — token price data will become stale. All price-dependent checks (stop-loss, circuit breaker USD thresholds) are now degraded.");
     });
 
     // Spawn daily summary notification task

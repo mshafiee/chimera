@@ -447,25 +447,38 @@ impl CircuitBreaker {
         .await?;
         let realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
 
-        // Get SOL price in USD from price cache
+        // Get SOL price in USD from price cache.
+        // If the price cache is unavailable or stale (returns None/zero), skip the
+        // USD threshold check entirely — computing unrealized_usd as 0 would
+        // understate the loss and allow cooldown exit while the breach still holds.
         let sol_price_usd = if let Some(ref cache) = self.price_cache {
-            cache.get_price_usd(crate::constants::mints::SOL).unwrap_or(Decimal::ZERO)
+            cache.get_price_usd(crate::constants::mints::SOL)
         } else {
-            Decimal::ZERO
+            None
         };
 
-        let unrealized_usd = unrealized_sol * sol_price_usd;
-        let total_pnl_usd = realized_usd + unrealized_usd;
+        let usd_check_result = if let Some(price) = sol_price_usd {
+            let unrealized_usd = unrealized_sol * price;
+            let total_pnl_usd = realized_usd + unrealized_usd;
+            Some(total_pnl_usd)
+        } else {
+            tracing::warn!(
+                "SOL price unavailable (stale cache) — skipping USD loss check during cooldown exit to avoid false clear"
+            );
+            None
+        };
 
-        if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
-            // Loss still breaches threshold — re-trip rather than resume.
-            self.trip(TripReason::MaxLoss24h {
-                loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
-                threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
-            })
-            .await?;
-            tracing::warn!("Circuit breaker cooldown expired but loss threshold still breached — re-tripped");
-            return Ok(());
+        if let Some(total_pnl_usd) = usd_check_result {
+            if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
+                // Loss still breaches threshold — re-trip rather than resume.
+                self.trip(TripReason::MaxLoss24h {
+                    loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
+                    threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
+                })
+                .await?;
+                tracing::warn!("Circuit breaker cooldown expired but loss threshold still breached — re-tripped");
+                return Ok(());
+            }
         }
 
         let consecutive = db::get_consecutive_losses(&self.db).await?;

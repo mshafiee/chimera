@@ -143,6 +143,18 @@ CREATE TABLE IF NOT EXISTS config_audit (
 CREATE INDEX IF NOT EXISTS idx_config_audit_key ON config_audit(key);
 CREATE INDEX IF NOT EXISTS idx_config_audit_changed ON config_audit(changed_at DESC);
 
+-- Kill-switch state: single-row table for persistent kill-switch across restarts.
+-- The CHECK (id = 1) enforces single-row semantics at the DB level.
+-- On startup, main.rs reads this before checking config_audit so crashes between
+-- the write and the in-memory circuit-breaker trip are safe.
+CREATE TABLE IF NOT EXISTS kill_switch_state (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    state      TEXT NOT NULL DEFAULT 'INACTIVE' CHECK (state IN ('ACTIVE', 'INACTIVE')),
+    changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    changed_by TEXT NOT NULL DEFAULT 'SYSTEM',
+    reason     TEXT
+);
+
 -- Admin Wallets: Authorization for API access
 CREATE TABLE IF NOT EXISTS admin_wallets (
     wallet_address TEXT PRIMARY KEY,
@@ -272,13 +284,20 @@ CREATE TABLE IF NOT EXISTS signal_aggregation (
     signature TEXT,
     is_consensus INTEGER DEFAULT 0,
     consensus_wallet_count INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(token_address, wallet_address, signature)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_aggregation_unique_with_sig
+    ON signal_aggregation(token_address, wallet_address, signature)
+    WHERE signature IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_aggregation_unique_no_sig
+    ON signal_aggregation(token_address, wallet_address, direction, created_at)
+    WHERE signature IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time
     ON signal_aggregation(token_address, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus 
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus
     ON signal_aggregation(is_consensus) WHERE is_consensus = 1;
 
 -- Wallet copy performance: Per-wallet copy trading metrics

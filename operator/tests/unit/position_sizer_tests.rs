@@ -159,14 +159,36 @@ async fn test_one_below_max_allows_new_position() {
     );
 }
 
+/// Insert N closed trades for a specific wallet (used for confidence seeding).
+async fn insert_closed_trades(pool: &chimera_operator::db::DbPool, wallet: &str, count: usize) {
+    for i in 0..count {
+        let uuid = format!("closed-{}-{}", wallet, i);
+        sqlx::query(
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
+             VALUES (?, ?, 'token_age_test', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
+        )
+        .bind(&uuid)
+        .bind(wallet)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
 // ─── Test 29 (plan) ── new token age penalty ─────────────────────────────────
 
 #[tokio::test]
 async fn test_new_token_age_penalty_halves_size() {
     // Token < 24h old gets a 0.5x multiplier.
     // Compare size for 2h-old vs 48h-old token, all other factors equal.
+    // Wallet must have enough closed trades so confidence-adjusted size exceeds
+    // min_size_sol before the age penalty is applied (otherwise both cases hit
+    // the min floor and no difference is visible).
 
     let (pool, _tmp) = create_test_db().await;
+    // Seed 5 closed trades → confidence ≈ 0.70. size = 2.0 * 0.5 * 0.70 = 0.70 > 0.1 (min).
+    // Age penalty: 0.70 * 0.5 = 0.35 vs 0.70 — ratio ≈ 0.5. ✓
+    insert_closed_trades(&pool, "test_wallet", 5).await;
     let cfg = sizing_config_with_max("2.0", "20.0", "0.1", 10);
     let sizer = PositionSizer::new(pool, cfg);
 

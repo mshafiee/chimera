@@ -728,7 +728,19 @@ impl Engine {
                         tracing::error!(error = %e, "Failed to update trade status to EXITING");
                     }
 
-                    let exit_fraction = signal.payload.exit_fraction.unwrap_or(Decimal::ONE);
+                    let exit_fraction = {
+                        let raw = signal.payload.exit_fraction.unwrap_or(Decimal::ONE);
+                        if raw <= Decimal::ZERO || raw > Decimal::ONE {
+                            tracing::warn!(
+                                trade_uuid = %trade_uuid,
+                                exit_fraction = %raw,
+                                "Invalid exit_fraction (must be in (0, 1]) — clamping to 1.0 (full exit)"
+                            );
+                            Decimal::ONE
+                        } else {
+                            raw
+                        }
+                    };
 
                     // Close Position and write net PnL to trades table (full or partial exit)
                     if let Err(e) = crate::db::close_position(

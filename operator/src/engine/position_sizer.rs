@@ -103,9 +103,10 @@ impl PositionSizer {
                     let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
                         .await
                         .unwrap_or(0);
-                    // Floor at 0.2 so wallets with 0 trades still get a non-zero base
-                    // that downstream penalties (token age, slippage) can still reduce.
-                    let confidence = Decimal::from_f64_retain(((trade_count as f64 / 10.0).max(0.2)).min(1.0))
+                    // Floor at 0.05 (5%) so unproven wallets (0 trades) get a minimal but
+                    // non-zero base. The previous 0.2 floor gave new wallets a 20% allocation,
+                    // which is too generous for an unvalidated signal source.
+                    let confidence = Decimal::from_f64_retain(((trade_count as f64 / 10.0).max(0.05)).min(1.0))
                         .unwrap_or(Decimal::ONE);
                     let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                         .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
@@ -117,9 +118,7 @@ impl PositionSizer {
             let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
                 .await
                 .unwrap_or(0);
-            // Floor at 0.2 so wallets with 0 trades still get a non-zero base
-            // that downstream penalties (token age, slippage) can still reduce.
-            let confidence = Decimal::from_f64_retain(((trade_count as f64 / 10.0).max(0.2)).min(1.0))
+            let confidence = Decimal::from_f64_retain(((trade_count as f64 / 10.0).max(0.05)).min(1.0))
                 .unwrap_or(Decimal::ONE);
             let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                 .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));

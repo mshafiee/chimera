@@ -602,9 +602,10 @@ impl Executor {
     async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
-        // Use HTTP directly to avoid Solana RPC client builder issues in Docker
-        // Use active RPC URL (fallback if in STANDARD mode)
-        let active_url = self.active_rpc_url();
+        // Always check the PRIMARY URL, not the currently active one.
+        // When in Standard (fallback) mode we are trying to determine if we can
+        // recover to primary — checking the fallback's health is meaningless here.
+        let active_url = &self.config.rpc.primary_url;
         let health_check = async {
             let response = self
                 .http_client
