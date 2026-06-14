@@ -93,6 +93,28 @@ async fn main() -> anyhow::Result<()> {
         Some(ws_state.clone()),
     ));
 
+    // Restore kill-switch if it was active before last restart.
+    // The kill-switch handler writes a "kill_switch ACTIVE" entry to config_audit.
+    // If the most recent kill_switch entry is ACTIVE (not superseded by a reset),
+    // automatically re-trip to prevent trading resumption after an unintended restart.
+    {
+        let kill_switch_row: Option<String> = sqlx::query_scalar(
+            r#"SELECT new_value FROM config_audit
+               WHERE config_key = 'kill_switch'
+               ORDER BY changed_at DESC LIMIT 1"#,
+        )
+        .fetch_optional(&db_pool)
+        .await
+        .unwrap_or(None);
+
+        if kill_switch_row.as_deref() == Some("ACTIVE") {
+            tracing::warn!("Kill-switch was active before restart — re-tripping circuit breaker");
+            let _ = circuit_breaker
+                .manual_trip("SYSTEM_RESTART_RESTORE", "Kill-switch was active before restart".to_string())
+                .await;
+        }
+    }
+
     // Initialize price cache
     let price_cache = Arc::new(PriceCache::new());
     // Track SOL for volatility calculation
@@ -237,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
                                 };
                                 if let Err(e) = db::update_position_unrealized_pnl(
                                     &pnl_db,
-                                    &pos.token_address,
+                                    &pos.trade_uuid,
                                     current,
                                     pnl_sol,
                                     pnl_pct,
@@ -578,6 +600,7 @@ async fn main() -> anyhow::Result<()> {
         let monitor_pt = profit_target_mgr;
         let monitor_engine = _engine_handle.clone();
         let monitor_token = cancel_token.clone();
+        let monitor_total_capital = config.position_sizing.total_capital_sol;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -588,6 +611,15 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     _ = interval.tick() => {
+                        // Check portfolio-level stop once per cycle before individual positions
+                        match monitor_sl.check_portfolio_stop(monitor_total_capital).await {
+                            StopLossAction::PauseAll => {
+                                tracing::warn!("Portfolio stop triggered — skipping position checks this cycle");
+                                continue;
+                            }
+                            _ => {}
+                        }
+
                         let positions = match db::get_active_positions_with_entry(&monitor_db).await {
                             Ok(p) => p,
                             Err(e) => {
@@ -611,7 +643,7 @@ async fn main() -> anyhow::Result<()> {
                                     token = %pos.token_address,
                                     "Stop-loss triggered, queuing EXIT signal"
                                 );
-                                let signal = build_exit_signal(&pos);
+                                let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                                 let _ = monitor_engine.queue_signal(signal, None).await;
                                 continue;
                             }
@@ -630,17 +662,30 @@ async fn main() -> anyhow::Result<()> {
 
                             // Check profit targets
                             match monitor_pt.check_targets(&pos.trade_uuid, &pos.token_address).await {
-                                ProfitTargetAction::FullExit | ProfitTargetAction::ExitPercent(_) => {
+                                ProfitTargetAction::FullExit => {
                                     tracing::info!(
                                         trade_uuid = %pos.trade_uuid,
                                         token = %pos.token_address,
-                                        "Profit target reached, queuing EXIT signal"
+                                        "Full profit target reached, queuing EXIT signal"
                                     );
-                                    let signal = build_exit_signal(&pos);
+                                    let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                                     let _ = monitor_engine.queue_signal(signal, None).await;
-                                    // Remove from tracker so the exit isn't re-queued on
-                                    // the next monitoring tick before the DB status updates.
                                     monitor_pt.remove_position(&pos.trade_uuid).await;
+                                }
+                                ProfitTargetAction::ExitPercent(pct) => {
+                                    // pct is 0-100; convert to 0.0-1.0 fraction
+                                    let fraction = (pct / rust_decimal::Decimal::from(100))
+                                        .max(rust_decimal::Decimal::ZERO)
+                                        .min(rust_decimal::Decimal::ONE);
+                                    tracing::info!(
+                                        trade_uuid = %pos.trade_uuid,
+                                        token = %pos.token_address,
+                                        fraction = %fraction,
+                                        "Partial profit target reached, queuing partial EXIT signal"
+                                    );
+                                    let signal = build_exit_signal(&pos, fraction);
+                                    let _ = monitor_engine.queue_signal(signal, None).await;
+                                    // Don't remove from tracker — position remains open for remaining amount
                                 }
                                 ProfitTargetAction::None => {}
                             }
@@ -739,6 +784,8 @@ async fn main() -> anyhow::Result<()> {
         let polling_db = db_pool.clone();
         let polling_engine = _engine_handle.clone();
         let polling_token = cancel_token.clone();
+        let polling_cb = circuit_breaker.clone();
+        let polling_tp = token_parser.clone();
 
         tokio::spawn(async move {
             chimera_operator::monitoring::start_polling_task(
@@ -746,6 +793,8 @@ async fn main() -> anyhow::Result<()> {
                 polling_engine,
                 polling_config,
                 polling_token,
+                polling_cb,
+                polling_tp,
             )
             .await;
         });
@@ -1128,13 +1177,16 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Build an EXIT signal from an active position entry (for stop-loss / profit-target exits)
-fn build_exit_signal(pos: &ActivePositionEntry) -> Signal {
+fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal) -> Signal {
     use rust_decimal::prelude::*;
-    let amount = if pos.entry_amount_sol.is_zero() {
+    let base_amount = if pos.entry_amount_sol.is_zero() {
         rust_decimal::Decimal::from_str("0.01").unwrap_or(rust_decimal::Decimal::ONE)
     } else {
         pos.entry_amount_sol
     };
+    let amount = (base_amount * fraction).max(
+        rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO),
+    );
     let payload = SignalPayload {
         strategy: Strategy::Exit,
         token: pos.token_symbol.clone(),

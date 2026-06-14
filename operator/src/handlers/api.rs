@@ -1049,8 +1049,10 @@ pub async fn update_config(
                 ));
             }
             let old = config.profit_management.hard_stop_loss;
+            // Config stores hard_stop_loss as a negative percentage (e.g. -15.0 means 15% loss).
+            // API accepts positive values (e.g. 15 = "stop at 15% loss"), so negate on store.
             config.profit_management.hard_stop_loss =
-                Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
+                -Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,
                 "profit_management.hard_stop_loss",
@@ -1569,7 +1571,22 @@ pub async fn trip_circuit_breaker(
         .unwrap_or("Emergency kill switch activated")
         .to_string();
 
-    // First, set extreme circuit breaker config values
+    // Persist kill-switch activation to DB so it survives restarts.
+    // On startup, main.rs checks for this flag and re-trips the circuit breaker.
+    crate::db::log_config_change(
+        &state.db,
+        "kill_switch",
+        Some("INACTIVE"),
+        "ACTIVE",
+        &auth.0.identifier,
+        Some(&reason),
+    )
+    .await
+    .map_err(|e| {
+        crate::error::AppError::Internal(format!("Failed to persist kill-switch: {}", e))
+    })?;
+
+    // Set extreme circuit breaker config values in-memory
     let mut config = state.config.write().await;
     use rust_decimal::prelude::*;
     config.circuit_breakers.max_loss_24h_usd = Decimal::from_str("0.01").unwrap_or(Decimal::ZERO);

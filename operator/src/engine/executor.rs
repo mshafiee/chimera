@@ -50,22 +50,26 @@ pub struct RpcHealth {
     pub latency_ms: Option<u64>,
 }
 
+/// Mutable execution state — wrapped in a Mutex so `execute` can take `&self`,
+/// allowing the RwLock in Engine to be held as a read lock during the 60 s RPC call
+/// instead of a write lock that would serialise all concurrent executions.
+struct ExecutorMutableState {
+    rpc_mode: RpcMode,
+    failure_count: u32,
+    fallback_since: Option<DateTime<Utc>>,
+    last_recovery_attempt: Option<DateTime<Utc>>,
+}
+
 /// Trade executor
 pub struct Executor {
     /// Configuration
     config: Arc<AppConfig>,
     /// Database pool
     db: DbPool,
-    /// Current RPC mode
-    rpc_mode: RpcMode,
-    /// Consecutive failure count
-    failure_count: u32,
-    /// When fallback mode was activated
-    fallback_since: Option<DateTime<Utc>>,
+    /// Interior-mutable RPC state (see ExecutorMutableState)
+    mutable: parking_lot::Mutex<ExecutorMutableState>,
     /// Recovery check interval (default 5 minutes)
     recovery_interval: Duration,
-    /// Last recovery attempt
-    last_recovery_attempt: Option<DateTime<Utc>>,
     /// Notification service
     notifier: Option<Arc<CompositeNotifier>>,
     /// Latest RPC health status (cached)
@@ -86,6 +90,8 @@ pub struct Executor {
     price_cache: Option<Arc<PriceCache>>,
     /// Price impact from the most recent Jupiter quote (set by execute_jito/execute_standard)
     last_price_impact: parking_lot::Mutex<Option<Decimal>>,
+    /// Fill price (lamports per token base unit) from the most recent Jupiter quote
+    last_fill_price_lamports_per_base: parking_lot::Mutex<Option<Decimal>>,
 }
 
 impl Executor {
@@ -128,11 +134,13 @@ impl Executor {
         Self {
             config,
             db,
-            rpc_mode,
-            failure_count: 0,
-            fallback_since: None,
+            mutable: parking_lot::Mutex::new(ExecutorMutableState {
+                rpc_mode,
+                failure_count: 0,
+                fallback_since: None,
+                last_recovery_attempt: None,
+            }),
             recovery_interval: Duration::from_secs(300), // 5 minutes
-            last_recovery_attempt: None,
             notifier: None,
             latest_rpc_health: Arc::new(RwLock::new(None)),
             http_client,
@@ -142,6 +150,7 @@ impl Executor {
             jito_searcher,
             price_cache: None,
             last_price_impact: parking_lot::Mutex::new(None),
+            last_fill_price_lamports_per_base: parking_lot::Mutex::new(None),
         }
     }
 
@@ -206,7 +215,7 @@ impl Executor {
     /// Execute a trade signal
     ///
     /// Returns the transaction signature on success
-    pub async fn execute(&mut self, signal: &Signal) -> Result<String, ExecutorError> {
+    pub async fn execute(&self, signal: &Signal) -> Result<String, ExecutorError> {
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -216,18 +225,19 @@ impl Executor {
                 self.try_recover_to_primary().await;
             }
 
+            let rpc_mode = self.mutable.lock().rpc_mode;
             tracing::info!(
                 trade_uuid = %signal.trade_uuid,
                 strategy = %signal.payload.strategy,
                 token = %signal.payload.token,
                 action = %signal.payload.action,
                 amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
-                rpc_mode = ?self.rpc_mode,
+                rpc_mode = ?rpc_mode,
                 "Executing trade"
             );
 
             // Check if Spear is allowed in current mode
-            if signal.payload.strategy == Strategy::Spear && self.rpc_mode == RpcMode::Standard {
+            if signal.payload.strategy == Strategy::Spear && rpc_mode == RpcMode::Standard {
                 return Err(ExecutorError::SpearDisabled);
             }
 
@@ -259,7 +269,7 @@ impl Executor {
             }
 
             // Execute based on mode
-            let result = match self.rpc_mode {
+            let result = match rpc_mode {
                 RpcMode::Jito => self.execute_jito(signal).await,
                 RpcMode::Standard => self.execute_standard(signal).await,
             };
@@ -316,7 +326,7 @@ impl Executor {
             // Handle result and track failures
             match &result {
                 Ok(sig) => {
-                    self.failure_count = 0;
+                    self.mutable.lock().failure_count = 0;
                     tracing::info!(
                         trade_uuid = %signal.trade_uuid,
                         signature = %sig,
@@ -324,7 +334,7 @@ impl Executor {
                     );
 
                     // Record tip if using Jito and tip manager is available
-                    let jito_tip = if self.rpc_mode == RpcMode::Jito {
+                    let jito_tip = if rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal);
                         if let Some(ref tip_manager) = self.tip_manager {
                             if let Err(e) = tip_manager
@@ -392,16 +402,20 @@ impl Executor {
                     }
                 }
                 Err(e) => {
-                    self.failure_count += 1;
+                    let failure_count = {
+                        let mut state = self.mutable.lock();
+                        state.failure_count += 1;
+                        state.failure_count
+                    };
                     tracing::error!(
                         trade_uuid = %signal.trade_uuid,
                         error = %e,
-                        failure_count = self.failure_count,
+                        failure_count = failure_count,
                         "Trade execution failed"
                     );
 
                     // Record failed tip if using Jito and tip manager is available
-                    if self.rpc_mode == RpcMode::Jito {
+                    if rpc_mode == RpcMode::Jito {
                         if let Some(ref tip_manager) = self.tip_manager {
                             let tip = self.calculate_jito_tip(signal);
                             if let Err(e) = tip_manager
@@ -422,8 +436,8 @@ impl Executor {
                     }
 
                     // Check if we need to switch to fallback
-                    if self.failure_count >= self.config.rpc.max_consecutive_failures
-                        && self.rpc_mode == RpcMode::Jito
+                    if failure_count >= self.config.rpc.max_consecutive_failures
+                        && rpc_mode == RpcMode::Jito
                     {
                         self.switch_to_fallback().await;
                     }
@@ -507,8 +521,10 @@ impl Executor {
 
     /// Check if we should attempt recovery to primary RPC
     fn should_attempt_recovery(&self) -> bool {
+        let state = self.mutable.lock();
+
         // Only attempt recovery if we're in fallback mode
-        if self.rpc_mode != RpcMode::Standard || self.fallback_since.is_none() {
+        if state.rpc_mode != RpcMode::Standard || state.fallback_since.is_none() {
             return false;
         }
 
@@ -520,7 +536,7 @@ impl Executor {
         let now = Utc::now();
 
         // Check if enough time has passed since fallback
-        if let Some(fallback_time) = self.fallback_since {
+        if let Some(fallback_time) = state.fallback_since {
             let elapsed = now.signed_duration_since(fallback_time);
             if elapsed < chrono::Duration::from_std(self.recovery_interval).unwrap_or_default() {
                 return false;
@@ -528,7 +544,7 @@ impl Executor {
         }
 
         // Check if enough time has passed since last recovery attempt
-        if let Some(last_attempt) = self.last_recovery_attempt {
+        if let Some(last_attempt) = state.last_recovery_attempt {
             let elapsed = now.signed_duration_since(last_attempt);
             if elapsed < chrono::Duration::from_std(self.recovery_interval).unwrap_or_default() {
                 return false;
@@ -539,8 +555,8 @@ impl Executor {
     }
 
     /// Attempt to recover to primary RPC
-    async fn try_recover_to_primary(&mut self) {
-        self.last_recovery_attempt = Some(Utc::now());
+    async fn try_recover_to_primary(&self) {
+        self.mutable.lock().last_recovery_attempt = Some(Utc::now());
 
         tracing::info!("Attempting to recover to primary RPC (Jito)");
 
@@ -552,9 +568,12 @@ impl Executor {
                     "Primary RPC is healthy, switching back to Jito mode"
                 );
 
-                self.rpc_mode = RpcMode::Jito;
-                self.fallback_since = None;
-                self.failure_count = 0;
+                {
+                    let mut state = self.mutable.lock();
+                    state.rpc_mode = RpcMode::Jito;
+                    state.fallback_since = None;
+                    state.failure_count = 0;
+                }
 
                 // Log recovery to config audit
                 if let Err(e) = crate::db::log_config_change(
@@ -715,8 +734,9 @@ impl Executor {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
             })?;
 
-        // Capture actual price impact from Jupiter quote for cost accounting
+        // Capture actual price impact and fill price from Jupiter quote
         *self.last_price_impact.lock() = built_tx.price_impact_pct();
+        *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
@@ -979,8 +999,9 @@ impl Executor {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
             })?;
 
-        // Capture actual price impact from Jupiter quote for cost accounting
+        // Capture actual price impact and fill price from Jupiter quote
         *self.last_price_impact.lock() = built_tx.price_impact_pct();
+        *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
 
         // Submit transaction via RPC
         let signature = match &built_tx {
@@ -1421,22 +1442,29 @@ impl Executor {
     }
 
     /// Switch to fallback RPC mode
-    async fn switch_to_fallback(&mut self) {
+    async fn switch_to_fallback(&self) {
         if self.config.rpc.fallback_url.is_some() {
-            let reason = format!(
-                "Consecutive RPC failures ({}) exceeded threshold",
-                self.failure_count
-            );
+            let (reason, previous_mode) = {
+                let state = self.mutable.lock();
+                let reason = format!(
+                    "Consecutive RPC failures ({}) exceeded threshold",
+                    state.failure_count
+                );
+                let previous_mode = state.rpc_mode;
+                (reason, previous_mode)
+            };
 
             tracing::warn!(
-                previous_mode = ?self.rpc_mode,
-                failure_count = self.failure_count,
+                previous_mode = ?previous_mode,
                 "Switching to fallback RPC mode"
             );
 
-            self.rpc_mode = RpcMode::Standard;
-            self.fallback_since = Some(Utc::now());
-            self.failure_count = 0;
+            {
+                let mut state = self.mutable.lock();
+                state.rpc_mode = RpcMode::Standard;
+                state.fallback_since = Some(Utc::now());
+                state.failure_count = 0;
+            }
 
             // Send notification
             self.notify(NotificationEvent::RpcFallback {
@@ -1462,17 +1490,27 @@ impl Executor {
 
     /// Get current RPC mode
     pub fn rpc_mode(&self) -> RpcMode {
-        self.rpc_mode
+        self.mutable.lock().rpc_mode
     }
 
     /// Check if currently in fallback mode
     pub fn is_in_fallback(&self) -> bool {
-        self.fallback_since.is_some()
+        self.mutable.lock().fallback_since.is_some()
+    }
+
+    /// Get fill price in SOL per token from the most recent Jupiter quote.
+    /// Assumes 9-decimal tokens (standard SPL). Returns None if unavailable.
+    pub fn get_last_fill_price_sol_per_token(&self) -> Option<Decimal> {
+        let lamports_per_base = (*self.last_fill_price_lamports_per_base.lock())?;
+        // Convert lamports/base_unit → SOL/token: divide by 1e9 (lamports→SOL) / 1e9 (base→token)
+        // For 9-decimal token: price_sol_per_token = lamports_per_base_unit / 1e9
+        let lamports_per_sol = Decimal::from(1_000_000_000u64);
+        Some(lamports_per_base / lamports_per_sol)
     }
 
     /// Get time spent in fallback mode
     pub fn fallback_duration(&self) -> Option<chrono::Duration> {
-        self.fallback_since
+        self.mutable.lock().fallback_since
             .map(|t| Utc::now().signed_duration_since(t))
     }
 
@@ -1480,7 +1518,7 @@ impl Executor {
     /// In STANDARD mode with fallback configured, returns fallback client
     /// Otherwise returns primary client
     fn active_rpc_client(&self) -> Arc<RpcClient> {
-        if self.rpc_mode == RpcMode::Standard {
+        if self.mutable.lock().rpc_mode == RpcMode::Standard {
             if let Some(ref fallback_client) = self.fallback_rpc_client {
                 return fallback_client.clone();
             }
@@ -1492,7 +1530,7 @@ impl Executor {
     /// In STANDARD mode with fallback configured, returns fallback URL
     /// Otherwise returns primary URL
     fn active_rpc_url(&self) -> &str {
-        if self.rpc_mode == RpcMode::Standard {
+        if self.mutable.lock().rpc_mode == RpcMode::Standard {
             if let Some(ref fallback_url) = self.config.rpc.fallback_url {
                 return fallback_url;
             }

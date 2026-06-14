@@ -523,8 +523,10 @@ impl TokenMetadataFetcher {
     pub async fn simulate_sell(&self, token_address: &str) -> AppResult<bool> {
         tracing::debug!(token = token_address, "Checking sell route for honeypot detection");
 
-        // Use a small amount (1000 base units) — just enough for Jupiter to find a route.
-        let test_amount: u64 = 1_000;
+        // Use 1_000_000 base units = 1 token for 6-decimal SPL tokens.
+        // 1_000 base units (0.001 tokens) falls below DEX minimum order sizes and causes
+        // false-positive "no route" rejections even for perfectly safe tokens.
+        let test_amount: u64 = 1_000_000;
         let sol_mint = crate::constants::mints::SOL;
 
         let quote_url = format!(

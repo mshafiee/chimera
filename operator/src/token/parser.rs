@@ -163,11 +163,12 @@ impl TokenParser {
                 tracing::warn!(
                     token = token_address,
                     error = %e,
-                    "Failed to fetch token metadata, allowing with warning"
+                    "Failed to fetch token metadata — rejecting (fail-closed for safety)"
                 );
-                // On metadata fetch failure, allow but don't cache
-                // The slow path will do more thorough checks
-                return Ok(TokenSafetyResult::safe());
+                // Fail closed: if we can't verify safety, don't allow the trade.
+                return Ok(TokenSafetyResult::unsafe_with_reason(
+                    "Token metadata unavailable — cannot verify safety",
+                ));
             }
         };
 
@@ -333,12 +334,20 @@ impl TokenParser {
                 );
             }
         } else {
-            // If we can't fetch FDV, log warning but don't reject (fail open for now)
-            // In production, you might want to reject if FDV fetch fails
+            // Fail closed: FDV unavailable means we cannot verify Ghost Chain safety.
             tracing::warn!(
                 token = token_address,
-                "Failed to fetch market cap (FDV), skipping liquidity ratio check"
+                "Failed to fetch market cap (FDV) — rejecting (fail-closed)"
             );
+            return Ok(TokenSafetyResult {
+                safe: false,
+                rejection_reason: Some(
+                    "FDV unavailable — cannot verify liquidity/FDV ratio (Ghost Chain risk)".to_string(),
+                ),
+                honeypot_checked: false,
+                liquidity_checked: true,
+                liquidity_usd: Some(liquidity_usd),
+            });
         }
 
         // Honeypot detection via sell simulation

@@ -21,8 +21,10 @@ use axum::{
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
+use parking_lot::Mutex;
 use serde_json::json;
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// HMAC verification state with support for secret rotation
@@ -32,6 +34,8 @@ pub struct HmacState {
     secrets: Arc<Vec<Vec<u8>>>,
     /// Maximum timestamp drift in seconds
     max_drift_secs: i64,
+    /// Nonce store: signature → received_at timestamp. Prevents replay within the drift window.
+    seen_nonces: Arc<Mutex<HashMap<String, i64>>>,
 }
 
 impl HmacState {
@@ -40,6 +44,7 @@ impl HmacState {
         Self {
             secrets: Arc::new(vec![secret.into_bytes()]),
             max_drift_secs,
+            seen_nonces: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -61,7 +66,20 @@ impl HmacState {
         Self {
             secrets: Arc::new(secret_bytes),
             max_drift_secs,
+            seen_nonces: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Check nonce and record it. Returns false if the nonce was already seen (replay).
+    fn check_and_record_nonce(&self, nonce: &str, now: i64) -> bool {
+        let mut store = self.seen_nonces.lock();
+        // Evict expired entries to bound memory usage
+        store.retain(|_, ts| now - *ts <= self.max_drift_secs);
+        if store.contains_key(nonce) {
+            return false; // Replay detected
+        }
+        store.insert(nonce.to_string(), now);
+        true
     }
 
     /// Check if rotation is active (multiple secrets configured)
@@ -170,8 +188,18 @@ pub async fn hmac_verify(
 
     match verification_result {
         VerificationResult::Valid { secret_index } => {
+            // Replay protection: signature must not have been seen within the drift window.
+            // The nonce is the signature itself — it encodes (timestamp || body) so it's unique per request.
+            let now = Utc::now().timestamp();
+            if !state.check_and_record_nonce(&signature, now) {
+                tracing::warn!(
+                    signature = %&signature[..8],
+                    "Replay attack detected — nonce already seen"
+                );
+                return error_response(StatusCode::UNAUTHORIZED, "Replay detected");
+            }
+
             if secret_index > 0 {
-                // Using a previous/rotated secret
                 tracing::info!(
                     secret_index = secret_index,
                     "HMAC verified with rotated secret (grace period active)"

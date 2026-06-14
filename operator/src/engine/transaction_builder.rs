@@ -38,6 +38,8 @@ pub enum BuiltTransaction {
         blockhash: solana_sdk::hash::Hash,
         /// Actual price impact from Jupiter quote (e.g. 1.5 = 1.5%).  `None` if unavailable.
         price_impact_pct: Option<Decimal>,
+        /// Fill price from Jupiter quote: inAmount_lamports / outAmount_base_units.
+        fill_price_lamports_per_base: Option<Decimal>,
     },
     /// Versioned transaction (v0/v1) - stored as raw bytes for RPC submission
     Versioned {
@@ -45,6 +47,8 @@ pub enum BuiltTransaction {
         blockhash: solana_sdk::hash::Hash,
         /// Actual price impact from Jupiter quote (e.g. 1.5 = 1.5%).  `None` if unavailable.
         price_impact_pct: Option<Decimal>,
+        /// Fill price from Jupiter quote: inAmount_lamports / outAmount_base_units.
+        fill_price_lamports_per_base: Option<Decimal>,
     },
 }
 
@@ -53,6 +57,13 @@ impl BuiltTransaction {
         match self {
             BuiltTransaction::Legacy { price_impact_pct, .. } => *price_impact_pct,
             BuiltTransaction::Versioned { price_impact_pct, .. } => *price_impact_pct,
+        }
+    }
+
+    pub fn fill_price_lamports_per_base(&self) -> Option<Decimal> {
+        match self {
+            BuiltTransaction::Legacy { fill_price_lamports_per_base, .. } => *fill_price_lamports_per_base,
+            BuiltTransaction::Versioned { fill_price_lamports_per_base, .. } => *fill_price_lamports_per_base,
         }
     }
 }
@@ -162,8 +173,9 @@ impl TransactionBuilder {
             .get_jupiter_swap(input_mint, output_mint, amount, wallet_keypair.pubkey())
             .await?;
 
-        // Extract price impact from the quote before consuming swap_response
+        // Extract quote-derived fields before consuming swap_response
         let price_impact_pct = swap_response.price_impact_pct;
+        let fill_price_lamports_per_base = swap_response.fill_price_lamports_per_base;
 
         // Decode the base64 transaction
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -271,6 +283,7 @@ impl TransactionBuilder {
                 transaction_bytes: signed_bytes,
                 blockhash,
                 price_impact_pct,
+                fill_price_lamports_per_base,
             })
         } else {
             // Legacy Transaction
@@ -296,6 +309,7 @@ impl TransactionBuilder {
                 transaction: tx,
                 blockhash,
                 price_impact_pct,
+                fill_price_lamports_per_base,
             })
         }
     }
@@ -317,6 +331,7 @@ impl TransactionBuilder {
             transaction: empty_tx,
             blockhash,
             price_impact_pct: None,
+            fill_price_lamports_per_base: None,
         })
     }
 
@@ -430,6 +445,27 @@ impl TransactionBuilder {
 
         swap_response.price_impact_pct = price_impact_pct;
 
+        // Compute fill price from quote amounts: lamports_in / base_units_out
+        // For BUY (SOL→TOKEN): in_amount = lamports spent, out_amount = token base units received
+        swap_response.fill_price_lamports_per_base = {
+            let in_amount = quote
+                .get("inAmount")
+                .and_then(|v| v.as_str().and_then(|s: &str| s.parse::<u64>().ok()))
+                .or_else(|| quote.get("inAmount").and_then(|v| v.as_u64()));
+            let out_amount = quote
+                .get("outAmount")
+                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()));
+            match (in_amount, out_amount) {
+                (Some(inn), Some(out)) if out > 0 => {
+                    let in_dec = Decimal::from(inn);
+                    let out_dec = Decimal::from(out);
+                    Some(in_dec / out_dec)
+                }
+                _ => None,
+            }
+        };
+
         Ok(swap_response)
     }
 
@@ -514,6 +550,11 @@ pub struct JupiterSwapResponse {
     /// Populated from the quote's `priceImpactPct` field; `None` if unavailable.
     #[serde(skip)]
     pub price_impact_pct: Option<Decimal>,
+    /// Fill price computed from the Jupiter quote: inAmount_lamports / outAmount_base_units.
+    /// For BUY (SOL→TOKEN) this is lamports-per-token-base-unit; divide by 1e9 to get SOL/token.
+    /// `None` if inAmount/outAmount are unavailable or unparseable.
+    #[serde(skip)]
+    pub fill_price_lamports_per_base: Option<Decimal>,
 }
 
 /// Load wallet keypair from vault

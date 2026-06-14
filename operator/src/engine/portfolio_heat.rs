@@ -57,12 +57,12 @@ impl PortfolioHeat {
     /// # Returns
     /// HeatResult with current heat status
     pub async fn calculate_heat(&self) -> Result<HeatResult, String> {
-        // Get total exposure from active positions (convert from database f64 to Decimal)
+        // Include EXITING positions — they still hold capital until exit confirms
         let total_exposure_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
-            WHERE state = 'ACTIVE'
+            WHERE state IN ('ACTIVE', 'EXITING')
             "#,
         )
         .fetch_one(&self.db)

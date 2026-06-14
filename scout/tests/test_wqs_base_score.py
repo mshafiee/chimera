@@ -182,9 +182,9 @@ class TestWQSBaseScore:
         
         score_pump = calculate_wqs(metrics_pump)
         
-        # Pump case should have lower score (penalized -15)
+        # Pump case should have lower score (penalized -17 pts, partially offset by higher 7d ROI)
         assert score_pump < score_normal
-        # Difference should be approximately 15 points
-        assert abs((score_normal - score_pump) - 15.0) < 5.0  # Allow some variance
+        # Net difference: anti-pump penalty (~17 pts) minus pump wallet's extra roi_7d contribution
+        assert abs((score_normal - score_pump) - 9.0) < 5.0  # Allow some variance
 
 

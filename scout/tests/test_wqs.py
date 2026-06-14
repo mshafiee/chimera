@@ -19,8 +19,10 @@ def test_wqs_basic_calculation():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # avoid dust-trader penalty
+        profit_factor=2.0,       # positive proof of profitability
     )
-    
+
     score = calculate_wqs(wallet)
     assert 0 <= score <= 100
     assert score > 30.0  # Should be strong with good metrics
@@ -121,8 +123,10 @@ def test_wqs_anti_pump_and_dump():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # avoid dust-trader penalty
+        profit_factor=1.5,       # neutral profit factor (no bonus/penalty)
     )
-    
+
     # Normal case: 7d ROI is proportional to 30d ROI
     wallet_normal = WalletMetrics(
         address="test_wallet_normal",
@@ -131,6 +135,8 @@ def test_wqs_anti_pump_and_dump():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,
+        profit_factor=1.5,
     )
     
     score_pump = calculate_wqs(wallet_pump)
@@ -658,7 +664,8 @@ def test_sniper_detection_at_60s_applies_heavy_penalty():
 def test_mev_protection_adds_bonus_independently_of_sniper_penalty():
     """M4: uses_mev_protection=True adds +10 pts but does NOT waive the sniper penalty."""
     base = dict(address="w", roi_30d=60.0, roi_7d=10.0, trade_count_30d=25,
-                max_drawdown_30d=5.0, avg_entry_delay_seconds=50.0)
+                max_drawdown_30d=5.0, avg_entry_delay_seconds=50.0,
+                avg_trade_size_sol=0.5, profit_factor=2.0)  # avoid dust/unproven penalties
 
     score_no_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=False))
     score_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=True))

@@ -524,7 +524,7 @@ impl Engine {
 
         // Execute the trade
         let result = {
-            let mut executor = self.executor.write().await;
+            let executor = self.executor.read().await;
             executor.execute(&signal).await
         };
         let latency_ms = start_time.elapsed().as_millis() as f64;
@@ -567,11 +567,17 @@ impl Engine {
 
                 // 2. Manage Position Lifecycle
                 if signal.payload.action == Action::Buy {
-                    // Calculate entry price (from cache or default to Decimal::ZERO)
-                    let entry_price = self
-                        .price_cache
-                        .as_ref()
-                        .and_then(|c| c.get_price_usd(signal.token_address()))
+                    // Prefer fill price from Jupiter quote (accurate); fall back to price cache
+                    let fill_price_sol = {
+                        let exec = self.executor.read().await;
+                        exec.get_last_fill_price_sol_per_token()
+                    };
+                    let entry_price = fill_price_sol
+                        .or_else(|| {
+                            self.price_cache
+                                .as_ref()
+                                .and_then(|c| c.get_price_usd(signal.token_address()))
+                        })
                         .unwrap_or(Decimal::ZERO);
 
                     // Open Position
@@ -615,7 +621,7 @@ impl Engine {
                         tracing::error!(error = %e, "Failed to update trade status to EXITING");
                     }
 
-                    // Close Position and write net PnL to trades table
+                    // Close Position and write net PnL to trades table (full exit)
                     if let Err(e) = crate::db::close_position(
                         &self.db,
                         signal.token_address(),
@@ -624,6 +630,7 @@ impl Engine {
                         &tx_signature,
                         &trade_uuid,
                         sol_price_usd,
+                        rust_decimal::Decimal::ONE,
                     )
                     .await
                     {
@@ -642,6 +649,26 @@ impl Engine {
                     {
                         tracing::error!(error = %e, "Failed to update trade status to CLOSED");
                     }
+                }
+            }
+            Err(crate::engine::executor::ExecutorError::MarketConditionsUnfavorable(ref reason)) => {
+                // Off-hours / market conditions: revert to PENDING so the signal is retried later.
+                // Marking as FAILED would permanently discard a valid signal.
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    reason = %reason,
+                    "Trade deferred — market conditions unfavorable, reverting to PENDING"
+                );
+                if let Err(db_err) = crate::db::update_trade_status(
+                    &self.db,
+                    &trade_uuid,
+                    "PENDING",
+                    None,
+                    Some(reason),
+                )
+                .await
+                {
+                    tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
                 }
             }
             Err(e) => {

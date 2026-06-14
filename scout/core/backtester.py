@@ -121,7 +121,7 @@ class BacktestSimulator:
         # Track results
         simulated_trades: List[SimulatedTrade] = []
         rejected_details: List[str] = []
-        
+
         # Track original realized PnL (only from SELL trades with pnl_sol) - using Decimal
         total_original_realized_pnl = Decimal('0')
         # Track simulated realized PnL (only from SELL trades)
@@ -129,6 +129,7 @@ class BacktestSimulator:
         total_slippage = Decimal('0')
         total_fees = Decimal('0')
         rejected_count = 0
+        simulated_sell_count = 0
         
         for trade in sorted_trades:
             sim_trade, rejection_reason = self._simulate_trade_roundtrip(
@@ -164,6 +165,7 @@ class BacktestSimulator:
                 # Track simulated realized PnL (only SELL trades)
                 if trade.action == TradeAction.SELL and sim_trade.simulated_pnl_sol is not None:
                     total_simulated_realized_pnl += sim_trade.simulated_pnl_sol
+                    simulated_sell_count += 1
         
         # Calculate rejection rate
         rejection_rate = rejected_count / len(sorted_trades) if sorted_trades else 0.0
@@ -182,6 +184,11 @@ class BacktestSimulator:
             passed = False
             failure_reason = f"Too many trades rejected: {rejection_rate*100:.0f}%"
         
+        # Fail if no SELL trades were closed in the OOS window (open positions only = untested)
+        elif passed and simulated_sell_count == 0:
+            passed = False
+            failure_reason = "No closed SELL trades in OOS window — cannot validate profitability"
+
         # Fail if simulated realized PnL is negative
         elif passed and total_simulated_realized_pnl < Decimal('0'):
             passed = False

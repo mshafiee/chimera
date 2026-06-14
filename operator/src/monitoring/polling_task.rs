@@ -10,9 +10,11 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::{rpc_polling, RateLimiter, RpcPollingState};
-use crate::db::DbPool;
+use crate::circuit_breaker::CircuitBreaker;
+use crate::db::{self, DbPool};
 use crate::engine::EngineHandle;
 use crate::models::{Action, Signal, SignalPayload, Strategy};
+use crate::token::TokenParser;
 
 /// Configuration for the polling task
 #[derive(Debug, Clone)]
@@ -36,6 +38,8 @@ pub async fn start_polling_task(
     engine: EngineHandle,
     config: PollingConfig,
     cancel_token: CancellationToken,
+    circuit_breaker: Arc<CircuitBreaker>,
+    token_parser: Arc<TokenParser>,
 ) {
     tracing::info!(
         interval_secs = config.interval_secs,
@@ -117,7 +121,15 @@ pub async fn start_polling_task(
 
                 // Process each transaction
                 for tx in transactions {
-                    if let Err(e) = process_transaction(&db, &engine, tx).await {
+                    if let Err(e) = process_transaction(
+                        &db,
+                        &engine,
+                        tx,
+                        &circuit_breaker,
+                        &token_parser,
+                    )
+                    .await
+                    {
                         tracing::warn!(error = %e, "Failed to process transaction");
                     }
                 }
@@ -150,8 +162,24 @@ async fn process_transaction(
     db: &DbPool,
     engine: &EngineHandle,
     tx: rpc_polling::WalletTransaction,
+    circuit_breaker: &CircuitBreaker,
+    token_parser: &TokenParser,
 ) -> Result<()> {
-    // Get wallet info from database
+    // Gate 1: circuit breaker — same check as webhook handler
+    if !circuit_breaker.is_trading_allowed() {
+        let reason = circuit_breaker
+            .trip_reason()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "Circuit breaker tripped".to_string());
+        tracing::warn!(
+            wallet = %tx.wallet_address,
+            reason = %reason,
+            "Polling signal rejected by circuit breaker"
+        );
+        return Ok(());
+    }
+
+    // Gate 2: wallet must be ACTIVE
     let wallet = match crate::db::get_wallet_by_address(db, &tx.wallet_address).await? {
         Some(w) => w,
         None => {
@@ -160,7 +188,6 @@ async fn process_transaction(
         }
     };
 
-    // Only process ACTIVE wallets
     if wallet.status != "ACTIVE" {
         tracing::debug!(
             wallet = %tx.wallet_address,
@@ -171,12 +198,6 @@ async fn process_transaction(
     }
 
     // Parse transaction to extract swap details
-    // Note: The WalletTransaction from RPC polling is simplified
-    // We need to fetch full transaction details and parse them
-
-    // For now, we'll use the basic info from polling
-    // TODO: Enhance this to fetch and parse full transaction details if needed
-
     let (direction, token_address) = match (tx.direction.as_deref(), tx.token_address.as_ref()) {
         (Some("BUY"), Some(token)) => (Action::Buy, token.clone()),
         (Some("SELL"), Some(token)) => (Action::Sell, token.clone()),
@@ -202,12 +223,10 @@ async fn process_transaction(
         }
     };
 
-    // Determine strategy based on wallet quality score
-    let strategy = if wallet.wqs_score.unwrap_or(0.0) >= 70.0 {
-        Strategy::Spear
-    } else {
-        Strategy::Shield
-    };
+    // Polling-generated signals always use Shield: we cannot verify strategy intent
+    // from on-chain data alone, so use the conservative path which enforces strict
+    // stop-losses and correct per-strategy sizing.
+    let strategy = Strategy::Shield;
 
     // Create signal payload
     let payload = SignalPayload {
@@ -220,9 +239,47 @@ async fn process_transaction(
         trade_uuid: None, // Will be auto-generated
     };
 
+    // Gate 3: duplicate UUID check — prevents re-processing on restart/pagination gaps
+    let trade_uuid = payload.generate_trade_uuid(tx.timestamp);
+    if db::trade_uuid_exists(db, &trade_uuid).await.unwrap_or(false) {
+        tracing::debug!(
+            trade_uuid = %trade_uuid,
+            "Duplicate polling signal skipped"
+        );
+        return Ok(());
+    }
+
+    // Gate 4: token safety fast-path (BUY signals only; SELL signals already own the token)
+    if matches!(direction, Action::Buy) {
+        match token_parser.fast_check(&token_address, strategy).await {
+            Ok(result) if !result.safe => {
+                let reason = result
+                    .rejection_reason
+                    .unwrap_or_else(|| "Token failed safety check".to_string());
+                tracing::warn!(
+                    token = %token_address,
+                    wallet = %tx.wallet_address,
+                    reason = %reason,
+                    "Polling signal rejected by token safety check"
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                // Fail closed: if we can't verify safety, reject the signal
+                tracing::warn!(
+                    token = %token_address,
+                    error = %e,
+                    "Token safety check failed, rejecting polling signal"
+                );
+                return Ok(());
+            }
+            Ok(_) => {} // safe — proceed
+        }
+    }
+
     // Create signal
     let signal = Signal {
-        trade_uuid: payload.generate_trade_uuid(tx.timestamp),
+        trade_uuid,
         payload: payload.clone(),
         timestamp: tx.timestamp,
         source_ip: Some("rpc_polling".to_string()), // Mark source as RPC polling

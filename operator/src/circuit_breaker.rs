@@ -302,8 +302,44 @@ impl CircuitBreaker {
         Ok(())
     }
 
-    /// Exit cooldown and return to active
+    /// Exit cooldown: re-evaluate breach conditions before resuming.
+    /// If the breach condition still holds, re-trip instead of going Active.
     async fn exit_cooldown(&self) -> AppResult<()> {
+        // Re-evaluate breach conditions before clearing cooldown.
+        let pnl_24h = db::get_pnl_24h(&self.db).await?;
+        if pnl_24h < Decimal::ZERO && pnl_24h.abs() >= self.config.max_loss_24h_usd {
+            // Loss still breaches threshold — re-trip rather than resume.
+            self.trip(TripReason::MaxLoss24h {
+                loss: pnl_24h.abs().to_f64().unwrap_or(0.0),
+                threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
+            })
+            .await?;
+            tracing::warn!("Circuit breaker cooldown expired but loss threshold still breached — re-tripped");
+            return Ok(());
+        }
+
+        let consecutive = db::get_consecutive_losses(&self.db).await?;
+        if consecutive >= self.config.max_consecutive_losses {
+            self.trip(TripReason::ConsecutiveLosses {
+                count: consecutive,
+                threshold: self.config.max_consecutive_losses,
+            })
+            .await?;
+            tracing::warn!("Circuit breaker cooldown expired but consecutive losses still breached — re-tripped");
+            return Ok(());
+        }
+
+        let drawdown = db::get_max_drawdown_percent(&self.db).await?;
+        if drawdown >= self.config.max_drawdown_percent {
+            self.trip(TripReason::MaxDrawdown {
+                drawdown: drawdown.to_f64().unwrap_or(0.0),
+                threshold: self.config.max_drawdown_percent.to_f64().unwrap_or(0.0),
+            })
+            .await?;
+            tracing::warn!("Circuit breaker cooldown expired but drawdown still breached — re-tripped");
+            return Ok(());
+        }
+
         {
             let mut state = self.state.write();
             state.state = CircuitBreakerState::Active;
@@ -319,7 +355,7 @@ impl CircuitBreaker {
             Some("COOLDOWN"),
             "ACTIVE",
             "SYSTEM",
-            Some("Cooldown period completed"),
+            Some("Cooldown period completed — breach conditions cleared"),
         )
         .await?;
 

@@ -81,22 +81,24 @@ pub struct SignalPayload {
 }
 
 impl SignalPayload {
-    /// Generate a deterministic trade UUID if not provided
+    /// Generate a deterministic trade UUID if not provided.
     ///
-    /// Uses SHA256(timestamp + token + action + amount) for idempotency
-    pub fn generate_trade_uuid(&self, timestamp: i64) -> String {
+    /// Does NOT include the request timestamp so that webhook retries (same payload,
+    /// later timestamp) produce the SAME UUID and are caught by the DB dedup check.
+    /// Hash: SHA256(wallet_address || token || action || amount_sol).
+    pub fn generate_trade_uuid(&self, _timestamp: i64) -> String {
         if let Some(ref uuid) = self.trade_uuid {
             return uuid.clone();
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(timestamp.to_be_bytes());
-        hasher.update(self.token.as_bytes());
-        hasher.update(self.action.to_string().as_bytes());
-        // Convert Decimal to bytes for hashing (use to_string to ensure consistent representation)
-        let amount_str = self.amount_sol.to_string();
-        hasher.update(amount_str.as_bytes());
         hasher.update(self.wallet_address.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.token.as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.action.to_string().as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.amount_sol.to_string().as_bytes());
 
         let result = hasher.finalize();
         hex::encode(&result[..16]) // Use first 16 bytes for shorter UUID

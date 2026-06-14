@@ -131,6 +131,10 @@ pub async fn insert_trade(
 }
 
 /// Update trade status
+///
+/// When `tx_signature` is `None`, the existing value is preserved — this prevents a FAILED
+/// status update from destroying a valid signature on a transaction that timed out but may
+/// have landed on-chain (critical for reconciliation).
 pub async fn update_trade_status(
     pool: &DbPool,
     trade_uuid: &str,
@@ -138,19 +142,35 @@ pub async fn update_trade_status(
     tx_signature: Option<&str>,
     error_message: Option<&str>,
 ) -> AppResult<()> {
-    let result = sqlx::query(
-        r#"
-        UPDATE trades
-        SET status = ?, tx_signature = ?, error_message = ?
-        WHERE trade_uuid = ?
-        "#,
-    )
-    .bind(status)
-    .bind(tx_signature)
-    .bind(error_message)
-    .bind(trade_uuid)
-    .execute(pool)
-    .await?;
+    let result = if let Some(sig) = tx_signature {
+        sqlx::query(
+            r#"
+            UPDATE trades
+            SET status = ?, tx_signature = ?, error_message = ?
+            WHERE trade_uuid = ?
+            "#,
+        )
+        .bind(status)
+        .bind(sig)
+        .bind(error_message)
+        .bind(trade_uuid)
+        .execute(pool)
+        .await?
+    } else {
+        // Preserve existing tx_signature — do not overwrite with NULL
+        sqlx::query(
+            r#"
+            UPDATE trades
+            SET status = ?, error_message = ?
+            WHERE trade_uuid = ?
+            "#,
+        )
+        .bind(status)
+        .bind(error_message)
+        .bind(trade_uuid)
+        .execute(pool)
+        .await?
+    };
 
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound(format!(
@@ -707,6 +727,10 @@ pub async fn open_position(
 ///
 /// Computes realized PnL from entry vs exit price, writes it to the `positions` table,
 /// and propagates net PnL (gross PnL minus recorded trade costs) to `trades.net_pnl_sol`.
+/// Close (or partially close) open positions for a wallet+token pair.
+///
+/// `exit_fraction` is in (0, 1]: 1.0 = full close, 0.25 = sell 25% of each position.
+/// Partial closes (< 1.0) reduce `entry_amount_sol` in-place and keep the position ACTIVE.
 pub async fn close_position(
     pool: &DbPool,
     token_address: &str,
@@ -715,11 +739,14 @@ pub async fn close_position(
     signature: &str,
     trade_uuid: &str,
     sol_price_usd: Option<Decimal>,
+    exit_fraction: Decimal,
 ) -> AppResult<()> {
-    // Find all ACTIVE (or EXITING) positions for this wallet+token
-    let active_positions: Vec<(i64, f64, f64)> = sqlx::query_as(
+    let exit_fraction = exit_fraction.max(Decimal::ZERO).min(Decimal::ONE);
+    // Find all ACTIVE (or EXITING) positions for this wallet+token.
+    // Include trade_uuid so we can fetch each position's entry-leg costs.
+    let active_positions: Vec<(i64, f64, f64, String)> = sqlx::query_as(
         r#"
-        SELECT id, entry_price, entry_amount_sol
+        SELECT id, entry_price, entry_amount_sol, trade_uuid
         FROM positions
         WHERE wallet_address = ? AND token_address = ? AND state IN ('ACTIVE', 'EXITING')
         "#,
@@ -738,15 +765,15 @@ pub async fn close_position(
         return Ok(());
     }
 
-    // Fetch recorded trade costs so they can be deducted from gross PnL
-    let trade_costs: Option<(f64, f64, f64)> = sqlx::query_as(
+    // Fetch exit-leg costs (jito tip, dex fee, slippage for the exit trade)
+    let exit_costs: Option<(f64, f64, f64)> = sqlx::query_as(
         "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
     )
     .bind(trade_uuid)
     .fetch_optional(pool)
     .await?;
 
-    let (tip, dex_fee, slippage) = trade_costs
+    let (exit_tip, exit_dex_fee, exit_slippage) = exit_costs
         .map(|(t, d, s)| {
             (
                 Decimal::from_f64_retain(t).unwrap_or(Decimal::ZERO),
@@ -756,7 +783,7 @@ pub async fn close_position(
         })
         .unwrap_or((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
 
-    let total_costs = tip + dex_fee + slippage;
+    let exit_total_costs = exit_tip + exit_dex_fee + exit_slippage;
 
     // Use provided SOL/USD price; fall back to $150 and warn if unavailable
     let sol_usd = sol_price_usd.unwrap_or_else(|| {
@@ -768,48 +795,88 @@ pub async fn close_position(
     });
 
     let mut gross_pnl = Decimal::ZERO;
+    let mut entry_total_costs = Decimal::ZERO;
 
-    for &(id, entry_price_f64, entry_amount_sol_f64) in active_positions.iter() {
-        let entry_price_dec = Decimal::from_f64_retain(entry_price_f64).unwrap_or(Decimal::ZERO);
+    let is_full_close = exit_fraction >= Decimal::ONE;
+
+    for (id, entry_price_f64, entry_amount_sol_f64, entry_trade_uuid) in active_positions.iter() {
+        let entry_price_dec = Decimal::from_f64_retain(*entry_price_f64).unwrap_or(Decimal::ZERO);
         let entry_amount_dec =
-            Decimal::from_f64_retain(entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
+            Decimal::from_f64_retain(*entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
+
+        // Scale exit amount by fraction — partial exits only realise a portion of the position
+        let exited_amount = entry_amount_dec * exit_fraction;
 
         let pnl_sol = if !entry_price_dec.is_zero() {
             let diff = exit_price - entry_price_dec;
             let ratio = diff / entry_price_dec;
-            ratio * entry_amount_dec
+            ratio * exited_amount
         } else {
             Decimal::ZERO
         };
 
         gross_pnl += pnl_sol;
 
+        // Scale entry-leg costs proportionally to the fraction being exited
+        let entry_costs: Option<(f64, f64, f64)> = sqlx::query_as(
+            "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
+        )
+        .bind(entry_trade_uuid)
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some((et, ed, es)) = entry_costs {
+            let proportional_entry_cost = (Decimal::from_f64_retain(et).unwrap_or(Decimal::ZERO)
+                + Decimal::from_f64_retain(ed).unwrap_or(Decimal::ZERO)
+                + Decimal::from_f64_retain(es).unwrap_or(Decimal::ZERO))
+                * exit_fraction;
+            entry_total_costs += proportional_entry_cost;
+        }
+
         let pnl_usd = pnl_sol * sol_usd;
 
-        sqlx::query(
-            r#"
-            UPDATE positions
-            SET
-                exit_price = ?,
-                exit_tx_signature = ?,
-                realized_pnl_sol = ?,
-                realized_pnl_usd = ?,
-                closed_at = CURRENT_TIMESTAMP,
-                state = 'CLOSED'
-            WHERE id = ?
-            "#,
-        )
-        .bind(exit_price.to_f64().unwrap_or(0.0))
-        .bind(signature)
-        .bind(pnl_sol.to_f64().unwrap_or(0.0))
-        .bind(pnl_usd.to_f64().unwrap_or(0.0))
-        .bind(id)
-        .execute(pool)
-        .await?;
+        if is_full_close {
+            sqlx::query(
+                r#"
+                UPDATE positions
+                SET
+                    exit_price = ?,
+                    exit_tx_signature = ?,
+                    realized_pnl_sol = ?,
+                    realized_pnl_usd = ?,
+                    closed_at = CURRENT_TIMESTAMP,
+                    state = 'CLOSED'
+                WHERE id = ?
+                "#,
+            )
+            .bind(exit_price.to_f64().unwrap_or(0.0))
+            .bind(signature)
+            .bind(pnl_sol.to_f64().unwrap_or(0.0))
+            .bind(pnl_usd.to_f64().unwrap_or(0.0))
+            .bind(id)
+            .execute(pool)
+            .await?;
+        } else {
+            // Partial close: reduce remaining amount, keep position ACTIVE
+            let remaining_amount = entry_amount_dec - exited_amount;
+            sqlx::query(
+                r#"
+                UPDATE positions
+                SET
+                    entry_amount_sol = ?,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE id = ?
+                "#,
+            )
+            .bind(remaining_amount.to_f64().unwrap_or(0.0))
+            .bind(id)
+            .execute(pool)
+            .await?;
+        }
     }
 
-    // Propagate net PnL (gross PnL minus all recorded trade costs) to the trades table
-    let net_pnl = gross_pnl - total_costs;
+    // Deduct both entry-leg and exit-leg costs for a true round-trip net PnL
+    let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
     if let Err(e) = update_trade_net_pnl(pool, trade_uuid, net_pnl).await {
         tracing::warn!(trade_uuid = %trade_uuid, error = %e, "Failed to write net_pnl_sol to trades table");
     }
@@ -941,10 +1008,10 @@ pub async fn insert_reconciliation_log(
 // CIRCUIT BREAKER SUPPORT
 // =============================================================================
 
-/// Get maximum drawdown from peak (for circuit breaker)
-/// Uses positions.realized_pnl_sol (the field actually populated by close_position)
+/// Get maximum drawdown from peak (for circuit breaker).
+/// Includes unrealized losses from open/exiting positions so the circuit breaker
+/// trips before a large open loser is closed (not after).
 pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
-    // Calculate drawdown from highest cumulative PnL to current
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
         WITH cumulative_pnl AS (
@@ -954,10 +1021,18 @@ pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
             FROM positions
             WHERE state = 'CLOSED'
         ),
+        open_unrealized AS (
+            -- Sum unrealized PnL for all non-closed positions (negative = loss)
+            SELECT COALESCE(SUM(COALESCE(unrealized_pnl_sol, 0)), 0.0) as total_unrealized
+            FROM positions
+            WHERE state IN ('ACTIVE', 'EXITING')
+        ),
         peaks AS (
             SELECT
                 COALESCE(MAX(running_pnl), 0.0) as peak_pnl,
-                COALESCE((SELECT running_pnl FROM cumulative_pnl ORDER BY closed_at DESC LIMIT 1), 0.0) as current_pnl
+                -- current = last realized equity + all open unrealized P&L
+                COALESCE((SELECT running_pnl FROM cumulative_pnl ORDER BY closed_at DESC LIMIT 1), 0.0)
+                    + (SELECT total_unrealized FROM open_unrealized) as current_pnl
             FROM cumulative_pnl
         )
         SELECT
@@ -1216,16 +1291,17 @@ pub async fn get_position_by_uuid(
 /// Lightweight summary for the PnL refresh background task
 #[derive(Debug, Clone)]
 pub struct ActivePositionSummary {
+    pub trade_uuid: String,
     pub token_address: String,
     pub entry_price: Decimal,
     pub entry_amount_sol: Decimal,
 }
 
-/// Get token_address, entry_price, and size for all ACTIVE/EXITING positions (PnL refresh)
+/// Get trade_uuid, token_address, entry_price, and size for all ACTIVE/EXITING positions (PnL refresh)
 pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePositionSummary>> {
-    let rows: Vec<(String, f64, f64)> = sqlx::query_as(
+    let rows: Vec<(String, String, f64, f64)> = sqlx::query_as(
         r#"
-        SELECT token_address, entry_price, entry_amount_sol
+        SELECT trade_uuid, token_address, entry_price, entry_amount_sol
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
         "#,
@@ -1235,7 +1311,8 @@ pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePo
 
     Ok(rows
         .into_iter()
-        .map(|(token, price, size)| ActivePositionSummary {
+        .map(|(uuid, token, price, size)| ActivePositionSummary {
+            trade_uuid: uuid,
             token_address: token,
             entry_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
             entry_amount_sol: Decimal::from_f64_retain(size).unwrap_or(Decimal::ZERO),
@@ -1246,7 +1323,7 @@ pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePo
 /// Update current_price, unrealized_pnl_sol, and unrealized_pnl_percent for active positions
 pub async fn update_position_unrealized_pnl(
     pool: &DbPool,
-    token_address: &str,
+    trade_uuid: &str,
     current_price: Decimal,
     pnl_sol: Decimal,
     pnl_pct: Decimal,
@@ -1261,14 +1338,14 @@ pub async fn update_position_unrealized_pnl(
             unrealized_pnl_sol = ?,
             unrealized_pnl_percent = ?,
             last_updated = datetime('now')
-        WHERE token_address = ?
+        WHERE trade_uuid = ?
           AND state IN ('ACTIVE', 'EXITING')
         "#,
     )
     .bind(current_f64)
     .bind(pnl_sol_f64)
     .bind(pnl_pct_f64)
-    .bind(token_address)
+    .bind(trade_uuid)
     .execute(pool)
     .await?;
 

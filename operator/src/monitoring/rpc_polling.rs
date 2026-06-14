@@ -104,26 +104,18 @@ pub async fn poll_wallet_transactions(
         .get_signatures_for_address(&wallet_address.parse().context("Invalid wallet address")?)
         .context("Failed to get signatures")?;
 
-    // Filter to new signatures (after last_signature if provided)
+    // Signatures are returned newest-first. Collect everything BEFORE last_signature
+    // (i.e., lower index = newer). Stop when we hit the anchor; if not found within
+    // the page, take all 10 (gap: > 10 new txs since last poll — will catch up).
     let mut new_signatures = Vec::new();
-    let mut found_last = last_signature.is_none();
 
     for sig_info in signatures.iter().take(10) {
-        // Limit to 10 most recent to save credits
-        if !found_last {
-            if let Some(last) = last_signature {
-                if sig_info.signature == last {
-                    found_last = true;
-                    continue;
-                }
-            } else {
-                found_last = true;
+        if let Some(last) = last_signature {
+            if sig_info.signature == last {
+                break; // Reached the last-seen anchor — everything before this is new
             }
         }
-
-        if found_last {
-            new_signatures.push(sig_info.signature.to_string());
-        }
+        new_signatures.push(sig_info.signature.to_string());
     }
 
     // Parse transactions (limited to save credits)

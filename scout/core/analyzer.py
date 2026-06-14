@@ -1257,23 +1257,29 @@ class WalletAnalyzer:
         # Get first trade timestamp
         first_trade_time = min(t.timestamp for t in trades)
 
-        # Simple fresh wallet detection: if first trade is < 7 days old
         now = time.time()
-        wallet_age_seconds = now - first_trade_time.timestamp()
-        wallet_age_days = wallet_age_seconds / 86400
 
-        if wallet_age_days < 7:
-            is_fresh_wallet = True
-
-        # Try to get wallet creation time (first transaction ever) for more precision
+        # Try to get wallet creation time (first transaction ever) for the authoritative check
         wallet_creation_time = await self._get_wallet_creation_time_cached(address)
 
         if wallet_creation_time:
-            # Calculate hours between wallet creation and first trade
-            hours_diff = (first_trade_time.timestamp() - wallet_creation_time) / 3600
+            # Authoritative: wallet is fresh only if the wallet itself was created recently
+            wallet_age_days = (now - wallet_creation_time) / 86400
+            if wallet_age_days < 7:
+                is_fresh_wallet = True
 
-            # If wallet was created <24h before trading, it's suspicious
-            if hours_diff < 24:
+            # If wallet was created <24h before its first swap trade, it's suspicious
+            # regardless of wallet age (e.g., sniper wallet spun up for one token)
+            hours_to_first_trade = (first_trade_time.timestamp() - wallet_creation_time) / 3600
+            if hours_to_first_trade < 24:
+                is_fresh_wallet = True
+        else:
+            # Fallback: no creation time available — use first SWAP trade in our 30-day window
+            # as a proxy. This can produce false positives for old wallets that traded
+            # different tokens last month, so only flag if first trade is very recent (<3 days).
+            wallet_age_seconds = now - first_trade_time.timestamp()
+            wallet_age_days = wallet_age_seconds / 86400
+            if wallet_age_days < 3:
                 is_fresh_wallet = True
 
         return {
@@ -1441,8 +1447,18 @@ class WalletAnalyzer:
         entry_delays = []
         buy_trades = [t for t in trades if t.action == TradeAction.BUY]
         
-        # Optimization: Only check top 5 recent unique tokens to save API calls
-        unique_tokens = list(set(t.token_address for t in buy_trades))[:5]
+        # Take the 5 most-recently-bought unique tokens for the sniper check.
+        # Using a plain set gives non-deterministic ordering — always use recency order
+        # so we sample the wallet's latest behaviour, not an arbitrary 5 tokens.
+        seen_tokens: set = set()
+        recent_unique_tokens = []
+        for t in sorted(buy_trades, key=lambda x: x.timestamp, reverse=True):
+            if t.token_address not in seen_tokens:
+                seen_tokens.add(t.token_address)
+                recent_unique_tokens.append(t.token_address)
+                if len(recent_unique_tokens) == 5:
+                    break
+        unique_tokens = recent_unique_tokens
         
         # Pre-fetch creation times (this will cache them)
         print(f"  [{address[:8]}] Fetching token creation times for {len(unique_tokens)} tokens...")
@@ -1541,19 +1557,28 @@ class WalletAnalyzer:
         # Calculate Sortino ratio: excess return / downside deviation
         sortino_ratio = None
         try:
-            if close_trades_30d and roi_30d:
-                # Get downside returns (negative returns only)
-                pnls_30d = [t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol is not None]
-                if pnls_30d:
-                    downside_returns = [float(p) for p in pnls_30d if p < 0]
+            if close_trades_30d:
+                # Compute per-trade return fractions (pnl / cost_basis) so numerator and
+                # denominator are in the same units (dimensionless fraction of capital invested).
+                # Using raw SOL pnl / raw SOL pnl for downside std would give units of "SOL",
+                # which makes the ratio dependent on position size rather than trade quality.
+                sell_trades = [
+                    t for t in trades_30d
+                    if t.action == TradeAction.SELL
+                    and t.pnl_sol is not None
+                    and t.sol_amount is not None
+                    and t.sol_amount > 0
+                ]
+                if sell_trades:
+                    # per-trade return fraction = pnl / proceeds_received
+                    trade_returns = [float(t.pnl_sol / t.sol_amount) for t in sell_trades]
+                    avg_return = sum(trade_returns) / len(trade_returns)
+                    downside_returns = [r for r in trade_returns if r < 0]
                     if downside_returns:
-                        # Downside deviation: sqrt(mean(min(return, 0)^2))
                         downside_variance = sum(r**2 for r in downside_returns) / len(downside_returns)
                         downside_deviation = downside_variance ** 0.5
                         if downside_deviation > 0:
-                            # Sortino = (avg_return - 0) / downside_deviation
-                            avg_return = roi_30d / 100.0  # Convert percentage to decimal
-                            sortino_ratio = avg_return / downside_deviation if downside_deviation > 0 else None
+                            sortino_ratio = avg_return / downside_deviation
         except Exception as e:
             print(f"  [{address[:8]}] Warning: Could not calculate Sortino ratio: {e}")
 
@@ -1600,8 +1625,6 @@ class WalletAnalyzer:
                 "profit_factor": None,
                 "realized_pnl_30d_sol": None,
             }
-
-        self._enrich_trades_with_realized_pnl(trades)
 
         pnls = [t.pnl_sol for t in trades if t.action == TradeAction.SELL and t.pnl_sol is not None]
         if not pnls:
@@ -1665,7 +1688,8 @@ class WalletAnalyzer:
                         last_buy = t.timestamp
 
                 if last_buy:
-                    bag_age = now - Decimal(str(int(last_buy)))
+                    # last_buy is a datetime object — use .timestamp() to get Unix epoch
+                    bag_age = now - Decimal(str(int(last_buy.timestamp())))
                     if bag_age > max_bag_age_seconds:
                         # Bag held > 30 days - apply penalty
                         bag_count += 1
@@ -1728,9 +1752,6 @@ class WalletAnalyzer:
         has_swap_fields = any(t.sol_amount is not None or t.token_amount is not None for t in trades)
 
         if has_swap_fields:
-            # Ensure we have realized PnL populated for SELL trades
-            self._enrich_trades_with_realized_pnl(trades)
-
             total_spent_sol = Decimal('0')
             realized_pnl_sol = Decimal('0')
 
@@ -1789,9 +1810,6 @@ class WalletAnalyzer:
         if not trades:
             return 0.0
 
-        # Ensure pnl is populated for SELL trades (if possible)
-        self._enrich_trades_with_realized_pnl(trades)
-        
         # Only count SELL trades (closing positions) for win/loss
         closing_trades = [t for t in trades if t.action == TradeAction.SELL]
         
@@ -1876,9 +1894,6 @@ class WalletAnalyzer:
         # Sort trades chronologically
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
         
-        # Ensure realized PnL exists for sells
-        self._enrich_trades_with_realized_pnl(trades)
-
         # Build equity curve from realized PnL over SELL trades (use Decimal for precision)
         Decimal('0')
         peak = Decimal('0')
@@ -1900,15 +1915,13 @@ class WalletAnalyzer:
             # Calculate drawdown from peak
             drawdown_amount = peak - cumulative_pnl
             if drawdown_amount > Decimal('0'):
-                # If peak is positive, standard calc
                 if peak > Decimal('0'):
                     current_dd = drawdown_amount / peak
                 else:
-                    # If peak is 0 or negative (started losing immediately), 
-                    # we can't use % of peak. We can treat it as % of capital lost?
-                    # Since we don't know total capital, we cap this edge case or ignore.
-                    current_dd = Decimal('0')
-                
+                    # Peak is 0: wallet started losing immediately and never recovered.
+                    # Drawdown is 100% — the wallet has never been profitable.
+                    current_dd = Decimal('1.0')
+
                 max_dd = max(max_dd, current_dd)
 
         # Convert to float for API compatibility
@@ -1934,12 +1947,9 @@ class WalletAnalyzer:
         if not trades:
             return 0.0
 
-        # Ensure pnl is populated for SELL trades (if possible)
-        self._enrich_trades_with_realized_pnl(trades)
-        
         # Get closing trades with PnL
         closing_trades = [
-            t for t in trades 
+            t for t in trades
             if t.action == TradeAction.SELL and t.pnl_sol is not None
         ]
         

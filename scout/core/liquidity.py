@@ -366,9 +366,10 @@ class LiquidityProvider:
                 # - Tokens that rugged (1M -> 0) will show 0 historical liquidity (safe, but filters them out)
                 # - Tokens that mooned (10k -> 10M) will show 10M historical (dangerous, inflates backtest results)
                 # 
-                # We cap at $50k to mitigate mooner bias, but this is still imperfect.
-                # Prioritize Birdeye historical data and treat fallback results with low confidence.
-                safe_fallback_liquidity = min(current.liquidity_usd, 50000.0)
+                # Cap at $10k (Shield strategy minimum) — tokens that mooned past $10k
+                # at trade time were already passing the liquidity gate, so anything above
+                # $10k in the fallback inflates backtest PnL without adding information.
+                safe_fallback_liquidity = min(current.liquidity_usd, 10000.0)
                 
                 logger.warning(
                     f"⚠️  SURVIVORSHIP BIAS RISK: Historical liquidity not available for "

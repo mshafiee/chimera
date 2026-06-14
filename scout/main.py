@@ -50,7 +50,7 @@ except ImportError:
 # Default configuration (tuned defaults; can be overridden by env/flags)
 # Note: WQS thresholds aligned with rescaled 0-100 range (see wqs.py)
 DEFAULT_OUTPUT_PATH = "../data/roster_new.db"
-DEFAULT_MIN_WQS_ACTIVE = 60.0  # Rescaled from 35.0 (was ~55% of old max, now 60% of 0-100)
+DEFAULT_MIN_WQS_ACTIVE = 70.0  # Must match PromotionCriteria.min_wqs_score in validator.py
 DEFAULT_MIN_WQS_CANDIDATE = 20.0  # Lowered from 30.0 to capture more candidates during discovery
 DEFAULT_DISCOVERY_HOURS = 168
 DEFAULT_WALLET_TX_LIMIT = 500

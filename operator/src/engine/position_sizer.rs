@@ -66,10 +66,10 @@ impl PositionSizer {
         let mut size = if let Some(ref kelly) = self.kelly_sizer {
             match kelly.calculate_kelly(&factors.wallet_address, 30).await {
                 Ok(result) => {
-                    let kelly_base = factors.total_capital_sol * result.recommended_size_percent;
+                    let kelly_base = factors.total_capital_sol * result.conservative_kelly;
                     tracing::debug!(
                         wallet = %factors.wallet_address,
-                        kelly_pct = ?result.recommended_size_percent,
+                        kelly_pct = ?result.conservative_kelly,
                         kelly_base_sol = ?kelly_base,
                         "Kelly Criterion base size computed"
                     );
@@ -279,9 +279,10 @@ impl PositionSizer {
 
     /// Check if we can open a new position (portfolio limits)
     pub async fn can_open_position(&self) -> bool {
-        // Query database for current active position count
+        // Count ACTIVE and EXITING positions together — EXITING positions still consume capital
+        // until the exit transaction confirms. Ignoring them allows 2× over-deployment.
         let active_count: i64 = match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM positions WHERE state = 'ACTIVE'",
+            "SELECT COUNT(*) FROM positions WHERE state IN ('ACTIVE', 'EXITING')",
         )
         .fetch_one(&self.db)
         .await
@@ -289,7 +290,6 @@ impl PositionSizer {
             Ok(count) => count,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to query active positions, allowing trade");
-                // On error, allow trade but log warning
                 return true;
             }
         };

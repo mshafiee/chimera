@@ -103,9 +103,12 @@ impl WalletPerformanceTracker {
             .filter_map(|t| t.net_pnl_sol)
             .fold(Decimal::ZERO, |acc, p| acc + p);
 
+        // avg_return must use the 7d trade count, not all-time total_trades.
+        let trades_7d_count = trades.len();
+
         metrics.copy_pnl_7d = copy_pnl_7d;
-        metrics.avg_return_per_trade = if metrics.total_trades > 0 {
-            copy_pnl_7d / Decimal::from(metrics.total_trades)
+        metrics.avg_return_per_trade = if trades_7d_count > 0 {
+            copy_pnl_7d / Decimal::from(trades_7d_count as u64)
         } else {
             Decimal::ZERO
         };

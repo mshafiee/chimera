@@ -175,30 +175,31 @@ impl StopLossManager {
             );
         }
 
-        // Check if stop-loss hit (compare using Decimal for precision)
-        // loss_percent is negative when losing, stop_loss_threshold is also negative
-        // We want to exit when loss_percent <= stop_loss_threshold (more negative)
-        if loss_percent <= stop_loss_threshold {
-            return StopLossAction::Exit;
-        }
-
-        // Check hard stop-loss (config value is already Decimal)
+        // The hard stop is the absolute maximum loss we allow.
+        // The adaptive stop may widen, but never beyond the hard stop — cap it.
+        // max() on negative numbers gives the TIGHTER (less negative) threshold.
         let hard_stop = self.config.hard_stop_loss;
-        if loss_percent <= hard_stop {
+        let effective_threshold = stop_loss_threshold.max(hard_stop);
+
+        if loss_percent <= effective_threshold {
             return StopLossAction::Exit;
         }
 
         StopLossAction::None
     }
 
-    /// Check portfolio-level stop (pause all trading if daily loss >5%)
-    pub async fn check_portfolio_stop(&self) -> StopLossAction {
-        // Get daily realized PnL (convert from database f64 to Decimal)
+    /// Check portfolio-level stop (pause all trading if daily loss >5% of total capital).
+    ///
+    /// `total_capital_sol` must be the configured total trading capital, not active exposure.
+    /// Using active exposure as the denominator shrinks as positions close, causing premature
+    /// triggers during drawdowns — use the stable config value instead.
+    pub async fn check_portfolio_stop(&self, total_capital_sol: Decimal) -> StopLossAction {
+        // Get rolling 24h realized PnL for consistency with get_pnl_24h
         let daily_pnl_f64: f64 = match sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
             FROM positions
-            WHERE DATE(closed_at) = DATE('now')
+            WHERE closed_at >= datetime('now', '-24 hours')
             "#,
         )
         .fetch_one(&self.db)
@@ -212,43 +213,18 @@ impl StopLossManager {
         };
         let daily_pnl = Decimal::from_f64_retain(daily_pnl_f64).unwrap_or(Decimal::ZERO);
 
-        // Get total exposure from active positions (convert from database f64 to Decimal)
-        // Note: For accurate calculation, you'd need total capital including available balance
-        let total_exposure_f64: f64 = match sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
-            FROM positions
-            WHERE state = 'ACTIVE'
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await
-        {
-            Ok(exposure) => exposure,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to query total exposure, skipping portfolio stop check");
-                return StopLossAction::None;
-            }
-        };
-        let total_exposure = Decimal::from_f64_retain(total_exposure_f64).unwrap_or(Decimal::ZERO);
-
-        // Calculate daily loss percentage using Decimal for precision
-        // Only check if we have meaningful exposure (>0.1 SOL)
-        let min_exposure = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
-        if total_exposure > min_exposure {
-            let daily_loss_percent = if !total_exposure.is_zero() {
-                (daily_pnl / total_exposure) * Decimal::from(100)
-            } else {
-                Decimal::ZERO
-            };
+        // Only check if total capital is meaningful (>0.1 SOL)
+        let min_capital = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
+        if total_capital_sol > min_capital {
+            let daily_loss_percent = (daily_pnl / total_capital_sol) * Decimal::from(100);
 
             let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
             if daily_loss_percent < loss_threshold {
                 tracing::warn!(
                     daily_loss_percent = %daily_loss_percent,
                     daily_pnl = %daily_pnl,
-                    total_exposure = %total_exposure,
-                    "Portfolio-level stop triggered: daily loss exceeds 5%"
+                    total_capital_sol = %total_capital_sol,
+                    "Portfolio-level stop triggered: 24h loss exceeds 5% of capital"
                 );
                 return StopLossAction::PauseAll;
             }

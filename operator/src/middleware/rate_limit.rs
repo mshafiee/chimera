@@ -1,13 +1,25 @@
-//! Rate limiting middleware with custom key extractor for proxy support
+//! Rate limiting middleware with proxy-aware key extraction.
 //!
-//! Extracts client IP from X-Forwarded-For or Forwarded headers,
-//! falling back to peer address for direct connections.
+//! X-Forwarded-For and similar headers are ONLY trusted when the connecting peer
+//! is a loopback or RFC-1918 private address (i.e., a trusted internal proxy).
+//! Direct connections from public IPs always use the peer address — accepting
+//! client-supplied forwarded headers from untrusted peers allows IP spoofing to
+//! trivially bypass per-IP rate limits.
 
 use axum::http::Request;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tower_governor::{key_extractor::KeyExtractor, GovernorError};
 
-/// Custom key extractor that prefers forwarded headers, falls back to peer address
+/// Returns true when the IP is a loopback or RFC-1918 private address.
+fn is_trusted_proxy(addr: &IpAddr) -> bool {
+    match addr {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
+/// Custom key extractor.
+/// Forwarded headers are only honoured for requests arriving from trusted (private/loopback) proxies.
 #[derive(Clone)]
 pub struct ProxyAwareKeyExtractor;
 
@@ -15,14 +27,45 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
     type Key = String;
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
-        // Try X-Forwarded-For first (most common)
-        if let Some(header_value) = req.headers().get("X-Forwarded-For") {
-            if let Ok(header_str) = header_value.to_str() {
-                // X-Forwarded-For can contain multiple IPs (comma-separated)
-                // The first one is typically the original client IP
-                if let Some(client_ip) = header_str.split(',').next() {
-                    let ip = client_ip.trim();
-                    // Basic validation: check if it looks like an IP
+        // Determine peer address first.
+        let peer_addr = req.extensions().get::<SocketAddr>().copied();
+        let peer_ip = peer_addr.map(|a| a.ip());
+
+        // Only trust forwarded headers when the direct connection is from a trusted proxy.
+        let from_trusted_proxy = peer_ip.map(|ip| is_trusted_proxy(&ip)).unwrap_or(false);
+
+        if from_trusted_proxy {
+            // X-Forwarded-For: client, proxy1, proxy2 — leftmost is the original client
+            if let Some(header_value) = req.headers().get("X-Forwarded-For") {
+                if let Ok(header_str) = header_value.to_str() {
+                    if let Some(client_ip) = header_str.split(',').next() {
+                        let ip = client_ip.trim();
+                        if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
+                            return Ok(ip.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Forwarded header (RFC 7239)
+            if let Some(header_value) = req.headers().get("Forwarded") {
+                if let Ok(header_str) = header_value.to_str() {
+                    for part in header_str.split(';') {
+                        let part = part.trim();
+                        if let Some(ip_raw) = part.strip_prefix("for=") {
+                            let ip = ip_raw.trim_matches('"').trim();
+                            if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
+                                return Ok(ip.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // X-Real-IP
+            if let Some(header_value) = req.headers().get("X-Real-IP") {
+                if let Ok(ip) = header_value.to_str() {
+                    let ip = ip.trim();
                     if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
                         return Ok(ip.to_string());
                     }
@@ -30,40 +73,11 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
             }
         }
 
-        // Try Forwarded header (RFC 7239)
-        if let Some(header_value) = req.headers().get("Forwarded") {
-            if let Ok(header_str) = header_value.to_str() {
-                // Forwarded header format: "for=192.0.2.60;proto=http;by=203.0.113.43"
-                // Extract the first "for=" value
-                for part in header_str.split(';') {
-                    let part = part.trim();
-                    if let Some(ip_raw) = part.strip_prefix("for=") {
-                        let ip = ip_raw.trim_matches('"').trim();
-                        if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
-                            return Ok(ip.to_string());
-                        }
-                    }
-                }
-            }
+        // Use peer address for direct (non-proxied) connections or when forwarded header is absent.
+        if let Some(ip) = peer_ip {
+            return Ok(ip.to_string());
         }
 
-        // Try X-Real-IP (some proxies use this)
-        if let Some(header_value) = req.headers().get("X-Real-IP") {
-            if let Ok(ip) = header_value.to_str() {
-                let ip = ip.trim();
-                if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
-                    return Ok(ip.to_string());
-                }
-            }
-        }
-
-        // Fallback to peer address from extensions
-        if let Some(peer_addr) = req.extensions().get::<SocketAddr>() {
-            return Ok(peer_addr.ip().to_string());
-        }
-
-        // If we can't extract any IP, use a default key
-        // This should rarely happen, but we need to return something
         Err(GovernorError::UnableToExtractKey)
     }
 }

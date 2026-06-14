@@ -201,6 +201,8 @@ class PrePromotionValidator:
         
         # Step 3: Walk-forward split (optional)
         wf_trades = trades
+        is_walk_forward = False
+        in_sample_trades = None
         wf_notes = None
         if self.criteria.walk_forward_enabled and trades:
             sorted_trades = sorted(trades, key=lambda t: t.timestamp)
@@ -211,9 +213,30 @@ class PrePromotionValidator:
                 # If holdout too small, fall back to full set
                 wf_trades = trades
             else:
+                is_walk_forward = True
+                in_sample_trades = sorted_trades[:-holdout_n]
                 wf_notes = f"Walk-forward holdout: {len(wf_trades)}/{len(trades)} trades"
 
-        # Step 4: Run backtest simulation (on walk-forward set if enabled)
+        # Step 3b: Validate in-sample period first (prevents curve-fitting on OOS)
+        if is_walk_forward and in_sample_trades:
+            try:
+                is_result = self.simulator.simulate_wallet(
+                    wallet_address, in_sample_trades, strategy
+                )
+                if not is_result.passed:
+                    status = self._determine_failure_status(is_result.failure_reason)
+                    return ValidationResult(
+                        wallet_address=wallet_address,
+                        status=status,
+                        passed=False,
+                        reason=f"Failed in-sample validation: {is_result.failure_reason}",
+                        recommended_status="CANDIDATE",
+                        notes="In-sample period must be profitable before OOS is evaluated",
+                    )
+            except Exception as e:
+                logger.warning(f"In-sample backtest error (non-fatal): {e}")
+
+        # Step 4: Run backtest simulation (on walk-forward OOS set if enabled)
         try:
             backtest_result = self.simulator.simulate_wallet(
                 wallet_address, wf_trades, strategy

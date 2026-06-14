@@ -73,8 +73,8 @@ impl PreValidator {
 
         // Check price drift (using Decimal for precision)
         let price_drift = if let Some(tracked) = tracked_price {
-            if let Some(current) = current_price {
-                if !tracked.is_zero() {
+            match current_price {
+                Some(current) if !tracked.is_zero() => {
                     let diff = (current - tracked).abs();
                     let ratio = diff / tracked;
                     let drift = ratio * Decimal::from(100);
@@ -91,11 +91,22 @@ impl PreValidator {
                         };
                     }
                     drift
-                } else {
-                    Decimal::ZERO
                 }
-            } else {
-                Decimal::ZERO
+                None => {
+                    // Tracked price exists but cache is cold — cannot verify drift.
+                    // Fail-closed: without a current price we cannot confirm the signal
+                    // isn't stale, and silently passing would allow drift-check bypass.
+                    return ValidationResult {
+                        valid: false,
+                        reason: Some(
+                            "Price drift check unavailable: current price not in cache (cold cache miss)"
+                                .to_string(),
+                        ),
+                        estimated_slippage: Decimal::ZERO,
+                        price_drift_percent: Decimal::ZERO,
+                    };
+                }
+                _ => Decimal::ZERO,
             }
         } else {
             Decimal::ZERO
