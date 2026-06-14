@@ -126,7 +126,22 @@ impl MomentumExit {
         // before the checks below to keep the hot path as short as possible.
         let hwm_snap = {
             let mut hwm_map = self.high_water_marks.write();
-            let hwm = hwm_map.entry(trade_uuid.to_string()).or_insert(entry_price);
+            let hwm = hwm_map.entry(trade_uuid.to_string()).or_insert_with(|| {
+                // If not in memory (e.g., after restart), attempt to reconstruct from price history.
+                // This is a best-effort recovery; if history is also empty, it falls back to entry_price.
+                if let Some(history) = self.price_cache.price_history.read().get(token_address) {
+                    let entry_dt: chrono::DateTime<chrono::Utc> = entry_time.into();
+                    let mut peak = entry_price;
+                    for (time, price) in history.iter() {
+                        if *time >= entry_dt && *price > peak {
+                            peak = *price;
+                        }
+                    }
+                    peak
+                } else {
+                    entry_price
+                }
+            });
             if current_price > *hwm {
                 *hwm = current_price;
             }

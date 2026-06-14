@@ -215,7 +215,6 @@ impl PortfolioHeat {
         Ok((shield_heat, spear_heat))
     }
 
-    /// Check if a new position of given size can be opened for a specific strategy
     pub async fn can_open_strategy_position(
         &self,
         strategy: crate::models::Strategy,
@@ -223,6 +222,10 @@ impl PortfolioHeat {
         shield_percent: u32,
         spear_percent: u32,
     ) -> Result<bool, String> {
+        if !self.can_open_position(position_size_sol).await? {
+            return Ok(false);
+        }
+
         let (shield_heat, spear_heat) = self.get_strategy_heat().await?;
         let allocation_pct = match strategy {
             crate::models::Strategy::Shield => Decimal::from(shield_percent),
