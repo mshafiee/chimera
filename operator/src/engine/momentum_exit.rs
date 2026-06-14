@@ -107,9 +107,14 @@ impl MomentumExit {
         let elapsed = entry_time.elapsed().unwrap_or_default();
         let elapsed_minutes = elapsed.as_secs() / 60;
 
-        // Base 8% threshold — Solana meme tokens routinely move 8%+ intraday (30%+ daily vol),
-        // so 5% triggered too many false exits on normal noise.
-        let base_drop_threshold = Decimal::from(8);
+        // RSI requires 16 samples (~15 min). Before RSI is available, use a tighter base so
+        // new positions get equivalent protection. Once RSI is active, widen to 8% to avoid
+        // false exits on normal Solana intraday noise (30%+ daily vol).
+        let base_drop_threshold = if elapsed_minutes < 16 {
+            Decimal::from(5)
+        } else {
+            Decimal::from(8)
+        };
         // Widen threshold for high-volatility tokens to avoid shakeout exits.
         // At 30% vol → 8+6=14%, at 50% vol → 8+10=18%, capped at 20%.
         // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,

@@ -196,12 +196,13 @@ impl StopLossManager {
 
         if loss_percent <= effective_threshold {
             let elapsed_secs = chrono::Utc::now().signed_duration_since(entry_time).num_seconds();
-            if elapsed_secs < 10 {
+            if elapsed_secs < self.config.wick_protection_secs as i64 {
                 tracing::info!(
                     trade_uuid = %trade_uuid,
                     elapsed_secs,
+                    wick_protection_secs = self.config.wick_protection_secs,
                     loss_percent = %loss_percent,
-                    "Stop-loss triggered but ignored due to 10-second entry grace period (wick protection)"
+                    "Stop-loss triggered but ignored due to entry grace period (wick protection)"
                 );
                 return StopLossAction::None;
             }

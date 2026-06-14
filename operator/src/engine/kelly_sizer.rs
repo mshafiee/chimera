@@ -116,6 +116,12 @@ impl KellySizer {
             return Err("No valid trades for Kelly calculation".to_string());
         }
 
+        if valid_trades_count < 10 {
+            return Err(format!(
+                "Insufficient trade history for reliable Kelly calculation ({valid_trades_count} trades, need ≥10)"
+            ));
+        }
+
         let win_rate = win_count / total_trades;
         let loss_rate = loss_count / total_trades;
 

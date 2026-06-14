@@ -136,6 +136,7 @@ profit_management:
   trailing_stop_distance: 20    # -20% from peak
   hard_stop_loss: -25           # -25% max loss; allows high-WQS wallets their intended -20% dynamic stop
   time_exit_hours: 24           # Exit profitable positions after 24h
+  wick_protection_secs: 30      # Grace period after entry before stop-loss can fire (covers Solana confirmation delays)
 
 # Position sizing configuration
 position_sizing:

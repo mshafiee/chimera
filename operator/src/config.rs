@@ -731,6 +731,10 @@ pub struct ProfitManagementConfig {
     /// Time-based exit (hours)
     #[serde(default = "default_time_exit_hours")]
     pub time_exit_hours: u64,
+    /// Grace period after entry before stop-loss is allowed to fire (wick protection).
+    /// Set longer on congested chains; 30s covers most Solana confirmation delays.
+    #[serde(default = "default_wick_protection_secs")]
+    pub wick_protection_secs: u64,
 }
 
 fn default_profit_targets() -> Vec<Decimal> {
@@ -764,6 +768,10 @@ fn default_time_exit_hours() -> u64 {
     24
 }
 
+fn default_wick_protection_secs() -> u64 {
+    30
+}
+
 impl Default for ProfitManagementConfig {
     fn default() -> Self {
         Self {
@@ -773,6 +781,7 @@ impl Default for ProfitManagementConfig {
             trailing_stop_distance: default_trailing_stop_distance(),
             max_stop_loss_distance: default_max_stop_loss_distance(),
             time_exit_hours: default_time_exit_hours(),
+            wick_protection_secs: default_wick_protection_secs(),
         }
     }
 }
