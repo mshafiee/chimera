@@ -208,12 +208,16 @@ impl StopLossManager {
     /// Using active exposure as the denominator shrinks as positions close, causing premature
     /// triggers during drawdowns — use the stable config value instead.
     pub async fn check_portfolio_stop(&self, total_capital_sol: Decimal) -> StopLossAction {
-        // Get rolling 24h realized PnL for consistency with get_pnl_24h
+        // Use net_pnl_sol from exit trades (after fees/tips/slippage) so the portfolio stop
+        // reflects true round-trip cost. Gross realized_pnl_sol on positions understates losses.
         let daily_pnl_f64: f64 = match sqlx::query_scalar::<_, f64>(
             r#"
-            SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
-            FROM positions
-            WHERE closed_at >= datetime('now', '-24 hours')
+            SELECT COALESCE(SUM(net_pnl_sol), 0.0)
+            FROM trades
+            WHERE side = 'SELL'
+              AND status = 'CLOSED'
+              AND net_pnl_sol IS NOT NULL
+              AND updated_at >= datetime('now', '-24 hours')
             "#,
         )
         .fetch_one(&self.db)

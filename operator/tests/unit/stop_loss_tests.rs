@@ -71,6 +71,8 @@ async fn insert_consensus_signal(pool: &chimera_operator::db::DbPool, token: &st
 }
 
 /// Insert a closed position to build up daily PnL.
+/// Also inserts a SELL exit trade with net_pnl_sol so the portfolio-stop query
+/// (which reads trades.net_pnl_sol for accuracy) returns the correct value.
 async fn insert_closed_position(
     pool: &chimera_operator::db::DbPool,
     trade_uuid: &str,
@@ -79,7 +81,7 @@ async fn insert_closed_position(
     entry_amount: f64,
     realized_pnl: f64,
 ) {
-    // Insert a backing trade first (FK constraint)
+    // Entry BUY trade (FK anchor for position)
     sqlx::query(
         "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
          VALUES (?, ?, ?, 'SHIELD', 'BUY', ?, 'CLOSED')"
@@ -88,6 +90,22 @@ async fn insert_closed_position(
     .bind(wallet)
     .bind(token)
     .bind(entry_amount)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Exit SELL trade with net_pnl_sol — this is what check_portfolio_stop now reads
+    let exit_uuid = format!("{}-exit", trade_uuid);
+    sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, \
+         status, net_pnl_sol, updated_at) \
+         VALUES (?, ?, ?, 'SHIELD', 'SELL', ?, 'CLOSED', ?, CURRENT_TIMESTAMP)"
+    )
+    .bind(&exit_uuid)
+    .bind(wallet)
+    .bind(token)
+    .bind(entry_amount)
+    .bind(realized_pnl)
     .execute(pool)
     .await
     .unwrap();
@@ -555,8 +573,8 @@ async fn test_portfolio_stop_db_error_returns_none() {
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
 
-    // Drop all positions-related tables to force a query error
-    sqlx::query("DROP TABLE IF EXISTS positions")
+    // Drop the trades table to force a query error on the net_pnl_sol query
+    sqlx::query("DROP TABLE IF EXISTS trades")
         .execute(&pool)
         .await
         .unwrap();

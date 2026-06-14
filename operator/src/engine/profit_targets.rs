@@ -253,8 +253,9 @@ impl ProfitTargetManager {
             }
         }
 
-        // Check trailing stop (activate after trailing_stop_activation %)
-        if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
+        // Check trailing stop (activate after trailing_stop_activation %, scaled by regime)
+        let scaled_activation = self.config.trailing_stop_activation * multiplier;
+        if profit_percent >= scaled_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;
             let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
@@ -294,13 +295,21 @@ impl ProfitTargetManager {
             let five_percent = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
             let zero = Decimal::ZERO;
             if profit_percent > ten_percent && elapsed_hours >= 48 {
+                // High-profit positions run to 48h — don't cut winners short
+                true
+            } else if profit_percent > five_percent && profit_percent <= ten_percent
+                && elapsed_hours >= self.config.time_exit_hours
+            {
+                // Medium-profit (5-10%): exit at configured time (default 24h)
                 true
             } else if profit_percent > zero && profit_percent < five_percent && elapsed_hours >= 12 {
+                // Stale low-profit: cut at 12h to free capital
                 true
             } else if profit_percent < zero && elapsed_hours >= 6 {
+                // Losing positions: cut at 6h
                 true
             } else {
-                elapsed_hours >= self.config.time_exit_hours && profit_percent > zero
+                false
             }
         } else {
             false
@@ -322,16 +331,7 @@ impl ProfitTargetManager {
             }
         }
 
-        // Return early on tiered exit (state already persisted above)
-        if let Some(action) = tiered_action {
-            return action;
-        }
-
-        if trailing_hit || time_exit {
-            return ProfitTargetAction::FullExit;
-        }
-
-        // Check momentum exit (early exit on negative momentum)
+        // Momentum exit takes priority: a crash should override a partial tiered exit
         if let Some(ref momentum) = self.momentum_exit {
             if momentum
                 .should_exit(trade_uuid, token_address, entry_price_snap, entry_time_snap)
@@ -343,6 +343,15 @@ impl ProfitTargetManager {
                 );
                 return ProfitTargetAction::FullExit;
             }
+        }
+
+        // Tiered exit (only if no momentum crash)
+        if let Some(action) = tiered_action {
+            return action;
+        }
+
+        if trailing_hit || time_exit {
+            return ProfitTargetAction::FullExit;
         }
 
         ProfitTargetAction::None
