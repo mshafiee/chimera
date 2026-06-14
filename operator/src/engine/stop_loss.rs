@@ -71,6 +71,7 @@ impl StopLossManager {
         wallet_address: &str,
         entry_price: Decimal,
         token_address: &str,
+        entry_time: chrono::DateTime<chrono::Utc>,
     ) -> StopLossAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
@@ -195,6 +196,16 @@ impl StopLossManager {
         let effective_threshold = stop_loss_threshold.max(self.config.max_stop_loss_distance);
 
         if loss_percent <= effective_threshold {
+            let elapsed_secs = chrono::Utc::now().signed_duration_since(entry_time).num_seconds();
+            if elapsed_secs < 10 {
+                tracing::info!(
+                    trade_uuid = %trade_uuid,
+                    elapsed_secs,
+                    loss_percent = %loss_percent,
+                    "Stop-loss triggered but ignored due to 10-second entry grace period (wick protection)"
+                );
+                return StopLossAction::None;
+            }
             return StopLossAction::Exit;
         }
 

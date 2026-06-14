@@ -90,6 +90,7 @@ impl KellySizer {
         // Calculate win rate and average win/loss
         let mut wins = Vec::new();
         let mut losses = Vec::new();
+        let mut valid_trades_count = 0;
 
         for trade in &trades {
             if let Some(pnl) = trade.net_pnl_sol {
@@ -98,14 +99,16 @@ impl KellySizer {
                     let pnl_pct = pnl / entry_size;
                     if pnl > Decimal::ZERO {
                         wins.push(pnl_pct);
+                        valid_trades_count += 1;
                     } else if pnl < Decimal::ZERO {
                         losses.push(pnl_pct.abs()); // Store as positive for calculation
+                        valid_trades_count += 1;
                     }
                 }
             }
         }
 
-        let total_trades = Decimal::from(trades.len());
+        let total_trades = Decimal::from(valid_trades_count);
         let win_count = Decimal::from(wins.len());
         let loss_count = Decimal::from(losses.len());
 

@@ -174,18 +174,32 @@ impl MomentumExit {
         let history = self.price_cache.price_history.read();
         let token_history = history.get(token_address)?;
 
-        if token_history.len() < 16 {
-            // Need at least 16 data points for calculating current and previous 14-period RSI
-            return None;
+        // We want 16 price points separated by roughly 1 minute (60 seconds)
+        let mut prices = Vec::new();
+        let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
+
+        for (time, price) in token_history.iter().rev() {
+            if let Some(last_time) = last_sampled_time {
+                // If the difference is >= 60 seconds, sample it
+                if last_time.signed_duration_since(*time).num_seconds() >= 60 {
+                    prices.push(price.to_f64().unwrap_or(0.0));
+                    last_sampled_time = Some(*time);
+                }
+            } else {
+                // Always sample the most recent price
+                prices.push(price.to_f64().unwrap_or(0.0));
+                last_sampled_time = Some(*time);
+            }
+
+            if prices.len() >= 16 {
+                break;
+            }
         }
 
-        // Get last 16 price changes
-        let prices: Vec<f64> = token_history
-            .iter()
-            .rev()
-            .take(16)
-            .map(|(_, price)| price.to_f64().unwrap_or(0.0))
-            .collect();
+        if prices.len() < 16 {
+            // Need at least 16 data points (spanning ~15 minutes) for calculating current and previous 14-period RSI
+            return None;
+        }
 
         let current_rsi = compute_rsi_from_prices(&prices[0..15])?;
         let previous_rsi = compute_rsi_from_prices(&prices[1..16])?;

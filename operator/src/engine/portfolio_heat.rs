@@ -125,29 +125,29 @@ impl PortfolioHeat {
     /// # Returns
     /// Tuple of (shield_heat_sol, spear_heat_sol) using Decimal for precision
     pub async fn get_strategy_heat(&self) -> Result<(Decimal, Decimal), String> {
-        let shield_heat_f64: f64 = sqlx::query_scalar::<_, f64>(
+        let rows = sqlx::query_as::<_, (String, f64)>(
             r#"
-            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
+            SELECT strategy, COALESCE(SUM(entry_amount_sol), 0.0) as heat
             FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING') AND strategy = 'SHIELD'
+            WHERE state IN ('ACTIVE', 'EXITING')
+            GROUP BY strategy
             "#,
         )
-        .fetch_one(&self.db)
+        .fetch_all(&self.db)
         .await
-        .map_err(|e| format!("Failed to query Shield heat: {}", e))?;
-        let shield_heat = Decimal::from_f64_retain(shield_heat_f64).unwrap_or(Decimal::ZERO);
+        .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
 
-        let spear_heat_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
-            FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING') AND strategy = 'SPEAR'
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("Failed to query Spear heat: {}", e))?;
-        let spear_heat = Decimal::from_f64_retain(spear_heat_f64).unwrap_or(Decimal::ZERO);
+        let mut shield_heat = Decimal::ZERO;
+        let mut spear_heat = Decimal::ZERO;
+
+        for (strategy, heat_val) in rows {
+            let heat = Decimal::from_f64_retain(heat_val).unwrap_or(Decimal::ZERO);
+            match strategy.as_str() {
+                "SHIELD" => shield_heat = heat,
+                "SPEAR" => spear_heat = heat,
+                _ => {}
+            }
+        }
 
         Ok((shield_heat, spear_heat))
     }

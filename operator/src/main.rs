@@ -683,6 +683,7 @@ async fn main() -> anyhow::Result<()> {
                                 &pos.wallet_address,
                                 pos.entry_price,
                                 &pos.token_address,
+                                pos.entry_time,
                             ).await;
 
                             if sl_action == StopLossAction::Exit {
