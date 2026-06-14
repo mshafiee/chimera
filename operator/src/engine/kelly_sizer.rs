@@ -148,8 +148,34 @@ impl KellySizer {
             Decimal::ZERO
         };
 
-        // Apply conservative multiplier (using Decimal for precision)
-        let conservative_kelly = full_kelly * self.conservative_multiplier;
+        // Trade velocity confidence: a wallet with the same win rate is statistically
+        // more reliable when it generates more trades per day because each outcome is
+        // an independent sample that tightens the confidence interval on the true win rate.
+        // Scale the conservative Kelly fraction — never push past full Kelly.
+        //   < 0.5 trades/day  → 0.80× (sparse history, widen caution margin)
+        //   0.5–1 trades/day  → 1.00× (neutral)
+        //   1–2  trades/day   → 1.15× (good statistical depth)
+        //   ≥ 2  trades/day   → 1.25× (high frequency, tighter confidence interval)
+        let trades_per_day = if lookback_days > 0 {
+            valid_trades_count as f64 / lookback_days as f64
+        } else {
+            0.0
+        };
+        let velocity_multiplier = if trades_per_day >= 2.0 {
+            dec!(1.25)
+        } else if trades_per_day >= 1.0 {
+            dec!(1.15)
+        } else if trades_per_day >= 0.5 {
+            Decimal::ONE
+        } else {
+            dec!(0.8)
+        };
+
+        // Apply conservative multiplier scaled by velocity confidence.
+        // Hard-cap at full_kelly: the velocity bonus increases the effective Kelly
+        // fraction but can never push past the mathematically optimal bound.
+        let conservative_kelly = (full_kelly * self.conservative_multiplier * velocity_multiplier)
+            .min(full_kelly);
 
         Ok(KellyResult {
             full_kelly,

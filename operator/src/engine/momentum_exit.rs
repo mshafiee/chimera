@@ -120,10 +120,11 @@ impl MomentumExit {
         let in_wick_window = elapsed.as_secs() < self.wick_protection_secs;
 
         if !in_wick_window {
-            // RSI requires 16 samples (~15 min). Before RSI is available, use a tighter base so
-            // new positions get equivalent protection. Once RSI is active, widen to 8% to avoid
-            // false exits on normal Solana intraday noise (30%+ daily vol).
-            let base_drop_threshold = if elapsed_minutes < 16 {
+            // RSI requires 16 samples at 20-second intervals (~5 min). Before RSI is
+            // available, use a tighter base so new positions get equivalent protection.
+            // Once RSI is active (≥6 min), widen to 8% to avoid false exits on normal
+            // Solana intraday noise (30%+ daily vol).
+            let base_drop_threshold = if elapsed_minutes < 6 {
                 Decimal::from(5)
             } else {
                 Decimal::from(8)
@@ -211,14 +212,16 @@ impl MomentumExit {
         let history = self.price_cache.price_history.read();
         let token_history = history.get(token_address)?;
 
-        // We want 16 price points separated by roughly 1 minute (60 seconds)
+        // Sample 16 price points at 20-second intervals (~5 min total window).
+        // Solana memecoins can rug or peak within minutes; the previous 60-second
+        // interval (15-min window) was too slow to catch liquidity events in time.
+        const RSI_SAMPLE_INTERVAL_SECS: i64 = 20;
         let mut prices = Vec::new();
         let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
 
         for (time, price) in token_history.iter().rev() {
             if let Some(last_time) = last_sampled_time {
-                // If the difference is >= 60 seconds, sample it
-                if last_time.signed_duration_since(*time).num_seconds() >= 60 {
+                if last_time.signed_duration_since(*time).num_seconds() >= RSI_SAMPLE_INTERVAL_SECS {
                     prices.push(price.to_f64().unwrap_or(0.0));
                     last_sampled_time = Some(*time);
                 }
@@ -234,7 +237,7 @@ impl MomentumExit {
         }
 
         if prices.len() < 16 {
-            // Need at least 16 data points (spanning ~15 minutes) for calculating current and previous 14-period RSI
+            // Need at least 16 data points spanning ~5 minutes for current and previous 14-period RSI
             return None;
         }
 
