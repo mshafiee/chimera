@@ -99,7 +99,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
         Decimal::from_str("1.20").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr.check_targets("uuid-peak", TOKEN).await;
+    let _ = mgr.check_targets("uuid-peak", TOKEN, "SHIELD").await;
 
     // Rise to $2.00 (+100%) → peak updates to $2.00, BUT trailing_stop_price stays at $0.96
     // (due to the peak update ordering bug — new high check fires AFTER peak was updated)
@@ -108,7 +108,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
         Decimal::from_str("2.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr.check_targets("uuid-peak", TOKEN).await;
+    let _ = mgr.check_targets("uuid-peak", TOKEN, "SHIELD").await;
 
     // Crash to $1.40 — below INTENDED stop ($2.00 × 0.80 = $1.60) but ABOVE ACTUAL stop ($0.96)
     price_cache.set_price(
@@ -116,7 +116,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
         Decimal::from_str("1.40").unwrap(),
         PriceSource::Jupiter,
     );
-    let action_at_crash = mgr.check_targets("uuid-peak", TOKEN).await;
+    let action_at_crash = mgr.check_targets("uuid-peak", TOKEN, "SHIELD").await;
 
     // After ratchet fix: stop price is $2.00 × 0.80 = $1.60, so $1.40 < $1.60 → FullExit
     assert!(
@@ -130,7 +130,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
         Decimal::from_str("0.94").unwrap(),
         PriceSource::Jupiter,
     );
-    let action_at_floor = mgr.check_targets("uuid-peak", TOKEN).await;
+    let action_at_floor = mgr.check_targets("uuid-peak", TOKEN, "SHIELD").await;
     assert!(
         matches!(action_at_floor, ProfitTargetAction::FullExit),
         "Position must exit at $0.94 (below locked trailing stop of $0.96)"
@@ -168,17 +168,17 @@ async fn test_first_target_fires_partial_exit_not_full() {
         Decimal::from_str("1.25").unwrap(),
         PriceSource::Jupiter,
     );
-    let action = mgr.check_targets("uuid-tier", TOKEN).await;
+    let action = mgr.check_targets("uuid-tier", TOKEN, "SHIELD").await;
 
     match action {
         ProfitTargetAction::ExitPercent(pct) => {
             assert_eq!(
                 pct,
-                Decimal::from_str("25.0").unwrap(),
-                "Tiered exit must be 25% of position, not full exit"
+                Decimal::from_str("33.0").unwrap(),
+                "Tiered exit must be 33% of remaining position (compound), not full exit"
             );
         }
-        other => panic!("Expected ExitPercent(25%), got {:?}", other),
+        other => panic!("Expected ExitPercent(33%), got {:?}", other),
     }
 }
 
@@ -223,7 +223,7 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
         Decimal::from_str("1.08").unwrap(),
         PriceSource::Jupiter,
     );
-    let action = mgr.check_targets("uuid-time", TOKEN).await;
+    let action = mgr.check_targets("uuid-time", TOKEN, "SHIELD").await;
 
     assert!(
         !matches!(action, ProfitTargetAction::FullExit),
@@ -263,7 +263,7 @@ async fn test_price_just_below_first_target_no_exit() {
         Decimal::from_str("1.249").unwrap(),
         PriceSource::Jupiter,
     );
-    let action = mgr.check_targets("uuid-below", TOKEN).await;
+    let action = mgr.check_targets("uuid-below", TOKEN, "SHIELD").await;
 
     assert!(
         matches!(action, ProfitTargetAction::None),
@@ -303,7 +303,7 @@ async fn test_trailing_stop_not_active_before_threshold() {
         Decimal::from_str("1.49").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr.check_targets("uuid-trail-off", TOKEN).await;
+    let _ = mgr.check_targets("uuid-trail-off", TOKEN, "SHIELD").await;
 
     // Price drops 20% from peak: $1.49 × 0.80 = $1.192 (still +19.2% from entry)
     price_cache.set_price(
@@ -311,7 +311,7 @@ async fn test_trailing_stop_not_active_before_threshold() {
         Decimal::from_str("1.19").unwrap(),
         PriceSource::Jupiter,
     );
-    let action = mgr.check_targets("uuid-trail-off", TOKEN).await;
+    let action = mgr.check_targets("uuid-trail-off", TOKEN, "SHIELD").await;
 
     assert!(
         !matches!(action, ProfitTargetAction::FullExit),
@@ -369,7 +369,7 @@ async fn test_trailing_stop_distance_from_peak() {
         Decimal::from_str("1.60").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr_a.check_targets("uuid-trail-a", TOKEN_A).await;
+    let _ = mgr_a.check_targets("uuid-trail-a", TOKEN_A, "SHIELD").await;
 
     // Drop to $1.29 (above $1.28 trailing stop)
     price_cache.set_price(
@@ -377,7 +377,7 @@ async fn test_trailing_stop_distance_from_peak() {
         Decimal::from_str("1.29").unwrap(),
         PriceSource::Jupiter,
     );
-    let action_above = mgr_a.check_targets("uuid-trail-a", TOKEN_A).await;
+    let action_above = mgr_a.check_targets("uuid-trail-a", TOKEN_A, "SHIELD").await;
     assert!(
         !matches!(action_above, ProfitTargetAction::FullExit),
         "$1.29 is above $1.28 trailing stop, must not exit"
@@ -406,7 +406,7 @@ async fn test_trailing_stop_distance_from_peak() {
         Decimal::from_str("1.60").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr_b.check_targets("uuid-trail-b", TOKEN_B).await;
+    let _ = mgr_b.check_targets("uuid-trail-b", TOKEN_B, "SHIELD").await;
 
     // Drop to $1.27 (below $1.28 trailing stop) → FullExit
     price_cache.set_price(
@@ -414,7 +414,7 @@ async fn test_trailing_stop_distance_from_peak() {
         Decimal::from_str("1.27").unwrap(),
         PriceSource::Jupiter,
     );
-    let action_below = mgr_b.check_targets("uuid-trail-b", TOKEN_B).await;
+    let action_below = mgr_b.check_targets("uuid-trail-b", TOKEN_B, "SHIELD").await;
     assert!(
         matches!(action_below, ProfitTargetAction::FullExit),
         "$1.27 is below $1.28 trailing stop, must trigger FullExit"
@@ -439,7 +439,7 @@ async fn test_unknown_trade_uuid_returns_none() {
     );
     let mgr = ProfitTargetManager::new(pool, default_config(), price_cache);
 
-    let action = mgr.check_targets("uuid-not-registered", TOKEN).await;
+    let action = mgr.check_targets("uuid-not-registered", TOKEN, "SHIELD").await;
     assert!(
         matches!(action, ProfitTargetAction::None),
         "Unregistered trade must return None, not trigger a spurious exit"
@@ -477,14 +477,14 @@ async fn test_same_target_not_hit_twice() {
         Decimal::from_str("1.25").unwrap(),
         PriceSource::Jupiter,
     );
-    let first = mgr.check_targets("uuid-dbl", TOKEN).await;
+    let first = mgr.check_targets("uuid-dbl", TOKEN, "SHIELD").await;
     assert!(
         matches!(first, ProfitTargetAction::ExitPercent(_)),
         "First hit must fire ExitPercent"
     );
 
     // Second check at same price — target already registered as hit
-    let second = mgr.check_targets("uuid-dbl", TOKEN).await;
+    let second = mgr.check_targets("uuid-dbl", TOKEN, "SHIELD").await;
     assert!(
         !matches!(second, ProfitTargetAction::ExitPercent(_)),
         "Second check at same price must NOT fire ExitPercent again (already hit)"
@@ -512,7 +512,7 @@ async fn test_no_price_in_cache_returns_none() {
     )
     .await;
 
-    let action = mgr.check_targets("uuid-noprice", TOKEN).await;
+    let action = mgr.check_targets("uuid-noprice", TOKEN, "SHIELD").await;
     assert!(
         matches!(action, ProfitTargetAction::None),
         "No cached price must return None, not trigger exit"

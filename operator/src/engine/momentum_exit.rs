@@ -1,11 +1,9 @@
 //! Momentum-Based Early Exit Detection
 //!
 //! Detects negative momentum indicators and triggers early exit:
-//! - Price drops 5% from entry within 5 minutes
-//! - Volume drops >50%
-//! - RSI < 40 and declining
-//!
-//! This helps cut losses faster and avoid holding losing positions.
+//! - Price drops 8%+ from entry within 5 minutes (widens further for high-volatility tokens)
+//! - Volume drops >65% from 24h average
+//! - RSI < 35 and declining
 
 use crate::db::DbPool;
 use crate::engine::volume_cache::VolumeCache;
@@ -99,15 +97,17 @@ impl MomentumExit {
         let elapsed = entry_time.elapsed().unwrap_or_default();
         let elapsed_minutes = elapsed.as_secs() / 60;
 
-        let base_drop_threshold = Decimal::from(5);
+        // Base 8% threshold — Solana meme tokens routinely move 8%+ intraday (30%+ daily vol),
+        // so 5% triggered too many false exits on normal noise.
+        let base_drop_threshold = Decimal::from(8);
         // Widen threshold for high-volatility tokens to avoid shakeout exits.
-        // At 30% vol → ~8%, at 50% vol → ~10%, capped at 15%.
+        // At 30% vol → 8+6=14%, at 50% vol → 8+10=18%, capped at 20%.
         // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,
         // max +5 pts) so long-held positions aren't exited on normal intraday noise.
         let price_drop_threshold = {
             let vol_bonus = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
                 let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
-                vol_dec * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO)
+                vol_dec * Decimal::from_str("0.2").unwrap_or(Decimal::ZERO)
             } else {
                 Decimal::ZERO
             };
@@ -120,7 +120,7 @@ impl MomentumExit {
             } else {
                 Decimal::ZERO
             };
-            (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(15))
+            (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(20))
         };
         if price_drop_percent >= price_drop_threshold {
             let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
@@ -134,27 +134,29 @@ impl MomentumExit {
             return MomentumExitAction::Exit;
         }
 
-        // Check 2: Volume drop (>50% from 24h average)
+        // Check 2: Volume drop (>65% from 24h average).
+        // 50% was too sensitive — volume naturally dips 40–60% outside US trading hours.
         if let Some(ref volume_cache) = self.volume_cache {
-            if volume_cache.has_volume_drop(token_address, Decimal::from(50)) {
+            if volume_cache.has_volume_drop(token_address, Decimal::from(65)) {
                 tracing::warn!(
                     trade_uuid = %trade_uuid,
                     token_address = token_address,
-                    "Negative momentum detected: volume dropped >50% from 24h average"
+                    "Negative momentum detected: volume dropped >65% from 24h average"
                 );
                 return MomentumExitAction::Exit;
             }
         }
 
-        // Check 3: RSI declining (RSI < 40 and declining)
+        // Check 3: RSI declining (RSI < 35 and declining).
+        // 40 triggered on normal pullbacks; 35 indicates genuine momentum breakdown.
         if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
-            if current_rsi < 40.0 && current_rsi < previous_rsi {
+            if current_rsi < 35.0 && current_rsi < previous_rsi {
                 tracing::warn!(
                     trade_uuid = %trade_uuid,
                     token_address = token_address,
                     current_rsi = current_rsi,
                     previous_rsi = previous_rsi,
-                    "Negative momentum detected: RSI < 40 and declining"
+                    "Negative momentum detected: RSI < 35 and declining"
                 );
                 return MomentumExitAction::Exit;
             }

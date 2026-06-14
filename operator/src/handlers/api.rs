@@ -632,7 +632,7 @@ pub async fn get_config(
                 .unwrap_or(0.0),
             hard_stop_loss: config
                 .profit_management
-                .hard_stop_loss
+                .max_stop_loss_distance
                 .to_f64()
                 .unwrap_or(0.0),
             time_exit_hours: config.profit_management.time_exit_hours,
@@ -1055,10 +1055,10 @@ pub async fn update_config(
                     "Hard stop loss must be between 0 and 100".to_string(),
                 ));
             }
-            let old = config.profit_management.hard_stop_loss;
-            // Config stores hard_stop_loss as a negative percentage (e.g. -15.0 means 15% loss).
-            // API accepts positive values (e.g. 15 = "stop at 15% loss"), so negate on store.
-            config.profit_management.hard_stop_loss =
+            let old = config.profit_management.max_stop_loss_distance;
+            // Config stores max_stop_loss_distance as a negative percentage (e.g. -25.0 means 25% loss).
+            // API accepts positive values (e.g. 25 = "stop at 25% loss"), so negate on store.
+            config.profit_management.max_stop_loss_distance =
                 -Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
             db::log_config_change(
                 &state.db,

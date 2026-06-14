@@ -35,7 +35,7 @@ async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
 #[allow(dead_code)]
 fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
     Arc::new(ProfitManagementConfig {
-        hard_stop_loss: Decimal::from_str(hard_stop).unwrap(),
+        max_stop_loss_distance: Decimal::from_str(hard_stop).unwrap(),
         ..ProfitManagementConfig::default()
     })
 }
@@ -226,7 +226,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         Decimal::from_str("1.20").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN).await;
+    let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
     // New peak at $2.00 → correct ratcheted stop = $1.60
     price_cache.set_price(
@@ -234,7 +234,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         Decimal::from_str("2.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN).await;
+    let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
     // Price falls to $1.40 — below ratcheted stop $1.60 → must Exit
     price_cache.set_price(
@@ -242,7 +242,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         Decimal::from_str("1.40").unwrap(),
         PriceSource::Jupiter,
     );
-    let action = mgr.check_targets("uuid-ratchet-fix", TOKEN).await;
+    let action = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
     assert!(
         matches!(action, ProfitTargetAction::FullExit),

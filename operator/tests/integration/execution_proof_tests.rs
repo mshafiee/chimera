@@ -105,7 +105,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
 
     // hard_stop=−100 prevents the sign-convention bug from interfering
     let config = Arc::new(ProfitManagementConfig {
-        hard_stop_loss: Decimal::from_str("-100.0").unwrap(),
+        max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
         ..ProfitManagementConfig::default()
     });
     let mgr = StopLossManager::new(pool.clone(), config, price_cache);

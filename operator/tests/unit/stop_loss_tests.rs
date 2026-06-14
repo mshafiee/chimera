@@ -38,7 +38,7 @@ fn default_config() -> Arc<ProfitManagementConfig> {
 
 fn config_with_hard_stop(hard_stop_positive: &str) -> Arc<ProfitManagementConfig> {
     Arc::new(ProfitManagementConfig {
-        hard_stop_loss: Decimal::from_str(hard_stop_positive).unwrap(),
+        max_stop_loss_distance: Decimal::from_str(hard_stop_positive).unwrap(),
         ..ProfitManagementConfig::default()
     })
 }

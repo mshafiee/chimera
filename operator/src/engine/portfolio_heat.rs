@@ -57,10 +57,13 @@ impl PortfolioHeat {
     /// # Returns
     /// HeatResult with current heat status
     pub async fn calculate_heat(&self) -> Result<HeatResult, String> {
-        // Include EXITING positions — they still hold capital until exit confirms
+        // Include EXITING positions — they still hold capital until exit confirms.
+        // Use entry_amount_sol only: heat measures capital at risk (deployed capital),
+        // not mark-to-market value. Including unrealized PnL inflates heat on winners
+        // (blocking new trades) and deflates it on losers (allowing over-exposure).
         let total_exposure_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
-            SELECT COALESCE(SUM(entry_amount_sol + COALESCE(unrealized_pnl_sol, 0.0)), 0.0)
+            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state IN ('ACTIVE', 'EXITING')
             "#,
@@ -124,7 +127,7 @@ impl PortfolioHeat {
     pub async fn get_strategy_heat(&self) -> Result<(Decimal, Decimal), String> {
         let shield_heat_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
-            SELECT COALESCE(SUM(entry_amount_sol + COALESCE(unrealized_pnl_sol, 0.0)), 0.0)
+            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state IN ('ACTIVE', 'EXITING') AND strategy = 'SHIELD'
             "#,
@@ -136,7 +139,7 @@ impl PortfolioHeat {
 
         let spear_heat_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
-            SELECT COALESCE(SUM(entry_amount_sol + COALESCE(unrealized_pnl_sol, 0.0)), 0.0)
+            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
             WHERE state IN ('ACTIVE', 'EXITING') AND strategy = 'SPEAR'
             "#,

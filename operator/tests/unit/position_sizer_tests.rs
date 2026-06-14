@@ -314,14 +314,24 @@ async fn test_position_size_floor_at_minimum() {
     );
 }
 
-// ─── Test: high WQS adds 1.2x multiplier ─────────────────────────────────────
+// ─── Test: WQS produces proportionally larger positions ──────────────────────
 
 #[tokio::test]
 async fn test_high_wqs_multiplier_applied() {
-    // WQS ≥ 80 adds 1.2x multiplier.
-
+    // WQS scales position size continuously via wqs_factor = WQS/100.
+    // WQS=85 vs WQS=50: ratio should be ≈ 85/50 = 1.7 (no discrete cliff at 80).
+    //
+    // Use a large base_size so the WQS factor pushes both values above min_size_sol
+    // (with 0 closed trades, confidence=0.05: 10.0 * 0.85 * 0.05 = 0.425 vs 0.25).
     let (pool, _tmp) = create_test_db().await;
-    let sizer = PositionSizer::new(pool, default_sizing_config());
+    let sizer = PositionSizer::new(
+        pool,
+        Arc::new(chimera_operator::config::PositionSizingConfig {
+            base_size_sol: Decimal::from_str("10.0").unwrap(),
+            min_size_sol: Decimal::from_str("0.01").unwrap(),
+            ..chimera_operator::config::PositionSizingConfig::default()
+        }),
+    );
 
     let mut high_wqs = neutral_factors();
     high_wqs.wallet_wqs = 85.0;
@@ -338,8 +348,8 @@ async fn test_high_wqs_multiplier_applied() {
     );
     let ratio = size_high / size_base;
     assert!(
-        (ratio - Decimal::from_str("1.2").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
-        "High WQS ratio should be ≈1.2, got {}",
+        (ratio - Decimal::from_str("1.7").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
+        "High WQS ratio should be ≈1.7 (85/50), got {}",
         ratio
     );
 }

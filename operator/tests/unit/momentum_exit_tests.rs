@@ -56,28 +56,41 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit_when_price_drops_six_percent() {
-        // Price drops 6% from entry within 5 minutes: exit should be triggered.
+        // Base threshold is now 8% — a 6% drop should NOT trigger exit (normal intraday noise).
+        // A 9% drop within 5 minutes should trigger exit.
         let (pool, _dir) = setup_test_db().await;
         let price_cache = Arc::new(PriceCache::new());
 
         let token = "So11111111111111111111111111111111111111112";
         let entry_price = Decimal::from_str("1.0").unwrap();
-        let current_price = Decimal::from_str("0.94").unwrap(); // 6% drop
-
-        price_cache.set_price(token, current_price, PriceSource::Jupiter);
 
         // Entry time set to 2 minutes ago (within the 5-minute window)
         let entry_time = SystemTime::now() - Duration::from_secs(120);
 
-        let detector = MomentumExit::new(pool, price_cache);
-        let action = detector
-            .check_momentum("uuid-drop", token, entry_price, entry_time)
+        // 6% drop: should NOT trigger (below 8% base threshold)
+        let price_6pct = Decimal::from_str("0.94").unwrap();
+        price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
+        let detector = MomentumExit::new(pool.clone(), price_cache.clone());
+        let action_6pct = detector
+            .check_momentum("uuid-drop-6", token, entry_price, entry_time)
             .await;
-
         assert_eq!(
-            action,
+            action_6pct,
+            MomentumExitAction::None,
+            "6% drop should not trigger exit — below new 8% base threshold"
+        );
+
+        // 9% drop: should trigger exit (above 8% base threshold)
+        let price_9pct = Decimal::from_str("0.91").unwrap();
+        price_cache.set_price(token, price_9pct, PriceSource::Jupiter);
+        let detector2 = MomentumExit::new(pool, price_cache);
+        let action_9pct = detector2
+            .check_momentum("uuid-drop-9", token, entry_price, entry_time)
+            .await;
+        assert_eq!(
+            action_9pct,
             MomentumExitAction::Exit,
-            "6% price drop within 5 min should trigger exit"
+            "9% price drop within 5 min should trigger exit"
         );
     }
 

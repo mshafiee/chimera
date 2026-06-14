@@ -200,8 +200,11 @@ impl ProfitTargetManager {
         targets.insert(trade_uuid.to_string(), state);
     }
 
-    /// Check profit targets and return action if needed
-    pub async fn check_targets(&self, trade_uuid: &str, token_address: &str) -> ProfitTargetAction {
+    /// Check profit targets and return action if needed.
+    ///
+    /// `strategy` is the position's strategy string ("SHIELD" or "SPEAR") — used to
+    /// differentiate time-exit thresholds and trailing-stop distance.
+    pub async fn check_targets(&self, trade_uuid: &str, token_address: &str, strategy: &str) -> ProfitTargetAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
             None => return ProfitTargetAction::None,
@@ -257,9 +260,18 @@ impl ProfitTargetManager {
         // Profit targets scale with regime to let winners run, but the trailing stop must
         // protect capital at the same rate — deferring it in bull markets (where positions
         // are larger) would maximise unprotected exposure at exactly the wrong time.
+        //
+        // Spear positions use a 50% wider trailing distance to avoid being shaken out by
+        // the higher volatility of their more aggressive token selection.
+        let trailing_distance = if strategy == "SPEAR" {
+            self.config.trailing_stop_distance
+                * Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
+        } else {
+            self.config.trailing_stop_distance
+        };
         if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;
-            let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
+            let trailing_distance_ratio = trailing_distance / Decimal::from(100);
             state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
             state_changed = true;
         }
@@ -269,7 +281,7 @@ impl ProfitTargetManager {
 
         // Ratchet trailing stop price on new high
         if state.trailing_stop_active && is_new_peak {
-            let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
+            let trailing_distance_ratio = trailing_distance / Decimal::from(100);
             state.trailing_stop_price =
                 state.current_price * (Decimal::ONE - trailing_distance_ratio);
             state_changed = true;
@@ -290,28 +302,27 @@ impl ProfitTargetManager {
             (0.0, 0.0, 0.0, 0.0, String::new(), false, 0.0)
         };
 
-        // Determine final action before releasing the lock
+        // Determine final action before releasing the lock.
+        // Spear positions use shorter hold times (higher volatility, faster decay).
+        // Shield positions hold longer to allow conservative signals to play out.
+        let is_spear = strategy == "SPEAR";
         let time_exit = if let Ok(elapsed) = state.entry_time.elapsed() {
             let elapsed_hours = elapsed.as_secs() / 3600;
+            let twenty_five_percent = Decimal::from_str("25.0").unwrap_or(Decimal::ZERO);
             let ten_percent = Decimal::from_str("10.0").unwrap_or(Decimal::ZERO);
-            let five_percent = Decimal::from_str("5.0").unwrap_or(Decimal::ZERO);
             let zero = Decimal::ZERO;
-            if profit_percent > ten_percent && elapsed_hours >= 48 {
-                // High-profit positions run to 48h — don't cut winners short
-                true
-            } else if profit_percent > five_percent && profit_percent <= ten_percent
-                && elapsed_hours >= self.config.time_exit_hours
-            {
-                // Medium-profit (5-10%): exit at configured time (default 24h)
-                true
-            } else if profit_percent > zero && profit_percent < five_percent && elapsed_hours >= 12 {
-                // Stale low-profit: cut at 12h to free capital
-                true
-            } else if profit_percent < zero && elapsed_hours >= 6 {
-                // Losing positions: cut at 6h
-                true
+            if profit_percent > twenty_five_percent {
+                // High-profit: Shield holds to 48h, Spear exits sooner at 24h
+                elapsed_hours >= if is_spear { 24 } else { 48 }
+            } else if profit_percent > ten_percent {
+                // Medium-profit: Shield 24h, Spear 12h
+                elapsed_hours >= if is_spear { 12 } else { self.config.time_exit_hours }
+            } else if profit_percent > zero {
+                // Low-profit: Shield 16h, Spear 8h — free capital before it goes flat
+                elapsed_hours >= if is_spear { 8 } else { 16 }
             } else {
-                false
+                // Losing: Shield 8h, Spear 4h
+                elapsed_hours >= if is_spear { 4 } else { 8 }
             }
         } else {
             false

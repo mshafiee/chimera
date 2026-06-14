@@ -300,31 +300,6 @@ impl MarketRegimeDetector {
         volume_multiplier.max(min_mult).min(max_mult) // Clamp between 0.5x and 2.0x
     }
 
-    /// Get profit targets for current regime
-    ///
-    /// # Returns
-    /// Vector of profit target percentages (using Decimal for precision)
-    pub fn get_profit_targets(&self) -> Vec<Decimal> {
-        match self.detect_regime() {
-            MarketRegime::Bull => vec![
-                Decimal::from_str("50.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("100.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("200.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("500.0").unwrap_or(Decimal::ZERO),
-            ], // Higher targets in bull
-            MarketRegime::Bear => vec![
-                Decimal::from_str("15.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("30.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("50.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("100.0").unwrap_or(Decimal::ZERO),
-            ], // Lower targets in bear
-            MarketRegime::Sideways => vec![
-                Decimal::from_str("10.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("20.0").unwrap_or(Decimal::ZERO),
-                Decimal::from_str("30.0").unwrap_or(Decimal::ZERO),
-            ], // Quick scalps in sideways
-        }
-    }
 }
 
 #[cfg(test)]

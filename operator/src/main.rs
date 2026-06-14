@@ -709,7 +709,7 @@ async fn main() -> anyhow::Result<()> {
                             ).await;
 
                             // Check profit targets
-                            match monitor_pt.check_targets(&pos.trade_uuid, &pos.token_address).await {
+                            match monitor_pt.check_targets(&pos.trade_uuid, &pos.token_address, &pos.strategy).await {
                                 ProfitTargetAction::FullExit => {
                                     tracing::info!(
                                         trade_uuid = %pos.trade_uuid,

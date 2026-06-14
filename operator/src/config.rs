@@ -724,9 +724,10 @@ pub struct ProfitManagementConfig {
     /// Trailing stop distance from peak (%)
     #[serde(default = "default_trailing_stop_distance")]
     pub trailing_stop_distance: Decimal,
-    /// Hard stop loss (%)
-    #[serde(default = "default_hard_stop_loss")]
-    pub hard_stop_loss: Decimal,
+    /// Maximum allowable loss before stop fires (floor on the dynamic stop, not a fixed trigger).
+    /// The adaptive stop may widen due to volatility/consensus, but never beyond this value.
+    #[serde(default = "default_max_stop_loss_distance", alias = "hard_stop_loss")]
+    pub max_stop_loss_distance: Decimal,
     /// Time-based exit (hours)
     #[serde(default = "default_time_exit_hours")]
     pub time_exit_hours: u64,
@@ -742,7 +743,9 @@ fn default_profit_targets() -> Vec<Decimal> {
 }
 
 fn default_tiered_exit_percent() -> Decimal {
-    Decimal::from_str("25.0").unwrap()
+    // Each exit sells this fraction of the *remaining* balance (compound, not original).
+    // Four tiers at 33%: 33% + 22% + 15% + 10% ≈ 80% total; trailing stop handles the tail.
+    Decimal::from_str("33.0").unwrap()
 }
 
 fn default_trailing_stop_activation() -> Decimal {
@@ -753,7 +756,7 @@ fn default_trailing_stop_distance() -> Decimal {
     Decimal::from_str("20.0").unwrap()
 }
 
-fn default_hard_stop_loss() -> Decimal {
+fn default_max_stop_loss_distance() -> Decimal {
     Decimal::from_str("-25.0").unwrap()
 }
 
@@ -768,7 +771,7 @@ impl Default for ProfitManagementConfig {
             tiered_exit_percent: default_tiered_exit_percent(),
             trailing_stop_activation: default_trailing_stop_activation(),
             trailing_stop_distance: default_trailing_stop_distance(),
-            hard_stop_loss: default_hard_stop_loss(),
+            max_stop_loss_distance: default_max_stop_loss_distance(),
             time_exit_hours: default_time_exit_hours(),
         }
     }

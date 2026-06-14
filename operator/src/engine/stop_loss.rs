@@ -189,11 +189,10 @@ impl StopLossManager {
             );
         }
 
-        // The hard stop is the absolute maximum loss we allow.
-        // The adaptive stop may widen, but never beyond the hard stop — cap it.
+        // max_stop_loss_distance is the floor on loss tolerance — the adaptive stop
+        // may widen due to volatility/consensus, but never past this value.
         // max() on negative numbers gives the TIGHTER (less negative) threshold.
-        let hard_stop = self.config.hard_stop_loss;
-        let effective_threshold = stop_loss_threshold.max(hard_stop);
+        let effective_threshold = stop_loss_threshold.max(self.config.max_stop_loss_distance);
 
         if loss_percent <= effective_threshold {
             return StopLossAction::Exit;
@@ -203,6 +202,9 @@ impl StopLossManager {
     }
 
     /// Check portfolio-level stop (pause all trading if daily loss >5% of total capital).
+    ///
+    /// Must be called from the position monitoring loop in main.rs on every tick alongside
+    /// `check_stop_loss` — it is the only path that returns `StopLossAction::PauseAll`.
     ///
     /// `total_capital_sol` must be the configured total trading capital, not active exposure.
     /// Using active exposure as the denominator shrinks as positions close, causing premature

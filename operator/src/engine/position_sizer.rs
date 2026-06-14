@@ -59,15 +59,11 @@ impl PositionSizer {
         self.config.off_hours_size_multiplier
     }
 
-    /// Calculate position size based on factors
+    /// Calculate position size based on factors.
     ///
-    /// Formula: base_size * confidence_multiplier * wallet_performance_multiplier
-    ///
-    /// # Arguments
-    /// * `factors` - Sizing factors
-    ///
-    /// # Returns
-    /// Position size in SOL (using Decimal for precision)
+    /// Multipliers applied (all multiplicative): confidence (1×–2×), performance (0.8×–1.1×),
+    /// token_age (0.5×–1×), slippage (0.7×–1×), quality (0.7×–1.3×), volatility (0.5×–1×),
+    /// regime (0.5×–2×). Total range: ~0.06× to ~5.15×. Min/max caps prevent extreme sizes.
     pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
         // Kelly Criterion override: derive base size from historical win/loss ratio.
         // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
@@ -136,13 +132,6 @@ impl PositionSizer {
             }
         } else if factors.is_consensus {
             self.config.consensus_multiplier
-        } else {
-            Decimal::ONE
-        };
-
-        // High WQS multiplier (>80) - use Decimal constants to avoid f64 precision issues
-        let wqs_mult = if factors.wallet_wqs >= 80.0 {
-            Decimal::from_str("1.2").unwrap_or(Decimal::ONE)
         } else {
             Decimal::ONE
         };
@@ -220,7 +209,6 @@ impl PositionSizer {
 
         // Apply all multipliers using Decimal arithmetic
         size *= confidence_mult;
-        size *= wqs_mult;
         size *= performance_mult;
         size *= token_age_mult;
         size *= slippage_mult;
