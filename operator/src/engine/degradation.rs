@@ -92,41 +92,19 @@ where
 
 /// Check memory pressure and return current usage percentage
 pub async fn check_memory_pressure() -> AppResult<f64> {
-    #[cfg(target_os = "linux")]
-    {
-        // Use spawn_blocking so the synchronous file read doesn't stall the async executor
-        let meminfo = tokio::task::spawn_blocking(|| std::fs::read_to_string("/proc/meminfo"))
-            .await
-            .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
-            .map_err(|e| AppError::Internal(format!("Failed to read /proc/meminfo: {}", e)))?;
-
-        let mut total_kb = 0u64;
-        let mut available_kb = 0u64;
-
-        for line in meminfo.lines() {
-            if line.starts_with("MemTotal:") {
-                total_kb = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-            } else if line.starts_with("MemAvailable:") {
-                available_kb = line
-                    .split_whitespace()
-                    .nth(1)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-            }
+    tokio::task::spawn_blocking(|| {
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        
+        let total = sys.total_memory();
+        let available = sys.available_memory();
+        
+        if total == 0 {
+            return Err(AppError::Internal("Could not determine total memory".to_string()));
         }
-
-        if total_kb == 0 {
-            return Err(AppError::Internal(
-                "Could not determine total memory".to_string(),
-            ));
-        }
-
-        let used_kb = total_kb.saturating_sub(available_kb);
-        let usage_percent = (used_kb as f64 / total_kb as f64) * 100.0;
+        
+        let used = total.saturating_sub(available);
+        let usage_percent = (used as f64 / total as f64) * 100.0;
 
         // Update global flag
         MEMORY_PRESSURE.store(
@@ -135,15 +113,9 @@ pub async fn check_memory_pressure() -> AppResult<f64> {
         );
 
         Ok(usage_percent / 100.0)
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        // For non-Linux systems, use a simple heuristic
-        // In production, consider using system-specific APIs
-        tracing::warn!("Memory pressure check not implemented for this platform");
-        Ok(0.0)
-    }
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("spawn_blocking join error: {}", e)))?
 }
 
 /// Check if memory pressure is high

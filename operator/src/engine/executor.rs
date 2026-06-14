@@ -1461,11 +1461,42 @@ impl Executor {
         } else {
             Decimal::ZERO
         };
-        let limit = match signal.payload.strategy {
+        
+        let mut limit = match signal.payload.strategy {
             Strategy::Shield => self.config.strategy.shield_max_total_cost_percent,
             Strategy::Spear => self.config.strategy.spear_max_total_cost_percent,
             _ => Decimal::ZERO,
         };
+
+        // Apply dynamic limit expansion in high volatility regimes
+        if limit > Decimal::ZERO {
+            if let Some(ref cache) = self.price_cache {
+                // Inline import to avoid cluttering file top
+                use crate::engine::market_regime::{MarketRegime, MarketRegimeDetector};
+                use std::str::FromStr;
+                
+                let detector = MarketRegimeDetector::new(cache.clone());
+                let regime = detector.detect_effective_regime(signal.token_address());
+                
+                let multiplier = match regime {
+                    MarketRegime::Bull | MarketRegime::Bear => Decimal::from_str("1.5").unwrap(), // Allow 50% more slippage in fast markets
+                    MarketRegime::Sideways => Decimal::ONE,
+                };
+                
+                limit *= multiplier;
+                
+                if multiplier > Decimal::ONE {
+                    tracing::debug!(
+                        trade_uuid = %signal.trade_uuid,
+                        regime = %regime,
+                        multiplier = %multiplier,
+                        expanded_limit = %limit,
+                        "Expanded execution cost limit for high volatility regime"
+                    );
+                }
+            }
+        }
+
         if limit > Decimal::ZERO && cost_pct > limit {
             return Err(ExecutorError::ExecutionCostTooHigh {
                 cost: total_cost,
