@@ -210,7 +210,7 @@ impl StopLossManager {
     pub async fn check_portfolio_stop(&self, total_capital_sol: Decimal) -> StopLossAction {
         // Use net_pnl_sol from exit trades (after fees/tips/slippage) so the portfolio stop
         // reflects true round-trip cost. Gross realized_pnl_sol on positions understates losses.
-        let daily_pnl_f64: f64 = match sqlx::query_scalar::<_, f64>(
+        let realized_pnl_f64: f64 = match sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(net_pnl_sol), 0.0)
             FROM trades
@@ -225,11 +225,27 @@ impl StopLossManager {
         {
             Ok(pnl) => pnl,
             Err(e) => {
-                tracing::error!(error = %e, "Failed to query daily PnL — pausing all trading (fail-safe)");
+                tracing::error!(error = %e, "Failed to query daily realized PnL — pausing all trading (fail-safe)");
                 return StopLossAction::PauseAll;
             }
         };
-        let daily_pnl = Decimal::from_f64_retain(daily_pnl_f64).unwrap_or(Decimal::ZERO);
+
+        // Also include current unrealized losses from open positions so the portfolio stop
+        // fires during a flash crash where positions are still open and nothing has closed yet.
+        let unrealized_pnl_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
+            FROM positions
+            WHERE state IN ('ACTIVE', 'EXITING')
+              AND unrealized_pnl_sol IS NOT NULL
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await
+        .unwrap_or(0.0);
+
+        let daily_pnl = Decimal::from_f64_retain(realized_pnl_f64 + unrealized_pnl_f64)
+            .unwrap_or(Decimal::ZERO);
 
         // Only check if total capital is meaningful (>0.1 SOL)
         let min_capital = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);

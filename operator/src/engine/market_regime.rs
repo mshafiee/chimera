@@ -179,12 +179,14 @@ impl MarketRegimeDetector {
         }
     }
 
-    /// Get position sizing multiplier based on effective regime: Bull = 2.0, Bear = 0.5, Sideways = 0.4
+    /// Get position sizing multiplier based on effective regime.
+    /// Bull = 1.5 (moderate boost), Sideways = 0.8 (mild reduction), Bear = 0.5 (significant cut).
+    /// Sideways must be >= Bear: a flat market is less risky than an actively declining one.
     pub fn get_regime_multiplier(&self, token_address: &str) -> Decimal {
         match self.detect_effective_regime(token_address) {
-            MarketRegime::Bull => Decimal::from_str("2.0").unwrap(),
+            MarketRegime::Bull => Decimal::from_str("1.5").unwrap(),
+            MarketRegime::Sideways => Decimal::from_str("0.8").unwrap(),
             MarketRegime::Bear => Decimal::from_str("0.5").unwrap(),
-            MarketRegime::Sideways => Decimal::from_str("0.4").unwrap(),
         }
     }
 

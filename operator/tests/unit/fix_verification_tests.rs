@@ -127,52 +127,53 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
 }
 
 #[tokio::test]
-async fn should_fire_hard_stop_at_16pct_loss_with_default_config() {
-    // Companion to the test above: after fixing the sign, the hard stop SHOULD fire
-    // when loss exceeds -15% (e.g., at -16%).
+async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
+    // With hard_stop_loss default changed to -25%, the WQS-based dynamic stop now has room
+    // to operate:
+    //   - WQS=75 → dynamic base = -20%
+    //   - effective_threshold = max(-20, -25) = -20%  (hard stop no longer overrides)
     //
-    // With the bug: fires at -2% (too early).
-    // After fix: fires at -16% (correct).
+    // Scenario A: -16% loss → -16% > -20% → no exit (dynamic stop not yet reached)
+    // Scenario B: -21% loss → -21% <= -20% → Exit   (dynamic stop fires correctly)
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
-    const TOKEN: &str = "token_hard_stop_16";
-    const WALLET: &str = "wallet_hard_stop_16";
+    const TOKEN: &str = "token_dynamic_stop_21";
+    const WALLET: &str = "wallet_dynamic_stop_21";
 
-    insert_wallet(&pool, WALLET, 30.0).await; // Low WQS → dynamic threshold = -10%
+    insert_wallet(&pool, WALLET, 75.0).await; // High WQS → dynamic threshold = -20%
 
-    // With low WQS (threshold = -10%), the dynamic stop fires first at -10%.
-    // Use a high WQS so dynamic threshold = -20%, making hard stop (-15%) fire first.
-    sqlx::query("UPDATE wallets SET wqs_score = 75.0 WHERE address = ?")
-        .bind(WALLET)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let cfg = Arc::new(ProfitManagementConfig::default());
+    let cfg = Arc::new(ProfitManagementConfig::default()); // hard_stop = -25%
     let mgr = StopLossManager::new(pool, cfg, price_cache.clone());
 
-    // Entry = $100, Current = $84 → loss = -16% (exceeds hard stop of -15%)
+    // Scenario A: Entry = $100, Current = $84 → loss = -16% (not past -20% dynamic stop)
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("84.00").unwrap(),
         PriceSource::Jupiter,
     );
-
-    let action = mgr
-        .check_stop_loss(
-            "uuid-hard-stop-16",
-            WALLET,
-            Decimal::from_str("100.00").unwrap(),
-            TOKEN,
-        )
+    let action_a = mgr
+        .check_stop_loss("uuid-dynamic-a", WALLET, Decimal::from_str("100.00").unwrap(), TOKEN)
         .await;
-
     assert_eq!(
-        action,
+        action_a,
+        StopLossAction::None,
+        "A -16% loss must NOT fire for a high-WQS wallet (dynamic stop = -20%)"
+    );
+
+    // Scenario B: Entry = $100, Current = $79 → loss = -21% (past -20% dynamic stop)
+    price_cache.set_price(
+        TOKEN,
+        Decimal::from_str("79.00").unwrap(),
+        PriceSource::Jupiter,
+    );
+    let action_b = mgr
+        .check_stop_loss("uuid-dynamic-b", WALLET, Decimal::from_str("100.00").unwrap(), TOKEN)
+        .await;
+    assert_eq!(
+        action_b,
         StopLossAction::Exit,
-        "A 16% loss must trigger the hard stop (-15% threshold). \
-         After fix: loss_percent=-16.0 <= hard_stop=-15.0 → Exit."
+        "A -21% loss must trigger the dynamic stop (-20% threshold) for a high-WQS wallet"
     );
 }
 

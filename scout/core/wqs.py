@@ -306,16 +306,16 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
 
 def classify_wallet(
     wqs_score: float,
-    active_threshold: float = 70.0,
-    candidate_threshold: float = 40.0,
+    active_threshold: float = 60.0,
+    candidate_threshold: float = 20.0,
 ) -> str:
     """
     Classify wallet based on WQS score.
 
     Args:
         wqs_score: Computed WQS (0-100)
-        active_threshold: Min score for ACTIVE status (default 70.0)
-        candidate_threshold: Min score for CANDIDATE status (default 40.0)
+        active_threshold: Min score for ACTIVE status (default 60.0)
+        candidate_threshold: Min score for CANDIDATE status (default 20.0)
 
     Returns:
         'ACTIVE', 'CANDIDATE', or 'REJECTED'

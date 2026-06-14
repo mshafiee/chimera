@@ -253,9 +253,11 @@ impl ProfitTargetManager {
             }
         }
 
-        // Check trailing stop (activate after trailing_stop_activation %, scaled by regime)
-        let scaled_activation = self.config.trailing_stop_activation * multiplier;
-        if profit_percent >= scaled_activation && !state.trailing_stop_active {
+        // Check trailing stop: activate at configured threshold regardless of regime.
+        // Profit targets scale with regime to let winners run, but the trailing stop must
+        // protect capital at the same rate — deferring it in bull markets (where positions
+        // are larger) would maximise unprotected exposure at exactly the wrong time.
+        if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;
             let trailing_distance_ratio = self.config.trailing_stop_distance / Decimal::from(100);
             state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);

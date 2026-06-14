@@ -112,7 +112,10 @@ impl MomentumExit {
                 Decimal::ZERO
             };
             let age_bonus = if elapsed_minutes > 5 {
-                let hours = Decimal::from(elapsed_minutes / 60);
+                // Use f64 division to avoid the integer-division cliff where positions
+                // 5–59 minutes old get zero bonus but 60 minutes jumps to 0.5%.
+                let hours = Decimal::from_f64_retain(elapsed_minutes as f64 / 60.0)
+                    .unwrap_or(Decimal::ZERO);
                 (hours / Decimal::from(2)).min(Decimal::from(5))
             } else {
                 Decimal::ZERO

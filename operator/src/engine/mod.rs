@@ -808,23 +808,45 @@ impl Engine {
                 }
             }
             Err(crate::engine::executor::ExecutorError::MarketConditionsUnfavorable(ref reason)) => {
-                // Off-hours / market conditions: revert to PENDING so the signal is retried later.
-                // Marking as FAILED would permanently discard a valid signal.
-                tracing::warn!(
-                    trade_uuid = %trade_uuid,
-                    reason = %reason,
-                    "Trade deferred — market conditions unfavorable, reverting to PENDING"
-                );
-                if let Err(db_err) = crate::db::update_trade_status(
-                    &self.db,
-                    &trade_uuid,
-                    "PENDING",
-                    None,
-                    Some(reason),
-                )
-                .await
-                {
-                    tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
+                if signal.payload.action == Action::Buy {
+                    // BUY deferred due to market conditions: revert to PENDING for retry.
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        reason = %reason,
+                        "BUY trade deferred — market conditions unfavorable, reverting to PENDING"
+                    );
+                    if let Err(db_err) = crate::db::update_trade_status(
+                        &self.db,
+                        &trade_uuid,
+                        "PENDING",
+                        None,
+                        Some(reason),
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
+                    }
+                } else {
+                    // EXIT/SELL deferred by market conditions — this is a critical failure because
+                    // check_market_conditions should never block exits (see executor.rs). If we
+                    // reach here something unexpected happened; fail visibly so it shows in DLQ.
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        reason = %reason,
+                        action = %signal.payload.action,
+                        "CRITICAL: EXIT signal deferred by market conditions — position may be stuck open"
+                    );
+                    if let Err(db_err) = crate::db::update_trade_status(
+                        &self.db,
+                        &trade_uuid,
+                        "FAILED",
+                        None,
+                        Some(reason),
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %db_err, "Failed to update exit trade status to FAILED");
+                    }
                 }
             }
             Err(crate::engine::executor::ExecutorError::ExecutionCostTooHigh { cost, cost_pct, limit_pct, strategy }) => {

@@ -241,14 +241,17 @@ impl Executor {
                 return Err(ExecutorError::SpearDisabled);
             }
 
-            // Check market conditions before executing (skip off-hours gate for exits)
-            if let Err(e) = self.check_market_conditions(&signal.payload.action).await {
-                tracing::warn!(
-                    trade_uuid = %signal.trade_uuid,
-                    error = %e,
-                    "Trade rejected due to market conditions"
-                );
-                return Err(ExecutorError::MarketConditionsUnfavorable(e.to_string()));
+            // Check market conditions for BUY signals only — exits must always be allowed
+            // through regardless of crash or volatility so stop-losses can close positions.
+            if signal.payload.action == crate::models::Action::Buy {
+                if let Err(e) = self.check_market_conditions(&signal.payload.action).await {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        error = %e,
+                        "Trade rejected due to market conditions"
+                    );
+                    return Err(ExecutorError::MarketConditionsUnfavorable(e.to_string()));
+                }
             }
 
             // Validate amount bounds (config values are already Decimal)
@@ -1460,7 +1463,20 @@ impl Executor {
         let mut limit = match signal.payload.strategy {
             Strategy::Shield => self.config.strategy.shield_max_total_cost_percent,
             Strategy::Spear => self.config.strategy.spear_max_total_cost_percent,
-            _ => Decimal::ZERO,
+            Strategy::Exit => {
+                // Never block an exit on cost — but warn when slippage is unusually high
+                // so operators can spot illiquid tokens or rug conditions in the logs.
+                let high_cost_threshold = Decimal::from_str("0.10").unwrap_or(Decimal::ZERO);
+                if cost_pct > high_cost_threshold {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        cost_pct = %cost_pct,
+                        cost_sol = %total_cost,
+                        "High execution cost on EXIT signal — proceeding anyway"
+                    );
+                }
+                return Ok(());
+            }
         };
 
         // Apply dynamic limit expansion in high volatility regimes

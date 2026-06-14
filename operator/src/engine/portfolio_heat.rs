@@ -126,7 +126,7 @@ impl PortfolioHeat {
             r#"
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
-            WHERE state = 'ACTIVE' AND strategy = 'SHIELD'
+            WHERE state IN ('ACTIVE', 'EXITING') AND strategy = 'SHIELD'
             "#,
         )
         .fetch_one(&self.db)
@@ -138,7 +138,7 @@ impl PortfolioHeat {
             r#"
             SELECT COALESCE(SUM(entry_amount_sol), 0.0)
             FROM positions
-            WHERE state = 'ACTIVE' AND strategy = 'SPEAR'
+            WHERE state IN ('ACTIVE', 'EXITING') AND strategy = 'SPEAR'
             "#,
         )
         .fetch_one(&self.db)
