@@ -1426,8 +1426,9 @@ class WalletAnalyzer:
         win_streak_consistency = self._calculate_win_streak_consistency(trades_30d)
         
         # 1. Calculate Profit Factor (use Decimal internally, convert to float at boundary)
-        gross_profit = sum(t.pnl_sol for t in trades if t.action == TradeAction.SELL and t.pnl_sol and t.pnl_sol > Decimal('0'))
-        gross_loss = abs(sum(t.pnl_sol for t in trades if t.action == TradeAction.SELL and t.pnl_sol and t.pnl_sol < Decimal('0')))
+        # Use trades_30d (not all-time trades) so recency weighting is consistent with ROI/win-rate
+        gross_profit = sum(t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol and t.pnl_sol > Decimal('0'))
+        gross_loss = abs(sum(t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol and t.pnl_sol < Decimal('0')))
         
         profit_factor = 0.0
         if gross_loss == Decimal('0'):

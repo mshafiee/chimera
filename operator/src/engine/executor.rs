@@ -799,7 +799,7 @@ impl Executor {
                 };
 
                 match self
-                    .submit_via_helius_sender(&tx_bytes, tip, helius_api_key)
+                    .submit_via_helius_sender(&tx_bytes, tip, helius_api_key, &wallet_keypair)
                     .await
                 {
                     Ok(signature) => {
@@ -853,30 +853,50 @@ impl Executor {
         tx_bytes: &[u8],
         tip_sol: Decimal,
         api_key: &str,
+        tip_keypair: &solana_sdk::signature::Keypair,
     ) -> Result<String, ExecutorError> {
-        // Helius Sender API endpoint
+        use solana_sdk::pubkey::Pubkey;
+        use solana_sdk::signature::Signer;
+        use solana_system_interface::instruction as system_instruction;
+        use std::str::FromStr;
+
         let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
 
-        // Encode transaction bytes to base64
-        let tx_base64 = BASE64.encode(tx_bytes);
-
-        // Create bundle payload
-        // Note: Helius Sender API expects a specific format
-        // For now, we'll submit the transaction directly
-        // In production, you would create a proper bundle with tip transaction
-
-        // Convert Decimal SOL to lamports (1 SOL = 1_000_000_000 lamports)
+        // Convert SOL to lamports
         let tip_lamports = (tip_sol * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or_else(|| {
             tracing::warn!(tip_sol = %tip_sol, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
             10_000_000u64
         });
+
+        // Build proper tip transaction (SOL transfer to Jito tip account)
+        let jito_tip_account =
+            Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4").map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Invalid Jito tip account: {}", e))
+            })?;
+        let recent_blockhash = self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+            ExecutorError::Rpc(format!("Failed to get blockhash for tip tx: {}", e))
+        })?;
+        let tip_instruction = system_instruction::transfer(
+            &tip_keypair.pubkey(),
+            &jito_tip_account,
+            tip_lamports,
+        );
+        let mut tip_tx = Transaction::new_with_payer(&[tip_instruction], Some(&tip_keypair.pubkey()));
+        tip_tx.sign(&[tip_keypair], recent_blockhash);
+        let tip_tx_bytes =
+            bincode::serde::encode_to_vec(&tip_tx, bincode::config::legacy()).map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e))
+            })?;
+        let tip_tx_base64 = BASE64.encode(&tip_tx_bytes);
+
+        // Proper two-transaction bundle: [tip_tx, swap_tx] (tip first per Jito spec)
+        let swap_tx_base64 = BASE64.encode(tx_bytes);
         let payload = serde_json::json!({
-            "transactions": [tx_base64],
-            "tip": tip_lamports,
+            "transactions": [tip_tx_base64, swap_tx_base64],
         });
 
-        let client = reqwest::Client::new();
-        let response = client
+        let response = self
+            .http_client
             .post(&url)
             .json(&payload)
             .send()
@@ -1015,13 +1035,22 @@ impl Executor {
         self.validate_transaction_size(&tx_bytes)?;
 
         // Send transaction via RPC (use active RPC client)
+        // 60-second timeout mirrors the versioned path; without it a stuck RPC node
+        // can block this Tokio task indefinitely and freeze the position in EXECUTING.
         let active_client = self.active_rpc_client();
-        let signature = active_client
-            .send_and_confirm_transaction(transaction)
-            .await
-            .map_err(|e| {
-                ExecutorError::TransactionFailed(format!("Transaction submission failed: {}", e))
-            })?;
+        let signature = timeout(
+            Duration::from_secs(60),
+            active_client.send_and_confirm_transaction(transaction),
+        )
+        .await
+        .map_err(|_| {
+            ExecutorError::TransactionFailed(
+                "Legacy transaction confirmation timed out after 60s".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Transaction submission failed: {}", e))
+        })?;
 
         tracing::info!(
             signature = %signature,

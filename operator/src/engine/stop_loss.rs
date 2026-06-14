@@ -74,10 +74,14 @@ impl StopLossManager {
             let ratio = diff / entry_price;
             ratio * Decimal::from(100)
         } else {
-            tracing::warn!(
+            // ERROR (not warn): zero entry_price means corrupt DB state — position is dead
+            // capital until manually corrected. Operators monitoring for error-level logs
+            // should investigate and repair the entry_price field in the trades table.
+            tracing::error!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
-                "Position has zero entry_price — stop-loss skipped until entry price is corrected"
+                "CORRUPT_POSITION: entry_price is zero — stop-loss disabled for this position. \
+                 Manually set trades.entry_price to correct the position or close it."
             );
             Decimal::ZERO
         };

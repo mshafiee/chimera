@@ -512,82 +512,80 @@ impl TokenMetadataFetcher {
         }
     }
 
-    /// Simulate a sell transaction to detect honeypots
+    /// Check whether a token can be sold by querying a Jupiter sell quote.
     ///
-    /// Returns true if the token can be sold, false if it's a honeypot
+    /// Returns true if Jupiter can route TOKEN→SOL (token is sellable),
+    /// false if the token has no sell route (likely honeypot or zero liquidity),
+    /// or an inconclusive error if the Jupiter API is unavailable.
     ///
-    /// This creates a minimal test sell transaction (token -> SOL) and simulates it
-    /// via RPC. If the simulation fails, the token is likely a honeypot.
+    /// This replaces the old transaction-simulation approach which used a random
+    /// dummy wallet (zero balance) and therefore always returned "inconclusive".
     pub async fn simulate_sell(&self, token_address: &str) -> AppResult<bool> {
-        tracing::debug!(
-            token = token_address,
-            "Simulating sell transaction for honeypot detection"
+        tracing::debug!(token = token_address, "Checking sell route for honeypot detection");
+
+        // Use a small amount (1000 base units) — just enough for Jupiter to find a route.
+        let test_amount: u64 = 1_000;
+        let sol_mint = crate::constants::mints::SOL;
+
+        let quote_url = format!(
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=10000",
+            self.jupiter_api_url, token_address, sol_mint, test_amount
         );
 
-        // Build a minimal test sell transaction
-        // We'll use Jupiter Swap API to get a swap transaction, then simulate it
-        let test_amount_lamports = 1_000_000; // 0.001 SOL worth of tokens (minimal test)
+        let response = self.http_client.get(&quote_url).send().await.map_err(|e| {
+            AppError::Http(format!("Jupiter sell-quote request failed: {}", e))
+        })?;
 
-        let token_mint = Pubkey::from_str(token_address)
-            .map_err(|e| AppError::Validation(format!("Invalid token mint: {}", e)))?;
-        let sol_mint = Pubkey::from_str(crate::constants::mints::SOL)
-            .map_err(|e| AppError::Validation(format!("Invalid SOL mint: {}", e)))?;
+        let status = response.status();
 
-        // Get a swap transaction from Jupiter (minimal amount)
-        let swap_tx = self
-            .get_jupiter_swap_transaction_for_simulation(token_mint, sol_mint, test_amount_lamports)
-            .await?;
-
-        // Simulate the transaction via RPC
-        let simulation_result = self.simulate_transaction_rpc(&swap_tx).await?;
-
-        if let Some(err) = simulation_result.err {
-            let err_str = format!("{:?}", err).to_lowercase();
-
-            // Check logs for specific failure reasons
-            let logs = simulation_result.logs.join("\n").to_lowercase();
-
-            // The simulation failed because our dummy wallet has no token balance or SOL.
-            // This is structurally guaranteed with Pubkey::new_unique() — we cannot
-            // distinguish a honeypot from a safe token via this path. Return a specific
-            // error so the caller can treat this as "inconclusive" (skip the check)
-            // rather than silently claiming the token is safe.
-            if logs.contains("insufficient funds")
-                || logs.contains("account not found")
-                || err_str.contains("accountnotfound")
-            {
-                return Err(AppError::Validation(
-                    "honeypot_simulation_inconclusive: dummy wallet has no funds".to_string(),
-                ));
-            }
-
-            // If it's a custom program error (usually 0x1770 or similar for frozen assets), reject
-            if logs.contains("custom program error") || logs.contains("transfer failed") {
-                tracing::warn!(
-                    token = token_address,
-                    "Honeypot detected via simulation error"
-                );
-                return Ok(false);
-            }
-
-            // Default to safe if error is obscure, or unsafe if you want max security
-            // Here we default to unsafe for unknown errors
+        if status == reqwest::StatusCode::BAD_REQUEST {
+            // Jupiter returns 400 when no route exists (can't sell this token)
+            tracing::warn!(token = token_address, "Honeypot: no Jupiter sell route (400)");
             return Ok(false);
         }
 
-        // If we got here, simulation succeeded or was inconclusive (but allowed)
-        let is_sellable = true;
+        if !status.is_success() {
+            return Err(AppError::Validation(format!(
+                "honeypot_simulation_inconclusive: Jupiter quote returned {}",
+                status
+            )));
+        }
+
+        let quote: serde_json::Value = response.json().await.map_err(|e| {
+            AppError::Parse(format!("Failed to parse Jupiter sell quote: {}", e))
+        })?;
+
+        // Jupiter returns an "error" field or an empty/absent outAmount when no route exists
+        if quote.get("error").is_some() {
+            tracing::warn!(
+                token = token_address,
+                error = ?quote.get("error"),
+                "Honeypot: Jupiter sell quote returned error"
+            );
+            return Ok(false);
+        }
+
+        let out_amount = quote
+            .get("outAmount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        if out_amount == 0 {
+            tracing::warn!(token = token_address, "Honeypot: sell quote returned zero output");
+            return Ok(false);
+        }
 
         tracing::debug!(
             token = token_address,
-            is_sellable = is_sellable,
-            "Honeypot simulation completed"
+            out_amount = out_amount,
+            "Sell route confirmed — token appears sellable"
         );
-
-        Ok(is_sellable)
+        Ok(true)
     }
 
     /// Get a Jupiter swap transaction for simulation (minimal amount)
+    #[allow(dead_code)]
     async fn get_jupiter_swap_transaction_for_simulation(
         &self,
         input_mint: Pubkey,
@@ -658,6 +656,7 @@ impl TokenMetadataFetcher {
     }
 
     /// Simulate a transaction via RPC
+    #[allow(dead_code)]
     async fn simulate_transaction_rpc(
         &self,
         transaction_base64: &str,
