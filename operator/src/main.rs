@@ -86,12 +86,19 @@ async fn main() -> anyhow::Result<()> {
     let ws_state = Arc::new(WsState::new());
     let cancel_token = CancellationToken::new();
 
+    // Initialize price cache
+    let price_cache = Arc::new(PriceCache::new());
+    // Track SOL for volatility calculation
+    price_cache.track_token("So11111111111111111111111111111111111111112");
+
     // Initialize circuit breaker
     let circuit_breaker = Arc::new(CircuitBreaker::new_with_ws(
         config.circuit_breakers.clone(),
         db_pool.clone(),
         Some(ws_state.clone()),
-    ).with_total_capital(config.position_sizing.total_capital_sol));
+    )
+    .with_total_capital(config.position_sizing.total_capital_sol)
+    .with_price_cache(price_cache.clone()));
 
     // Restore kill-switch if it was active before last restart.
     // The kill-switch handler writes a "kill_switch ACTIVE" entry to config_audit.
@@ -114,11 +121,6 @@ async fn main() -> anyhow::Result<()> {
                 .await;
         }
     }
-
-    // Initialize price cache
-    let price_cache = Arc::new(PriceCache::new());
-    // Track SOL for volatility calculation
-    price_cache.track_token("So11111111111111111111111111111111111111112");
 
     // Initialize tip manager
     let tip_manager = Arc::new(TipManager::new(config.jito.clone(), db_pool.clone()));
@@ -609,6 +611,7 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut last_checked: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
             loop {
                 tokio::select! {
                     _ = monitor_token.cancelled() => {
@@ -632,6 +635,26 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
                         };
+
+                        let now = std::time::Instant::now();
+                        for pos in &positions {
+                            if let Some(&last) = last_checked.get(&pos.trade_uuid) {
+                                if now.duration_since(last) > std::time::Duration::from_secs(60) {
+                                    tracing::error!(
+                                        trade_uuid = %pos.trade_uuid,
+                                        token = %pos.token_address,
+                                        elapsed_secs = %now.duration_since(last).as_secs(),
+                                        "MONITOR_STALENESS_ALERT: Position monitoring is stale (not checked for > 60s)"
+                                    );
+                                }
+                            }
+                        }
+
+                        for pos in &positions {
+                            last_checked.insert(pos.trade_uuid.clone(), now);
+                        }
+
+                        last_checked.retain(|uuid, _| positions.iter().any(|p| &p.trade_uuid == uuid));
 
                         for pos in positions {
                             // Check stop-loss first (higher priority)
@@ -812,13 +835,14 @@ async fn main() -> anyhow::Result<()> {
     // Spawn market regime price history update task (every 5 minutes)
     {
         let regime_token = cancel_token.clone();
+        let detector_clone = market_regime_detector.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
                 tokio::select! {
                     _ = regime_token.cancelled() => break,
                     _ = interval.tick() => {
-                        market_regime_detector.update_price_history().await;
+                        detector_clone.update_price_history().await;
                     }
                 }
             }
@@ -961,11 +985,13 @@ async fn main() -> anyhow::Result<()> {
         circuit_breaker: circuit_breaker.clone(),
         portfolio_heat: Some(portfolio_heat),
         signal_aggregator: Some(signal_aggregator.clone()),
+        market_regime: Some(market_regime_detector.clone()),
         helius_client: helius_client.clone(),
         position_sizer: Some(position_sizer),
         total_capital_sol: config.position_sizing.total_capital_sol,
         max_position_sol: config.position_sizing.max_size_sol,
-        signal_quality_threshold: config.strategy.signal_quality_threshold,
+        shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
+        spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
         shield_percent: config.strategy.shield_percent,
         spear_percent: config.strategy.spear_percent,
     });
@@ -1202,6 +1228,7 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
         amount_sol: amount,
         wallet_address: pos.wallet_address.clone(),
         trade_uuid: Some(pos.trade_uuid.clone()),
+        exit_fraction: Some(fraction),
     };
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }

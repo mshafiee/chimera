@@ -5,6 +5,7 @@ mod tests {
     use chimera_operator::config::DatabaseConfig;
     use chimera_operator::db;
     use chimera_operator::engine::kelly_sizer::KellySizer;
+    use chimera_operator::models::Strategy;
     use rust_decimal::prelude::*;
     use tempfile::TempDir;
 
@@ -27,7 +28,7 @@ mod tests {
         let (pool, _dir) = setup_test_db().await;
         let sizer = KellySizer::new(pool);
 
-        let result = sizer.calculate_kelly("wallet_with_no_trades", 30).await;
+        let result = sizer.calculate_kelly("wallet_with_no_trades", Strategy::Shield, 30).await;
         assert!(result.is_err(), "Expected error for wallet with no trades");
     }
 
@@ -82,7 +83,7 @@ mod tests {
         }
 
         let sizer = KellySizer::new(pool);
-        let result = sizer.calculate_kelly(wallet, 30).await.unwrap();
+        let result = sizer.calculate_kelly(wallet, Strategy::Shield, 30).await.unwrap();
 
         assert!(
             result.full_kelly > Decimal::ZERO,
@@ -151,7 +152,7 @@ mod tests {
         }
 
         let sizer = KellySizer::new(pool);
-        let result = sizer.calculate_kelly(wallet, 30).await.unwrap();
+        let result = sizer.calculate_kelly(wallet, Strategy::Shield, 30).await.unwrap();
 
         // Negative edge: kelly is clamped to zero (implementation uses .max(Decimal::ZERO))
         assert_eq!(

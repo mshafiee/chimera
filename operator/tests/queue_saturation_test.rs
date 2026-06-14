@@ -20,6 +20,7 @@ fn make_signal(strategy: Strategy, id: u32) -> Signal {
         amount_sol: Decimal::from_str("0.1").unwrap(),
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: Some(format!("test-uuid-{}", id)),
+        exit_fraction: None,
     };
     Signal::new(payload, 12345, None)
 }

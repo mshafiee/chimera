@@ -129,6 +129,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         "sig_exit_r3",
         UUID,
         None,
+        Decimal::ONE,
     )
     .await
     .unwrap();
@@ -207,6 +208,7 @@ async fn test_profit_capture_positive_pnl_recorded() {
         "sig_exit_profit",
         UUID,
         None,
+        Decimal::ONE,
     )
     .await
     .unwrap();

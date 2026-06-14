@@ -118,6 +118,7 @@ pub async fn helius_webhook_handler(
                     action: direction,
                     amount_sol: swap.amount_in,
                     trade_uuid: None,
+                    exit_fraction: None,
                 };
 
                 let signal = Signal::new(

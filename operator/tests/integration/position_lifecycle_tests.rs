@@ -114,6 +114,7 @@ async fn test_close_position_no_active_position_is_noop() {
         "sig_exit",
         "uuid-nosell",
         None,
+        Decimal::ONE,
     )
     .await;
 
@@ -183,6 +184,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         "sig_sell_f",
         uuid,
         None,
+        Decimal::ONE,
     )
     .await
     .unwrap();
@@ -324,6 +326,7 @@ async fn test_full_trade_status_progression() {
         "sig_exit",
         uuid,
         None,
+        Decimal::ONE,
     )
     .await
     .unwrap();

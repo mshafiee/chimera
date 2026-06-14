@@ -564,7 +564,7 @@ async fn test_portfolio_stop_db_error_returns_none() {
         .unwrap();
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop().await;
+    let action = mgr.check_portfolio_stop(Decimal::from_str("10.0").unwrap()).await;
 
     assert_eq!(
         action,
@@ -591,7 +591,7 @@ async fn test_portfolio_stop_below_min_exposure_skips_check() {
     insert_closed_position(&pool, "uuid-pnl-bad", "wallet_s", "token_s2", 1.0, -1.0).await;
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop().await;
+    let action = mgr.check_portfolio_stop(Decimal::from_str("0.09").unwrap()).await;
 
     assert_eq!(
         action,
@@ -617,7 +617,7 @@ async fn test_portfolio_stop_triggers_at_5pct_daily_loss() {
     insert_closed_position(&pool, "uuid-loss-51", "wallet_p", "token_p2", 1.0, -0.51).await;
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop().await;
+    let action = mgr.check_portfolio_stop(Decimal::from_str("10.0").unwrap()).await;
 
     assert_eq!(
         action,
@@ -726,7 +726,7 @@ async fn test_portfolio_stop_not_triggered_below_threshold() {
     insert_closed_position(&pool, "uuid-ok-pnl", "wallet_ok", "token_ok2", 1.0, -0.49).await;
 
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop().await;
+    let action = mgr.check_portfolio_stop(Decimal::from_str("10.0").unwrap()).await;
 
     assert_eq!(
         action,

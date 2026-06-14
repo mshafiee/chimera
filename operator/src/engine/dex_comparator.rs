@@ -116,23 +116,17 @@ impl DexComparator {
             results.push(result);
         }
 
+        if results.is_empty() {
+            return Err(crate::error::AppError::Internal(
+                "All DEX queries failed".to_string(),
+            ));
+        }
+
         // Select DEX with lowest total cost
         let result = results
             .into_iter()
             .min_by(|a, b| a.total_cost_sol.cmp(&b.total_cost_sol))
-            .unwrap_or_else(|| {
-                // Fallback to Jupiter if all queries failed
-                let default_total_cost = amount_sol * Decimal::from_str("0.008").unwrap(); // Default 0.8% total cost
-                let default_fee = amount_sol * Decimal::from_str("0.003").unwrap();
-                let default_slippage = amount_sol * Decimal::from_str("0.005").unwrap();
-                DexComparisonResult {
-                    selected_dex: "Jupiter".to_string(),
-                    total_cost_sol: default_total_cost,
-                    fee_sol: default_fee,
-                    slippage_sol: default_slippage,
-                    dex_url: self.jupiter_api_url.clone(),
-                }
-            });
+            .unwrap();
 
         // Cache the result
         {

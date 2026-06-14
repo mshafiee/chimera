@@ -79,6 +79,7 @@ fn test_signal_creation() {
         amount_sol: Decimal::from_str("0.5").unwrap(),
         wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
         trade_uuid: None,
+        exit_fraction: None,
     };
 
     let signal = Signal::new(payload, chrono::Utc::now().timestamp(), None);

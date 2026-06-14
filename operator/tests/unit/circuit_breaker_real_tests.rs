@@ -76,10 +76,11 @@ async fn insert_closed_position_with_pnl(
     sqlx::query(
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
-          entry_tx_signature, state, realized_pnl_sol, closed_at) \
-         VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', ?, CURRENT_TIMESTAMP)",
+          entry_tx_signature, state, realized_pnl_sol, realized_pnl_usd, closed_at) \
+         VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', ?, ?, CURRENT_TIMESTAMP)",
     )
     .bind(trade_uuid)
+    .bind(pnl_sol)
     .bind(pnl_sol)
     .execute(pool)
     .await
@@ -96,7 +97,8 @@ async fn test_evaluate_trips_on_24h_loss() {
     // to confirm whether the CB treats SOL = USD (potential unit mismatch bug).
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // Insert 600 SOL loss in last 24h (well above $500 threshold)
     // If CB treats SOL as USD: -600 SOL < 0 AND 600 >= 500 → trip.
@@ -118,7 +120,8 @@ async fn test_evaluate_does_not_trip_below_threshold() {
     // 400 SOL/USD loss → below $500 threshold → must stay Active.
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // 2 losses × (-200 SOL) = -400 total, consecutive = 2 < threshold of 3.
     // Using 4 × (-100) would also give -400 but would trigger the consecutive check (4 ≥ 3).
@@ -143,7 +146,8 @@ async fn test_evaluate_rate_limit_prevents_re_evaluation_within_30s() {
     // This means new losses incurred in the first 30s after an evaluation are invisible.
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // First eval: empty DB, nothing trips.
     cb.evaluate().await.unwrap();
@@ -173,7 +177,8 @@ async fn test_consecutive_losses_resets_at_intervening_win() {
     // With max_consecutive_losses=3, this DOES trip. But the counter is 3, not 5.
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // Use insert_closed_position_with_pnl so both tables are populated for the JOIN in
     // get_consecutive_losses(). insert_closed_trade_with_pnl only inserts into trades.
@@ -221,7 +226,8 @@ async fn test_consecutive_losses_4_does_not_count_behind_win() {
     // LOSE, WIN, LOSE, LOSE → consecutive = 2 (not 3). Should NOT trip with threshold=3.
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // Most recent: 2 losses
     for i in 0..2 {
@@ -252,7 +258,8 @@ async fn test_no_hourly_loss_limit_allows_large_intra_hour_loss() {
     // rate is irrelevant — only the 24h cumulative matters.
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // 10 trades of -50 SOL each = -500 SOL total
     for i in 0..10 {
@@ -283,7 +290,8 @@ async fn test_cooldown_exit_does_not_reevaluate_trip_condition() {
         cooldown_minutes: 0,
         ..tight_config()
     };
-    let cb = CircuitBreaker::new(cfg, pool.clone());
+    let cb = CircuitBreaker::new(cfg, pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // Insert losses exceeding threshold
     for i in 0..6 {
@@ -301,7 +309,8 @@ async fn test_cooldown_exit_does_not_reevaluate_trip_condition() {
     // Now call evaluate() again — with 0-minute cooldown, it should exit cooldown
     // (the evaluate() internal exits cooldown first, then returns without re-checking)
     // Create a new CB instance (no rate limit) to force re-evaluation
-    let cb2 = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb2 = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // Still -600 SOL loss in DB. New CB evaluates fresh → should trip again.
     cb2.evaluate().await.unwrap();
@@ -327,7 +336,8 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
     // gains first (build the peak), then losses (create drawdown), then partial recovery.
 
     let (pool, _tmp) = create_test_db().await;
-    let cb = CircuitBreaker::new(tight_config(), pool.clone());
+    let cb = CircuitBreaker::new(tight_config(), pool.clone())
+        .with_total_capital(Decimal::from(1000000));
 
     // Insert positions with explicit timestamps to enforce ordering
     // Historical profitable positions: build peak of +1000 SOL

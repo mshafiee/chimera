@@ -171,6 +171,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
+            exit_fraction: None,
         };
         let signal = Signal::new(payload, 1234567890, None);
 
@@ -198,6 +199,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
+            exit_fraction: None,
         };
         let shield_signal = Signal::new(shield_payload, 1234567890, None);
 
@@ -270,6 +272,7 @@ mod tests {
                 amount_sol: Decimal::from_str("0.1").unwrap(),
                 wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
                 trade_uuid: Some(format!("uuid-fill-{}", i)),
+                exit_fraction: None,
             };
             let signal = Signal::new(payload, 1_700_000_000 + i as i64, None);
             let _ = queue.push(signal, None).await;
@@ -284,6 +287,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: Some("uuid-spear-shed".to_string()),
+            exit_fraction: None,
         };
         let spear_signal = Signal::new(spear_payload, 1_700_001_000_i64, None);
 
@@ -634,6 +638,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: Some("test-mid-trade-failure".to_string()),
+            exit_fraction: None,
         };
         let signal = Signal::new(payload, chrono::Utc::now().timestamp(), None);
 
@@ -662,6 +667,7 @@ mod tests {
                 amount_sol: Decimal::from_str("0.5").unwrap(),
                 wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
                 trade_uuid: Some("test-spear-in-fallback".to_string()),
+                exit_fraction: None,
             };
             let spear_signal = Signal::new(spear_payload, chrono::Utc::now().timestamp(), None);
 

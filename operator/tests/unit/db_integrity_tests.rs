@@ -180,6 +180,7 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
         "sig_exit",
         "uuid-multi-1",
         None,
+        Decimal::ONE,
     )
     .await
     .unwrap();
@@ -238,7 +239,7 @@ async fn test_close_position_zero_exit_price_records_full_loss() {
     .unwrap();
 
     // Close with exit_price = 0
-    let result = close_position(&pool, "token_z", "wallet_z", Decimal::ZERO, "sig_exit_z", uuid, None).await;
+    let result = close_position(&pool, "token_z", "wallet_z", Decimal::ZERO, "sig_exit_z", uuid, None, Decimal::ONE).await;
 
     // The function returns Ok regardless — documents no validation on exit_price=0
     assert!(
@@ -529,6 +530,7 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
         "sig_missing",
         "uuid-missing",
         None,
+        Decimal::ONE,
     )
     .await;
 

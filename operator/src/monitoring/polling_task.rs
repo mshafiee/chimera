@@ -237,6 +237,7 @@ async fn process_transaction(
         amount_sol,
         wallet_address: tx.wallet_address.clone(),
         trade_uuid: None, // Will be auto-generated
+        exit_fraction: None,
     };
 
     // Gate 3: duplicate UUID check — prevents re-processing on restart/pagination gaps

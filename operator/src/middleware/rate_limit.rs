@@ -99,6 +99,7 @@ mod tests {
             .method(Method::GET)
             .uri(Uri::from_static("/"))
             .version(Version::HTTP_11)
+            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
             .body(())
             .unwrap();
         *req.headers_mut() = headers;
@@ -150,6 +151,7 @@ mod tests {
         let mut req = Request::builder()
             .method(Method::GET)
             .uri(Uri::from_static("/"))
+            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
             .body(())
             .unwrap();
         *req.headers_mut() = headers;

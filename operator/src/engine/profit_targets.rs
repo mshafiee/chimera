@@ -231,13 +231,13 @@ impl ProfitTargetManager {
 
         state.peak_profit_percent = profit_percent.max(state.peak_profit_percent);
 
-        // Get profit targets (dynamic based on market regime if available)
-        let targets: Vec<Decimal> = if let Some(ref regime_detector) = self.market_regime {
-            // Profit targets are already Decimal for precision
-            regime_detector.get_profit_targets()
+        // Get profit targets scaled by market regime multiplier
+        let multiplier = if let Some(ref regime_detector) = self.market_regime {
+            regime_detector.get_regime_multiplier(token_address)
         } else {
-            self.config.targets.clone()
+            Decimal::ONE
         };
+        let targets: Vec<Decimal> = self.config.targets.iter().map(|t| *t * multiplier).collect();
 
         // Track whether state changed so we can persist once at the end
         let mut state_changed = is_new_peak;

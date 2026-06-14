@@ -60,6 +60,8 @@ fn neutral_factors() -> SizingFactors {
         wallet_address: "test_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
         strategy: chimera_operator::models::Strategy::Shield,
+        consensus_wallet_count: None,
+        regime_multiplier: Decimal::ONE,
     }
 }
 
@@ -240,6 +242,8 @@ async fn test_position_size_capped_at_max() {
         wallet_address: "test_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
         strategy: chimera_operator::models::Strategy::Shield,
+        consensus_wallet_count: None,
+        regime_multiplier: Decimal::ONE,
     };
 
     let size = sizer.calculate_size(factors).await;
@@ -274,6 +278,8 @@ async fn test_position_size_floor_at_minimum() {
         wallet_address: "test_wallet".to_string(),
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
         strategy: chimera_operator::models::Strategy::Spear,
+        consensus_wallet_count: None,
+        regime_multiplier: Decimal::ONE,
     };
 
     let size = sizer.calculate_size(factors).await;

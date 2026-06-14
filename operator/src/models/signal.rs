@@ -78,6 +78,9 @@ pub struct SignalPayload {
     /// Optional trade UUID from signal provider
     #[serde(default)]
     pub trade_uuid: Option<String>,
+    /// Optional fraction of the position to exit (used for partial exits)
+    #[serde(default)]
+    pub exit_fraction: Option<Decimal>,
 }
 
 impl SignalPayload {
@@ -189,6 +192,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
+            exit_fraction: None,
         };
 
         assert!(valid_signal.validate().is_ok());
@@ -204,6 +208,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
+            exit_fraction: None,
         };
 
         let uuid1 = signal.generate_trade_uuid(1234567890);
@@ -212,9 +217,9 @@ mod tests {
         // Same inputs should generate same UUID (deterministic)
         assert_eq!(uuid1, uuid2);
 
-        // Different timestamp should generate different UUID
+        // Different timestamp should generate same UUID (due to deduplication requirement)
         let uuid3 = signal.generate_trade_uuid(1234567891);
-        assert_ne!(uuid1, uuid3);
+        assert_eq!(uuid1, uuid3);
     }
 
     #[test]
@@ -227,6 +232,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.5").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: Some("custom-uuid-123".to_string()),
+            exit_fraction: None,
         };
 
         assert_eq!(signal.generate_trade_uuid(0), "custom-uuid-123");

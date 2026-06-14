@@ -39,6 +39,10 @@ pub struct SizingFactors {
     pub total_capital_sol: Decimal,
     /// Trading strategy — determines per-strategy max position size
     pub strategy: crate::models::Strategy,
+    /// Number of wallets in agreement for consensus
+    pub consensus_wallet_count: Option<usize>,
+    /// Multiplier based on the effective market regime
+    pub regime_multiplier: Decimal,
 }
 
 impl PositionSizer {
@@ -64,7 +68,7 @@ impl PositionSizer {
         // Kelly Criterion override: derive base size from historical win/loss ratio.
         // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
         let mut size = if let Some(ref kelly) = self.kelly_sizer {
-            match kelly.calculate_kelly(&factors.wallet_address, 30).await {
+            match kelly.calculate_kelly(&factors.wallet_address, factors.strategy, 30).await {
                 Ok(result) => {
                     let kelly_base = factors.total_capital_sol * result.conservative_kelly;
                     tracing::debug!(
@@ -106,7 +110,15 @@ impl PositionSizer {
         };
 
         // Confidence multiplier (using Decimal)
-        let confidence_mult = if factors.is_consensus {
+        let confidence_mult = if let Some(count) = factors.consensus_wallet_count {
+            if count > 0 {
+                let excess = (count - 1).min(4) as i64;
+                (Decimal::ONE + Decimal::from_str("0.25").unwrap() * Decimal::from(excess))
+                    .min(Decimal::from(2))
+            } else {
+                Decimal::ONE
+            }
+        } else if factors.is_consensus {
             self.config.consensus_multiplier
         } else {
             Decimal::ONE
@@ -198,6 +210,7 @@ impl PositionSizer {
         size *= slippage_mult;
         size *= quality_mult;
         size *= volatility_mult;
+        size *= factors.regime_multiplier;
 
         // Apply strategy-specific max cap (Barbell: Shield gets larger allocation, Spear smaller)
         let strategy_max = match factors.strategy {
@@ -274,6 +287,8 @@ impl PositionSizer {
             wallet_address: wallet_address.to_string(),
             total_capital_sol,
             strategy: crate::models::Strategy::Shield, // caller can override
+            consensus_wallet_count: None,
+            regime_multiplier: Decimal::ONE,
         }
     }
 

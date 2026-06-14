@@ -60,6 +60,8 @@ pub struct WebhookState {
     pub portfolio_heat: Option<Arc<crate::engine::PortfolioHeat>>,
     /// Signal aggregator for consensus detection
     pub signal_aggregator: Option<Arc<SignalAggregator>>,
+    /// Market regime detector (optional)
+    pub market_regime: Option<Arc<crate::engine::MarketRegimeDetector>>,
     /// Helius client for token age fetching
     pub helius_client: Option<Arc<HeliusClient>>,
     /// Position sizer for Kelly/confidence-based sizing
@@ -68,8 +70,10 @@ pub struct WebhookState {
     pub total_capital_sol: Decimal,
     /// Maximum single-position size in SOL (used to cap SELL amounts)
     pub max_position_sol: Decimal,
-    /// Minimum signal quality score to accept a trade (from config.strategy.signal_quality_threshold)
-    pub signal_quality_threshold: f64,
+    /// Minimum signal quality score to accept a Shield trade
+    pub shield_signal_quality_threshold: f64,
+    /// Minimum signal quality score to accept a Spear trade
+    pub spear_signal_quality_threshold: f64,
     /// Shield strategy allocation percentage
     pub shield_percent: u32,
     /// Spear strategy allocation percentage
@@ -325,6 +329,7 @@ pub async fn webhook_handler(
             .unwrap_or(50.0);
 
         // Check if consensus signal using SignalAggregator
+        let mut consensus_wallet_count = None;
         let is_consensus = if let Some(ref aggregator) = state.signal_aggregator {
             if let Some(ref token_address) = signal.payload.token_address {
                 // Add signal to aggregator and check for consensus
@@ -344,8 +349,10 @@ pub async fn webhook_handler(
                         wallet_count = consensus.wallet_count,
                         "Consensus signal detected"
                     );
+                    consensus_wallet_count = Some(consensus.wallet_count);
                     true
                 } else {
+                    consensus_wallet_count = Some(1);
                     false
                 }
             } else {
@@ -419,7 +426,11 @@ pub async fn webhook_handler(
             SignalQuality::calculate(wallet_wqs, is_consensus, liquidity_usd, token_age_hours);
 
         // Reject if quality too low (threshold from config.strategy.signal_quality_threshold)
-        let quality_threshold = state.signal_quality_threshold;
+        let quality_threshold = match signal.payload.strategy {
+            Strategy::Shield => state.shield_signal_quality_threshold,
+            Strategy::Spear => state.spear_signal_quality_threshold,
+            Strategy::Exit => 0.0,
+        };
         if !quality.should_enter(quality_threshold) {
             tracing::warn!(
                 trade_uuid = %signal.trade_uuid,
@@ -465,6 +476,17 @@ pub async fn webhook_handler(
                 .as_ref()
                 .map(|(_, _, wr)| *wr)
                 .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
+
+            let regime_multiplier = if let Some(ref regime_detector) = state.market_regime {
+                if let Some(ref token_address) = signal.payload.token_address {
+                    regime_detector.get_regime_multiplier(token_address)
+                } else {
+                    Decimal::ONE
+                }
+            } else {
+                Decimal::ONE
+            };
+
             let factors = SizingFactors {
                 is_consensus,
                 wallet_wqs,
@@ -476,6 +498,8 @@ pub async fn webhook_handler(
                 wallet_address: signal.payload.wallet_address.clone(),
                 total_capital_sol: state.total_capital_sol,
                 strategy: signal.payload.strategy,
+                consensus_wallet_count,
+                regime_multiplier,
             };
             trade_amount_sol = sizer.calculate_size(factors).await;
             tracing::info!(

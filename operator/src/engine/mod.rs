@@ -641,18 +641,31 @@ impl Engine {
 
                 // 2. Manage Position Lifecycle
                 if signal.payload.action == Action::Buy {
-                    // Prefer fill price from Jupiter quote (accurate); fall back to price cache
                     let fill_price_sol = {
                         let exec = self.executor.read().await;
                         exec.get_last_fill_price_sol_per_token()
                     };
-                    let entry_price = fill_price_sol
-                        .or_else(|| {
+                    let sol_price_usd = self
+                        .price_cache
+                        .as_ref()
+                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL))
+                        .unwrap_or(Decimal::ZERO);
+
+                    let entry_price = if let Some(fps) = fill_price_sol {
+                        if !sol_price_usd.is_zero() {
+                            fps * sol_price_usd
+                        } else {
                             self.price_cache
                                 .as_ref()
                                 .and_then(|c| c.get_price_usd(signal.token_address()))
-                        })
-                        .unwrap_or(Decimal::ZERO);
+                                .unwrap_or(Decimal::ZERO)
+                        }
+                    } else {
+                        self.price_cache
+                            .as_ref()
+                            .and_then(|c| c.get_price_usd(signal.token_address()))
+                            .unwrap_or(Decimal::ZERO)
+                    };
 
                     // Open Position
                     if let Err(e) = crate::db::open_position(
@@ -671,13 +684,33 @@ impl Engine {
                         tracing::error!(error = %e, "Failed to open position");
                     }
                 } else if signal.payload.action == Action::Sell {
-                    let exit_price = self
+                    let fill_price_sol = {
+                        let exec = self.executor.read().await;
+                        exec.get_last_fill_price_sol_per_token()
+                    };
+                    let sol_price_usd = self
                         .price_cache
                         .as_ref()
-                        .and_then(|c| c.get_price_usd(signal.token_address()))
+                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL))
                         .unwrap_or(Decimal::ZERO);
 
-                    let sol_price_usd = self
+                    let exit_price = if let Some(fps) = fill_price_sol {
+                        if !sol_price_usd.is_zero() {
+                            fps * sol_price_usd
+                        } else {
+                            self.price_cache
+                                .as_ref()
+                                .and_then(|c| c.get_price_usd(signal.token_address()))
+                                .unwrap_or(Decimal::ZERO)
+                        }
+                    } else {
+                        self.price_cache
+                            .as_ref()
+                            .and_then(|c| c.get_price_usd(signal.token_address()))
+                            .unwrap_or(Decimal::ZERO)
+                    };
+
+                    let sol_price_usd_opt = self
                         .price_cache
                         .as_ref()
                         .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
@@ -695,7 +728,9 @@ impl Engine {
                         tracing::error!(error = %e, "Failed to update trade status to EXITING");
                     }
 
-                    // Close Position and write net PnL to trades table (full exit)
+                    let exit_fraction = signal.payload.exit_fraction.unwrap_or(Decimal::ONE);
+
+                    // Close Position and write net PnL to trades table (full or partial exit)
                     if let Err(e) = crate::db::close_position(
                         &self.db,
                         signal.token_address(),
@@ -703,8 +738,8 @@ impl Engine {
                         exit_price,
                         &tx_signature,
                         &trade_uuid,
-                        sol_price_usd,
-                        rust_decimal::Decimal::ONE,
+                        sol_price_usd_opt,
+                        exit_fraction,
                     )
                     .await
                     {

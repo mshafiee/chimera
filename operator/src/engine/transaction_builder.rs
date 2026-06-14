@@ -135,18 +135,25 @@ impl TransactionBuilder {
                 })?;
 
                 // Try to fetch the actual on-chain token balance; fall back to price estimate.
+                let exit_fraction = signal.payload.exit_fraction.unwrap_or(Decimal::ONE);
                 let amount_lamports = match self
                     .fetch_token_balance(&wallet_keypair.pubkey(), &token_mint)
                     .await
                 {
                     Some(bal) if bal > 0 => {
+                        let scaled_bal = (Decimal::from(bal) * exit_fraction)
+                            .round()
+                            .to_u64()
+                            .unwrap_or(bal);
                         tracing::info!(
                             wallet = %wallet_keypair.pubkey(),
                             token = %signal.payload.token,
                             balance_lamports = bal,
-                            "SELL: using on-chain token balance"
+                            exit_fraction = %exit_fraction,
+                            scaled_balance_lamports = scaled_bal,
+                            "SELL: using on-chain token balance scaled by exit_fraction"
                         );
-                        bal
+                        scaled_bal
                     }
                     _ => {
                         let est = self.estimate_token_amount_from_price(
@@ -457,10 +464,16 @@ impl TransactionBuilder {
                 .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
                 .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()));
             match (in_amount, out_amount) {
-                (Some(inn), Some(out)) if out > 0 => {
+                (Some(inn), Some(out)) if out > 0 && inn > 0 => {
                     let in_dec = Decimal::from(inn);
                     let out_dec = Decimal::from(out);
-                    Some(in_dec / out_dec)
+                    if output_mint.to_string() == crate::constants::mints::SOL {
+                        // For SELL (TOKEN→SOL): out_amount is SOL lamports, in_amount is token base units
+                        Some(out_dec / in_dec)
+                    } else {
+                        // For BUY (SOL→TOKEN): in_amount is SOL lamports, out_amount is token base units
+                        Some(in_dec / out_dec)
+                    }
                 }
                 _ => None,
             }

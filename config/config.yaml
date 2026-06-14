@@ -46,7 +46,8 @@ strategy:
   spear_percent: 30
   max_position_sol: 1.0
   min_position_sol: 0.01
-  signal_quality_threshold: 0.55  # Min score to accept (raised from 0.45 to prevent weak solo signals from scraping by)
+  shield_signal_quality_threshold: 0.55
+  spear_signal_quality_threshold: 0.35
   dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
   shield_max_total_cost_percent: 0.05  # Rejects Shield trades if costs exceed 5% of trade size
   spear_max_total_cost_percent: 0.08   # Rejects Spear trades if costs exceed 8% of trade size

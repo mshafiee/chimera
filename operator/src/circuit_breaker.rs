@@ -113,6 +113,8 @@ pub struct CircuitBreaker {
     ws_state: Option<Arc<crate::handlers::WsState>>,
     /// Total capital in SOL for portfolio stop calculation
     total_capital_sol: Decimal,
+    /// Price cache for converting unrealized SOL losses to USD
+    price_cache: Option<Arc<crate::price_cache::PriceCache>>,
 }
 
 impl CircuitBreaker {
@@ -139,7 +141,14 @@ impl CircuitBreaker {
             check_interval: Duration::seconds(30),
             ws_state,
             total_capital_sol: Decimal::from(10), // default to 10 SOL
+            price_cache: None,
         }
+    }
+
+    /// Set price cache
+    pub fn with_price_cache(mut self, price_cache: Arc<crate::price_cache::PriceCache>) -> Self {
+        self.price_cache = Some(price_cache);
+        self
     }
 
     /// Set total capital in SOL
@@ -212,7 +221,19 @@ impl CircuitBreaker {
             return Ok(());
         }
 
-        // Check 24h SOL portfolio realized stop (5% limit of total_capital_sol)
+        // Query unrealized SOL PnL for active/exiting positions
+        let unrealized_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
+            FROM positions
+            WHERE state IN ('ACTIVE', 'EXITING')
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+        let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
+
+        // Check 24h SOL portfolio stop (5% limit of total_capital_sol)
         let total_capital = self.total_capital_sol;
         if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
             let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
@@ -225,7 +246,10 @@ impl CircuitBreaker {
             .fetch_one(&self.db)
             .await?;
             let daily_pnl_sol = Decimal::from_f64_retain(daily_pnl_sol_f64).unwrap_or(Decimal::ZERO);
-            let daily_loss_percent = (daily_pnl_sol / total_capital) * Decimal::from(100);
+            
+            // Total SOL loss includes realized and unrealized
+            let total_loss_sol = daily_pnl_sol + unrealized_sol;
+            let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
             if daily_loss_percent < loss_threshold {
                 self.trip(TripReason::PortfolioStop24h {
@@ -237,11 +261,33 @@ impl CircuitBreaker {
             }
         }
 
-        // Check 24h loss
-        let pnl_24h = db::get_pnl_24h(&self.db).await?;
-        if pnl_24h < Decimal::ZERO && pnl_24h.abs() >= self.config.max_loss_24h_usd {
+        // Sum realized USD PnL in the last 24h
+        let realized_usd_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
+            FROM positions
+            WHERE state = 'CLOSED'
+              AND closed_at >= datetime('now', '-24 hours')
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+        let realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
+
+        // Get SOL price in USD from price cache
+        let sol_price_usd = if let Some(ref cache) = self.price_cache {
+            cache.get_price_usd(crate::constants::mints::SOL).unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+
+        let unrealized_usd = unrealized_sol * sol_price_usd;
+        let total_pnl_usd = realized_usd + unrealized_usd;
+
+        // Check 24h loss in USD (sum of realized USD + unrealized USD)
+        if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
             self.trip(TripReason::MaxLoss24h {
-                loss: pnl_24h.abs().to_f64().unwrap_or(0.0),
+                loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
                 threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
             })
             .await?;
@@ -348,6 +394,18 @@ impl CircuitBreaker {
     /// Exit cooldown: re-evaluate breach conditions before resuming.
     /// If the breach condition still holds, re-trip instead of going Active.
     async fn exit_cooldown(&self) -> AppResult<()> {
+        // Query unrealized SOL PnL for active/exiting positions
+        let unrealized_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
+            FROM positions
+            WHERE state IN ('ACTIVE', 'EXITING')
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+        let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
+
         // Re-check portfolio stop realized SOL loss before exiting cooldown
         let total_capital = self.total_capital_sol;
         if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
@@ -361,7 +419,10 @@ impl CircuitBreaker {
             .fetch_one(&self.db)
             .await?;
             let daily_pnl_sol = Decimal::from_f64_retain(daily_pnl_sol_f64).unwrap_or(Decimal::ZERO);
-            let daily_loss_percent = (daily_pnl_sol / total_capital) * Decimal::from(100);
+            
+            // Total SOL loss includes realized and unrealized
+            let total_loss_sol = daily_pnl_sol + unrealized_sol;
+            let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
             if daily_loss_percent < loss_threshold {
                 self.trip(TripReason::PortfolioStop24h {
@@ -369,17 +430,39 @@ impl CircuitBreaker {
                     threshold: 5.0,
                 })
                 .await?;
-                tracing::warn!("Circuit breaker cooldown expired but daily realized SOL loss still breached — re-tripped");
+                tracing::warn!("Circuit breaker cooldown expired but daily SOL loss still breached — re-tripped");
                 return Ok(());
             }
         }
 
         // Re-evaluate breach conditions before clearing cooldown.
-        let pnl_24h = db::get_pnl_24h(&self.db).await?;
-        if pnl_24h < Decimal::ZERO && pnl_24h.abs() >= self.config.max_loss_24h_usd {
+        // Sum realized USD PnL in the last 24h
+        let realized_usd_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
+            FROM positions
+            WHERE state = 'CLOSED'
+              AND closed_at >= datetime('now', '-24 hours')
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+        let realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
+
+        // Get SOL price in USD from price cache
+        let sol_price_usd = if let Some(ref cache) = self.price_cache {
+            cache.get_price_usd(crate::constants::mints::SOL).unwrap_or(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+
+        let unrealized_usd = unrealized_sol * sol_price_usd;
+        let total_pnl_usd = realized_usd + unrealized_usd;
+
+        if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
             // Loss still breaches threshold — re-trip rather than resume.
             self.trip(TripReason::MaxLoss24h {
-                loss: pnl_24h.abs().to_f64().unwrap_or(0.0),
+                loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
                 threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
             })
             .await?;

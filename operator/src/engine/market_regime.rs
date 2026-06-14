@@ -119,6 +119,75 @@ impl MarketRegimeDetector {
         }
     }
 
+    /// Detect market regime for a specific token based on its price history in the cache
+    pub fn detect_token_regime(&self, token_address: &str) -> MarketRegime {
+        let history = self.price_cache.price_history.read();
+        let token_history = match history.get(token_address) {
+            Some(th) => th,
+            None => return MarketRegime::Sideways,
+        };
+
+        if token_history.len() < 3 {
+            // Not enough data, default to sideways
+            return MarketRegime::Sideways;
+        }
+
+        // Calculate price change over last 24 hours using Decimal for precision
+        let prices: Vec<rust_decimal::Decimal> = token_history.iter().map(|(_, price)| *price).collect();
+        let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
+        let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
+
+        if first_price.is_zero() || last_price.is_zero() {
+            return MarketRegime::Sideways;
+        }
+
+        // Calculate percentage change using Decimal to avoid floating-point precision errors
+        let price_change_percent = if !first_price.is_zero() {
+            let diff = last_price - first_price;
+            let ratio = diff / first_price;
+            ratio * rust_decimal::Decimal::from(100)
+        } else {
+            rust_decimal::Decimal::ZERO
+        };
+
+        // Classify regime based on price change (using Decimal comparisons)
+        let five_percent =
+            rust_decimal::Decimal::from_str("5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+        let neg_five_percent =
+            rust_decimal::Decimal::from_str("-5.0").unwrap_or(rust_decimal::Decimal::ZERO);
+
+        if price_change_percent > five_percent {
+            MarketRegime::Bull
+        } else if price_change_percent < neg_five_percent {
+            MarketRegime::Bear
+        } else {
+            MarketRegime::Sideways
+        }
+    }
+
+    /// Merge the global SOL regime and the token-specific regime conservatively
+    pub fn detect_effective_regime(&self, token_address: &str) -> MarketRegime {
+        let global_regime = self.detect_regime();
+        let token_regime = self.detect_token_regime(token_address);
+
+        if global_regime == MarketRegime::Bear || token_regime == MarketRegime::Bear {
+            MarketRegime::Bear
+        } else if global_regime == MarketRegime::Sideways || token_regime == MarketRegime::Sideways {
+            MarketRegime::Sideways
+        } else {
+            MarketRegime::Bull
+        }
+    }
+
+    /// Get position sizing multiplier based on effective regime: Bull = 2.0, Bear = 0.5, Sideways = 0.4
+    pub fn get_regime_multiplier(&self, token_address: &str) -> Decimal {
+        match self.detect_effective_regime(token_address) {
+            MarketRegime::Bull => Decimal::from_str("2.0").unwrap(),
+            MarketRegime::Bear => Decimal::from_str("0.5").unwrap(),
+            MarketRegime::Sideways => Decimal::from_str("0.4").unwrap(),
+        }
+    }
+
     /// Update volume history (called periodically, e.g., daily)
     ///
     /// # Arguments

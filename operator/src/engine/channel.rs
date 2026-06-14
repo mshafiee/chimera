@@ -89,28 +89,11 @@ impl PriorityQueue {
                 // This prevents starvation during high load
                 if let Some(wqs) = wallet_wqs {
                     if wqs >= 70.0 {
-                        let spear_high_wqs = self.spear_high_wqs.lock();
-                        if spear_high_wqs.len() >= self.spear_high_wqs_capacity {
-                            // High-WQS SPEAR queue is full, fall back to regular SPEAR queue
-                            // but only if we're not in load shedding mode
-                            if self.should_shed_load() {
-                                tracing::warn!(
-                                    trade_uuid = %signal.trade_uuid,
-                                    wallet_wqs = wqs,
-                                    queue_depth = self.len(),
-                                    "High-WQS SPEAR queue full and load shedding active, dropping signal"
-                                );
-                                return Err(
-                                    "Load shedding active: SPEAR signals temporarily rejected"
-                                        .to_string(),
-                                );
-                            }
-                            // Fall through to regular SPEAR queue
-                        } else {
+                        let mut spear_high_wqs = self.spear_high_wqs.lock();
+                        if spear_high_wqs.len() < self.spear_high_wqs_capacity {
                             // Add to high-WQS SPEAR queue
                             let trade_uuid = signal.trade_uuid.clone();
-                            drop(spear_high_wqs);
-                            self.spear_high_wqs.lock().push_back(signal);
+                            spear_high_wqs.push_back(signal);
                             tracing::debug!(
                                 trade_uuid = %trade_uuid,
                                 wallet_wqs = wqs,
@@ -118,6 +101,24 @@ impl PriorityQueue {
                             );
                             return Ok(());
                         }
+
+                        // High-WQS SPEAR queue is full.
+                        // Drop lock to avoid deadlock before checking self.should_shed_load()
+                        drop(spear_high_wqs);
+
+                        if self.should_shed_load() {
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                wallet_wqs = wqs,
+                                queue_depth = self.len(),
+                                "High-WQS SPEAR queue full and load shedding active, dropping signal"
+                            );
+                            return Err(
+                                "Load shedding active: SPEAR signals temporarily rejected"
+                                    .to_string(),
+                            );
+                        }
+                        // Fall through to regular SPEAR queue
                     }
                 }
 
@@ -168,12 +169,18 @@ impl PriorityQueue {
 
     /// Get queue depths by priority
     pub fn depths(&self) -> QueueDepths {
+        let high = self.high.lock().len();
+        let medium = self.medium.lock().len();
+        let spear_high_wqs = self.spear_high_wqs.lock().len();
+        let low = self.low.lock().len();
+        let total = high + medium + spear_high_wqs + low;
+
         QueueDepths {
-            high: self.high.lock().len(),
-            medium: self.medium.lock().len(),
-            spear_high_wqs: self.spear_high_wqs.lock().len(),
-            low: self.low.lock().len(),
-            total: self.len(),
+            high,
+            medium,
+            spear_high_wqs,
+            low,
+            total,
             capacity: self.capacity,
         }
     }
@@ -212,6 +219,7 @@ mod tests {
             amount_sol: Decimal::from_str("0.1").unwrap(),
             wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
             trade_uuid: None,
+            exit_fraction: None,
         };
         Signal::new(payload, 12345, None)
     }

@@ -62,18 +62,20 @@ impl KellySizer {
     pub async fn calculate_kelly(
         &self,
         wallet_address: &str,
+        strategy: crate::models::Strategy,
         lookback_days: i64,
     ) -> Result<KellyResult, String> {
         // Get historical trades for this wallet
         let from_date = chrono::Utc::now() - chrono::Duration::days(lookback_days);
         let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let strategy_str = strategy.to_string();
 
         let trades = db::get_trades(
             &self.db,
             Some(&from_date_str),
             None,
             Some("CLOSED"), // Only closed trades
-            None,
+            Some(&strategy_str),
             Some(wallet_address),
             None,
             None,
@@ -162,10 +164,11 @@ impl KellySizer {
     pub async fn calculate_position_size(
         &self,
         wallet_address: &str,
+        strategy: crate::models::Strategy,
         total_capital_sol: Decimal,
         lookback_days: i64,
     ) -> Result<Decimal, String> {
-        let kelly = self.calculate_kelly(wallet_address, lookback_days).await?;
+        let kelly = self.calculate_kelly(wallet_address, strategy, lookback_days).await?;
         let size_sol = total_capital_sol * kelly.conservative_kelly;
         Ok(size_sol)
     }
