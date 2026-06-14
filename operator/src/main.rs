@@ -26,7 +26,7 @@ use chimera_operator::db;
 use chimera_operator::db::ActivePositionEntry;
 use chimera_operator::engine::{
     self, MarketRegimeDetector, MomentumExit, PortfolioHeat, PositionSizer, ProfitTargetAction,
-    ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager,
+    ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager, VolumeCache,
 };
 use chimera_operator::handlers::{
     disable_wallet_monitoring, enable_wallet_monitoring, export_trades, get_config,
@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         config.circuit_breakers.clone(),
         db_pool.clone(),
         Some(ws_state.clone()),
-    ));
+    ).with_total_capital(config.position_sizing.total_capital_sol));
 
     // Restore kill-switch if it was active before last restart.
     // The kill-switch handler writes a "kill_switch ACTIVE" entry to config_audit.
@@ -586,7 +586,12 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(config.profit_management.clone()),
             price_cache.clone(),
         ));
-        let momentum_exit = Arc::new(MomentumExit::new(db_pool.clone(), price_cache.clone()));
+        let volume_cache = Arc::new(VolumeCache::new());
+        let momentum_exit = Arc::new(MomentumExit::with_volume_cache(
+            db_pool.clone(),
+            price_cache.clone(),
+            volume_cache,
+        ));
         let profit_target_mgr = Arc::new(ProfitTargetManager::with_extras(
             db_pool.clone(),
             Arc::new(config.profit_management.clone()),
@@ -961,6 +966,8 @@ async fn main() -> anyhow::Result<()> {
         total_capital_sol: config.position_sizing.total_capital_sol,
         max_position_sol: config.position_sizing.max_size_sol,
         signal_quality_threshold: config.strategy.signal_quality_threshold,
+        shield_percent: config.strategy.shield_percent,
+        spear_percent: config.strategy.spear_percent,
     });
 
     // Create roster state

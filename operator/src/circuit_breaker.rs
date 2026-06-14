@@ -46,6 +46,8 @@ pub enum TripReason {
     ConsecutiveLosses { count: u32, threshold: u32 },
     /// Drawdown from peak exceeded threshold
     MaxDrawdown { drawdown: f64, threshold: f64 },
+    /// 24h SOL-denominated loss exceeded threshold (portfolio stop)
+    PortfolioStop24h { loss_pct: f64, threshold: f64 },
     /// Manual trip by admin
     Manual { reason: String },
 }
@@ -77,6 +79,13 @@ impl std::fmt::Display for TripReason {
                     drawdown, threshold
                 )
             }
+            Self::PortfolioStop24h { loss_pct, threshold } => {
+                write!(
+                    f,
+                    "24h realized SOL loss {:.2}% exceeded threshold {:.2}% (portfolio stop)",
+                    loss_pct, threshold
+                )
+            }
             Self::Manual { reason } => write!(f, "Manual: {}", reason),
         }
     }
@@ -102,6 +111,8 @@ pub struct CircuitBreaker {
     check_interval: Duration,
     /// Optional WebSocket state for broadcasting events
     ws_state: Option<Arc<crate::handlers::WsState>>,
+    /// Total capital in SOL for portfolio stop calculation
+    total_capital_sol: Decimal,
 }
 
 impl CircuitBreaker {
@@ -127,7 +138,14 @@ impl CircuitBreaker {
             })),
             check_interval: Duration::seconds(30),
             ws_state,
+            total_capital_sol: Decimal::from(10), // default to 10 SOL
         }
+    }
+
+    /// Set total capital in SOL
+    pub fn with_total_capital(mut self, total_capital_sol: Decimal) -> Self {
+        self.total_capital_sol = total_capital_sol;
+        self
     }
 
     /// Check if trading is allowed
@@ -192,6 +210,31 @@ impl CircuitBreaker {
         // If still in cooldown or tripped, don't evaluate further
         if self.current_state() != CircuitBreakerState::Active {
             return Ok(());
+        }
+
+        // Check 24h SOL portfolio realized stop (5% limit of total_capital_sol)
+        let total_capital = self.total_capital_sol;
+        if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
+            let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
+                FROM positions
+                WHERE closed_at >= datetime('now', '-24 hours')
+                "#,
+            )
+            .fetch_one(&self.db)
+            .await?;
+            let daily_pnl_sol = Decimal::from_f64_retain(daily_pnl_sol_f64).unwrap_or(Decimal::ZERO);
+            let daily_loss_percent = (daily_pnl_sol / total_capital) * Decimal::from(100);
+            let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            if daily_loss_percent < loss_threshold {
+                self.trip(TripReason::PortfolioStop24h {
+                    loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
+                    threshold: 5.0,
+                })
+                .await?;
+                return Ok(());
+            }
         }
 
         // Check 24h loss
@@ -305,6 +348,32 @@ impl CircuitBreaker {
     /// Exit cooldown: re-evaluate breach conditions before resuming.
     /// If the breach condition still holds, re-trip instead of going Active.
     async fn exit_cooldown(&self) -> AppResult<()> {
+        // Re-check portfolio stop realized SOL loss before exiting cooldown
+        let total_capital = self.total_capital_sol;
+        if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
+            let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
+                FROM positions
+                WHERE closed_at >= datetime('now', '-24 hours')
+                "#,
+            )
+            .fetch_one(&self.db)
+            .await?;
+            let daily_pnl_sol = Decimal::from_f64_retain(daily_pnl_sol_f64).unwrap_or(Decimal::ZERO);
+            let daily_loss_percent = (daily_pnl_sol / total_capital) * Decimal::from(100);
+            let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            if daily_loss_percent < loss_threshold {
+                self.trip(TripReason::PortfolioStop24h {
+                    loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
+                    threshold: 5.0,
+                })
+                .await?;
+                tracing::warn!("Circuit breaker cooldown expired but daily realized SOL loss still breached — re-tripped");
+                return Ok(());
+            }
+        }
+
         // Re-evaluate breach conditions before clearing cooldown.
         let pnl_24h = db::get_pnl_24h(&self.db).await?;
         if pnl_24h < Decimal::ZERO && pnl_24h.abs() >= self.config.max_loss_24h_usd {

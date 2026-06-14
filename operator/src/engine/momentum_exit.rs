@@ -133,18 +133,14 @@ impl MomentumExit {
         }
 
         // Check 3: RSI declining (RSI < 40 and declining)
-        // Note: RSI calculation uses f64 for statistical calculations, but entry_price is Decimal
-        let entry_price_f64 = entry_price.to_f64().unwrap_or(0.0);
-        if let Some(rsi) = self.calculate_rsi(token_address, entry_price_f64).await {
-            if rsi < 40.0 {
-                // Check if RSI was higher in previous period (declining)
-                // For simplicity, we'll check if current RSI is below threshold
-                // A more sophisticated check would compare to previous RSI value
+        if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
+            if current_rsi < 40.0 && current_rsi < previous_rsi {
                 tracing::warn!(
                     trade_uuid = %trade_uuid,
                     token_address = token_address,
-                    rsi = rsi,
-                    "Negative momentum detected: RSI < 40"
+                    current_rsi = current_rsi,
+                    previous_rsi = previous_rsi,
+                    "Negative momentum detected: RSI < 40 and declining"
                 );
                 return MomentumExitAction::Exit;
             }
@@ -155,58 +151,30 @@ impl MomentumExit {
 
     /// Calculate RSI (Relative Strength Index) from price history
     ///
-    /// Uses 14-period RSI by default
-    /// Returns None if insufficient data
-    async fn calculate_rsi(&self, token_address: &str, _entry_price: f64) -> Option<f64> {
+    /// Uses 14-period RSI by default.
+    /// Returns Some((current_rsi, previous_rsi)) if sufficient data is available.
+    async fn calculate_rsi(&self, token_address: &str) -> Option<(f64, f64)> {
         // Get price history from price cache
         let history = self.price_cache.price_history.read();
         let token_history = history.get(token_address)?;
 
-        if token_history.len() < 15 {
-            // Need at least 15 data points for 14-period RSI
+        if token_history.len() < 16 {
+            // Need at least 16 data points for calculating current and previous 14-period RSI
             return None;
         }
 
-        // Get last 14 price changes (convert Decimal to f64 for RSI calculation - RSI is a statistical metric)
+        // Get last 16 price changes
         let prices: Vec<f64> = token_history
             .iter()
             .rev()
-            .take(15)
+            .take(16)
             .map(|(_, price)| price.to_f64().unwrap_or(0.0))
             .collect();
-        let mut gains = Vec::new();
-        let mut losses = Vec::new();
 
-        for i in 1..prices.len() {
-            let change = prices[i - 1] - prices[i]; // Reversed order
-            if change > 0.0 {
-                gains.push(change);
-                losses.push(0.0);
-            } else {
-                gains.push(0.0);
-                losses.push(change.abs());
-            }
-        }
+        let current_rsi = compute_rsi_from_prices(&prices[0..15])?;
+        let previous_rsi = compute_rsi_from_prices(&prices[1..16])?;
 
-        if gains.is_empty() || losses.is_empty() {
-            return None;
-        }
-
-        // Calculate average gain and loss
-        let avg_gain: f64 = gains.iter().sum::<f64>() / gains.len() as f64;
-        let avg_loss: f64 = losses.iter().sum::<f64>() / losses.len() as f64;
-
-        if avg_loss == 0.0 {
-            return Some(100.0); // All gains, RSI = 100
-        }
-
-        // Calculate RS (Relative Strength)
-        let rs = avg_gain / avg_loss;
-
-        // Calculate RSI: 100 - (100 / (1 + RS))
-        let rsi = 100.0 - (100.0 / (1.0 + rs));
-
-        Some(rsi)
+        Some((current_rsi, previous_rsi))
     }
 
     /// Check if position should exit based on momentum
@@ -224,6 +192,35 @@ impl MomentumExit {
             MomentumExitAction::Exit
         )
     }
+}
+
+/// Helper function to calculate RSI from a slice of prices
+fn compute_rsi_from_prices(prices: &[f64]) -> Option<f64> {
+    if prices.len() < 15 {
+        return None;
+    }
+    let mut gains = Vec::new();
+    let mut losses = Vec::new();
+    for i in 1..prices.len() {
+        let change = prices[i - 1] - prices[i]; // Reversed order
+        if change > 0.0 {
+            gains.push(change);
+            losses.push(0.0);
+        } else {
+            gains.push(0.0);
+            losses.push(change.abs());
+        }
+    }
+    if gains.is_empty() || losses.is_empty() {
+        return None;
+    }
+    let avg_gain: f64 = gains.iter().sum::<f64>() / gains.len() as f64;
+    let avg_loss: f64 = losses.iter().sum::<f64>() / losses.len() as f64;
+    if avg_loss == 0.0 {
+        return Some(100.0);
+    }
+    let rs = avg_gain / avg_loss;
+    Some(100.0 - (100.0 / (1.0 + rs)))
 }
 
 #[cfg(test)]

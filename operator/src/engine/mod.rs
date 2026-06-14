@@ -522,6 +522,80 @@ impl Engine {
             }
         }
 
+        // Re-check portfolio heat and strategy allocation before execution (for BUY signals only)
+        if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
+            let portfolio_heat = PortfolioHeat::new(self.db.clone(), self.config.position_sizing.total_capital_sol);
+
+            // 1. Portfolio Heat Check
+            match portfolio_heat.can_open_position(signal.payload.amount_sol).await {
+                Ok(false) => {
+                    let reason = "Portfolio heat limit reached at execution time".to_string();
+                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: portfolio heat limit reached");
+
+                    // Reject trade and set status to DEAD_LETTER
+                    let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                    let _ = crate::db::insert_dead_letter(
+                        &self.db,
+                        Some(&trade_uuid),
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        "PORTFOLIO_HEAT_LIMIT",
+                        Some(&reason),
+                        signal.source_ip.as_deref(),
+                    ).await;
+                    if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "DEAD_LETTER".to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                        }));
+                    }
+                    return;
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Portfolio heat check failed at execution time");
+                }
+            }
+
+            // 2. Strategy Allocation Check
+            match portfolio_heat.can_open_strategy_position(
+                signal.payload.strategy,
+                signal.payload.amount_sol,
+                self.config.strategy.shield_percent,
+                self.config.strategy.spear_percent,
+            ).await {
+                Ok(false) => {
+                    let reason = format!("Strategy allocation limit reached at execution time for {:?}", signal.payload.strategy);
+                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: strategy allocation limit reached");
+
+                    // Reject trade and set status to DEAD_LETTER
+                    let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                    let _ = crate::db::insert_dead_letter(
+                        &self.db,
+                        Some(&trade_uuid),
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        "STRATEGY_HEAT_LIMIT",
+                        Some(&reason),
+                        signal.source_ip.as_deref(),
+                    ).await;
+                    if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "DEAD_LETTER".to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                        }));
+                    }
+                    return;
+                }
+                Ok(true) => {}
+                Err(e) => {
+                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Strategy allocation check failed at execution time");
+                }
+            }
+        }
+
         // Execute the trade
         let result = {
             let executor = self.executor.read().await;
@@ -669,6 +743,37 @@ impl Engine {
                 .await
                 {
                     tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
+                }
+            }
+            Err(crate::engine::executor::ExecutorError::ExecutionCostTooHigh { cost, cost_pct, limit_pct, strategy }) => {
+                let reason = format!(
+                    "Cost efficiency check failed: total cost {} SOL ({:.1}%) exceeds limit {:.1}% for strategy {:?}",
+                    cost, cost_pct, limit_pct, strategy
+                );
+                tracing::warn!(trade_uuid = %trade_uuid, reason = %reason, "Trade rejected due to cost efficiency");
+
+                // Update trade status to DEAD_LETTER
+                let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+
+                // Log to dead letter queue
+                let _ = crate::db::insert_dead_letter(
+                    &self.db,
+                    Some(&trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "EXECUTION_COST_TOO_HIGH",
+                    Some(&reason),
+                    signal.source_ip.as_deref(),
+                )
+                .await;
+
+                // Broadcast update via WebSocket
+                if let Some(ref ws) = self.ws_state {
+                    ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                        trade_uuid: trade_uuid.clone(),
+                        status: "DEAD_LETTER".to_string(),
+                        token_symbol: Some(signal.payload.token.clone()),
+                        strategy: signal.payload.strategy.to_string(),
+                    }));
                 }
             }
             Err(e) => {

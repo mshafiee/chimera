@@ -358,7 +358,7 @@ impl Executor {
                     };
 
                     // Track costs: Jito tip, DEX fee, slippage
-                    let dex_fee_rate = Decimal::from_str("0.003").unwrap(); // 0.3% DEX fee
+                    let dex_fee_rate = self.config.strategy.dex_fee_rate;
                     let dex_fee_sol = signal.payload.amount_sol * dex_fee_rate;
                     // Use actual price impact from Jupiter quote when available;
                     // fall back to a size-based conservative estimate otherwise.
@@ -740,6 +740,10 @@ impl Executor {
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
+        
+        // Check total execution cost cap
+        self.check_execution_costs(signal, built_tx.price_impact_pct(), tip)?;
+
         tracing::debug!(
             tip_sol = tip.to_f64().unwrap_or(0.0),
             strategy = %signal.payload.strategy,
@@ -1002,6 +1006,9 @@ impl Executor {
         // Capture actual price impact and fill price from Jupiter quote
         *self.last_price_impact.lock() = built_tx.price_impact_pct();
         *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
+
+        // Check total execution cost cap
+        self.check_execution_costs(signal, built_tx.price_impact_pct(), Decimal::ZERO)?;
 
         // Submit transaction via RPC
         let signature = match &built_tx {
@@ -1441,6 +1448,35 @@ impl Executor {
         }
     }
 
+    /// Check if the total execution costs (tip + fee + slippage) exceed the configured limit
+    fn check_execution_costs(&self, signal: &Signal, price_impact_pct: Option<Decimal>, tip: Decimal) -> Result<(), ExecutorError> {
+        let dex_fee = signal.payload.amount_sol * self.config.strategy.dex_fee_rate;
+        let price_impact = price_impact_pct
+            .map(|pct| pct / Decimal::from(100))
+            .unwrap_or(Decimal::ZERO);
+        let slippage = signal.payload.amount_sol * price_impact;
+        let total_cost = tip + dex_fee + slippage;
+        let cost_pct = if !signal.payload.amount_sol.is_zero() {
+            total_cost / signal.payload.amount_sol
+        } else {
+            Decimal::ZERO
+        };
+        let limit = match signal.payload.strategy {
+            Strategy::Shield => self.config.strategy.shield_max_total_cost_percent,
+            Strategy::Spear => self.config.strategy.spear_max_total_cost_percent,
+            _ => Decimal::ZERO,
+        };
+        if limit > Decimal::ZERO && cost_pct > limit {
+            return Err(ExecutorError::ExecutionCostTooHigh {
+                cost: total_cost,
+                cost_pct: cost_pct.to_f64().unwrap_or(0.0) * 100.0,
+                limit_pct: limit.to_f64().unwrap_or(0.0) * 100.0,
+                strategy: signal.payload.strategy,
+            });
+        }
+        Ok(())
+    }
+
     /// Switch to fallback RPC mode
     async fn switch_to_fallback(&self) {
         if self.config.rpc.fallback_url.is_some() {
@@ -1595,6 +1631,15 @@ pub enum ExecutorError {
     /// Address Lookup Table unavailable
     #[error("Address Lookup Table unavailable: {0}")]
     AddressLookupTableUnavailable(String),
+
+    /// Execution cost too high (exceeds total cost percent)
+    #[error("Total execution cost {cost} SOL ({cost_pct:.1}%) exceeds limit {limit_pct:.1}% for {strategy:?}")]
+    ExecutionCostTooHigh {
+        cost: Decimal,
+        cost_pct: f64,
+        limit_pct: f64,
+        strategy: Strategy,
+    },
 }
 
 #[cfg(test)]

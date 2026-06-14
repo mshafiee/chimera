@@ -91,10 +91,14 @@ impl KellySizer {
 
         for trade in &trades {
             if let Some(pnl) = trade.net_pnl_sol {
-                if pnl > Decimal::ZERO {
-                    wins.push(pnl);
-                } else if pnl < Decimal::ZERO {
-                    losses.push(pnl.abs()); // Store as positive for calculation
+                let entry_size = trade.amount_sol;
+                if !entry_size.is_zero() {
+                    let pnl_pct = pnl / entry_size;
+                    if pnl > Decimal::ZERO {
+                        wins.push(pnl_pct);
+                    } else if pnl < Decimal::ZERO {
+                        losses.push(pnl_pct.abs()); // Store as positive for calculation
+                    }
                 }
             }
         }

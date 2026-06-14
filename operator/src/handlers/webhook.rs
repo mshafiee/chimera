@@ -70,6 +70,10 @@ pub struct WebhookState {
     pub max_position_sol: Decimal,
     /// Minimum signal quality score to accept a trade (from config.strategy.signal_quality_threshold)
     pub signal_quality_threshold: f64,
+    /// Shield strategy allocation percentage
+    pub shield_percent: u32,
+    /// Spear strategy allocation percentage
+    pub spear_percent: u32,
 }
 
 /// Webhook handler
@@ -202,7 +206,7 @@ pub async fn webhook_handler(
     }
 
     // Create signal
-    let signal = Signal::new(payload, timestamp, None);
+    let mut signal = Signal::new(payload, timestamp, None);
 
     // Fetch wallet data once (used for both quality check and queue routing).
     // For BUY signals, also gate on wallet status — only ACTIVE wallets may trigger buys.
@@ -482,6 +486,9 @@ pub async fn webhook_handler(
         }
     }
 
+    // Update signal payload amount with sized/capped value
+    signal.payload.amount_sol = trade_amount_sol;
+
     // Check portfolio heat (if enabled)
     if let Some(ref portfolio_heat) = state.portfolio_heat {
         match portfolio_heat
@@ -517,6 +524,52 @@ pub async fn webhook_handler(
             }
             Ok(true) => {
                 // Heat check passed
+                // Check strategy allocation heat
+                match portfolio_heat
+                    .can_open_strategy_position(
+                        signal.payload.strategy,
+                        trade_amount_sol,
+                        state.shield_percent,
+                        state.spear_percent,
+                    )
+                    .await
+                {
+                    Ok(false) => {
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            amount_sol = %trade_amount_sol,
+                            strategy = ?signal.payload.strategy,
+                            "Signal rejected: strategy allocation limit reached"
+                        );
+
+                        let _ = db::insert_dead_letter(
+                            &state.db,
+                            Some(&signal.trade_uuid),
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            "STRATEGY_HEAT_LIMIT",
+                            Some("Strategy allocation limit reached"),
+                            None,
+                        )
+                        .await;
+
+                        return Ok((
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            Json(WebhookResponse {
+                                status: WebhookStatus::Rejected,
+                                trade_uuid: signal.trade_uuid,
+                                reason: Some(format!("Strategy allocation limit reached for {:?}", signal.payload.strategy)),
+                            }),
+                        ));
+                    }
+                    Ok(true) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            error = %e,
+                            "Strategy heat check failed, allowing trade"
+                        );
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(

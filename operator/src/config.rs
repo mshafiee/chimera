@@ -259,6 +259,15 @@ pub struct StrategyConfig {
     /// 0.45 lets through a typical ACTIVE wallet (WQS 70, $15k liq) scoring ~0.47
     #[serde(default = "default_signal_quality_threshold")]
     pub signal_quality_threshold: f64,
+    /// DEX fee rate (e.g. 0.003 for 0.3%)
+    #[serde(default = "default_dex_fee_rate")]
+    pub dex_fee_rate: Decimal,
+    /// Maximum total execution cost (tip + fee + slippage) for Shield as a fraction of trade size (e.g. 0.05 for 5%)
+    #[serde(default = "default_shield_max_cost")]
+    pub shield_max_total_cost_percent: Decimal,
+    /// Maximum total execution cost for Spear as a fraction of trade size (e.g. 0.08 for 8%)
+    #[serde(default = "default_spear_max_cost")]
+    pub spear_max_total_cost_percent: Decimal,
 }
 
 fn default_shield_percent() -> u32 {
@@ -279,6 +288,18 @@ fn default_max_position() -> Decimal {
 
 fn default_min_position() -> Decimal {
     Decimal::from_str("0.01").unwrap()
+}
+
+fn default_dex_fee_rate() -> Decimal {
+    Decimal::from_str("0.003").unwrap()
+}
+
+fn default_shield_max_cost() -> Decimal {
+    Decimal::from_str("0.05").unwrap()
+}
+
+fn default_spear_max_cost() -> Decimal {
+    Decimal::from_str("0.08").unwrap()
 }
 
 /// Jito bundle tip configuration
