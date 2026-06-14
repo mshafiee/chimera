@@ -761,6 +761,60 @@ pub async fn open_position(
     Ok(result.last_insert_rowid())
 }
 
+/// Atomically mark a trade ACTIVE and insert the corresponding position row.
+///
+/// If either the trade status update or the position insert fails, the whole
+/// transaction is rolled back — preventing a dangling ACTIVE trade with no
+/// position row (which the position monitor would silently miss).
+pub async fn activate_trade_and_open_position(
+    pool: &DbPool,
+    trade_uuid: &str,
+    wallet_address: &str,
+    token_address: &str,
+    token_symbol: Option<&str>,
+    strategy: &str,
+    amount_sol: Decimal,
+    entry_price: Decimal,
+    tx_signature: &str,
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        UPDATE trades
+        SET status = 'ACTIVE', tx_signature = ?
+        WHERE trade_uuid = ?
+        "#,
+    )
+    .bind(tx_signature)
+    .bind(trade_uuid)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO positions (
+            trade_uuid, wallet_address, token_address, token_symbol, strategy,
+            entry_amount_sol, entry_price, entry_tx_signature,
+            state, unrealized_pnl_sol, unrealized_pnl_percent
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
+        "#,
+    )
+    .bind(trade_uuid)
+    .bind(wallet_address)
+    .bind(token_address)
+    .bind(token_symbol)
+    .bind(strategy)
+    .bind(amount_sol.to_f64().unwrap_or(0.0))
+    .bind(entry_price.to_f64().unwrap_or(0.0))
+    .bind(tx_signature)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 /// Close a position from a successful sell trade.
 ///
 /// Computes realized PnL from entry vs exit price, writes it to the `positions` table,
@@ -1154,15 +1208,14 @@ pub async fn get_active_positions_with_entry(pool: &DbPool) -> AppResult<Vec<Act
                 p.trade_uuid,
                 p.wallet_address,
                 p.token_address,
-                t.token,
+                t.token_symbol,
                 p.strategy,
                 COALESCE(p.entry_price, 0.0),
                 COALESCE(p.entry_amount_sol, 0.0),
-                COALESCE(p.created_at, datetime('now'))
+                COALESCE(p.opened_at, datetime('now'))
             FROM positions p
             LEFT JOIN trades t ON t.trade_uuid = p.trade_uuid
             WHERE p.state = 'ACTIVE'
-            LIMIT 500
             "#,
     )
     .fetch_all(pool)

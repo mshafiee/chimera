@@ -616,30 +616,8 @@ impl Engine {
                     "Trade executed successfully"
                 );
 
-                // 1. Update Trade Status to ACTIVE (Confirmed on-chain)
-                if let Err(e) = crate::db::update_trade_status(
-                    &self.db,
-                    &trade_uuid,
-                    "ACTIVE",
-                    Some(&tx_signature),
-                    None,
-                )
-                .await
-                {
-                    tracing::error!(error = %e, "Failed to update trade status to ACTIVE");
-                } else {
-                    // Broadcast trade update via WebSocket
-                    if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "ACTIVE".to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                        }));
-                    }
-                }
-
-                // 2. Manage Position Lifecycle
+                // 1 + 2a. For BUY signals, atomically mark trade ACTIVE and open position.
+                // This prevents a dangling ACTIVE trade with no position row if open_position fails.
                 if signal.payload.action == Action::Buy {
                     let fill_price_sol = {
                         let exec = self.executor.read().await;
@@ -667,8 +645,7 @@ impl Engine {
                             .unwrap_or(Decimal::ZERO)
                     };
 
-                    // Open Position
-                    if let Err(e) = crate::db::open_position(
+                    match crate::db::activate_trade_and_open_position(
                         &self.db,
                         &trade_uuid,
                         &signal.payload.wallet_address,
@@ -681,7 +658,19 @@ impl Engine {
                     )
                     .await
                     {
-                        tracing::error!(error = %e, "Failed to open position");
+                        Ok(()) => {
+                            if let Some(ref ws) = self.ws_state {
+                                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                                    trade_uuid: trade_uuid.clone(),
+                                    status: "ACTIVE".to_string(),
+                                    token_symbol: Some(signal.payload.token.clone()),
+                                    strategy: signal.payload.strategy.to_string(),
+                                }));
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to activate trade and open position — rolled back");
+                        }
                     }
                 } else if signal.payload.action == Action::Sell {
                     let fill_price_sol = {
@@ -715,12 +704,32 @@ impl Engine {
                         .as_ref()
                         .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
 
+                    // For SELL signals: mark ACTIVE first (state machine compliance), then EXITING.
+                    if let Err(e) = crate::db::update_trade_status(
+                        &self.db,
+                        &trade_uuid,
+                        "ACTIVE",
+                        Some(&tx_signature),
+                        None,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, "Failed to update sell trade status to ACTIVE");
+                    } else if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "ACTIVE".to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                        }));
+                    }
+
                     // Transition to EXITING before closing so reconciliation can detect mid-close failures
                     if let Err(e) = crate::db::update_trade_status(
                         &self.db,
                         &trade_uuid,
                         "EXITING",
-                        Some(&tx_signature),
+                        None,
                         None,
                     )
                     .await

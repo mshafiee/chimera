@@ -236,8 +236,48 @@ impl RecoveryManager {
 
                 Ok(RecoveryAction::RevertedToActive)
             }
-            OnChainState::Pending => {
-                // Transaction still pending, don't take action yet
+            OnChainState::RpcError(ref rpc_err) => {
+                // Transient RPC error. If the position has been stuck long enough
+                // (> 5 min) we escalate to dead letter rather than waiting forever.
+                const RPC_ERROR_ESCALATION_SECS: i64 = 300;
+                if stuck_duration.num_seconds() >= RPC_ERROR_ESCALATION_SECS {
+                    tracing::error!(
+                        trade_uuid = %position.trade_uuid,
+                        stuck_secs = stuck_duration.num_seconds(),
+                        rpc_error = %rpc_err,
+                        "Persistent RPC errors checking EXITING position — escalating to dead letter"
+                    );
+                    db::insert_dead_letter(
+                        &self.db,
+                        Some(&position.trade_uuid),
+                        &position.trade_uuid,
+                        "RPC_CHECK_FAILED",
+                        Some(rpc_err.as_str()),
+                        None,
+                    )
+                    .await?;
+                    db::insert_reconciliation_log(
+                        &self.db,
+                        &position.trade_uuid,
+                        "EXITING",
+                        None,
+                        "STATE_MISMATCH",
+                        None,
+                        Some(&format!(
+                            "Escalated to dead letter after {}s: RPC error: {}",
+                            stuck_duration.num_seconds(),
+                            rpc_err
+                        )),
+                    )
+                    .await?;
+                } else {
+                    tracing::warn!(
+                        trade_uuid = %position.trade_uuid,
+                        stuck_secs = stuck_duration.num_seconds(),
+                        rpc_error = %rpc_err,
+                        "RPC error checking stuck position — will retry next cycle"
+                    );
+                }
                 Ok(RecoveryAction::StillPending)
             }
         }
@@ -300,13 +340,14 @@ impl RecoveryManager {
                     );
                     Ok(OnChainState::TransactionNotFound)
                 } else {
-                    // Other RPC errors - log and assume pending (don't take action)
+                    // Other RPC errors (timeouts, 429s, etc.) — do not treat as Pending
+                    // because that would keep the position in EXITING indefinitely.
                     tracing::warn!(
                         signature = %tx_signature,
                         error = %e,
-                        "RPC error checking transaction, assuming pending"
+                        "RPC error checking transaction status"
                     );
-                    Ok(OnChainState::Pending)
+                    Ok(OnChainState::RpcError(e.to_string()))
                 }
             }
         }
@@ -323,8 +364,8 @@ enum OnChainState {
     /// Blockhash expired
     #[allow(dead_code)] // Reserved for future use
     BlockhashExpired,
-    /// Transaction still pending
-    Pending,
+    /// Transient RPC error (timeout, 429, etc.) — error message included
+    RpcError(String),
 }
 
 /// Recovery action taken
