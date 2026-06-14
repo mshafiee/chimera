@@ -49,6 +49,29 @@ pub async fn wallet_auth(
         return Err(AppError::Auth("Wallet address mismatch".to_string()));
     }
 
+    // Extract timestamp from message to prevent replay attacks
+    let timestamp_str = req
+        .message
+        .lines()
+        .find(|line| line.starts_with("Timestamp: "))
+        .and_then(|line| line.strip_prefix("Timestamp: "))
+        .ok_or_else(|| AppError::Auth("Missing timestamp in authentication message".to_string()))?
+        .trim();
+
+    let timestamp = timestamp_str
+        .parse::<i64>()
+        .map_err(|_| AppError::Auth("Invalid timestamp format".to_string()))?;
+
+    let now = Utc::now().timestamp();
+    let drift = (now - timestamp).abs();
+    // Allow up to 5 minutes (300 seconds) of clock drift/delay
+    if drift > 300 {
+        return Err(AppError::Auth(format!(
+            "Authentication request expired (drift: {}s, max: 300s)",
+            drift
+        )));
+    }
+
     // Decode signature
     let signature_bytes = BASE64
         .decode(&req.signature)
