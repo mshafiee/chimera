@@ -102,20 +102,31 @@ impl MomentumExit {
         let base_drop_threshold = Decimal::from(5);
         // Widen threshold for high-volatility tokens to avoid shakeout exits.
         // At 30% vol → ~8%, at 50% vol → ~10%, capped at 15%.
-        let price_drop_threshold = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
-            let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
-            let scaled = base_drop_threshold + (vol_dec * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO));
-            scaled.min(Decimal::from(15))
-        } else {
-            base_drop_threshold
+        // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,
+        // max +5 pts) so long-held positions aren't exited on normal intraday noise.
+        let price_drop_threshold = {
+            let vol_bonus = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
+                let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
+                vol_dec * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO)
+            } else {
+                Decimal::ZERO
+            };
+            let age_bonus = if elapsed_minutes > 5 {
+                let hours = Decimal::from(elapsed_minutes / 60);
+                (hours / Decimal::from(2)).min(Decimal::from(5))
+            } else {
+                Decimal::ZERO
+            };
+            (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(15))
         };
-        if elapsed_minutes <= 5 && price_drop_percent >= price_drop_threshold {
+        if price_drop_percent >= price_drop_threshold {
             let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
             tracing::warn!(
                 trade_uuid = %trade_uuid,
                 price_drop_percent = price_drop_f64,
                 elapsed_minutes = elapsed_minutes,
-                "Negative momentum detected: price dropped 5% within 5 minutes"
+                threshold = ?price_drop_threshold,
+                "Negative momentum detected: price drop exceeds threshold"
             );
             return MomentumExitAction::Exit;
         }

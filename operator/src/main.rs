@@ -101,20 +101,24 @@ async fn main() -> anyhow::Result<()> {
     .with_price_cache(price_cache.clone()));
 
     // Restore kill-switch if it was active before last restart.
-    // The kill-switch handler writes a "kill_switch ACTIVE" entry to config_audit.
-    // If the most recent kill_switch entry is ACTIVE (not superseded by a reset),
-    // automatically re-trip to prevent trading resumption after an unintended restart.
+    // Reads from kill_switch_state (single-row UPSERT table) which is written synchronously
+    // by the kill-switch API handler before tripping the circuit breaker in memory.
+    // Falls back to config_audit if kill_switch_state row is absent (pre-migration DBs).
     {
-        let kill_switch_row: Option<String> = sqlx::query_scalar(
-            r#"SELECT new_value FROM config_audit
-               WHERE config_key = 'kill_switch'
-               ORDER BY changed_at DESC LIMIT 1"#,
-        )
-        .fetch_optional(&db_pool)
-        .await
-        .unwrap_or(None);
+        let is_active = if db::is_kill_switch_active(&db_pool).await {
+            true
+        } else {
+            // Fallback: config_audit (legacy path for DBs without kill_switch_state row)
+            let row: Option<String> = sqlx::query_scalar(
+                "SELECT new_value FROM config_audit WHERE key = 'kill_switch' ORDER BY changed_at DESC LIMIT 1",
+            )
+            .fetch_optional(&db_pool)
+            .await
+            .unwrap_or(None);
+            row.as_deref() == Some("ACTIVE")
+        };
 
-        if kill_switch_row.as_deref() == Some("ACTIVE") {
+        if is_active {
             tracing::warn!("Kill-switch was active before restart — re-tripping circuit breaker");
             let _ = circuit_breaker
                 .manual_trip("SYSTEM_RESTART_RESTORE", "Kill-switch was active before restart".to_string())
@@ -582,12 +586,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Build position risk managers and spawn monitoring loop
     let market_regime_detector = Arc::new(MarketRegimeDetector::new(price_cache.clone()));
+    // Create SignalAggregator early so the stop-loss manager can read consensus from
+    // its in-memory cache instead of issuing a DB query on every 5-second position tick.
+    let signal_aggregator = Arc::new(SignalAggregator::new(db_pool.clone()));
     {
         let stop_loss_mgr = Arc::new(StopLossManager::new(
             db_pool.clone(),
             Arc::new(config.profit_management.clone()),
             price_cache.clone(),
         ));
+        stop_loss_mgr.set_signal_aggregator(signal_aggregator.clone()).await;
         let volume_cache = Arc::new(VolumeCache::new());
         let momentum_exit = Arc::new(MomentumExit::with_volume_cache(
             db_pool.clone(),
@@ -723,6 +731,51 @@ async fn main() -> anyhow::Result<()> {
             }
         });
         tracing::info!("Position monitoring task started");
+    }
+
+    // Spawn wallet TTL expiration task (60-minute interval).
+    // Demotes wallets whose ttl_expires_at has passed from ACTIVE to CANDIDATE so they
+    // are not traded again until the Scout re-promotes them after re-validation.
+    {
+        let ttl_db = db_pool.clone();
+        let ttl_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tokio::select! {
+                    _ = ttl_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        match db::get_expired_ttl_wallets(&ttl_db).await {
+                            Ok(expired) if !expired.is_empty() => {
+                                for addr in &expired {
+                                    if let Err(e) = db::demote_wallet(
+                                        &ttl_db,
+                                        addr,
+                                        "TTL expired — demoted by background task",
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            wallet = %addr,
+                                            error = %e,
+                                            "Failed to demote TTL-expired wallet"
+                                        );
+                                    } else {
+                                        tracing::info!(
+                                            wallet = %addr,
+                                            "Wallet demoted: TTL expired"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::warn!(error = %e, "TTL expiration check failed"),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Wallet TTL expiration task started (60-min interval)");
     }
 
     // Create metrics state (shared between task and router)
@@ -950,8 +1003,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Create webhook state (token_parser already created above)
 
-    // Create SignalAggregator and HeliusClient for signal quality enhancements
-    let signal_aggregator = Arc::new(SignalAggregator::new(db_pool.clone()));
+    // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
+    // into the stop-loss manager's consensus cache. Reuse it here.
     let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
         config
             .monitoring
@@ -1091,10 +1144,14 @@ async fn main() -> anyhow::Result<()> {
             jwt_secret,
         }));
 
-    // Build WebSocket routes
+    // Build WebSocket routes — require bearer auth to prevent unauthenticated position data leaks
     let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
-        .with_state(ws_state.clone());
+        .with_state(ws_state.clone())
+        .layer(axum_middleware::from_fn_with_state(
+            auth_state.clone(),
+            bearer_auth,
+        ));
 
     // Build metrics routes
     let metrics_routes = metrics_router().with_state(metrics_state.clone());
@@ -1122,9 +1179,13 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!(
                 "Monitoring state initialized successfully, registering monitoring routes"
             );
-            Router::new()
+            // Helius webhook and status are public (Helius calls from external service)
+            let monitoring_public = Router::new()
                 .route("/monitoring/status", get(get_monitoring_status))
                 .route("/monitoring/helius-webhook", post(helius_webhook_handler))
+                .with_state(monitoring_state_arc.clone());
+            // Enable/disable wallet monitoring require operator role
+            let monitoring_protected = Router::new()
                 .route(
                     "/monitoring/wallets/{wallet_address}/enable",
                     post(enable_wallet_monitoring),
@@ -1134,6 +1195,11 @@ async fn main() -> anyhow::Result<()> {
                     post(disable_wallet_monitoring),
                 )
                 .with_state(monitoring_state_arc)
+                .layer(axum_middleware::from_fn_with_state(
+                    auth_state.clone(),
+                    bearer_auth,
+                ));
+            monitoring_public.merge(monitoring_protected)
         }
         Err(e) => {
             tracing::error!(error = %e, "Failed to initialize MonitoringState, monitoring routes disabled");
@@ -1141,13 +1207,21 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Root-level WebSocket for web dashboard — bearer auth required to prevent data leaks
+    let root_ws_routes = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(ws_state.clone())
+        .layer(axum_middleware::from_fn_with_state(
+            auth_state.clone(),
+            bearer_auth,
+        ));
+
     // Create full router with all routes and middleware
     // Note: Layer order matters - bottom layers are applied first (innermost)
     let app = Router::new()
         .route("/ping", get(|| async { "pong" }))
         .route("/health", get(health_simple))
-        .route("/ws", get(ws_handler)) // Root-level WebSocket for web dashboard
-        .with_state(ws_state.clone())
+        .merge(root_ws_routes)
         .nest("/api/v1", health_routes)
         .nest("/api/v1", public_api_routes)
         .nest("/api/v1", protected_api_routes)

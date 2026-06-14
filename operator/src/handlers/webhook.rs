@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -477,14 +477,32 @@ pub async fn webhook_handler(
                 .map(|(_, _, wr)| *wr)
                 .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
 
-            let regime_multiplier = if let Some(ref regime_detector) = state.market_regime {
-                if let Some(ref token_address) = signal.payload.token_address {
-                    regime_detector.get_regime_multiplier(token_address)
+            let regime_multiplier = {
+                let base = if let Some(ref regime_detector) = state.market_regime {
+                    if let Some(ref token_address) = signal.payload.token_address {
+                        regime_detector.get_regime_multiplier(token_address)
+                    } else {
+                        Decimal::ONE
+                    }
                 } else {
                     Decimal::ONE
+                };
+                // Apply off-hours size reduction (02:00–06:00 UTC low-liquidity window).
+                // This reduces position size rather than blocking, preserving opportunity
+                // while managing wider-spread/higher-slippage risk.
+                let hour_utc = Utc::now().time().hour();
+                if (2..6).contains(&hour_utc) {
+                    let mult = sizer.off_hours_size_multiplier();
+                    tracing::info!(
+                        trade_uuid = %signal.trade_uuid,
+                        hour_utc = hour_utc,
+                        off_hours_multiplier = ?mult,
+                        "Off-hours window: reducing position size"
+                    );
+                    base * mult
+                } else {
+                    base
                 }
-            } else {
-                Decimal::ONE
             };
 
             let factors = SizingFactors {

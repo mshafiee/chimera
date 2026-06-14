@@ -146,6 +146,7 @@ position_sizing:
   max_concurrent_positions: 5
   use_kelly_sizing: true   # Kelly Criterion sizing enabled
   total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
+  off_hours_size_multiplier: 0.5  # 50% position size during 02:00–06:00 UTC (wider spreads, lower liquidity)
 
 # MEV protection configuration
 mev_protection:

@@ -369,12 +369,23 @@ impl TokenParser {
                     }
                 }
                 Err(ref e) if e.to_string().contains("honeypot_simulation_inconclusive") => {
-                    // Dummy wallet has no funds — simulation cannot distinguish safe from
-                    // honeypot. Log and continue; honeypot_checked stays false so callers
-                    // know the simulation was skipped.
+                    // Simulation wallet has no balance — cannot distinguish safe from honeypot.
+                    // Fail-closed: reject the token rather than assume it is safe. The correct
+                    // fix is to supply a funded keypair for simulation; until then we treat an
+                    // unverifiable honeypot check as a rejection in production.
+                    // Set CHIMERA_DEV_MODE=1 to bypass this gate during local testing.
+                    if std::env::var("CHIMERA_DEV_MODE").is_err() {
+                        tracing::warn!(
+                            token = token_address,
+                            "Honeypot simulation inconclusive (unfunded wallet) — rejecting (fail-closed)"
+                        );
+                        return Ok(TokenSafetyResult::unsafe_with_reason(
+                            "Honeypot check inconclusive — cannot verify sell route",
+                        ));
+                    }
                     tracing::warn!(
                         token = token_address,
-                        "Honeypot simulation inconclusive (dummy wallet); relying on Token-2022 extension checks"
+                        "Honeypot simulation inconclusive (dev mode) — proceeding without verification"
                     );
                 }
                 Err(e) => {

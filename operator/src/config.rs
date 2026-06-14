@@ -804,6 +804,16 @@ pub struct PositionSizingConfig {
     /// Total trading capital in SOL (used for Kelly sizing and portfolio heat)
     #[serde(default = "default_total_capital_sol")]
     pub total_capital_sol: Decimal,
+    /// Kelly fraction for Shield strategy (conservative; default 25% of full Kelly)
+    #[serde(default = "default_kelly_fraction_shield")]
+    pub kelly_fraction_shield: Decimal,
+    /// Kelly fraction for Spear strategy (more conservative than Shield to cap risk; default 15%)
+    #[serde(default = "default_kelly_fraction_spear")]
+    pub kelly_fraction_spear: Decimal,
+    /// Size multiplier applied during off-hours (02:00–06:00 UTC) to reduce exposure
+    /// to low-liquidity windows. Set to 1.0 to disable the reduction.
+    #[serde(default = "default_off_hours_size_multiplier")]
+    pub off_hours_size_multiplier: Decimal,
 }
 
 fn default_base_size_sol() -> Decimal {
@@ -842,6 +852,18 @@ fn default_total_capital_sol() -> Decimal {
     Decimal::from_str("10.0").unwrap()
 }
 
+fn default_kelly_fraction_shield() -> Decimal {
+    Decimal::from_str("0.25").unwrap() // 25% of full Kelly for Shield (conservative)
+}
+
+fn default_kelly_fraction_spear() -> Decimal {
+    Decimal::from_str("0.15").unwrap() // 15% of full Kelly for Spear (higher risk = smaller fraction)
+}
+
+fn default_off_hours_size_multiplier() -> Decimal {
+    Decimal::from_str("0.5").unwrap() // 50% of normal size during 02:00–06:00 UTC low-liquidity window
+}
+
 impl Default for PositionSizingConfig {
     fn default() -> Self {
         Self {
@@ -854,6 +876,9 @@ impl Default for PositionSizingConfig {
             max_concurrent_positions: default_max_concurrent_positions(),
             use_kelly_sizing: default_use_kelly_sizing(),
             total_capital_sol: default_total_capital_sol(),
+            kelly_fraction_shield: default_kelly_fraction_shield(),
+            kelly_fraction_spear: default_kelly_fraction_spear(),
+            off_hours_size_multiplier: default_off_hours_size_multiplier(),
         }
     }
 }

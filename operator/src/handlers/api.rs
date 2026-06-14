@@ -168,6 +168,13 @@ pub async fn update_wallet(
     if !auth.0.role.has_permission(Role::Operator) {
         return Err(AppError::Forbidden("Requires operator role or higher".to_string()));
     }
+    // Refuse wallet writes while a roster merge transaction is in progress to avoid
+    // racing the atomic batch upsert and causing a SQLite busy-timeout.
+    if crate::roster::is_merging_roster() {
+        return Err(AppError::Internal(
+            "Roster merge in progress — retry in a moment".to_string(),
+        ));
+    }
     // Validate status
     let valid_statuses = ["ACTIVE", "CANDIDATE", "REJECTED"];
     if !valid_statuses.contains(&body.status.as_str()) {
@@ -1530,6 +1537,16 @@ pub async fn reset_circuit_breaker(
     let status_before = state.circuit_breaker.status();
     let previous_state = status_before.state.to_string();
 
+    // Clear the kill-switch state in the dedicated table so a restart after reset
+    // does not re-trip automatically.
+    let _ = crate::db::set_kill_switch_state(
+        &state.db,
+        false,
+        &auth.0.identifier,
+        None,
+    )
+    .await;
+
     state.circuit_breaker.reset(&auth.0.identifier).await?;
 
     let status_after = state.circuit_breaker.status();
@@ -1571,8 +1588,21 @@ pub async fn trip_circuit_breaker(
         .unwrap_or("Emergency kill switch activated")
         .to_string();
 
-    // Persist kill-switch activation to DB so it survives restarts.
-    // On startup, main.rs checks for this flag and re-trips the circuit breaker.
+    // Write to dedicated kill_switch_state table first (single-row UPSERT, crash-safe).
+    // main.rs reads this table on startup to re-trip if a crash occurred after the write
+    // but before the in-memory circuit-breaker trip completed.
+    crate::db::set_kill_switch_state(
+        &state.db,
+        true,
+        &auth.0.identifier,
+        Some(&reason),
+    )
+    .await
+    .map_err(|e| {
+        crate::error::AppError::Internal(format!("Failed to persist kill-switch state: {}", e))
+    })?;
+
+    // Also append to config_audit for the immutable audit trail.
     crate::db::log_config_change(
         &state.db,
         "kill_switch",
@@ -1583,7 +1613,7 @@ pub async fn trip_circuit_breaker(
     )
     .await
     .map_err(|e| {
-        crate::error::AppError::Internal(format!("Failed to persist kill-switch: {}", e))
+        crate::error::AppError::Internal(format!("Failed to persist kill-switch audit: {}", e))
     })?;
 
     // Set extreme circuit breaker config values in-memory

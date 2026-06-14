@@ -20,3 +20,6 @@ CREATE INDEX IF NOT EXISTS idx_trades_net_pnl ON trades(net_pnl_sol) WHERE net_p
 
 
 
+
+-- Track this migration as applied
+INSERT OR IGNORE INTO schema_migrations (version) VALUES ('001');

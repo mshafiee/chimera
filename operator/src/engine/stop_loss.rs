@@ -7,16 +7,21 @@
 
 use crate::config::ProfitManagementConfig;
 use crate::db::{get_wallet_by_address, DbPool};
+use crate::monitoring::SignalAggregator;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
 use sqlx;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Stop-loss manager
 pub struct StopLossManager {
     db: DbPool,
     config: Arc<ProfitManagementConfig>,
     price_cache: Arc<PriceCache>,
+    /// Optional in-memory consensus cache (avoids per-position DB query every 5 s).
+    /// Set via `set_signal_aggregator` after construction.
+    signal_aggregator: Arc<RwLock<Option<Arc<SignalAggregator>>>>,
 }
 
 /// Stop-loss action
@@ -40,7 +45,14 @@ impl StopLossManager {
             db,
             config,
             price_cache,
+            signal_aggregator: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Wire in the signal aggregator after construction so consensus checks read from
+    /// the in-memory cache instead of issuing a DB query on every position tick.
+    pub async fn set_signal_aggregator(&self, agg: Arc<SignalAggregator>) {
+        *self.signal_aggregator.write().await = Some(agg);
     }
 
     /// Check stop-loss for a position
@@ -69,21 +81,22 @@ impl StopLossManager {
         // Negative when price has fallen (e.g. -15.0 for 15% drop), matching negative thresholds.
         // Zero entry_price yields loss_percent=0 — no stop fires, position is held until data is
         // corrected. Forcing an exit on corrupt data risks selling at an unknown price.
-        let loss_percent = if !entry_price.is_zero() {
-            let diff = current_price - entry_price;
-            let ratio = diff / entry_price;
-            ratio * Decimal::from(100)
-        } else {
-            // ERROR (not warn): zero entry_price means corrupt DB state — position is dead
-            // capital until manually corrected. Operators monitoring for error-level logs
-            // should investigate and repair the entry_price field in the trades table.
+        // Zero entry_price means the position was opened with corrupt data.
+        // Holding a position with no cost basis is worse than exiting at market — force exit
+        // immediately so the capital is recovered rather than locked indefinitely.
+        if entry_price.is_zero() {
             tracing::error!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
-                "CORRUPT_POSITION: entry_price is zero — stop-loss disabled for this position. \
-                 Manually set trades.entry_price to correct the position or close it."
+                "CORRUPT_POSITION: entry_price is zero — forcing immediate exit to recover capital"
             );
-            Decimal::ZERO
+            return StopLossAction::Exit;
+        }
+
+        let loss_percent = {
+            let diff = current_price - entry_price;
+            let ratio = diff / entry_price;
+            ratio * Decimal::from(100)
         };
 
         // Get wallet WQS for dynamic stop calculation
@@ -93,25 +106,26 @@ impl StopLossManager {
             _ => 50.0,
         };
 
-        // Check if this is a consensus signal (multiple wallets buying same token)
+        // Check if this is a consensus signal — read from SignalAggregator in-memory cache
+        // (O(1), no DB query per position per 5-second tick).
         let is_consensus = {
-            // Query signal_aggregation table for recent consensus signals on this token
-            let consensus_count: Result<i64, _> = sqlx::query_scalar(
-                r#"
-                SELECT COUNT(DISTINCT wallet_address)
-                FROM signal_aggregation
-                WHERE token_address = ?
-                  AND direction = 'BUY'
-                  AND created_at > datetime('now', '-5 minutes')
-                "#,
-            )
-            .bind(token_address)
-            .fetch_one(&self.db)
-            .await;
-
-            match consensus_count {
-                Ok(count) => count >= 2, // 2+ wallets = consensus
-                Err(_) => false,         // On error, assume not consensus
+            let agg_guard = self.signal_aggregator.read().await;
+            if let Some(ref agg) = *agg_guard {
+                agg.is_consensus_token(token_address).await
+            } else {
+                // Fallback DB query when aggregator not wired (startup window or tests)
+                let count: i64 = sqlx::query_scalar(
+                    r#"SELECT COUNT(DISTINCT wallet_address)
+                       FROM signal_aggregation
+                       WHERE token_address = ?
+                         AND direction = 'BUY'
+                         AND created_at > datetime('now', '-5 minutes')"#,
+                )
+                .bind(token_address)
+                .fetch_one(&self.db)
+                .await
+                .unwrap_or(0);
+                count >= 2
             }
         };
 

@@ -284,6 +284,44 @@ pub async fn log_config_change(
     Ok(())
 }
 
+/// Write the kill-switch active/inactive state to the dedicated single-row table.
+/// Called synchronously (before returning from the API handler) so a crash between
+/// this write and the in-memory circuit-breaker trip is safe — the next startup
+/// reads this table and re-trips.
+pub async fn set_kill_switch_state(
+    pool: &DbPool,
+    active: bool,
+    changed_by: &str,
+    reason: Option<&str>,
+) -> AppResult<()> {
+    let state = if active { "ACTIVE" } else { "INACTIVE" };
+    sqlx::query(
+        r#"INSERT INTO kill_switch_state (id, state, changed_at, changed_by, reason)
+           VALUES (1, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+               state      = excluded.state,
+               changed_at = excluded.changed_at,
+               changed_by = excluded.changed_by,
+               reason     = excluded.reason"#,
+    )
+    .bind(state)
+    .bind(changed_by)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Read the persisted kill-switch state. Returns `true` if ACTIVE.
+pub async fn is_kill_switch_active(pool: &DbPool) -> bool {
+    let row: Option<String> =
+        sqlx::query_scalar("SELECT state FROM kill_switch_state WHERE id = 1")
+            .fetch_optional(pool)
+            .await
+            .unwrap_or(None);
+    row.as_deref() == Some("ACTIVE")
+}
+
 // =============================================================================
 // INCIDENTS API (Dead Letter Queue & Config Audit)
 // =============================================================================
@@ -731,6 +769,11 @@ pub async fn open_position(
 ///
 /// `exit_fraction` is in (0, 1]: 1.0 = full close, 0.25 = sell 25% of each position.
 /// Partial closes (< 1.0) reduce `entry_amount_sol` in-place and keep the position ACTIVE.
+///
+/// All position updates are wrapped in a single transaction so concurrent exit signals for the
+/// same (wallet, token) pair cannot double-close the same position. Each UPDATE includes a
+/// state guard (`AND state IN ('ACTIVE', 'EXITING')`) so that a position already CLOSED by a
+/// concurrent call is silently skipped rather than overwritten.
 pub async fn close_position(
     pool: &DbPool,
     token_address: &str,
@@ -742,6 +785,10 @@ pub async fn close_position(
     exit_fraction: Decimal,
 ) -> AppResult<()> {
     let exit_fraction = exit_fraction.max(Decimal::ZERO).min(Decimal::ONE);
+
+    // Begin a transaction so concurrent close_position calls for the same pair serialize.
+    let mut tx = pool.begin().await?;
+
     // Find all ACTIVE (or EXITING) positions for this wallet+token.
     // Include trade_uuid so we can fetch each position's entry-leg costs.
     let active_positions: Vec<(i64, f64, f64, String)> = sqlx::query_as(
@@ -753,7 +800,7 @@ pub async fn close_position(
     )
     .bind(wallet_address)
     .bind(token_address)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
     if active_positions.is_empty() {
@@ -762,6 +809,7 @@ pub async fn close_position(
             token = %token_address,
             "No active positions found to close"
         );
+        tx.commit().await?;
         return Ok(());
     }
 
@@ -770,7 +818,7 @@ pub async fn close_position(
         "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
     )
     .bind(trade_uuid)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
     let (exit_tip, exit_dex_fee, exit_slippage) = exit_costs
@@ -785,14 +833,14 @@ pub async fn close_position(
 
     let exit_total_costs = exit_tip + exit_dex_fee + exit_slippage;
 
-    // Use provided SOL/USD price; fall back to $150 and warn if unavailable
-    let sol_usd = sol_price_usd.unwrap_or_else(|| {
+    // When SOL/USD price is unavailable, write NULL for the USD column rather than a stale
+    // hardcoded value. The SOL-denominated PnL remains accurate regardless.
+    if sol_price_usd.is_none() {
         tracing::warn!(
             trade_uuid = %trade_uuid,
-            "SOL/USD price unavailable for PnL calculation; using $150 fallback"
+            "SOL/USD price unavailable — realized_pnl_usd will be NULL for this close"
         );
-        Decimal::from_str("150.0").unwrap_or(Decimal::ZERO)
-    });
+    }
 
     let mut gross_pnl = Decimal::ZERO;
     let mut entry_total_costs = Decimal::ZERO;
@@ -815,14 +863,12 @@ pub async fn close_position(
             Decimal::ZERO
         };
 
-        gross_pnl += pnl_sol;
-
         // Scale entry-leg costs proportionally to the fraction being exited
         let entry_costs: Option<(f64, f64, f64)> = sqlx::query_as(
             "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
         )
         .bind(entry_trade_uuid)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         if let Some((et, ed, es)) = entry_costs {
@@ -833,10 +879,13 @@ pub async fn close_position(
             entry_total_costs += proportional_entry_cost;
         }
 
-        let pnl_usd = pnl_sol * sol_usd;
+        // USD PnL is None when SOL price unavailable — stored as NULL in DB
+        let pnl_usd_opt: Option<f64> = sol_price_usd
+            .map(|sol_usd| (pnl_sol * sol_usd).to_f64().unwrap_or(0.0));
 
         if is_full_close {
-            sqlx::query(
+            // State guard: skip positions already CLOSED by a concurrent call
+            let rows = sqlx::query(
                 r#"
                 UPDATE positions
                 SET
@@ -846,34 +895,48 @@ pub async fn close_position(
                     realized_pnl_usd = ?,
                     closed_at = CURRENT_TIMESTAMP,
                     state = 'CLOSED'
-                WHERE id = ?
+                WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
                 "#,
             )
             .bind(exit_price.to_f64().unwrap_or(0.0))
             .bind(signature)
             .bind(pnl_sol.to_f64().unwrap_or(0.0))
-            .bind(pnl_usd.to_f64().unwrap_or(0.0))
+            .bind(pnl_usd_opt)
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+
+            if rows.rows_affected() == 0 {
+                tracing::warn!(position_id = id, "Position already closed by concurrent call — skipping");
+                continue;
+            }
         } else {
             // Partial close: reduce remaining amount, keep position ACTIVE
             let remaining_amount = entry_amount_dec - exited_amount;
-            sqlx::query(
+            let rows = sqlx::query(
                 r#"
                 UPDATE positions
                 SET
                     entry_amount_sol = ?,
                     last_updated = CURRENT_TIMESTAMP
-                WHERE id = ?
+                WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
                 "#,
             )
             .bind(remaining_amount.to_f64().unwrap_or(0.0))
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+
+            if rows.rows_affected() == 0 {
+                tracing::warn!(position_id = id, "Position already closed by concurrent call — skipping partial close");
+                continue;
+            }
         }
+
+        gross_pnl += pnl_sol;
     }
+
+    tx.commit().await?;
 
     // Deduct both entry-leg and exit-leg costs for a true round-trip net PnL
     let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;

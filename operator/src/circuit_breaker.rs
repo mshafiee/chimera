@@ -175,19 +175,17 @@ impl CircuitBreaker {
 
     /// Evaluate trip conditions and update state
     pub async fn evaluate(&self) -> AppResult<()> {
-        // Check if we should evaluate (rate limit checks)
+        // Atomically check and update last_check under a single write lock.
+        // Holding read then write separately is a TOCTOU race: two concurrent calls could
+        // both pass the interval check before either updates last_check.
         {
-            let state = self.state.read();
+            let mut state = self.state.write();
             if let Some(last_check) = state.last_check {
                 if Utc::now().signed_duration_since(last_check) < self.check_interval {
                     return Ok(());
                 }
             }
-        }
-
-        // Update last check time
-        {
-            self.state.write().last_check = Some(Utc::now());
+            state.last_check = Some(Utc::now());
         }
 
         // If in cooldown, check if cooldown period has passed

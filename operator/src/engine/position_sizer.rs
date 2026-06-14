@@ -55,6 +55,10 @@ impl PositionSizer {
         Self { db, config, kelly_sizer }
     }
 
+    pub fn off_hours_size_multiplier(&self) -> rust_decimal::Decimal {
+        self.config.off_hours_size_multiplier
+    }
+
     /// Calculate position size based on factors
     ///
     /// Formula: base_size * confidence_multiplier * wallet_performance_multiplier
@@ -70,10 +74,23 @@ impl PositionSizer {
         let mut size = if let Some(ref kelly) = self.kelly_sizer {
             match kelly.calculate_kelly(&factors.wallet_address, factors.strategy, 30).await {
                 Ok(result) => {
-                    let kelly_base = factors.total_capital_sol * result.conservative_kelly;
+                    // Apply strategy-specific Kelly fraction: Shield uses a larger fraction
+                    // (more conservative signal, wider stops) while Spear uses a smaller
+                    // fraction (higher variance, smaller size to bound risk).
+                    let kelly_fraction = match factors.strategy {
+                        crate::models::Strategy::Shield => self.config.kelly_fraction_shield,
+                        crate::models::Strategy::Spear => self.config.kelly_fraction_spear,
+                        // Exit signals don't open positions; use Shield default as a safe fallback
+                        crate::models::Strategy::Exit => self.config.kelly_fraction_shield,
+                    };
+                    let kelly_pct = result.full_kelly * kelly_fraction;
+                    let kelly_base = factors.total_capital_sol * kelly_pct;
                     tracing::debug!(
                         wallet = %factors.wallet_address,
-                        kelly_pct = ?result.conservative_kelly,
+                        strategy = ?factors.strategy,
+                        full_kelly = ?result.full_kelly,
+                        kelly_fraction = ?kelly_fraction,
+                        kelly_pct = ?kelly_pct,
                         kelly_base_sol = ?kelly_base,
                         "Kelly Criterion base size computed"
                     );

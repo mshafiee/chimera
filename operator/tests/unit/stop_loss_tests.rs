@@ -146,12 +146,10 @@ async fn insert_active_position(
 // ─── Test 1 ──────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_zero_entry_price_bypasses_dynamic_stop_loss() {
-    // When entry_price=0, loss_percent is computed as Decimal::ZERO (safe fallback).
-    // Dynamic threshold (WQS=50 → -15%): 0 <= -15 → FALSE → no dynamic exit.
-    // Hard stop (-15.0): 0 <= -15.0 → FALSE → no hard stop exit.
-    // No stop fires — position is held until the entry price data is corrected.
-    // Forcing a sale on corrupt data risks exiting at an unknown/unfavorable price.
+async fn test_zero_entry_price_forces_immediate_exit() {
+    // Zero entry_price means the position's cost basis is corrupt.
+    // We cannot calculate a valid loss percentage, so the safest action is to force
+    // an immediate exit to recover capital rather than hold indefinitely.
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
@@ -172,8 +170,8 @@ async fn test_zero_entry_price_bypasses_dynamic_stop_loss() {
 
     assert_eq!(
         action,
-        StopLossAction::None,
-        "Zero entry_price → loss_percent=0 which does not trigger any stop (hard or dynamic)"
+        StopLossAction::Exit,
+        "Corrupt zero entry_price must trigger immediate exit to recover capital"
     );
 }
 

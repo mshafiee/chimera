@@ -127,6 +127,23 @@ impl SignalAggregator {
         None
     }
 
+    /// Return true if 2+ distinct wallets have BUY signals for this token in the last 5 minutes.
+    /// Reads from the in-memory cache — no DB query needed.
+    pub async fn is_consensus_token(&self, token_address: &str) -> bool {
+        let signals = self.recent_signals.read().await;
+        let five_min_ago = Instant::now() - Duration::from_secs(300);
+        if let Some(token_signals) = signals.get(token_address) {
+            let mut seen = std::collections::HashSet::new();
+            for s in token_signals {
+                if s.direction == "BUY" && s.timestamp > five_min_ago {
+                    seen.insert(&s.wallet_address);
+                }
+            }
+            return seen.len() >= 2;
+        }
+        false
+    }
+
     /// Check for divergence (some wallets exiting while others hold)
     ///
     /// # Arguments

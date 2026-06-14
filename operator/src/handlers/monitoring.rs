@@ -2,6 +2,7 @@
 //!
 //! Handles Helius webhook endpoint and monitoring status
 
+use crate::middleware::{AuthExtension, Role};
 use crate::models::{Action, Signal, SignalPayload, Strategy};
 use crate::monitoring::transaction_parser::parse_helius_webhook;
 use crate::monitoring::HeliusWebhookPayload;
@@ -201,10 +202,15 @@ pub struct MonitoringStatus {
 }
 
 /// Enable monitoring for a wallet
+/// Requires: operator+ role
 pub async fn enable_wallet_monitoring(
     State(state): State<Arc<MonitoringState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
     Path(wallet_address): Path<String>,
 ) -> StatusCode {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return StatusCode::FORBIDDEN;
+    }
     tracing::info!(wallet = %wallet_address, "Enable monitoring requested");
 
     // Check if wallet exists and is ACTIVE
@@ -289,10 +295,15 @@ pub async fn enable_wallet_monitoring(
 }
 
 /// Disable monitoring for a wallet
+/// Requires: operator+ role
 pub async fn disable_wallet_monitoring(
     State(state): State<Arc<MonitoringState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
     Path(wallet_address): Path<String>,
 ) -> StatusCode {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return StatusCode::FORBIDDEN;
+    }
     tracing::info!(wallet = %wallet_address, "Disable monitoring requested");
 
     // Get current monitoring record

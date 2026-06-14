@@ -6,3 +6,6 @@ ALTER TABLE wallets ADD COLUMN avg_loss_sol REAL;
 ALTER TABLE wallets ADD COLUMN profit_factor REAL;
 ALTER TABLE wallets ADD COLUMN realized_pnl_30d_sol REAL;
 
+
+-- Track this migration as applied
+INSERT OR IGNORE INTO schema_migrations (version) VALUES ('002');

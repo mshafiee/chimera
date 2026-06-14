@@ -723,9 +723,49 @@ class WalletAnalyzer:
         }
         dex_diversity = len(dex_sources) if dex_sources else None
 
+        # Detect limit order and Jito MEV usage from raw transaction data.
+        # Jito: any native SOL transfer to a known Jito tip account.
+        # Limit orders: Helius sets source="JUPITER_LIMIT" for limit-order fills, or the
+        #   Jupiter Limit Order v2 program appears in the instructions programId list.
+        _jito_tip_accounts = {
+            "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4",
+            "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+            "Cw8CFyM9FkoMi7K918YFiz4gBC9MDiSrqwR775XZdTJ5",
+            "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt13UZMCSj",
+            "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+            "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+            "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+            "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+        }
+        _jupiter_limit_program = "j1o2qRpjcyUwEvwtcfhEQefh773ZgjxcVRry7LDqg5X"
+
+        uses_limit_orders = False
+        uses_mev_protection = False
+        for tx in transactions:
+            if not uses_limit_orders:
+                if tx.get("source") == "JUPITER_LIMIT":
+                    uses_limit_orders = True
+                else:
+                    for ix in tx.get("instructions", []):
+                        if ix.get("programId") == _jupiter_limit_program:
+                            uses_limit_orders = True
+                            break
+            if not uses_mev_protection:
+                for nt in tx.get("nativeTransfers", []):
+                    if nt.get("toUserAccount") in _jito_tip_accounts:
+                        uses_mev_protection = True
+                        break
+
+        print(f"  [{address[:8]}] Smart money: limit_orders={uses_limit_orders}, mev_protection={uses_mev_protection}")
+
         print(f"  [{address[:8]}] Calculating metrics from {len(trades)} trades...")
         # Calculate metrics from trades
-        metrics = await self._calculate_metrics_from_trades(address, trades, dex_diversity_score=dex_diversity)
+        metrics = await self._calculate_metrics_from_trades(
+            address, trades,
+            dex_diversity_score=dex_diversity,
+            uses_limit_orders=uses_limit_orders,
+            uses_mev_protection=uses_mev_protection,
+        )
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
         else:
@@ -1310,7 +1350,7 @@ class WalletAnalyzer:
         self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -1492,10 +1532,8 @@ class WalletAnalyzer:
             is_fresh_wallet = False
         
         # 4. Smart Money Detection (DEX diversity, limit orders, MEV protection)
-        # dex_diversity_score is computed from raw Helius transaction sources upstream and passed in.
-        # uses_limit_orders / uses_mev_protection require instruction-level parsing (future work).
-        uses_limit_orders = False
-        uses_mev_protection = False
+        # All three values are computed from raw Helius transactions upstream and passed in.
+        # uses_limit_orders / uses_mev_protection default False for callers that don't supply them.
         
         print(f"  [{address[:8]}] Calculating unrealized PnL...")
         # 5. Calculate Unrealized PnL (Bag Holder Detection)

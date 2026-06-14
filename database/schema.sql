@@ -1,6 +1,12 @@
 -- Chimera v7.1 Database Schema
 -- High-frequency copy-trading system for Solana
 
+-- Schema migration tracking (idempotent guard for migration files)
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 -- =============================================================================
 -- CORE TRADING TABLES
 -- =============================================================================
@@ -142,6 +148,17 @@ CREATE TABLE IF NOT EXISTS config_audit (
 
 CREATE INDEX IF NOT EXISTS idx_config_audit_key ON config_audit(key);
 CREATE INDEX IF NOT EXISTS idx_config_audit_changed ON config_audit(changed_at DESC);
+
+-- Kill-switch state: single-row table written synchronously before returning from the
+-- kill-switch API handler. On startup, main.rs reads this before checking config_audit
+-- so crashes between the write and the in-memory circuit-breaker trip are safe.
+CREATE TABLE IF NOT EXISTS kill_switch_state (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),  -- enforces single-row constraint
+    state      TEXT NOT NULL DEFAULT 'INACTIVE' CHECK (state IN ('ACTIVE', 'INACTIVE')),
+    changed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    changed_by TEXT NOT NULL DEFAULT 'SYSTEM',
+    reason     TEXT
+);
 
 -- Admin Wallets: Authorization for API access
 CREATE TABLE IF NOT EXISTS admin_wallets (

@@ -28,7 +28,18 @@ use crate::error::AppResult;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, warn};
+
+/// Set to true while a roster merge transaction is in progress.
+/// Engine write paths (wallet promotion/demotion) should check this to avoid
+/// racing the merge transaction and causing SQLite busy-timeout errors.
+static MERGING_ROSTER: AtomicBool = AtomicBool::new(false);
+
+/// Returns true while a roster merge is in progress.
+pub fn is_merging_roster() -> bool {
+    MERGING_ROSTER.load(Ordering::Acquire)
+}
 
 /// Expected wallets table schema (must match database/schema/wallets.sql)
 /// This is validated at runtime before merge to prevent silent failures
@@ -300,8 +311,9 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
     let batch_size = 500;
     let mut offset = 0;
 
-    // Step 6: Merge in batches to prevent locking the DB for too long
-    // Using a limit/offset strategy
+    // Step 6: Read all wallets from the attached DB into memory, then write them all in one
+    // transaction. Per-batch commits mean a failure on batch N leaves batches 1..N-1
+    // committed with no way to roll back — unacceptable for a merge that must be atomic.
 
     // Define a struct to hold the row data (sqlx only supports tuples up to 9-16 elements)
     #[derive(sqlx::FromRow)]
@@ -329,17 +341,18 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         updated_at: Option<String>, // Scout's updated_at timestamp
     }
 
+    // Collect all rows first (attached DB is on conn; we need conn for reads throughout)
+    let mut all_rows: Vec<RosterTransferRow> = Vec::with_capacity(new_count as usize);
     loop {
-        // Read batch from attached roster
         let rows: Vec<RosterTransferRow> = sqlx::query_as(
             &format!(r#"
-                SELECT 
+                SELECT
                     address, status, wqs_score, roi_7d, roi_30d,
                     trade_count_30d, win_rate, max_drawdown_30d,
                     avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                     last_trade_at, promoted_at,
                     ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
-                FROM new_roster.wallets 
+                FROM new_roster.wallets
                 LIMIT {} OFFSET {}
             "#, batch_size, offset)
         )
@@ -349,11 +362,25 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         if rows.is_empty() {
             break;
         }
+        offset += rows.len() as u32;
+        all_rows.extend(rows);
 
-        // Upsert batch into main DB with updated_at preservation logic
-        // This prevents Scout from "reviving" wallets the Operator just banned/demoted
+        info!(
+            fetched = all_rows.len(),
+            total = new_count,
+            "Roster read progress"
+        );
+    }
+
+    // Signal that a merge is in progress so the engine defers wallet-write operations.
+    // The flag is always cleared in a defer-like fashion (set false before every return path).
+    MERGING_ROSTER.store(true, Ordering::Release);
+
+    // Write all rows in a single transaction — all-or-nothing, no partial commits.
+    // Uses the pool (separate connection from conn so ATTACH on conn is unaffected).
+    let write_result: AppResult<()> = async {
         let mut tx = pool.begin().await?;
-        for row in rows {
+        for row in &all_rows {
             // Use INSERT with ON CONFLICT to upsert, preserving Operator's updated_at
             // and status if they're newer than Scout's. This prevents race conditions
             // where Operator bans/demotes a wallet just before Scout writes its roster.
@@ -367,8 +394,8 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
                     ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
                 ON CONFLICT(address) DO UPDATE SET
-                    status = CASE 
-                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01') 
+                    status = CASE
+                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
                         THEN wallets.status  -- Preserve Operator's status if newer
                         ELSE excluded.status
                     END,
@@ -389,8 +416,8 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
                     notes = excluded.notes,
                     archetype = excluded.archetype,
                     avg_entry_delay_seconds = excluded.avg_entry_delay_seconds,
-                    updated_at = CASE 
-                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01') 
+                    updated_at = CASE
+                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
                         THEN wallets.updated_at  -- Preserve Operator's updated_at if newer
                         ELSE excluded.updated_at
                     END
@@ -405,24 +432,21 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
             .execute(&mut *tx)
             .await?;
         }
-
         tx.commit().await?;
+        Ok(())
+    }.await;
 
-        offset += batch_size;
+    MERGING_ROSTER.store(false, Ordering::Release);
+    write_result?;
 
-        // Yield to allow other readers/writers
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        info!(
-            merged = offset.min(new_count),
-            total = new_count,
-            "Roster merge progress"
-        );
-    }
-
-    // Log success (no single result object anymore, since we batched)
     info!(
-        wallets_merged = new_count,
+        wallets_written = all_rows.len(),
+        "Roster merge write committed"
+    );
+
+    let wallets_merged = all_rows.len() as u32;
+    info!(
+        wallets_merged = wallets_merged,
         wallets_removed = wallets_removed,
         "Roster merge completed"
     );
@@ -439,14 +463,14 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         pool,
         "roster_merge",
         Some(&format!("{} wallets", wallets_removed)),
-        &format!("{} wallets", new_count),
+        &format!("{} wallets", wallets_merged),
         "SYSTEM_SCOUT",
         Some(&format!("Merged from {}", roster_path_str)),
     )
     .await?;
 
     Ok(MergeResult {
-        wallets_merged: new_count,
+        wallets_merged,
         wallets_removed,
         integrity_ok: true,
         merged_at: Utc::now(),

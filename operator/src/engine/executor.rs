@@ -502,16 +502,16 @@ impl Executor {
             }
         }
 
-        // Check 3: Low liquidity period (off-hours) — only for new positions, not exits
-        // Skip BUY trades during low-activity hours (2 AM - 6 AM UTC), but allow exits
+        // Check 3: Low liquidity period (off-hours) — only for new positions, not exits.
+        // Position size is already reduced by off_hours_size_multiplier at signal time
+        // (webhook.rs). Log a reminder here so the execution trace is complete.
         if matches!(action, crate::models::Action::Buy) {
-            let now = Utc::now();
-            let hour_utc = now.time().hour();
+            let hour_utc = Utc::now().time().hour();
             if (2..6).contains(&hour_utc) {
-                return Err(format!(
-                    "Low liquidity period: {}:00 UTC (off-hours 2-6 AM) — BUY signals blocked, exits allowed",
-                    hour_utc
-                ));
+                tracing::warn!(
+                    hour_utc = hour_utc,
+                    "Executing during off-hours window (2–6 AM UTC): position size was reduced at signal time"
+                );
             }
         }
 
@@ -788,6 +788,9 @@ impl Executor {
                         signature = %signature,
                         "Bundle submitted via direct Jito Searcher"
                     );
+                    // Poll for confirmation; on definitive on-chain failure propagate error.
+                    // On timeout (still pending) return the signature so recovery handles it.
+                    self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
                     return Ok(signature);
                 }
                 Err(e) => {
@@ -832,6 +835,7 @@ impl Executor {
                             signature = %signature,
                             "Bundle submitted via Helius Sender API"
                         );
+                        self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
                         return Ok(signature);
                     }
                     Err(e) => {
@@ -1603,6 +1607,81 @@ impl Executor {
             }
         }
         &self.config.rpc.primary_url
+    }
+
+    /// Poll `getSignatureStatuses` up to `max_polls` times with `interval` between polls.
+    ///
+    /// Returns `true` if confirmed, `false` if still pending after all polls.
+    /// Returns `Err` only if the transaction is definitively failed on-chain.
+    ///
+    /// Callers that get `false` should record the signature and let the recovery manager
+    /// handle the stuck position — do NOT re-submit without first verifying the tx is gone.
+    async fn poll_signature_confirmation(
+        &self,
+        signature: &str,
+        trade_uuid: &str,
+    ) -> Result<bool, ExecutorError> {
+        use solana_sdk::signature::Signature;
+        use std::str::FromStr;
+
+        let sig = Signature::from_str(signature).map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Invalid signature {}: {}", signature, e))
+        })?;
+
+        let max_polls = 3u32;
+        let interval = Duration::from_secs(2);
+
+        for attempt in 1..=max_polls {
+            tokio::time::sleep(interval).await;
+
+            match self.rpc_client.get_signature_status(&sig).await {
+                Ok(Some(Ok(()))) => {
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        signature = %signature,
+                        attempt = attempt,
+                        "Transaction confirmed on-chain"
+                    );
+                    return Ok(true);
+                }
+                Ok(Some(Err(tx_err))) => {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        signature = %signature,
+                        error = %tx_err,
+                        "Transaction failed on-chain"
+                    );
+                    return Err(ExecutorError::TransactionFailed(format!(
+                        "Transaction failed on-chain: {}",
+                        tx_err
+                    )));
+                }
+                Ok(None) => {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        signature = %signature,
+                        attempt = attempt,
+                        max_polls = max_polls,
+                        "Transaction not yet confirmed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        error = %e,
+                        "RPC error checking signature status"
+                    );
+                }
+            }
+        }
+
+        tracing::warn!(
+            trade_uuid = %trade_uuid,
+            signature = %signature,
+            "Transaction unconfirmed after {} polls — recovery manager will handle",
+            max_polls
+        );
+        Ok(false)
     }
 }
 
