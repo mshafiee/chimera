@@ -1039,6 +1039,48 @@ async fn main() -> anyhow::Result<()> {
         "Portfolio heat manager initialized"
     );
 
+    // Refresh total_capital_sol from the live wallet balance every 60 seconds so that
+    // compounding gains and drawdown recovery propagate into heat capacity without restart.
+    {
+        use chimera_operator::engine::transaction_builder::load_wallet_keypair;
+        use solana_client::nonblocking::rpc_client::RpcClient as NonblockingRpcClient;
+        use solana_sdk::signature::Signer;
+
+        let heat_clone = Arc::clone(&portfolio_heat);
+        let rpc_url = config.rpc.primary_url.clone();
+        match vault::load_secrets_with_fallback()
+            .ok()
+            .and_then(|s| load_wallet_keypair(&s).ok())
+        {
+            Some(keypair) => {
+                let pubkey = keypair.pubkey();
+                tokio::spawn(async move {
+                    let rpc = NonblockingRpcClient::new(rpc_url);
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    loop {
+                        interval.tick().await;
+                        match rpc.get_balance(&pubkey).await {
+                            Ok(lamports) => {
+                                let sol = rust_decimal::Decimal::from(lamports)
+                                    / rust_decimal::Decimal::from(1_000_000_000u64);
+                                heat_clone.update_capital(sol);
+                                tracing::debug!(capital_sol = ?sol, "Portfolio capital refreshed from wallet");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to fetch wallet balance for capital refresh");
+                            }
+                        }
+                    }
+                });
+                tracing::info!("Portfolio capital refresh task spawned (60s interval)");
+            }
+            None => {
+                tracing::warn!("Wallet keypair unavailable — portfolio capital will not auto-refresh from wallet balance");
+            }
+        }
+    }
+
     let position_sizer = Arc::new(PositionSizer::new(
         db_pool.clone(),
         Arc::new(config.position_sizing.clone()),

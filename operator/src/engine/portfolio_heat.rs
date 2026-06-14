@@ -4,16 +4,19 @@
 //! when heat limit (20% of capital) is reached.
 
 use crate::db::DbPool;
+use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 /// Portfolio heat manager
 pub struct PortfolioHeat {
     db: DbPool,
     /// Maximum portfolio heat as percentage of capital (default: 20%)
     max_heat_percent: Decimal,
-    /// Total capital in SOL (for heat calculation, using Decimal for precision)
-    total_capital_sol: Decimal,
+    /// Total capital in SOL — wrapped in Arc<RwLock> so the background wallet-balance
+    /// refresh task can update it without rebuilding the struct.
+    total_capital_sol: Arc<RwLock<Decimal>>,
 }
 
 /// Portfolio heat result
@@ -35,7 +38,7 @@ impl PortfolioHeat {
         Self {
             db,
             max_heat_percent: dec!(20),
-            total_capital_sol,
+            total_capital_sol: Arc::new(RwLock::new(total_capital_sol)),
         }
     }
 
@@ -49,8 +52,14 @@ impl PortfolioHeat {
         Self {
             db,
             max_heat_percent: max_heat,
-            total_capital_sol,
+            total_capital_sol: Arc::new(RwLock::new(total_capital_sol)),
         }
+    }
+
+    /// Update the capital figure from a live wallet balance query.
+    /// Called by the background refresh task in main.rs every 60 seconds.
+    pub fn update_capital(&self, new_capital: Decimal) {
+        *self.total_capital_sol.write() = new_capital;
     }
 
     /// Calculate current portfolio heat
@@ -111,16 +120,17 @@ impl PortfolioHeat {
             );
         }
         let total_exposure = Decimal::from_f64_retain(total_exposure_f64).unwrap_or(Decimal::ZERO);
+        let capital = *self.total_capital_sol.read();
 
         // Calculate heat percentage using Decimal for precision
-        let current_heat_percent = if !self.total_capital_sol.is_zero() {
-            (total_exposure / self.total_capital_sol) * Decimal::from(100)
+        let current_heat_percent = if !capital.is_zero() {
+            (total_exposure / capital) * Decimal::from(100)
         } else {
             Decimal::ZERO
         };
 
         // Calculate available heat
-        let max_heat_sol = self.total_capital_sol * (self.max_heat_percent / Decimal::from(100));
+        let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
         let available_heat_sol = max_heat_sol - total_exposure;
 
         // Check if can open new position
@@ -150,8 +160,9 @@ impl PortfolioHeat {
 
         // Check if new position would exceed heat limit using Decimal for precision
         let new_exposure = heat.total_exposure_sol + position_size_sol;
-        let new_heat_percent = if !self.total_capital_sol.is_zero() {
-            (new_exposure / self.total_capital_sol) * Decimal::from(100)
+        let capital = *self.total_capital_sol.read();
+        let new_heat_percent = if !capital.is_zero() {
+            (new_exposure / capital) * Decimal::from(100)
         } else {
             Decimal::ZERO
         };
@@ -210,7 +221,7 @@ impl PortfolioHeat {
             // 0% allocation means this strategy is disabled — block all positions
             return Ok(false);
         }
-        let allocated_sol = self.total_capital_sol * (allocation_pct / Decimal::from(100));
+        let allocated_sol = *self.total_capital_sol.read() * (allocation_pct / Decimal::from(100));
         let current_heat = match strategy {
             crate::models::Strategy::Shield => shield_heat,
             crate::models::Strategy::Spear => spear_heat,

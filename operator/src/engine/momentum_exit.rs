@@ -8,7 +8,10 @@
 use crate::db::DbPool;
 use crate::engine::volume_cache::VolumeCache;
 use crate::price_cache::PriceCache;
+use parking_lot::RwLock;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -30,6 +33,8 @@ pub struct MomentumExit {
     /// Grace period matching stop_loss.rs wick_protection_secs — price-drop check is suppressed
     /// during this window to avoid exiting on the entry-candle wick.
     wick_protection_secs: u64,
+    /// High-water mark per trade UUID — tracks peak observed price for trailing-stop logic.
+    high_water_marks: Arc<RwLock<HashMap<String, Decimal>>>,
 }
 
 /// Position entry data for momentum tracking
@@ -51,6 +56,7 @@ impl MomentumExit {
             price_cache,
             volume_cache: None,
             wick_protection_secs,
+            high_water_marks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -66,7 +72,13 @@ impl MomentumExit {
             price_cache,
             volume_cache: Some(volume_cache),
             wick_protection_secs,
+            high_water_marks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Remove HWM state when a position is closed to prevent unbounded map growth.
+    pub fn remove_position(&self, trade_uuid: &str) {
+        self.high_water_marks.write().remove(trade_uuid);
     }
 
     /// Check for negative momentum and return action
@@ -90,6 +102,17 @@ impl MomentumExit {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
             None => return MomentumExitAction::None, // No price data, skip check
+        };
+
+        // Update high-water mark. The lock is held only for the map mutation; drop it
+        // before the checks below to keep the hot path as short as possible.
+        let hwm_snap = {
+            let mut hwm_map = self.high_water_marks.write();
+            let hwm = hwm_map.entry(trade_uuid.to_string()).or_insert(entry_price);
+            if current_price > *hwm {
+                *hwm = current_price;
+            }
+            *hwm
         };
 
         // Guard: corrupt position data — align with stop_loss.rs behavior
@@ -172,20 +195,47 @@ impl MomentumExit {
             );
         }
 
-        // Check 2: Volume drop (>65% from 24h average).
-        // 50% was too sensitive — volume naturally dips 40–60% outside US trading hours.
-        if let Some(ref volume_cache) = self.volume_cache {
-            if volume_cache.has_volume_drop(token_address, Decimal::from(65)) {
-                tracing::warn!(
-                    trade_uuid = %trade_uuid,
-                    token_address = token_address,
-                    "Negative momentum detected: volume dropped >65% from 24h average"
-                );
-                return MomentumExitAction::Exit;
+        // Check 2: Trailing stop from HWM.
+        // Only activates once the position is ≥50% in profit (HWM ≥ 1.5× entry) so normal
+        // early-stage volatility doesn't trigger it. Once active, exits if price falls 25%
+        // from the peak — protecting unrealized gains that the entry-price check cannot.
+        if !entry_price.is_zero() {
+            let hwm_gain_pct = (hwm_snap - entry_price) / entry_price * dec!(100);
+            if hwm_gain_pct >= dec!(50) {
+                let drop_from_hwm = (hwm_snap - current_price) / hwm_snap * dec!(100);
+                if drop_from_hwm >= dec!(25) {
+                    let drop_f64 = drop_from_hwm.to_f64().unwrap_or(0.0);
+                    let hwm_f64 = hwm_snap.to_f64().unwrap_or(0.0);
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        drop_from_hwm_pct = drop_f64,
+                        high_water_mark = hwm_f64,
+                        "Trailing stop hit: dropped from HWM"
+                    );
+                    return MomentumExitAction::Exit;
+                }
             }
         }
 
-        // Check 3: RSI declining (RSI < 35 and declining).
+        // Check 3: Volume drop (>65% from 24h average).
+        // Gated to positions ≥5 minutes old: volume naturally dips 40–60% outside US trading
+        // hours, and a freshly-opened position should not be immediately dumped on a pre-existing
+        // low-volume condition that entry logic already accepted.
+        let volume_check_ready = elapsed.as_secs() >= 300;
+        if volume_check_ready {
+            if let Some(ref volume_cache) = self.volume_cache {
+                if volume_cache.has_volume_drop(token_address, Decimal::from(65)) {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        "Negative momentum detected: volume dropped >65% from 24h average"
+                    );
+                    return MomentumExitAction::Exit;
+                }
+            }
+        }
+
+        // Check 4: RSI declining (RSI < 35 and declining).
         // 40 triggered on normal pullbacks; 35 indicates genuine momentum breakdown.
         if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
             if current_rsi < 35.0 && current_rsi < previous_rsi {

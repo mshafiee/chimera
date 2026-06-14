@@ -393,6 +393,9 @@ impl ProfitTargetManager {
         let mut targets = self.active_targets.write().await;
         targets.remove(trade_uuid);
         drop(targets);
+        if let Some(ref momentum) = self.momentum_exit {
+            momentum.remove_position(trade_uuid);
+        }
         if let Err(e) = db::delete_exit_target(&self.db, trade_uuid).await {
             tracing::warn!(trade_uuid, error = %e, "Failed to delete exit target state from DB");
         }
