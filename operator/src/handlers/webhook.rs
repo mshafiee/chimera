@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use chrono::{Timelike, Utc};
+use chrono::Utc;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -487,22 +487,10 @@ pub async fn webhook_handler(
                 } else {
                     Decimal::ONE
                 };
-                // Apply off-hours size reduction (02:00–06:00 UTC low-liquidity window).
-                // This reduces position size rather than blocking, preserving opportunity
-                // while managing wider-spread/higher-slippage risk.
-                let hour_utc = Utc::now().time().hour();
-                if (2..6).contains(&hour_utc) {
-                    let mult = sizer.off_hours_size_multiplier();
-                    tracing::info!(
-                        trade_uuid = %signal.trade_uuid,
-                        hour_utc = hour_utc,
-                        off_hours_multiplier = ?mult,
-                        "Off-hours window: reducing position size"
-                    );
-                    base * mult
-                } else {
-                    base
-                }
+                // Off-hours multiplier is applied at execution time (engine/mod.rs), not here,
+                // so that signals queued just before 02:00 UTC also get the reduction applied
+                // at the moment they actually execute — eliminating the timing edge case.
+                base
             };
 
             let factors = SizingFactors {

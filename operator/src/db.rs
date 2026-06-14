@@ -766,6 +766,11 @@ pub async fn open_position(
 /// If either the trade status update or the position insert fails, the whole
 /// transaction is rolled back — preventing a dangling ACTIVE trade with no
 /// position row (which the position monitor would silently miss).
+///
+/// `max_heat_sol`: if provided, a final portfolio-heat guard is checked inside
+/// the transaction before the INSERT, preventing a race where two concurrent
+/// signals both pass the pre-execution heat check then both commit positions
+/// that together exceed the limit.
 pub async fn activate_trade_and_open_position(
     pool: &DbPool,
     trade_uuid: &str,
@@ -776,8 +781,31 @@ pub async fn activate_trade_and_open_position(
     amount_sol: Decimal,
     entry_price: Decimal,
     tx_signature: &str,
+    max_heat_sol: Option<Decimal>,
 ) -> AppResult<()> {
     let mut tx = pool.begin().await?;
+
+    // Final heat guard inside the write transaction: serialize concurrent BUY commits.
+    if let Some(limit) = max_heat_sol {
+        let current_exposure: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(entry_amount_sol), 0.0) FROM positions WHERE state IN ('ACTIVE', 'EXITING')",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let current = Decimal::from_f64_retain(current_exposure).unwrap_or(Decimal::ZERO);
+        if current + amount_sol > limit {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                current_exposure_sol = %current,
+                new_size_sol = %amount_sol,
+                max_heat_sol = %limit,
+                "Portfolio heat limit reached at write time — rolling back position open"
+            );
+            return Err(AppError::Internal(
+                "Portfolio heat limit reached at write time".to_string(),
+            ));
+        }
+    }
 
     sqlx::query(
         r#"
@@ -990,13 +1018,16 @@ pub async fn close_position(
         gross_pnl += pnl_sol;
     }
 
-    tx.commit().await?;
-
-    // Deduct both entry-leg and exit-leg costs for a true round-trip net PnL
+    // Deduct both entry-leg and exit-leg costs for a true round-trip net PnL.
+    // Written inside the transaction so the close and net_pnl update are atomic.
     let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
-    if let Err(e) = update_trade_net_pnl(pool, trade_uuid, net_pnl).await {
-        tracing::warn!(trade_uuid = %trade_uuid, error = %e, "Failed to write net_pnl_sol to trades table");
-    }
+    sqlx::query("UPDATE trades SET net_pnl_sol = ? WHERE trade_uuid = ?")
+        .bind(net_pnl.to_f64().unwrap_or(0.0))
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }

@@ -119,18 +119,17 @@ pub async fn start_polling_task(
                     "Detected new transactions, processing..."
                 );
 
-                // Process each transaction
+                // Process each transaction (30-second timeout guards against hung RPC calls)
                 for tx in transactions {
-                    if let Err(e) = process_transaction(
-                        &db,
-                        &engine,
-                        tx,
-                        &circuit_breaker,
-                        &token_parser,
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(30),
+                        process_transaction(&db, &engine, tx, &circuit_breaker, &token_parser),
                     )
-                    .await
-                    {
-                        tracing::warn!(error = %e, "Failed to process transaction");
+                    .await;
+                    match result {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::warn!(error = %e, "Failed to process transaction"),
+                        Err(_) => tracing::warn!("process_transaction timed out after 30s"),
                     }
                 }
             }

@@ -181,7 +181,7 @@ class RosterWriter:
         # Create new database with WAL mode for concurrent access
         conn = sqlite3.connect(str(self.temp_path), timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
-        conn.execute("PRAGMA synchronous=NORMAL;")  # Faster writes, still safe
+        conn.execute("PRAGMA synchronous=FULL;")  # Ensures durability on power loss
         cursor = conn.cursor()
         
         try:

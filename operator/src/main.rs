@@ -622,6 +622,7 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             let mut last_checked: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+            let mut db_fail_count: u32 = 0;
             loop {
                 tokio::select! {
                     _ = monitor_token.cancelled() => {
@@ -639,9 +640,18 @@ async fn main() -> anyhow::Result<()> {
                         }
 
                         let positions = match db::get_active_positions_with_entry(&monitor_db).await {
-                            Ok(p) => p,
+                            Ok(p) => { db_fail_count = 0; p }
                             Err(e) => {
-                                tracing::error!(error = %e, "Position monitor: DB query failed");
+                                db_fail_count += 1;
+                                if db_fail_count >= 3 {
+                                    tracing::error!(
+                                        consecutive_failures = db_fail_count,
+                                        error = %e,
+                                        "Position monitor: repeated DB failures — positions not being monitored"
+                                    );
+                                } else {
+                                    tracing::warn!(error = %e, "Position monitor: DB query failed, will retry next tick");
+                                }
                                 continue;
                             }
                         };

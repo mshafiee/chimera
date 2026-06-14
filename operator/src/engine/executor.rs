@@ -12,7 +12,7 @@ use crate::notifications::{CompositeNotifier, NotificationEvent};
 use crate::price_cache::PriceCache;
 use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use chrono::{DateTime, Timelike, Utc};
+use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
@@ -450,7 +450,7 @@ impl Executor {
 
     /// Check market conditions before executing trades
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
-    async fn check_market_conditions(&self, action: &crate::models::Action) -> Result<(), String> {
+    async fn check_market_conditions(&self, _action: &crate::models::Action) -> Result<(), String> {
         // Check 1: SOL price crash (>10% drop in last hour)
         // This requires price history - check if we have sufficient data
         if let Some(ref price_cache) = self.price_cache {
@@ -502,18 +502,8 @@ impl Executor {
             }
         }
 
-        // Check 3: Low liquidity period (off-hours) — only for new positions, not exits.
-        // Position size is already reduced by off_hours_size_multiplier at signal time
-        // (webhook.rs). Log a reminder here so the execution trace is complete.
-        if matches!(action, crate::models::Action::Buy) {
-            let hour_utc = Utc::now().time().hour();
-            if (2..6).contains(&hour_utc) {
-                tracing::warn!(
-                    hour_utc = hour_utc,
-                    "Executing during off-hours window (2–6 AM UTC): position size was reduced at signal time"
-                );
-            }
-        }
+        // Note: off-hours position size reduction is applied in engine/mod.rs at execution
+        // time (not at webhook receipt), so the reduced amount is already in signal.payload.amount_sol.
 
         // All checks passed
         Ok(())

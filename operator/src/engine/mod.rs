@@ -49,6 +49,7 @@ use crate::models::{Action, Signal, Strategy};
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
+use chrono::{Timelike, Utc};
 use rust_decimal::prelude::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -360,7 +361,7 @@ impl Engine {
     }
 
     /// Process a single signal
-    async fn process_signal(&mut self, signal: Signal) {
+    async fn process_signal(&mut self, mut signal: Signal) {
         let trade_uuid = signal.trade_uuid.clone();
         let start_time = std::time::Instant::now();
 
@@ -596,6 +597,25 @@ impl Engine {
             }
         }
 
+        // Apply off-hours size reduction at execution time so signals queued just
+        // before 02:00 UTC also get the multiplier when they actually execute.
+        if signal.payload.action == Action::Buy {
+            let hour_utc = Utc::now().time().hour();
+            if (2..6).contains(&hour_utc) {
+                let mult = self.config.position_sizing.off_hours_size_multiplier;
+                if mult < rust_decimal::Decimal::ONE {
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        hour_utc = hour_utc,
+                        multiplier = %mult,
+                        original_amount_sol = %signal.payload.amount_sol,
+                        "Off-hours window: reducing position size at execution time"
+                    );
+                    signal.payload.amount_sol = signal.payload.amount_sol * mult;
+                }
+            }
+        }
+
         // Execute the trade
         let result = {
             let executor = self.executor.read().await;
@@ -645,6 +665,11 @@ impl Engine {
                             .unwrap_or(Decimal::ZERO)
                     };
 
+                    // max_heat_sol = 20% of total capital — matched to PortfolioHeat::new default.
+                    let max_heat_sol = self.config.position_sizing.total_capital_sol
+                        * rust_decimal::Decimal::from_f64_retain(0.20)
+                            .unwrap_or(rust_decimal::Decimal::ZERO);
+
                     match crate::db::activate_trade_and_open_position(
                         &self.db,
                         &trade_uuid,
@@ -655,6 +680,7 @@ impl Engine {
                         signal.payload.amount_sol,
                         entry_price,
                         &tx_signature,
+                        Some(max_heat_sol),
                     )
                     .await
                     {
