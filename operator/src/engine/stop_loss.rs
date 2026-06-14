@@ -234,7 +234,8 @@ impl StopLossManager {
 
         // Also include current unrealized losses from open positions so the portfolio stop
         // fires during a flash crash where positions are still open and nothing has closed yet.
-        let unrealized_pnl_f64: f64 = sqlx::query_scalar::<_, f64>(
+        // Fail-closed: a DB error during a crash (high lock contention) must not mask losses.
+        let unrealized_pnl_f64: f64 = match sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
             FROM positions
@@ -244,7 +245,13 @@ impl StopLossManager {
         )
         .fetch_one(&self.db)
         .await
-        .unwrap_or(0.0);
+        {
+            Ok(pnl) => pnl,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to query unrealized PnL — pausing all trading (fail-safe)");
+                return StopLossAction::PauseAll;
+            }
+        };
 
         let daily_pnl = Decimal::from_f64_retain(realized_pnl_f64 + unrealized_pnl_f64)
             .unwrap_or(Decimal::ZERO);

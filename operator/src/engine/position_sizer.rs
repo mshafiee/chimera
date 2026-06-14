@@ -67,6 +67,12 @@ impl PositionSizer {
     pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
         // Kelly Criterion override: derive base size from historical win/loss ratio.
         // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
+        //
+        // When Kelly is active we track full_kelly_cap = full_kelly * total_capital so that
+        // multiplicative adjustments (confidence, quality, regime) applied below never push the
+        // final size past full Kelly — which already maximises long-term growth and exceeding it
+        // guarantees ruin over a sufficient sample.
+        let mut full_kelly_cap: Option<Decimal> = None;
         let mut size = if let Some(ref kelly) = self.kelly_sizer {
             match kelly.calculate_kelly(&factors.wallet_address, factors.strategy, 30).await {
                 Ok(result) => {
@@ -79,6 +85,7 @@ impl PositionSizer {
                         // Exit signals don't open positions; use Shield default as a safe fallback
                         crate::models::Strategy::Exit => self.config.kelly_fraction_shield,
                     };
+                    full_kelly_cap = Some(factors.total_capital_sol * result.full_kelly);
                     let kelly_pct = result.full_kelly * kelly_fraction;
                     let kelly_base = factors.total_capital_sol * kelly_pct;
                     tracing::debug!(
@@ -215,6 +222,20 @@ impl PositionSizer {
         size *= quality_mult;
         size *= volatility_mult;
         size *= factors.regime_multiplier;
+
+        // When Kelly is active, cap at full Kelly × capital before the strategy_max clamp.
+        // Full Kelly already maximises long-term growth; exceeding it guarantees ruin.
+        if let Some(cap) = full_kelly_cap {
+            if size > cap && !cap.is_zero() {
+                tracing::debug!(
+                    wallet = %factors.wallet_address,
+                    pre_cap_size = %size,
+                    full_kelly_cap = %cap,
+                    "Clamping size to full Kelly cap after multipliers"
+                );
+                size = cap;
+            }
+        }
 
         // Apply strategy-specific max cap (Barbell: Shield gets larger allocation, Spear smaller)
         let strategy_max = match factors.strategy {

@@ -1482,12 +1482,17 @@ impl Executor {
         // Apply dynamic limit expansion in high volatility regimes
         if limit > Decimal::ZERO {
             if let Some(ref cache) = self.price_cache {
-                // Inline import to avoid cluttering file top
+                // Use a fresh detector but read the token regime from the shared price_cache
+                // (which is populated by the price update loop). detect_token_regime reads
+                // price_cache.price_history, which is the same Arc — it has real data.
+                // detect_effective_regime merges global SOL history, but the fresh detector's
+                // own price_history is always empty, so global always returns Sideways and the
+                // Bull expansion never fires. Using detect_token_regime gives accurate results.
                 use crate::engine::market_regime::{MarketRegime, MarketRegimeDetector};
                 use std::str::FromStr;
-                
+
                 let detector = MarketRegimeDetector::new(cache.clone());
-                let regime = detector.detect_effective_regime(signal.token_address());
+                let regime = detector.detect_token_regime(signal.token_address());
                 
                 let multiplier = match regime {
                     MarketRegime::Bull | MarketRegime::Bear => Decimal::from_str("1.5").unwrap(), // Allow 50% more slippage in fast markets

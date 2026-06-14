@@ -51,6 +51,7 @@ use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
 use chrono::{Timelike, Utc};
 use rust_decimal::prelude::*;
+use sqlx;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -593,6 +594,41 @@ impl Engine {
                 Ok(true) => {}
                 Err(e) => {
                     tracing::error!(trade_uuid = %trade_uuid, error = %e, "Strategy allocation check failed at execution time");
+                }
+            }
+        }
+
+        // Duplicate-token guard: reject a second BUY for a token we already hold.
+        // Two consensus signals arriving within the queue window both pass the heat check
+        // before either is committed — doubling concentration in a single token.
+        if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
+            if let Some(ref token_address) = signal.payload.token_address {
+                let existing: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM positions WHERE token_address = ? AND state IN ('ACTIVE','EXITING')"
+                )
+                .bind(token_address)
+                .fetch_one(&self.db)
+                .await
+                .unwrap_or(0);
+
+                if existing > 0 {
+                    let reason = format!("Duplicate position rejected: already ACTIVE/EXITING in {}", token_address);
+                    tracing::warn!(trade_uuid = %trade_uuid, token_address = %token_address, "Duplicate token position rejected");
+                    let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                    let _ = crate::db::insert_dead_letter(
+                        &self.db, Some(&trade_uuid),
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        "DUPLICATE_TOKEN_POSITION", Some(&reason), signal.source_ip.as_deref(),
+                    ).await;
+                    if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "DEAD_LETTER".to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                        }));
+                    }
+                    return;
                 }
             }
         }
