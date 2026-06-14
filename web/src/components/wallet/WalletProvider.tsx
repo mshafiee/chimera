@@ -53,7 +53,7 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
 
     try {
       // Create a message to sign
-      const message = `Chimera Dashboard Authentication\n\nWallet: ${publicKey.toBase58()}\nTimestamp: ${Date.now()}`
+      const message = `Chimera Dashboard Authentication\n\nWallet: ${publicKey.toBase58()}\nTimestamp: ${Math.floor(Date.now() / 1000)}`
       const encodedMessage = new TextEncoder().encode(message)
       
       // Sign the message
