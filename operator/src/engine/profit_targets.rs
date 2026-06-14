@@ -388,6 +388,15 @@ impl ProfitTargetManager {
         ProfitTargetAction::None
     }
 
+    /// Sweep HWM entries for positions that closed outside the FullExit path.
+    /// Called periodically from the position monitoring loop (~every 5 minutes).
+    pub async fn sweep_hwm_stale_entries(&self) -> usize {
+        match &self.momentum_exit {
+            Some(m) => m.sweep_stale_entries().await,
+            None => 0,
+        }
+    }
+
     /// Remove position from tracking and delete persisted state
     pub async fn remove_position(&self, trade_uuid: &str) {
         let mut targets = self.active_targets.write().await;

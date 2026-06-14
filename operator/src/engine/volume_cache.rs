@@ -92,6 +92,15 @@ impl VolumeCache {
         };
 
         let now = Utc::now();
+
+        // Fail safe: if the most-recent data point is > 10 minutes old the cache is
+        // stale (indexer lag or downtime). Do not exit on stale signals.
+        if let Some((newest_time, _)) = token_history.back() {
+            if now.signed_duration_since(*newest_time).num_minutes() > 10 {
+                return false;
+            }
+        }
+
         let recent_cutoff = now - Duration::minutes(60);
         let baseline_cutoff = now - Duration::hours(24);
 
@@ -119,7 +128,14 @@ impl VolumeCache {
             }
         }
 
-        // Fallback: single most-recent point vs full 24 h average (original behaviour)
+        // Fallback: single most-recent point vs full 24 h average (original behaviour).
+        // Require at least 30 minutes of recorded history — 2 data points spanning 5
+        // minutes produce a meaningless "24h average" and can trigger false exits.
+        if let Some((oldest_time, _)) = token_history.front() {
+            if now.signed_duration_since(*oldest_time).num_minutes() < 30 {
+                return false;
+            }
+        }
         if let Some(current) = token_history.back().map(|(_, v)| *v) {
             let total: Decimal = token_history.iter().map(|(_, v)| *v).sum();
             let avg = total / Decimal::from(token_history.len());

@@ -138,7 +138,9 @@ impl KellySizer {
             Decimal::ZERO
         } else {
             let sum: Decimal = losses.iter().sum();
-            sum / Decimal::from(losses.len())
+            // Enforce a 1% floor: extremely tight stop-losses produce avg_loss → 0,
+            // causing Kelly → win_rate and ignoring actual downside risk.
+            (sum / Decimal::from(losses.len())).max(dec!(0.01))
         };
 
         // Calculate Kelly Criterion using Decimal for precision

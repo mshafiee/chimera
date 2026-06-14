@@ -1208,6 +1208,17 @@ pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
     Ok(count.0 as u32)
 }
 
+/// Return trade UUIDs for all ACTIVE and EXITING positions.
+/// Used by the HWM sweep to prune stale entries from the momentum_exit map.
+pub async fn get_active_trade_uuids(pool: &DbPool) -> AppResult<Vec<String>> {
+    let uuids: Vec<String> = sqlx::query_scalar(
+        "SELECT trade_uuid FROM positions WHERE state IN ('ACTIVE', 'EXITING')",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(uuids)
+}
+
 /// Active position enriched with entry data for the position monitoring loop
 #[derive(Debug, Clone)]
 pub struct ActivePositionEntry {

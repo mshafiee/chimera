@@ -81,6 +81,24 @@ impl MomentumExit {
         self.high_water_marks.write().remove(trade_uuid);
     }
 
+    /// Sweep stale HWM entries for positions that closed via paths other than
+    /// `ProfitTargetManager::remove_position` (stop-loss, engine close, recovery).
+    /// Returns the number of entries removed.
+    pub async fn sweep_stale_entries(&self) -> usize {
+        let active = match crate::db::get_active_trade_uuids(&self.db).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "HWM sweep: DB query failed, skipping");
+                return 0;
+            }
+        };
+        let active_set: std::collections::HashSet<String> = active.into_iter().collect();
+        let mut map = self.high_water_marks.write();
+        let before = map.len();
+        map.retain(|uuid, _| active_set.contains(uuid));
+        before - map.len()
+    }
+
     /// Check for negative momentum and return action
     ///
     /// # Arguments

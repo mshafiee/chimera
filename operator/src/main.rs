@@ -624,6 +624,7 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             let mut last_checked: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
             let mut db_fail_count: u32 = 0;
+            let mut sweep_counter: u32 = 0;
             loop {
                 tokio::select! {
                     _ = monitor_token.cancelled() => {
@@ -631,6 +632,17 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     _ = interval.tick() => {
+                        // Sweep HWM map every 60 cycles (~5 min) to purge entries for
+                        // positions that closed via stop-loss, recovery, or engine-side paths.
+                        sweep_counter += 1;
+                        if sweep_counter >= 60 {
+                            sweep_counter = 0;
+                            let removed = monitor_pt.sweep_hwm_stale_entries().await;
+                            if removed > 0 {
+                                tracing::debug!(removed, "HWM sweep: removed stale entries");
+                            }
+                        }
+
                         // Check portfolio-level stop once per cycle before individual positions
                         match monitor_sl.check_portfolio_stop(monitor_total_capital).await {
                             StopLossAction::PauseAll => {
@@ -695,6 +707,7 @@ async fn main() -> anyhow::Result<()> {
                                 );
                                 let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                                 let _ = monitor_engine.queue_signal(signal, None).await;
+                                monitor_pt.remove_position(&pos.trade_uuid).await;
                                 continue;
                             }
 
@@ -1079,6 +1092,60 @@ async fn main() -> anyhow::Result<()> {
                 tracing::warn!("Wallet keypair unavailable — portfolio capital will not auto-refresh from wallet balance");
             }
         }
+    }
+
+    // Force-liquidation safety task: if an external capital drain causes portfolio heat
+    // to exceed 150% of the configured limit, exit oldest positions until back in range.
+    // Runs every 60 seconds — slow enough to not interfere with normal trading, fast
+    // enough to act before a margin-call-like cascade.
+    {
+        let fl_heat = Arc::clone(&portfolio_heat);
+        let fl_db = db_pool.clone();
+        let fl_engine = _engine_handle.clone();
+        let fl_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = fl_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        let overexposed = match fl_heat.is_critically_overexposed().await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Heat overexposure check failed");
+                                false
+                            }
+                        };
+                        if !overexposed {
+                            continue;
+                        }
+                        tracing::warn!("HEAT_OVEREXPOSED: capital drain detected — force-exiting oldest positions");
+                        let mut positions = match db::get_active_positions_with_entry(&fl_db).await {
+                            Ok(p) => p,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Force-liquidation: DB query failed");
+                                continue;
+                            }
+                        };
+                        positions.sort_by_key(|p| p.entry_time);
+                        for pos in positions {
+                            let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
+                            let _ = fl_engine.queue_signal(signal, None).await;
+                            tracing::warn!(
+                                trade_uuid = %pos.trade_uuid,
+                                token = %pos.token_address,
+                                "Force-exited position (heat overexposure)"
+                            );
+                            match fl_heat.is_critically_overexposed().await {
+                                Ok(false) => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Force-liquidation task spawned (60s interval, triggers at 150% heat)");
     }
 
     let position_sizer = Arc::new(PositionSizer::new(

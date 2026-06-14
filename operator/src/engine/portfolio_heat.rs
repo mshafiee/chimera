@@ -62,6 +62,18 @@ impl PortfolioHeat {
         *self.total_capital_sol.write() = new_capital;
     }
 
+    /// Returns true when exposure exceeds 150% of the configured heat limit.
+    ///
+    /// Used by the force-liquidation background task to detect external capital drains
+    /// (e.g. user withdraws from wallet) that push existing positions above the heat cap.
+    /// The 1.5× buffer avoids false triggers on normal market fluctuations.
+    pub async fn is_critically_overexposed(&self) -> Result<bool, String> {
+        let heat = self.calculate_heat().await?;
+        let capital = *self.total_capital_sol.read();
+        let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
+        Ok(heat.total_exposure_sol > max_heat_sol * dec!(1.5))
+    }
+
     /// Calculate current portfolio heat
     ///
     /// # Returns
