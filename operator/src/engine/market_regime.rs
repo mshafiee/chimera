@@ -5,6 +5,7 @@
 
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -179,15 +180,18 @@ impl MarketRegimeDetector {
         }
     }
 
-    /// Get position sizing multiplier based on effective regime.
-    /// Bull = 1.5 (moderate boost), Sideways = 0.8 (mild reduction), Bear = 0.5 (significant cut).
+    /// Get position sizing multiplier based on effective regime AND volume trend.
+    /// Bull = 1.5, Sideways = 0.8, Bear = 0.5 — then multiplied by the week-over-week
+    /// volume trend multiplier (0.7–1.1) and clamped to [0.5, 2.0].
     /// Sideways must be >= Bear: a flat market is less risky than an actively declining one.
     pub fn get_regime_multiplier(&self, token_address: &str) -> Decimal {
-        match self.detect_effective_regime(token_address) {
-            MarketRegime::Bull => Decimal::from_str("1.5").unwrap(),
-            MarketRegime::Sideways => Decimal::from_str("0.8").unwrap(),
-            MarketRegime::Bear => Decimal::from_str("0.5").unwrap(),
-        }
+        let regime_mult = match self.detect_effective_regime(token_address) {
+            MarketRegime::Bull     => dec!(1.5),
+            MarketRegime::Sideways => dec!(0.8),
+            MarketRegime::Bear     => dec!(0.5),
+        };
+        let volume_mult = self.get_volume_trend_multiplier();
+        (regime_mult * volume_mult).max(dec!(0.5)).min(dec!(2.0))
     }
 
     /// Update volume history (called periodically, e.g., daily)
@@ -267,19 +271,19 @@ impl MarketRegimeDetector {
         // - If volume drops 10-20%, reduce by 15%
         // - If volume increases >20%, increase by 10% (but cap at 1.2x)
         // - Otherwise, neutral (1.0)
-        let threshold_80 = Decimal::from_str("0.8").unwrap_or(Decimal::ZERO);
-        let threshold_90 = Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
-        let threshold_120 = Decimal::from_str("1.2").unwrap_or(Decimal::ZERO);
+        let threshold_80  = dec!(0.8);
+        let threshold_90  = dec!(0.9);
+        let threshold_120 = dec!(1.2);
 
         if volume_change_ratio < threshold_80 {
-            // Volume dropped >20%
-            Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
+            // Volume dropped >20% — reduce position sizes by 30%
+            dec!(0.7)
         } else if volume_change_ratio < threshold_90 {
-            // Volume dropped 10-20%
-            Decimal::from_str("0.85").unwrap_or(Decimal::ONE)
+            // Volume dropped 10-20% — reduce by 15%
+            dec!(0.85)
         } else if volume_change_ratio > threshold_120 {
-            // Volume increased >20%
-            Decimal::from_str("1.1").unwrap_or(Decimal::ONE)
+            // Volume increased >20% — modest boost capped at 10%
+            dec!(1.1)
         } else {
             // Neutral
             Decimal::ONE

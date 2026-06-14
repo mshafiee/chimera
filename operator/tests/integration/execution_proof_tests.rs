@@ -111,8 +111,9 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
     let mgr = StopLossManager::new(pool.clone(), config, price_cache);
 
     // Step 1: Stop-loss decision — must return Exit
+    let entry_time = chrono::Utc::now() - chrono::TimeDelta::seconds(60);
     let action = mgr
-        .check_stop_loss(UUID, WALLET, Decimal::from_str("200.0").unwrap(), TOKEN)
+        .check_stop_loss(UUID, WALLET, Decimal::from_str("200.0").unwrap(), TOKEN, entry_time)
         .await;
     assert_eq!(
         action,

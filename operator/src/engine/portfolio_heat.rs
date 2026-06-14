@@ -5,6 +5,7 @@
 
 use crate::db::DbPool;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 
 /// Portfolio heat manager
 pub struct PortfolioHeat {
@@ -33,7 +34,7 @@ impl PortfolioHeat {
     pub fn new(db: DbPool, total_capital_sol: Decimal) -> Self {
         Self {
             db,
-            max_heat_percent: Decimal::from_f64_retain(20.0).unwrap_or(Decimal::ZERO), // 20% max heat
+            max_heat_percent: dec!(20),
             total_capital_sol,
         }
     }
@@ -167,7 +168,8 @@ impl PortfolioHeat {
             _ => return Ok(true),
         };
         if allocation_pct.is_zero() {
-            return Ok(true);
+            // 0% allocation means this strategy is disabled — block all positions
+            return Ok(false);
         }
         let allocated_sol = self.total_capital_sol * (allocation_pct / Decimal::from(100));
         let current_heat = match strategy {

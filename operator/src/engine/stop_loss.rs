@@ -10,6 +10,7 @@ use crate::db::{get_wallet_by_address, DbPool};
 use crate::monitoring::SignalAggregator;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use sqlx;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -130,44 +131,34 @@ impl StopLossManager {
             }
         };
 
-        // Calculate base dynamic stop-loss threshold using Decimal for precision
-        // For consensus signals, use wider stops (lower risk of false signal)
-        // Use Decimal constants to avoid f64 precision issues
+        // Calculate base dynamic stop-loss threshold using compile-time Decimal constants.
+        // High-WQS wallets get wider stops to let proven signals breathe; low-WQS gets tighter.
         let mut stop_loss_threshold = if wqs >= 70.0 {
-            // High WQS: wider stop (-20%)
-            Decimal::from_str("-20.0").unwrap_or(Decimal::ZERO)
+            dec!(-20) // High WQS: wider stop
         } else if wqs >= 40.0 {
-            // Medium WQS: standard stop (-15%)
-            Decimal::from_str("-15.0").unwrap_or(Decimal::ZERO)
+            dec!(-15) // Medium WQS: standard stop
         } else {
-            // Low WQS: tighter stop (-10%)
-            Decimal::from_str("-10.0").unwrap_or(Decimal::ZERO)
+            dec!(-10) // Low WQS: tighter stop
         };
 
-        // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation)
-        // If token is highly volatile, widen stops to avoid getting wicked out
+        // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation).
+        // If token is highly volatile, widen stops to avoid getting wicked out.
         if let Some(volatility) = self.price_cache.calculate_volatility(token_address) {
             // Volatility is returned as percentage (e.g., 15.0 = 15%)
             // If volatility > 20%, widen stop by 1.5x
             // If volatility > 30%, widen stop by 2x
-            // If volatility < 10%, tighten stop by 0.9x (but never below -5%)
-            // Use Decimal constants to avoid f64 precision issues
+            // If volatility < 10%, tighten stop by 0.9x
             let volatility_multiplier = if volatility > 30.0 {
-                Decimal::from_str("2.0").unwrap_or(Decimal::ONE)
+                dec!(2.0)
             } else if volatility > 20.0 {
-                Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
+                dec!(1.5)
             } else if volatility < 10.0 {
-                Decimal::from_str("0.9").unwrap_or(Decimal::ONE)
+                dec!(0.9)
             } else {
                 Decimal::ONE
             };
 
             stop_loss_threshold *= volatility_multiplier;
-
-            // Ensure stop never goes below -5% (too tight) or above -50% (too wide)
-            let min_threshold = Decimal::from_str("-50.0").unwrap_or(Decimal::ZERO);
-            let max_threshold = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
-            stop_loss_threshold = stop_loss_threshold.max(min_threshold).min(max_threshold);
 
             tracing::debug!(
                 trade_uuid = %trade_uuid,
@@ -178,10 +169,11 @@ impl StopLossManager {
             );
         }
 
-        // Widen stop-loss by 5% for consensus signals
+        // Widen stop-loss by 5% for consensus signals (additive, applied after volatility).
+        // A second clamp is applied immediately after so that the combined
+        // volatility + consensus adjustment can never exceed the [-50%, -5%] safety envelope.
         if is_consensus {
-            let consensus_adjustment = Decimal::from_str("-5.0").unwrap_or(Decimal::ZERO);
-            stop_loss_threshold += consensus_adjustment; // Make it wider (e.g., -15% -> -20%)
+            stop_loss_threshold += dec!(-5); // widen (e.g. -40% → -45%)
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
@@ -189,6 +181,13 @@ impl StopLossManager {
                 "Consensus signal detected, widening stop-loss by 5%"
             );
         }
+
+        // Final clamp: never tighter than -5% or wider than -50%.
+        // Applied after ALL adjustments (volatility × + consensus +) so every combination
+        // respects the envelope. widest_stop (-50) is numerically smaller; tightest_stop (-5) larger.
+        let widest_stop   = dec!(-50);
+        let tightest_stop = dec!(-5);
+        stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
 
         // max_stop_loss_distance is the floor on loss tolerance — the adaptive stop
         // may widen due to volatility/consensus, but never past this value.

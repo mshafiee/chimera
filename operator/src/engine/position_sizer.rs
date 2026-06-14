@@ -10,6 +10,7 @@ use crate::config::PositionSizingConfig;
 use crate::db::DbPool;
 use crate::engine::kelly_sizer::KellySizer;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use sqlx;
 use std::sync::Arc;
 
@@ -178,35 +179,26 @@ impl PositionSizer {
         // Medium quality (0.7-0.9): 1.0x
         // Low quality (<0.7): 0.7x (shouldn't reach here due to filter)
         let quality_mult = if let Some(quality) = factors.signal_quality {
-            let high_threshold = Decimal::from_str("0.9").unwrap_or(Decimal::ZERO);
-            let medium_threshold = Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
-            if quality >= high_threshold {
-                Decimal::from_str("1.3").unwrap_or(Decimal::ONE)
-            } else if quality >= medium_threshold {
+            if quality >= dec!(0.9) {
+                dec!(1.3)
+            } else if quality >= dec!(0.7) {
                 Decimal::ONE
             } else {
-                Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
+                dec!(0.7)
             }
         } else {
             Decimal::ONE // Default if quality not provided
         };
 
         // Volatility multiplier (reduce size for high volatility)
-        // If volatility > 30%, reduce size proportionally
-        // Use Decimal arithmetic to avoid f64 precision issues
+        // If volatility > 30%, reduce size proportionally; floor at 0.5x
         let volatility_mult = if let Some(volatility) = factors.token_volatility_24h {
-            let threshold = Decimal::from_str("30.0").unwrap_or(Decimal::ZERO);
-            if volatility > threshold {
-                let step = Decimal::from_str("10.0").unwrap_or(Decimal::ONE);
-                let reduction_rate = Decimal::from_str("0.3").unwrap_or(Decimal::ZERO);
-                let min_mult = Decimal::from_str("0.5").unwrap_or(Decimal::ONE);
-
-                // Calculate: (volatility - 30) / 10 * 0.3
-                let excess = volatility - threshold;
-                let steps = excess / step;
-                let reduction = steps * reduction_rate;
-                let multiplier = Decimal::ONE - reduction;
-                multiplier.max(min_mult) // Minimum 50% of base size
+            if volatility > dec!(30.0) {
+                // Each 10% above the 30% threshold reduces size by 30%, floored at 50%
+                let excess = volatility - dec!(30.0);
+                let steps = excess / dec!(10.0);
+                let reduction = steps * dec!(0.3);
+                (Decimal::ONE - reduction).max(dec!(0.5))
             } else {
                 Decimal::ONE
             }

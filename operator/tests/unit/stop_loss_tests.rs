@@ -19,6 +19,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+/// Returns an entry_time sufficiently in the past to clear the 10-second wick-protection
+/// grace period, so stop-loss checks evaluate the threshold rather than bailing early.
+fn past_entry() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() - chrono::TimeDelta::seconds(60)
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
@@ -183,7 +189,7 @@ async fn test_zero_entry_price_forces_immediate_exit() {
     let mgr = StopLossManager::new(pool, default_config(), price_cache);
 
     let action = mgr
-        .check_stop_loss("uuid-1", "wallet_a", Decimal::ZERO, TOKEN)
+        .check_stop_loss("uuid-1", "wallet_a", Decimal::ZERO, TOKEN, past_entry())
         .await;
 
     assert_eq!(
@@ -230,6 +236,7 @@ async fn test_consensus_query_failure_no_stop_widening() {
             "wallet_b",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
 
@@ -274,6 +281,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
             "wallet_c",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
 
@@ -339,6 +347,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
             "wallet_vol",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(
@@ -360,6 +369,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
             "wallet_vol",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(
@@ -417,6 +427,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
             "wallet_tight",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(
@@ -437,6 +448,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
             "wallet_tight",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(
@@ -492,6 +504,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
             "wallet_cv",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(
@@ -513,6 +526,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
             "wallet_cv",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(
@@ -552,6 +566,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
             "wallet_hardstop",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
 
@@ -663,6 +678,7 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
             "wallet_nocache",
             Decimal::from_str("1.00").unwrap(),
             "token_nocache",
+            past_entry(),
         )
         .await;
 
@@ -699,6 +715,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
             "wallet_med",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
 
@@ -720,6 +737,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
             "wallet_med",
             Decimal::from_str("1.00").unwrap(),
             TOKEN,
+            past_entry(),
         )
         .await;
     assert_eq!(

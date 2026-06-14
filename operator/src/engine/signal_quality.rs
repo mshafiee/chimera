@@ -35,7 +35,7 @@ impl SignalQuality {
     ///
     /// # Arguments
     /// * `wallet_wqs` - Wallet Quality Score (0-100)
-    /// * `is_consensus` - Whether this is a consensus signal
+    /// * `consensus_wallet_count` - Number of wallets in agreement (None or Some(0/1) = no consensus)
     /// * `liquidity_usd` - Current liquidity in USD (using Decimal for precision)
     /// * `token_age_hours` - Token age in hours (None if unknown)
     ///
@@ -43,7 +43,7 @@ impl SignalQuality {
     /// SignalQuality with score and factors
     pub fn calculate(
         wallet_wqs: f64,
-        is_consensus: bool,
+        consensus_wallet_count: Option<usize>,
         liquidity_usd: rust_decimal::Decimal,
         token_age_hours: Option<f64>,
     ) -> Self {
@@ -54,8 +54,14 @@ impl SignalQuality {
         let wallet_score = (wallet_wqs / 100.0).min(1.0);
         score += wallet_score * 0.4;
 
-        // 2. Consensus strength (30% weight)
-        let consensus_score = if is_consensus { 1.0 } else { 0.0 };
+        // 2. Consensus strength (30% weight) — graduated by wallet count
+        let consensus_score = match consensus_wallet_count {
+            None | Some(0) | Some(1) => 0.0, // no consensus
+            Some(2) => 0.5,
+            Some(3) => 0.7,
+            Some(4) => 0.9,
+            Some(_) => 1.0, // 5+ wallets
+        };
         score += consensus_score * 0.3;
 
         // 3. Liquidity score (20% weight) - use Decimal directly for comparisons
@@ -155,7 +161,8 @@ mod tests {
 
     #[test]
     fn test_high_quality_signal() {
-        let quality = SignalQuality::calculate(90.0, true, Decimal::from(60000u32), Some(200.0));
+        // 5-wallet consensus → score 1.0
+        let quality = SignalQuality::calculate(90.0, Some(5), Decimal::from(60000u32), Some(200.0));
 
         assert!(quality.score >= 0.9);
         assert!(quality.should_enter(0.7));
@@ -164,9 +171,10 @@ mod tests {
 
     #[test]
     fn test_medium_quality_signal() {
-        let quality = SignalQuality::calculate(75.0, true, Decimal::from(25000u32), Some(48.0));
+        // 3-wallet consensus → graduated score 0.7 → total: 0.75*0.4 + 0.7*0.3 + liquidity + age = 0.72
+        let quality = SignalQuality::calculate(75.0, Some(3), Decimal::from(25000u32), Some(48.0));
 
-        assert!(quality.score >= 0.7);
+        assert!(quality.score >= 0.7, "score was {}", quality.score);
         assert!(quality.score < 0.9);
         assert!(quality.should_enter(0.7));
         assert_eq!(quality.category(), QualityCategory::Medium);
@@ -174,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_low_quality_signal() {
-        let quality = SignalQuality::calculate(50.0, false, Decimal::from(3000u32), Some(2.0));
+        let quality = SignalQuality::calculate(50.0, None, Decimal::from(3000u32), Some(2.0));
 
         assert!(quality.score < 0.7);
         assert!(!quality.should_enter(0.7));
@@ -183,17 +191,27 @@ mod tests {
 
     #[test]
     fn test_consensus_boost() {
-        let with_consensus = SignalQuality::calculate(60.0, true, Decimal::from(10000u32), None);
-        let without_consensus =
-            SignalQuality::calculate(60.0, false, Decimal::from(10000u32), None);
+        // 2-wallet consensus should score higher than no consensus
+        let with_consensus = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
+        let without_consensus = SignalQuality::calculate(60.0, None, Decimal::from(10000u32), None);
 
         assert!(with_consensus.score > without_consensus.score);
     }
 
     #[test]
+    fn test_consensus_graduated() {
+        // More wallets → higher score
+        let two   = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
+        let three = SignalQuality::calculate(60.0, Some(3), Decimal::from(10000u32), None);
+        let five  = SignalQuality::calculate(60.0, Some(5), Decimal::from(10000u32), None);
+        assert!(two.score < three.score);
+        assert!(three.score < five.score);
+    }
+
+    #[test]
     fn test_liquidity_scoring() {
-        let high_liquidity = SignalQuality::calculate(70.0, false, Decimal::from(60000u32), None);
-        let low_liquidity = SignalQuality::calculate(70.0, false, Decimal::from(3000u32), None);
+        let high_liquidity = SignalQuality::calculate(70.0, None, Decimal::from(60000u32), None);
+        let low_liquidity = SignalQuality::calculate(70.0, None, Decimal::from(3000u32), None);
 
         assert!(high_liquidity.score > low_liquidity.score);
     }

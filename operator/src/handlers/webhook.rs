@@ -421,9 +421,9 @@ pub async fn webhook_handler(
             None
         };
 
-        // Calculate signal quality
+        // Calculate signal quality — pass the wallet count for graduated consensus scoring
         let quality =
-            SignalQuality::calculate(wallet_wqs, is_consensus, liquidity_usd, token_age_hours);
+            SignalQuality::calculate(wallet_wqs, consensus_wallet_count, liquidity_usd, token_age_hours);
 
         // Reject if quality too low (threshold from config.strategy.signal_quality_threshold)
         let quality_threshold = match signal.payload.strategy {

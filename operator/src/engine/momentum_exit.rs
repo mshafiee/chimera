@@ -1,7 +1,7 @@
 //! Momentum-Based Early Exit Detection
 //!
 //! Detects negative momentum indicators and triggers early exit:
-//! - Price drops 8%+ from entry within 5 minutes (widens further for high-volatility tokens)
+//! - Price drops 8%+ from entry within 5 minutes (base; widens for high-volatility tokens and older positions)
 //! - Volume drops >65% from 24h average
 //! - RSI < 35 and declining
 
@@ -86,7 +86,17 @@ impl MomentumExit {
             None => return MomentumExitAction::None, // No price data, skip check
         };
 
-        // Check 1: Price drops 5% from entry within 5 minutes
+        // Guard: corrupt position data — align with stop_loss.rs behavior
+        if entry_price.is_zero() {
+            tracing::error!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                "CORRUPT_POSITION: entry_price is zero in momentum_exit — forcing exit to recover capital"
+            );
+            return MomentumExitAction::Exit;
+        }
+
+        // Check 1: Price drops 8% from entry within 5 minutes (base threshold)
         let price_drop_percent = if !entry_price.is_zero() {
             let diff = entry_price - current_price;
             let ratio = diff / entry_price;

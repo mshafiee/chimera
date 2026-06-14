@@ -7,6 +7,7 @@
 
 use crate::db::{self, DbPool};
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 
 /// Kelly position sizer
 pub struct KellySizer {
@@ -37,8 +38,7 @@ impl KellySizer {
     pub fn new(db: DbPool) -> Self {
         Self {
             db,
-            conservative_multiplier: Decimal::from_f64_retain(0.25)
-                .unwrap_or(Decimal::from_f64_retain(0.25).unwrap_or(Decimal::ZERO)), // Use 25% of full Kelly
+            conservative_multiplier: dec!(0.25), // Use 25% of full Kelly
         }
     }
 

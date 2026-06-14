@@ -210,8 +210,8 @@ impl ProfitTargetManager {
             None => return ProfitTargetAction::None,
         };
 
-        let mut targets = self.active_targets.write().await;
-        let state = match targets.get_mut(trade_uuid) {
+        let mut guard = self.active_targets.write().await;
+        let state = match guard.get_mut(trade_uuid) {
             Some(s) => s,
             None => return ProfitTargetAction::None,
         };
@@ -240,14 +240,15 @@ impl ProfitTargetManager {
         } else {
             Decimal::ONE
         };
-        let targets: Vec<Decimal> = self.config.targets.iter().map(|t| *t * multiplier).collect();
+        // Use a distinct name so we don't shadow the `guard` write-lock binding above.
+        let profit_level_targets: Vec<Decimal> = self.config.targets.iter().map(|t| *t * multiplier).collect();
 
         // Track whether state changed so we can persist once at the end
         let mut state_changed = is_new_peak;
 
         // Check tiered profit targets
         let mut tiered_action: Option<ProfitTargetAction> = None;
-        for target in &targets {
+        for target in &profit_level_targets {
             if profit_percent >= *target && !state.targets_hit.contains(target) {
                 state.targets_hit.push(*target);
                 state_changed = true;
@@ -332,8 +333,9 @@ impl ProfitTargetManager {
         let entry_price_snap = state.entry_price;
         let entry_time_snap = state.entry_time;
 
-        // Release the write lock before async calls
-        drop(targets);
+        // Release the write lock before async DB calls. `guard` is the actual RwLock
+        // WriteGuard from line 213; `profit_level_targets` is a plain Vec and needs no drop.
+        drop(guard);
 
         // Persist state changes to DB (outside the lock)
         if state_changed {

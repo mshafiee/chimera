@@ -603,13 +603,28 @@ impl Engine {
         // before either is committed — doubling concentration in a single token.
         if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
             if let Some(ref token_address) = signal.payload.token_address {
-                let existing: i64 = sqlx::query_scalar(
+                let existing: i64 = match sqlx::query_scalar::<_, i64>(
                     "SELECT COUNT(*) FROM positions WHERE token_address = ? AND state IN ('ACTIVE','EXITING')"
                 )
                 .bind(token_address)
                 .fetch_one(&self.db)
                 .await
-                .unwrap_or(0);
+                {
+                    Ok(n) => n,
+                    Err(e) => {
+                        // Fail-closed: a DB error during the duplicate check could allow a
+                        // duplicate position if we default to 0. Reject the signal instead.
+                        let reason = format!("DB error during duplicate check — rejecting signal (fail-safe): {}", e);
+                        tracing::error!(trade_uuid = %trade_uuid, error = %e, "DB error in duplicate position check — rejecting signal");
+                        let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                        let _ = crate::db::insert_dead_letter(
+                            &self.db, Some(&trade_uuid),
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            "DB_ERROR_DUPLICATE_CHECK", Some(&reason), signal.source_ip.as_deref(),
+                        ).await;
+                        return;
+                    }
+                };
 
                 if existing > 0 {
                     let reason = format!("Duplicate position rejected: already ACTIVE/EXITING in {}", token_address);
