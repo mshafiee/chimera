@@ -186,13 +186,18 @@ impl PositionSizer {
             Decimal::ONE
         };
 
-        // High slippage penalty (>2%)
-        let slippage_mult =
-            if factors.estimated_slippage > Decimal::from_str("2.0").unwrap_or(Decimal::ZERO) {
-                Decimal::from_str("0.7").unwrap_or(Decimal::ONE)
-            } else {
-                Decimal::ONE
-            };
+        // Slippage degrades size linearly: no penalty at ≤1%, 50% floor at ≥5%.
+        // Mirrors the volatility_mult continuous approach — avoids a hard cliff at one
+        // threshold (the previous >2% → 0.7× binary hit a 30% reduction instantaneously).
+        let slippage_mult = if factors.estimated_slippage <= dec!(1.0) {
+            Decimal::ONE
+        } else if factors.estimated_slippage >= dec!(5.0) {
+            dec!(0.5)
+        } else {
+            let excess = factors.estimated_slippage - dec!(1.0);
+            let penalty = excess / dec!(4.0) * dec!(0.5);
+            (Decimal::ONE - penalty).max(dec!(0.5))
+        };
 
         // Signal quality multiplier
         // High quality (>0.9): 1.3x

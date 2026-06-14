@@ -613,6 +613,28 @@ async fn main() -> anyhow::Result<()> {
             Some(market_regime_detector.clone()),
         ));
 
+        // Dedicated HWM sweep task — runs every 5 minutes independent of the position
+        // monitoring loop so memory is reclaimed even if that loop stalls or panics.
+        {
+            let sweep_pt = Arc::clone(&profit_target_mgr);
+            let sweep_token = cancel_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                loop {
+                    tokio::select! {
+                        _ = sweep_token.cancelled() => break,
+                        _ = interval.tick() => {
+                            let removed = sweep_pt.sweep_hwm_stale_entries().await;
+                            if removed > 0 {
+                                tracing::debug!(removed, "HWM sweep: removed stale entries");
+                            }
+                        }
+                    }
+                }
+            });
+            tracing::info!("HWM sweep task spawned (5-min interval)");
+        }
+
         let monitor_db = db_pool.clone();
         let monitor_sl = stop_loss_mgr;
         let monitor_pt = profit_target_mgr;
@@ -624,7 +646,6 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             let mut last_checked: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
             let mut db_fail_count: u32 = 0;
-            let mut sweep_counter: u32 = 0;
             loop {
                 tokio::select! {
                     _ = monitor_token.cancelled() => {
@@ -632,17 +653,6 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     _ = interval.tick() => {
-                        // Sweep HWM map every 60 cycles (~5 min) to purge entries for
-                        // positions that closed via stop-loss, recovery, or engine-side paths.
-                        sweep_counter += 1;
-                        if sweep_counter >= 60 {
-                            sweep_counter = 0;
-                            let removed = monitor_pt.sweep_hwm_stale_entries().await;
-                            if removed > 0 {
-                                tracing::debug!(removed, "HWM sweep: removed stale entries");
-                            }
-                        }
-
                         // Check portfolio-level stop once per cycle before individual positions
                         match monitor_sl.check_portfolio_stop(monitor_total_capital).await {
                             StopLossAction::PauseAll => {
