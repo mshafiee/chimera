@@ -245,7 +245,7 @@ impl RecoveryManager {
                         trade_uuid = %position.trade_uuid,
                         stuck_secs = stuck_duration.num_seconds(),
                         rpc_error = %rpc_err,
-                        "Persistent RPC errors checking EXITING position — escalating to dead letter"
+                        "Persistent RPC errors checking EXITING position — escalating to dead letter and reverting to ACTIVE"
                     );
                     db::insert_dead_letter(
                         &self.db,
@@ -270,6 +270,28 @@ impl RecoveryManager {
                         )),
                     )
                     .await?;
+                    // Revert to ACTIVE so portfolio heat is freed and the exit can be
+                    // retried by the normal exit path. Leaving the position in EXITING
+                    // would permanently lock capital in the heat calculation.
+                    // The dead letter entry ensures a human reviews the final outcome.
+                    db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
+                    db::log_config_change(
+                        &self.db,
+                        &format!("position:{}", position.trade_uuid),
+                        Some("EXITING"),
+                        "ACTIVE",
+                        "SYSTEM_RECOVERY",
+                        Some("Persistent RPC error: reverted to ACTIVE after dead letter escalation"),
+                    )
+                    .await?;
+                    if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+                            trade_uuid: position.trade_uuid.clone(),
+                            state: "ACTIVE".to_string(),
+                            unrealized_pnl_percent: None,
+                        }));
+                    }
+                    Ok(RecoveryAction::RevertedToActive)
                 } else {
                     tracing::warn!(
                         trade_uuid = %position.trade_uuid,
@@ -277,8 +299,8 @@ impl RecoveryManager {
                         rpc_error = %rpc_err,
                         "RPC error checking stuck position — will retry next cycle"
                     );
+                    Ok(RecoveryAction::StillPending)
                 }
-                Ok(RecoveryAction::StillPending)
             }
         }
     }

@@ -72,6 +72,41 @@ impl PortfolioHeat {
         .fetch_one(&self.db)
         .await
         .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
+
+        // Warn when EXITING positions have been stuck longer than the recovery escalation
+        // threshold (5 min). These should have been reverted to ACTIVE by recovery.rs, but
+        // if they persist they lock capital. Alerting here lets operators catch recovery
+        // failures before they compound.
+        let stale_exiting_count: i64 = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM positions
+            WHERE state = 'EXITING'
+              AND updated_at < datetime('now', '-300 seconds')
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await
+        .unwrap_or(0);
+        if stale_exiting_count > 0 {
+            let stale_sol: f64 = sqlx::query_scalar::<_, f64>(
+                r#"
+                SELECT COALESCE(SUM(entry_amount_sol), 0.0)
+                FROM positions
+                WHERE state = 'EXITING'
+                  AND updated_at < datetime('now', '-300 seconds')
+                "#,
+            )
+            .fetch_one(&self.db)
+            .await
+            .unwrap_or(0.0);
+            tracing::warn!(
+                stale_exiting_count,
+                stale_exposure_sol = stale_sol,
+                "STALE_EXITING: positions stuck >5 min are locking portfolio heat; \
+                 check recovery.rs background task and RPC connectivity"
+            );
+        }
         let total_exposure = Decimal::from_f64_retain(total_exposure_f64).unwrap_or(Decimal::ZERO);
 
         // Calculate heat percentage using Decimal for precision
