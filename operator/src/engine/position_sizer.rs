@@ -98,9 +98,17 @@ impl PositionSizer {
                         kelly_base_sol = ?kelly_base,
                         "Kelly Criterion base size computed"
                     );
-                    kelly_base
-                        .max(self.config.min_size_sol)
-                        .min(self.config.max_size_sol)
+                    // Do NOT apply max(min_size_sol) here when Kelly is active.
+                    // A zero kelly_base means non-positive EV — the full_kelly_cap zero-check
+                    // below will reject the trade. Clamping up to min_size_sol first would
+                    // inflate a negative-EV signal past the zero-cap guard.
+                    if kelly_base.is_zero() {
+                        kelly_base
+                    } else {
+                        kelly_base
+                            .max(self.config.min_size_sol)
+                            .min(self.config.max_size_sol)
+                    }
                 }
                 Err(_) => {
                     // < 10 closed trades: scale base size by WQS quality and sample confidence
@@ -229,8 +237,20 @@ impl PositionSizer {
 
         // When Kelly is active, cap at full Kelly × capital before the strategy_max clamp.
         // Full Kelly already maximises long-term growth; exceeding it guarantees ruin.
+        //
+        // Zero cap means Kelly (or its fallback) calculated a non-positive EV for this
+        // wallet. Reject immediately — trading at min_size_sol in this case causes "death
+        // by a thousand cuts" as the engine bleeds capital on negative-EV signals.
         if let Some(cap) = full_kelly_cap {
-            if size > cap && !cap.is_zero() {
+            if cap.is_zero() {
+                tracing::warn!(
+                    wallet = %factors.wallet_address,
+                    strategy = ?factors.strategy,
+                    "Kelly cap is zero (negative EV or insufficient allocation) — rejecting trade"
+                );
+                return Decimal::ZERO;
+            }
+            if size > cap {
                 tracing::debug!(
                     wallet = %factors.wallet_address,
                     pre_cap_size = %size,
