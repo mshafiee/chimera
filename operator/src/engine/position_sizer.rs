@@ -114,7 +114,17 @@ impl PositionSizer {
                         .unwrap_or(Decimal::ONE);
                     let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                         .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
-                    (self.config.base_size_sol * wqs_factor * confidence).max(self.config.min_size_sol)
+                    // Set a conservative capital cap so the multiplicative chain (regime,
+                    // consensus, quality) cannot push an unproven wallet past a modest
+                    // fraction of total capital. Scales linearly: 0 trades → 2%, 9 trades → 9.2%.
+                    // This mirrors the full_kelly_cap guard used when Kelly is available.
+                    let fallback_cap_pct = Decimal::from_f64_retain(
+                        (trade_count as f64 / 10.0 * 0.08 + 0.02).min(0.10)
+                    ).unwrap_or(dec!(0.02));
+                    full_kelly_cap = Some(factors.total_capital_sol * fallback_cap_pct);
+                    (self.config.base_size_sol * wqs_factor * confidence)
+                        .max(self.config.min_size_sol)
+                        .min(self.config.max_size_sol)
                 }
             }
         } else {
@@ -126,7 +136,9 @@ impl PositionSizer {
                 .unwrap_or(Decimal::ONE);
             let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                 .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
-            (self.config.base_size_sol * wqs_factor * confidence).max(self.config.min_size_sol)
+            (self.config.base_size_sol * wqs_factor * confidence)
+                .max(self.config.min_size_sol)
+                .min(self.config.max_size_sol)
         };
 
         // Confidence multiplier (using Decimal)

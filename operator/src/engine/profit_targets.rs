@@ -264,11 +264,26 @@ impl ProfitTargetManager {
         //
         // Spear positions use a 50% wider trailing distance to avoid being shaken out by
         // the higher volatility of their more aggressive token selection.
-        let trailing_distance = if strategy == "SPEAR" {
+        // Additionally, the trailing distance widens for highly volatile tokens (mirrors
+        // stop_loss.rs adaptive logic) so microcaps aren't stopped out by normal intraday
+        // retracements. Cap at 40% so the stop remains actionable.
+        let base_trailing_distance = if strategy == "SPEAR" {
             self.config.trailing_stop_distance
                 * Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
         } else {
             self.config.trailing_stop_distance
+        };
+        let trailing_distance = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
+            let vol_mult = if vol > 50.0 {
+                Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
+            } else if vol > 30.0 {
+                Decimal::from_str("1.25").unwrap_or(Decimal::ONE)
+            } else {
+                Decimal::ONE
+            };
+            (base_trailing_distance * vol_mult).min(Decimal::from(40))
+        } else {
+            base_trailing_distance
         };
         if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;

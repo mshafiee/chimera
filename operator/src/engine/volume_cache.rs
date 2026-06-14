@@ -75,18 +75,60 @@ impl VolumeCache {
         token_history.back().map(|(_, volume)| *volume)
     }
 
-    /// Check if volume dropped significantly (>50% from 24h average)
+    /// Check if volume dropped significantly compared to a time-matched baseline.
+    ///
+    /// Compares the 60-minute recent average to the prior 23-hour baseline
+    /// (excluding the most recent hour). This accounts for normal diurnal volume
+    /// patterns (lower during Asian/EU overlap vs US hours) and avoids false exits
+    /// from a single quiet data point.
+    ///
+    /// Falls back to single-point vs full 24h average when insufficient data exists
+    /// (< 3 recent samples or < 12 baseline samples).
     pub fn has_volume_drop(&self, token_address: &str, threshold_percent: Decimal) -> bool {
-        if let (Some(current), Some(average)) = (
-            self.get_current_volume(token_address),
-            self.get_24h_average_volume(token_address),
-        ) {
-            if average > Decimal::ZERO {
-                let drop = average - current;
-                let drop_percent = (drop / average) * Decimal::from(100);
-                return drop_percent >= threshold_percent;
+        let history = self.volume_history.read();
+        let token_history = match history.get(token_address) {
+            Some(h) if !h.is_empty() => h,
+            _ => return false,
+        };
+
+        let now = Utc::now();
+        let recent_cutoff = now - Duration::minutes(60);
+        let baseline_cutoff = now - Duration::hours(24);
+
+        let recent_samples: Vec<Decimal> = token_history
+            .iter()
+            .filter(|(t, _)| *t >= recent_cutoff)
+            .map(|(_, v)| *v)
+            .collect();
+
+        let baseline_samples: Vec<Decimal> = token_history
+            .iter()
+            .filter(|(t, _)| *t >= baseline_cutoff && *t < recent_cutoff)
+            .map(|(_, v)| *v)
+            .collect();
+
+        // Windowed comparison: recent 60 min vs prior 23 h baseline
+        if recent_samples.len() >= 3 && baseline_samples.len() >= 12 {
+            let recent_avg = recent_samples.iter().copied().sum::<Decimal>()
+                / Decimal::from(recent_samples.len());
+            let baseline_avg = baseline_samples.iter().copied().sum::<Decimal>()
+                / Decimal::from(baseline_samples.len());
+            if baseline_avg > Decimal::ZERO {
+                let drop_pct = (baseline_avg - recent_avg) / baseline_avg * Decimal::from(100);
+                return drop_pct >= threshold_percent;
             }
         }
+
+        // Fallback: single most-recent point vs full 24 h average (original behaviour)
+        if let Some(current) = token_history.back().map(|(_, v)| *v) {
+            let total: Decimal = token_history.iter().map(|(_, v)| *v).sum();
+            let avg = total / Decimal::from(token_history.len());
+            if avg > Decimal::ZERO {
+                let drop_pct = (avg - current) / avg * Decimal::from(100);
+                return drop_pct >= threshold_percent;
+            }
+        }
+
         false
     }
 }
