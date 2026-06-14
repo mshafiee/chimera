@@ -42,7 +42,7 @@ mod tests {
         // Current price same as entry price
         price_cache.set_price(token, entry_price, PriceSource::Jupiter);
 
-        let detector = MomentumExit::new(pool, price_cache);
+        let detector = MomentumExit::new(pool, price_cache, 30);
         let action = detector
             .check_momentum("uuid-stable", token, entry_price, SystemTime::now())
             .await;
@@ -69,7 +69,7 @@ mod tests {
         let entry_time_new = SystemTime::now() - Duration::from_secs(120);
         let price_4pct = Decimal::from_str("0.96").unwrap();
         price_cache.set_price(token, price_4pct, PriceSource::Jupiter);
-        let detector = MomentumExit::new(pool.clone(), price_cache.clone());
+        let detector = MomentumExit::new(pool.clone(), price_cache.clone(), 30);
         let action_4pct = detector
             .check_momentum("uuid-drop-4", token, entry_price, entry_time_new)
             .await;
@@ -82,7 +82,7 @@ mod tests {
         // 6% drop on a 2-minute-old position: should trigger (above 5% early threshold)
         let price_6pct = Decimal::from_str("0.94").unwrap();
         price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
-        let detector2 = MomentumExit::new(pool.clone(), price_cache.clone());
+        let detector2 = MomentumExit::new(pool.clone(), price_cache.clone(), 30);
         let action_6pct = detector2
             .check_momentum("uuid-drop-6", token, entry_price, entry_time_new)
             .await;
@@ -95,7 +95,7 @@ mod tests {
         // 6% drop on a 20-minute-old position: should NOT trigger (base is back to 8%)
         let entry_time_old = SystemTime::now() - Duration::from_secs(1200);
         price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
-        let detector3 = MomentumExit::new(pool, price_cache);
+        let detector3 = MomentumExit::new(pool, price_cache, 30);
         let action_6pct_old = detector3
             .check_momentum("uuid-drop-6-old", token, entry_price, entry_time_old)
             .await;
@@ -116,7 +116,7 @@ mod tests {
         let token = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
         let entry_price = Decimal::from_str("1.0").unwrap();
 
-        let detector = MomentumExit::new(pool, price_cache);
+        let detector = MomentumExit::new(pool, price_cache, 30);
         let action = detector
             .check_momentum("uuid-noprice", token, entry_price, SystemTime::now())
             .await;

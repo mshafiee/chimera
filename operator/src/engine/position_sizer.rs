@@ -236,19 +236,20 @@ impl PositionSizer {
             crate::models::Strategy::Exit => self.config.max_size_sol,
         };
 
-        // Enforce minimum bounds first, then strictly cap at strategy_max.
-        // This ensures that even if strategy_max < min_size_sol, the maximum
-        // exposure limit is strictly respected.
-        size = size.max(self.config.min_size_sol).min(strategy_max);
-
+        // Reject dust trades: if strategy_max is below min_size_sol, the resulting size
+        // would be unviable — too small to clear DEX tick constraints or survive gas costs.
+        // Return zero so the caller can reject the trade cleanly rather than submit a dust tx.
         if strategy_max < self.config.min_size_sol {
             tracing::warn!(
                 strategy = ?factors.strategy,
                 strategy_max = %strategy_max,
                 min_size_sol = %self.config.min_size_sol,
-                "strategy_max is below min_size_sol — clamping strictly to strategy_max to protect capital; check config"
+                "Rejecting trade: strategy_max is below min_size_sol — would produce unviable dust trade; check config"
             );
+            return Decimal::ZERO;
         }
+
+        size = size.max(self.config.min_size_sol).min(strategy_max);
 
         size
     }

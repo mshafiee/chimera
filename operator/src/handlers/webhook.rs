@@ -508,6 +508,29 @@ pub async fn webhook_handler(
                 regime_multiplier,
             };
             trade_amount_sol = sizer.calculate_size(factors).await;
+            if trade_amount_sol.is_zero() {
+                tracing::warn!(
+                    trade_uuid = %signal.trade_uuid,
+                    "Signal rejected: position sizer returned zero size (strategy_max < min_size_sol — check config)"
+                );
+                let _ = db::insert_dead_letter(
+                    &state.db,
+                    Some(&signal.trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "POSITION_SIZE_ZERO",
+                    Some("strategy_max is below min_size_sol; trade rejected to prevent dust transaction"),
+                    None,
+                )
+                .await;
+                return Ok((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid: signal.trade_uuid,
+                        reason: Some("Position size zero: strategy_max below min_size_sol".to_string()),
+                    }),
+                ));
+            }
             tracing::info!(
                 trade_uuid = %signal.trade_uuid,
                 trade_amount_sol = ?trade_amount_sol,

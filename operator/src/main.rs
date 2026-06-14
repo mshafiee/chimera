@@ -603,6 +603,7 @@ async fn main() -> anyhow::Result<()> {
             db_pool.clone(),
             price_cache.clone(),
             volume_cache,
+            config.profit_management.wick_protection_secs,
         ));
         let profit_target_mgr = Arc::new(ProfitTargetManager::with_extras(
             db_pool.clone(),

@@ -27,6 +27,9 @@ pub struct MomentumExit {
     db: DbPool,
     price_cache: Arc<PriceCache>,
     volume_cache: Option<Arc<VolumeCache>>,
+    /// Grace period matching stop_loss.rs wick_protection_secs — price-drop check is suppressed
+    /// during this window to avoid exiting on the entry-candle wick.
+    wick_protection_secs: u64,
 }
 
 /// Position entry data for momentum tracking
@@ -42,11 +45,12 @@ struct PositionEntry {
 
 impl MomentumExit {
     /// Create a new momentum exit detector
-    pub fn new(db: DbPool, price_cache: Arc<PriceCache>) -> Self {
+    pub fn new(db: DbPool, price_cache: Arc<PriceCache>, wick_protection_secs: u64) -> Self {
         Self {
             db,
             price_cache,
             volume_cache: None,
+            wick_protection_secs,
         }
     }
 
@@ -55,11 +59,13 @@ impl MomentumExit {
         db: DbPool,
         price_cache: Arc<PriceCache>,
         volume_cache: Arc<VolumeCache>,
+        wick_protection_secs: u64,
     ) -> Self {
         Self {
             db,
             price_cache,
             volume_cache: Some(volume_cache),
+            wick_protection_secs,
         }
     }
 
@@ -107,46 +113,62 @@ impl MomentumExit {
         let elapsed = entry_time.elapsed().unwrap_or_default();
         let elapsed_minutes = elapsed.as_secs() / 60;
 
-        // RSI requires 16 samples (~15 min). Before RSI is available, use a tighter base so
-        // new positions get equivalent protection. Once RSI is active, widen to 8% to avoid
-        // false exits on normal Solana intraday noise (30%+ daily vol).
-        let base_drop_threshold = if elapsed_minutes < 16 {
-            Decimal::from(5)
+        // Respect the same wick-protection grace period as stop_loss.rs.
+        // A sharp single-candle wick immediately after entry should not trigger a momentum
+        // exit when stop_loss.rs would ignore it. Volume and RSI checks are ungated because
+        // they reflect genuine structural breakdown rather than a transient wick.
+        let in_wick_window = elapsed.as_secs() < self.wick_protection_secs;
+
+        if !in_wick_window {
+            // RSI requires 16 samples (~15 min). Before RSI is available, use a tighter base so
+            // new positions get equivalent protection. Once RSI is active, widen to 8% to avoid
+            // false exits on normal Solana intraday noise (30%+ daily vol).
+            let base_drop_threshold = if elapsed_minutes < 16 {
+                Decimal::from(5)
+            } else {
+                Decimal::from(8)
+            };
+            // Widen threshold for high-volatility tokens to avoid shakeout exits.
+            // At 30% vol → 8+6=14%, at 50% vol → 8+10=18%, capped at 20%.
+            // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,
+            // max +5 pts) so long-held positions aren't exited on normal intraday noise.
+            let price_drop_threshold = {
+                let vol_bonus = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
+                    let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
+                    vol_dec * Decimal::from_str("0.2").unwrap_or(Decimal::ZERO)
+                } else {
+                    Decimal::ZERO
+                };
+                let age_bonus = if elapsed_minutes > 5 {
+                    // Use f64 division to avoid the integer-division cliff where positions
+                    // 5–59 minutes old get zero bonus but 60 minutes jumps to 0.5%.
+                    let hours = Decimal::from_f64_retain(elapsed_minutes as f64 / 60.0)
+                        .unwrap_or(Decimal::ZERO);
+                    (hours / Decimal::from(2)).min(Decimal::from(5))
+                } else {
+                    Decimal::ZERO
+                };
+                (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(20))
+            };
+            if price_drop_percent >= price_drop_threshold {
+                let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    price_drop_percent = price_drop_f64,
+                    elapsed_minutes = elapsed_minutes,
+                    threshold = ?price_drop_threshold,
+                    "Negative momentum detected: price drop exceeds threshold"
+                );
+                return MomentumExitAction::Exit;
+            }
         } else {
-            Decimal::from(8)
-        };
-        // Widen threshold for high-volatility tokens to avoid shakeout exits.
-        // At 30% vol → 8+6=14%, at 50% vol → 8+10=18%, capped at 20%.
-        // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,
-        // max +5 pts) so long-held positions aren't exited on normal intraday noise.
-        let price_drop_threshold = {
-            let vol_bonus = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
-                let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
-                vol_dec * Decimal::from_str("0.2").unwrap_or(Decimal::ZERO)
-            } else {
-                Decimal::ZERO
-            };
-            let age_bonus = if elapsed_minutes > 5 {
-                // Use f64 division to avoid the integer-division cliff where positions
-                // 5–59 minutes old get zero bonus but 60 minutes jumps to 0.5%.
-                let hours = Decimal::from_f64_retain(elapsed_minutes as f64 / 60.0)
-                    .unwrap_or(Decimal::ZERO);
-                (hours / Decimal::from(2)).min(Decimal::from(5))
-            } else {
-                Decimal::ZERO
-            };
-            (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(20))
-        };
-        if price_drop_percent >= price_drop_threshold {
-            let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
-            tracing::warn!(
+            tracing::debug!(
                 trade_uuid = %trade_uuid,
-                price_drop_percent = price_drop_f64,
-                elapsed_minutes = elapsed_minutes,
-                threshold = ?price_drop_threshold,
-                "Negative momentum detected: price drop exceeds threshold"
+                elapsed_secs = elapsed.as_secs(),
+                wick_protection_secs = self.wick_protection_secs,
+                price_drop_percent = ?price_drop_percent,
+                "Momentum price-drop check suppressed: within wick-protection window"
             );
-            return MomentumExitAction::Exit;
         }
 
         // Check 2: Volume drop (>65% from 24h average).

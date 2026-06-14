@@ -194,6 +194,21 @@ impl StopLossManager {
         // max() on negative numbers gives the TIGHTER (less negative) threshold.
         let effective_threshold = stop_loss_threshold.max(self.config.max_stop_loss_distance);
 
+        // Warn when max_stop_loss_distance overrides adaptive widening so the operator can
+        // see in logs that volatile/consensus tokens are being stopped tighter than intended.
+        // To allow adaptive stops to breathe, set max_stop_loss_distance to a larger negative
+        // value (e.g. -50) in config.yaml.
+        if self.config.max_stop_loss_distance > stop_loss_threshold {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                adaptive_threshold = %stop_loss_threshold,
+                max_stop_loss_distance = %self.config.max_stop_loss_distance,
+                effective_threshold = %effective_threshold,
+                "Adaptive stop-loss widening overridden by max_stop_loss_distance; \
+                 set max_stop_loss_distance to a larger negative (e.g. -50) to let adaptive stops breathe"
+            );
+        }
+
         if loss_percent <= effective_threshold {
             let elapsed_secs = chrono::Utc::now().signed_duration_since(entry_time).num_seconds();
             if elapsed_secs < self.config.wick_protection_secs as i64 {
