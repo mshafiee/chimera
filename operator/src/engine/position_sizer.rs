@@ -234,19 +234,19 @@ impl PositionSizer {
             crate::models::Strategy::Spear => self.config.spear_max_size_sol,
             crate::models::Strategy::Exit => self.config.max_size_sol,
         };
-        size = size.min(strategy_max);
-        // Enforce the minimum AFTER capping to strategy_max so that if strategy_max <
-        // min_size_sol the minimum always wins and the misconfiguration is visible in logs.
-        if size < self.config.min_size_sol {
-            if strategy_max < self.config.min_size_sol {
-                tracing::warn!(
-                    strategy = ?factors.strategy,
-                    strategy_max = %strategy_max,
-                    min_size_sol = %self.config.min_size_sol,
-                    "strategy_max is below min_size_sol — clamping to min_size_sol; check config"
-                );
-            }
-            size = self.config.min_size_sol;
+
+        // Enforce minimum bounds first, then strictly cap at strategy_max.
+        // This ensures that even if strategy_max < min_size_sol, the maximum
+        // exposure limit is strictly respected.
+        size = size.max(self.config.min_size_sol).min(strategy_max);
+
+        if strategy_max < self.config.min_size_sol {
+            tracing::warn!(
+                strategy = ?factors.strategy,
+                strategy_max = %strategy_max,
+                min_size_sol = %self.config.min_size_sol,
+                "strategy_max is below min_size_sol — clamping strictly to strategy_max to protect capital; check config"
+            );
         }
 
         size
