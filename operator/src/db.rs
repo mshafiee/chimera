@@ -7,6 +7,7 @@ use crate::config::DatabaseConfig;
 use crate::error::{AppError, AppResult};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Row, Sqlite};
+use std::collections::HashMap;
 // Path removed
 
 use rust_decimal::prelude::*;
@@ -233,9 +234,9 @@ pub async fn update_trade_costs(
 ) -> AppResult<()> {
     let total_cost_sol = jito_tip_sol + dex_fee_sol + slippage_cost_sol;
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"
-        UPDATE trades 
+        UPDATE trades
         SET jito_tip_sol = ?, dex_fee_sol = ?, slippage_cost_sol = ?, total_cost_sol = ?
         WHERE trade_uuid = ?
         "#,
@@ -248,6 +249,13 @@ pub async fn update_trade_costs(
     .execute(pool)
     .await?;
 
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!(
+            "trade_uuid {} not found",
+            trade_uuid
+        )));
+    }
+
     Ok(())
 }
 
@@ -257,9 +265,9 @@ pub async fn update_trade_net_pnl(
     trade_uuid: &str,
     net_pnl_sol: Decimal,
 ) -> AppResult<()> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
-        UPDATE trades 
+        UPDATE trades
         SET net_pnl_sol = ?
         WHERE trade_uuid = ?
         "#,
@@ -268,6 +276,13 @@ pub async fn update_trade_net_pnl(
     .bind(trade_uuid)
     .execute(pool)
     .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!(
+            "trade_uuid {} not found",
+            trade_uuid
+        )));
+    }
 
     Ok(())
 }
@@ -297,6 +312,55 @@ pub async fn insert_dead_letter(
     .await?;
 
     Ok(result.last_insert_rowid())
+}
+
+/// Atomically mark a trade as DEAD_LETTER and insert it into the dead_letter_queue.
+///
+/// Both the status update on `trades` and the DLQ insert are wrapped in a single
+/// BEGIN IMMEDIATE transaction so the two writes are never observed in a partial state.
+pub async fn mark_dead_letter(
+    pool: &DbPool,
+    trade_uuid: &str,
+    payload: &str,
+    error: &str,
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+
+    // Update the trade status to DEAD_LETTER (preserve existing tx_signature)
+    let result = sqlx::query(
+        r#"
+        UPDATE trades
+        SET status = 'DEAD_LETTER', error_message = ?
+        WHERE trade_uuid = ?
+        "#,
+    )
+    .bind(error)
+    .bind(trade_uuid)
+    .execute(&mut *tx)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!(
+            "trade_uuid '{}' not found",
+            trade_uuid
+        )));
+    }
+
+    // Insert into dead letter queue
+    sqlx::query(
+        r#"
+        INSERT INTO dead_letter_queue (trade_uuid, payload, reason, error_details)
+        VALUES (?, ?, 'DEAD_LETTER', ?)
+        "#,
+    )
+    .bind(trade_uuid)
+    .bind(payload)
+    .bind(error)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Log a configuration change
@@ -534,17 +598,19 @@ pub async fn get_pnl_prev_window(
     from_hours: u32,
     to_hours: u32,
 ) -> AppResult<Decimal> {
-    let result: (Option<f64>,) = sqlx::query_as(&format!(
+    let from_modifier = format!("-{} hours", from_hours);
+    let to_modifier = format!("-{} hours", to_hours);
+    let result: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT CAST(COALESCE(SUM(realized_pnl_sol), 0) AS REAL)
         FROM positions
         WHERE state = 'CLOSED'
-        AND closed_at >= datetime('now', '-{from_hours} hours')
-        AND closed_at < datetime('now', '-{to_hours} hours')
+        AND closed_at >= datetime('now', ?)
+        AND closed_at < datetime('now', ?)
         "#,
-        from_hours = from_hours,
-        to_hours = to_hours,
-    ))
+    )
+    .bind(&from_modifier)
+    .bind(&to_modifier)
     .fetch_one(pool)
     .await?;
     Ok(Decimal::from_f64_retain(result.0.unwrap_or(0.0)).unwrap_or(Decimal::ZERO))
@@ -972,6 +1038,37 @@ pub async fn close_position(
         );
     }
 
+    // Bulk-fetch entry-leg costs for all positions in a single query to avoid N+1.
+    // Collect the entry trade_uuids first, then issue one SELECT ... WHERE trade_uuid IN (...).
+    let entry_uuids: Vec<String> = active_positions
+        .iter()
+        .map(|(_, _, _, uuid)| uuid.clone())
+        .collect();
+
+    // Build a HashMap<trade_uuid, (jito_tip, dex_fee, slippage)> from one round-trip.
+    let mut entry_costs_map: HashMap<String, (f64, f64, f64)> = HashMap::new();
+    if !entry_uuids.is_empty() {
+        // sqlx does not support dynamic IN-list binding directly, so build the
+        // parameterised SQL with the correct number of placeholders.
+        let placeholders = entry_uuids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let bulk_sql = format!(
+            "SELECT trade_uuid, jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid IN ({})",
+            placeholders
+        );
+        let mut bulk_q = sqlx::query_as::<_, (String, f64, f64, f64)>(&bulk_sql);
+        for uuid in &entry_uuids {
+            bulk_q = bulk_q.bind(uuid);
+        }
+        let cost_rows: Vec<(String, f64, f64, f64)> = bulk_q.fetch_all(&mut *tx).await?;
+        for (uuid, tip, dex, slip) in cost_rows {
+            entry_costs_map.insert(uuid, (tip, dex, slip));
+        }
+    }
+
     let mut gross_pnl = Decimal::ZERO;
     let mut entry_total_costs = Decimal::ZERO;
 
@@ -993,15 +1090,8 @@ pub async fn close_position(
             Decimal::ZERO
         };
 
-        // Scale entry-leg costs proportionally to the fraction being exited
-        let entry_costs: Option<(f64, f64, f64)> = sqlx::query_as(
-            "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
-        )
-        .bind(entry_trade_uuid)
-        .fetch_optional(&mut *tx)
-        .await?;
-
-        if let Some((et, ed, es)) = entry_costs {
+        // Scale entry-leg costs proportionally to the fraction being exited (from pre-fetched map)
+        if let Some(&(et, ed, es)) = entry_costs_map.get(entry_trade_uuid.as_str()) {
             let proportional_entry_cost = (Decimal::from_f64_retain(et).unwrap_or(Decimal::ZERO)
                 + Decimal::from_f64_retain(ed).unwrap_or(Decimal::ZERO)
                 + Decimal::from_f64_retain(es).unwrap_or(Decimal::ZERO))
@@ -1113,6 +1203,7 @@ pub async fn get_stuck_positions(
     stuck_seconds: i64,
 ) -> AppResult<Vec<PositionRecord>> {
     #[allow(clippy::type_complexity)]
+    let modifier = format!("-{} seconds", stuck_seconds);
     let positions: Vec<(
         i64,
         String,
@@ -1125,14 +1216,14 @@ pub async fn get_stuck_positions(
         String,
     )> = sqlx::query_as(
         r#"
-        SELECT id, trade_uuid, wallet_address, token_address, strategy, state, 
+        SELECT id, trade_uuid, wallet_address, token_address, strategy, state,
                entry_tx_signature, exit_tx_signature, last_updated
         FROM positions
         WHERE state = 'EXITING'
-        AND last_updated < datetime('now', ? || ' seconds')
+        AND last_updated < datetime('now', ?)
         "#,
     )
-    .bind(-stuck_seconds)
+    .bind(&modifier)
     .fetch_all(pool)
     .await?;
 
@@ -1516,6 +1607,19 @@ pub struct ActivePositionSummary {
     pub entry_amount_sol: Decimal,
 }
 
+/// Get the peak price recorded for a position (used by trailing stop / profit-target logic).
+///
+/// Peak price is stored in `exit_targets`, not `positions` — querying `positions` would
+/// always return NULL because that column does not exist on the positions table.
+pub async fn get_position_peak_price(pool: &DbPool, trade_uuid: &str) -> AppResult<Option<f64>> {
+    let row: Option<(f64,)> =
+        sqlx::query_as("SELECT peak_price FROM exit_targets WHERE trade_uuid = ?")
+            .bind(trade_uuid)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(p,)| p))
+}
+
 /// Get trade_uuid, token_address, entry_price, and size for all ACTIVE/EXITING positions (PnL refresh)
 pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePositionSummary>> {
     let rows: Vec<(String, String, f64, f64)> = sqlx::query_as(
@@ -1700,10 +1804,11 @@ pub async fn get_wallet_by_address(
     Ok(wallet)
 }
 
-/// Add or update a wallet in the database
+/// Add or update a wallet in the database (atomic upsert — no TOCTOU race).
 ///
 /// If the wallet doesn't exist, it will be created with CANDIDATE status.
-/// If it exists, it will be updated with new metrics.
+/// If it exists, all mutable metric fields are updated atomically via
+/// INSERT … ON CONFLICT(address) DO UPDATE SET — no separate SELECT required.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_wallet(
     pool: &DbPool,
@@ -1718,72 +1823,45 @@ pub async fn upsert_wallet(
     last_trade_at: Option<&str>,
     notes: Option<&str>,
 ) -> AppResult<bool> {
-    // Check if wallet exists
-    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallets WHERE address = ?")
-        .bind(address)
-        .fetch_one(pool)
-        .await?;
+    let avg_trade_size_f64 = avg_trade_size_sol.map(|d| d.to_f64().unwrap_or(0.0));
 
-    if exists > 0 {
-        // Update existing wallet
-        sqlx::query(
-            r#"
-            UPDATE wallets
-            SET wqs_score = COALESCE(?, wqs_score),
-                roi_7d = COALESCE(?, roi_7d),
-                roi_30d = COALESCE(?, roi_30d),
-                trade_count_30d = COALESCE(?, trade_count_30d),
-                win_rate = COALESCE(?, win_rate),
-                max_drawdown_30d = COALESCE(?, max_drawdown_30d),
-                avg_trade_size_sol = COALESCE(?, avg_trade_size_sol),
-                last_trade_at = COALESCE(?, last_trade_at),
-                notes = COALESCE(?, notes),
-                updated_at = CURRENT_TIMESTAMP
-            WHERE address = ?
-            "#,
+    let result = sqlx::query(
+        r#"
+        INSERT INTO wallets (
+            address, status, wqs_score, roi_7d, roi_30d,
+            trade_count_30d, win_rate, max_drawdown_30d,
+            avg_trade_size_sol, last_trade_at, notes,
+            created_at, updated_at
         )
-        .bind(wqs_score)
-        .bind(roi_7d)
-        .bind(roi_30d)
-        .bind(trade_count_30d)
-        .bind(win_rate)
-        .bind(max_drawdown_30d)
-        .bind(avg_trade_size_sol.map(|d| d.to_f64().unwrap_or(0.0)))
-        .bind(last_trade_at)
-        .bind(notes)
-        .bind(address)
-        .execute(pool)
-        .await?;
+        VALUES (?, 'CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        ON CONFLICT(address) DO UPDATE SET
+            wqs_score        = COALESCE(excluded.wqs_score, wqs_score),
+            roi_7d           = COALESCE(excluded.roi_7d, roi_7d),
+            roi_30d          = COALESCE(excluded.roi_30d, roi_30d),
+            trade_count_30d  = COALESCE(excluded.trade_count_30d, trade_count_30d),
+            win_rate         = COALESCE(excluded.win_rate, win_rate),
+            max_drawdown_30d = COALESCE(excluded.max_drawdown_30d, max_drawdown_30d),
+            avg_trade_size_sol = COALESCE(excluded.avg_trade_size_sol, avg_trade_size_sol),
+            last_trade_at    = COALESCE(excluded.last_trade_at, last_trade_at),
+            notes            = COALESCE(excluded.notes, notes),
+            updated_at       = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(address)
+    .bind(wqs_score)
+    .bind(roi_7d)
+    .bind(roi_30d)
+    .bind(trade_count_30d)
+    .bind(win_rate)
+    .bind(max_drawdown_30d)
+    .bind(avg_trade_size_f64)
+    .bind(last_trade_at)
+    .bind(notes)
+    .execute(pool)
+    .await?;
 
-        Ok(true) // Updated
-    } else {
-        // Insert new wallet
-        sqlx::query(
-            r#"
-            INSERT INTO wallets (
-                address, status, wqs_score, roi_7d, roi_30d,
-                trade_count_30d, win_rate, max_drawdown_30d,
-                avg_trade_size_sol, last_trade_at, notes,
-                created_at, updated_at
-            )
-            VALUES (?, 'CANDIDATE', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            "#,
-        )
-        .bind(address)
-        .bind(wqs_score)
-        .bind(roi_7d)
-        .bind(roi_30d)
-        .bind(trade_count_30d)
-        .bind(win_rate)
-        .bind(max_drawdown_30d)
-        .bind(avg_trade_size_sol.map(|d| d.to_f64().unwrap_or(0.0)))
-        .bind(last_trade_at)
-        .bind(notes)
-        .execute(pool)
-        .await?;
-
-        Ok(false) // Created
-    }
+    // rows_affected == 1 on INSERT (new row), == 2 on conflict UPDATE in SQLite
+    Ok(result.rows_affected() != 1)
 }
 
 /// Update wallet status with optional TTL
@@ -2156,14 +2234,7 @@ pub async fn get_trades(
     }
 
     query.push_str(" ORDER BY created_at DESC");
-
-    if let Some(lim) = limit {
-        query.push_str(&format!(" LIMIT {}", lim));
-    }
-
-    if let Some(off) = offset {
-        query.push_str(&format!(" OFFSET {}", off));
-    }
+    query.push_str(" LIMIT ? OFFSET ?");
 
     // Execute with bindings
     let mut q = sqlx::query_as::<_, TradeDetail>(&query);
@@ -2171,6 +2242,11 @@ pub async fn get_trades(
     for binding in bindings {
         q = q.bind(binding);
     }
+
+    // Bind LIMIT and OFFSET as parameters to avoid SQL injection via format!()
+    let lim = limit.unwrap_or(1000);
+    let off = offset.unwrap_or(0);
+    q = q.bind(lim).bind(off);
 
     let trades = q.fetch_all(pool).await?;
     Ok(trades)

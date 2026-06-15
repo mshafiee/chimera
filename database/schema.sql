@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS positions (
 CREATE INDEX IF NOT EXISTS idx_positions_state ON positions(state);
 CREATE INDEX IF NOT EXISTS idx_positions_state_updated ON positions(state, last_updated);
 CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_positions_wallet_token ON positions(wallet_address, token_address);
 
 -- =============================================================================
 -- WALLET MANAGEMENT TABLES
@@ -159,6 +160,17 @@ CREATE TABLE IF NOT EXISTS kill_switch_state (
     changed_by TEXT NOT NULL DEFAULT 'SYSTEM',
     reason     TEXT
 );
+
+-- Circuit breaker state persistence: single-row table read on startup to restore
+-- the last known circuit breaker state across process restarts.
+CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    state TEXT NOT NULL DEFAULT 'Active',
+    tripped_at TEXT,
+    trip_reason TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+INSERT OR IGNORE INTO circuit_breaker_state (id, state) VALUES (1, 'Active');
 
 -- Admin Wallets: Authorization for API access
 CREATE TABLE IF NOT EXISTS admin_wallets (
