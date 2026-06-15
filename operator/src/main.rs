@@ -1160,9 +1160,9 @@ async fn main() -> anyhow::Result<()> {
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: _engine_handle.clone(),
-        token_parser,
+        token_parser: token_parser.clone(),
         circuit_breaker: circuit_breaker.clone(),
-        portfolio_heat: Some(portfolio_heat),
+        portfolio_heat: Some(portfolio_heat.clone()),
         signal_aggregator: Some(signal_aggregator.clone()),
         market_regime: Some(market_regime_detector.clone()),
         helius_client: helius_client.clone(),
@@ -1268,6 +1268,8 @@ async fn main() -> anyhow::Result<()> {
         .with_state(Arc::new(WalletAuthState {
             db: db_pool.clone(),
             jwt_secret,
+            // FIX 11: Initialize auth nonce store for replay protection
+            seen_auth_nonces: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
         }));
 
     // Build WebSocket routes — require bearer auth to prevent unauthenticated position data leaks
@@ -1299,7 +1301,12 @@ async fn main() -> anyhow::Result<()> {
         _engine_handle.clone(),
         config_arc.clone(),
         Some(token_fetcher.clone()),
-    ) {
+    )
+    .map(|ms| {
+        ms.with_circuit_breaker(circuit_breaker.clone())
+            .with_token_parser(token_parser.clone())
+            .with_portfolio_heat(portfolio_heat.clone())
+    }) {
         Ok(monitoring_state) => {
             let monitoring_state_arc = Arc::new(monitoring_state);
             tracing::info!(

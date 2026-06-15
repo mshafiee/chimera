@@ -83,11 +83,12 @@ impl HmacState {
     fn check_and_record_nonce(&self, nonce: &str, now: i64) -> bool {
         let mut store = self.seen_nonces.lock();
         // Evict expired entries to bound memory usage.
-        store.retain(|_, ts| now - *ts <= self.max_drift_secs);
+        // FIX 8: Use strict less-than to match the rejection gate (drift > max_drift_secs)
         // Hard cap: if post-eviction the store is still oversized, reject the new nonce
         // rather than dropping valid replay-protection entries. This prevents a burst of
         // requests from opening a replay window — callers receive false here and the
         // request is treated as a duplicate (safe fail-closed).
+        store.retain(|_, ts| now - *ts < self.max_drift_secs);
         if store.len() >= Self::MAX_NONCE_STORE {
             tracing::warn!(
                 store_size = store.len(),
@@ -281,12 +282,25 @@ fn verify_with_secrets(
 
 /// Constant-time string comparison to prevent timing attacks.
 ///
-/// Always iterates over max(a.len(), b.len()) bytes so the execution time
-/// does not reveal which input is shorter. Uses `subtle::ConstantTimeEq` on
-/// the byte slices to prevent compiler optimisations from reintroducing
-/// early-exit behaviour.
+/// Pads the shorter input to the length of the longer one before calling
+/// `ct_eq`, so that the comparison always iterates over the same number of
+/// bytes regardless of which input is shorter. This prevents an attacker
+/// from deducing the expected length by measuring execution time.
+///
+/// FIX 13: avoids early-exit on length mismatch that leaks expected length.
 fn constant_time_compare(a: &str, b: &str) -> bool {
-    a.as_bytes().ct_eq(b.as_bytes()).into()
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let max_len = a_bytes.len().max(b_bytes.len());
+
+    // Pad both to max_len with zeros so ct_eq always processes the same byte count
+    let mut a_padded = vec![0u8; max_len];
+    let mut b_padded = vec![0u8; max_len];
+    a_padded[..a_bytes.len()].copy_from_slice(a_bytes);
+    b_padded[..b_bytes.len()].copy_from_slice(b_bytes);
+
+    // ct_eq on equal-length slices — no early exit
+    a_padded.ct_eq(&b_padded).into()
 }
 
 /// Create an error response

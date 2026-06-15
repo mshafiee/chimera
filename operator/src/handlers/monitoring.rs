@@ -92,6 +92,22 @@ pub async fn helius_webhook_handler(
 
             // Only process signals from ACTIVE wallets
             if wallet.status == "ACTIVE" {
+                // FIX 1: Check circuit breaker before queuing
+                if let Some(ref cb) = state.circuit_breaker {
+                    if !cb.is_trading_allowed() {
+                        let reason = cb
+                            .trip_reason()
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "Circuit breaker tripped".to_string());
+                        tracing::warn!(
+                            wallet = %wallet_address,
+                            reason = %reason,
+                            "Helius webhook signal blocked by circuit breaker"
+                        );
+                        return StatusCode::SERVICE_UNAVAILABLE;
+                    }
+                }
+
                 // Generate signal
                 let direction = if swap.direction == crate::monitoring::SwapDirection::Buy {
                     Action::Buy
@@ -99,7 +115,16 @@ pub async fn helius_webhook_handler(
                     Action::Sell
                 };
 
+                // FIX 2: Determine strategy, downgrading Spear to Shield when in RPC fallback
+                let in_fallback = state.engine.is_in_fallback();
                 let strategy = if wallet.wqs_score.unwrap_or(0.0) >= 70.0 {
+                    Strategy::Shield
+                } else if in_fallback {
+                    // Cannot run Spear when primary RPC is unavailable; use Shield
+                    tracing::info!(
+                        wallet = %wallet_address,
+                        "RPC in fallback mode — downgrading Spear signal to Shield"
+                    );
                     Strategy::Shield
                 } else {
                     Strategy::Spear
@@ -110,6 +135,55 @@ pub async fn helius_webhook_handler(
                 } else {
                     swap.token_in.clone()
                 };
+
+                // FIX 1: Token fast_check before queuing (BUY only)
+                if direction == Action::Buy {
+                    if let Some(ref tp) = state.token_parser {
+                        match tp.fast_check(&target_token, strategy).await {
+                            Ok(result) if !result.safe => {
+                                let reason = result
+                                    .rejection_reason
+                                    .unwrap_or_else(|| "Token failed safety check".to_string());
+                                tracing::warn!(
+                                    wallet = %wallet_address,
+                                    token = %target_token,
+                                    reason = %reason,
+                                    "Helius webhook token rejected by fast-path safety check"
+                                );
+                                return StatusCode::OK; // Not an error on our end; just skip
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    token = %target_token,
+                                    error = %e,
+                                    "Helius webhook token fast-check failed; proceeding to slow path"
+                                );
+                            }
+                            Ok(_) => {} // safe — continue
+                        }
+                    }
+
+                    // FIX 1: Check portfolio heat before queuing BUY signals
+                    if let Some(ref ph) = state.portfolio_heat {
+                        match ph.can_open_position(swap.amount_in).await {
+                            Ok(false) => {
+                                tracing::warn!(
+                                    wallet = %wallet_address,
+                                    token = %target_token,
+                                    "Helius webhook BUY rejected: portfolio heat limit reached"
+                                );
+                                return StatusCode::SERVICE_UNAVAILABLE;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Portfolio heat check failed for Helius webhook; allowing"
+                                );
+                            }
+                            Ok(true) => {} // heat OK — continue
+                        }
+                    }
+                }
 
                 let signal_payload = SignalPayload {
                     wallet_address: wallet_address.clone(),

@@ -732,6 +732,8 @@ pub async fn update_config(
 
     {
     let mut config = state.config.write().await;
+    // FIX 4: Snapshot config before mutations so we can restore on validate() failure
+    let config_snapshot = config.clone();
 
     // Update circuit breakers if provided
     if let Some(cb) = body.circuit_breakers {
@@ -762,24 +764,28 @@ pub async fn update_config(
     }
 
     // Update strategy allocation if provided
+    // FIX 3: Always validate sum regardless of which field is provided
     if let Some(sa) = body.strategy_allocation {
-        if let Some(shield) = sa.shield_percent {
-            let spear = sa.spear_percent.unwrap_or(100 - shield);
-            if shield + spear != 100 {
-                return Err(AppError::Validation(
-                    "Strategy allocation must sum to 100%".to_string(),
-                ));
-            }
-            let old_shield = config.strategy.shield_percent;
-            let old_spear = config.strategy.spear_percent;
-            config.strategy.shield_percent = shield;
-            config.strategy.spear_percent = spear;
-            audit_entries.push((
-                "strategy.allocation".to_string(),
-                Some(format!("shield:{}/spear:{}", old_shield, old_spear)),
-                format!("shield:{}/spear:{}", shield, spear),
-            ));
+        // Apply any provided values on top of current config, then validate sum
+        let new_shield = sa.shield_percent.unwrap_or(config.strategy.shield_percent);
+        let new_spear = sa.spear_percent.unwrap_or(config.strategy.spear_percent);
+        if new_shield + new_spear != 100 {
+            return Err(AppError::Validation(format!(
+                "Strategy allocation must sum to 100% (shield: {} + spear: {} = {})",
+                new_shield,
+                new_spear,
+                new_shield + new_spear,
+            )));
         }
+        let old_shield = config.strategy.shield_percent;
+        let old_spear = config.strategy.spear_percent;
+        config.strategy.shield_percent = new_shield;
+        config.strategy.spear_percent = new_spear;
+        audit_entries.push((
+            "strategy.allocation".to_string(),
+            Some(format!("shield:{}/spear:{}", old_shield, old_spear)),
+            format!("shield:{}/spear:{}", new_shield, new_spear),
+        ));
     }
 
     // Update strategy position limits if provided
@@ -1136,6 +1142,16 @@ pub async fn update_config(
             config.queue.load_shed_threshold_percent = v;
             audit_entries.push(("queue.load_shed_threshold_percent".to_string(), Some(old.to_string()), v.to_string()));
         }
+    }
+
+    // FIX 4: Validate the mutated config before committing; restore snapshot on failure
+    if let Err(e) = config.validate() {
+        tracing::warn!(error = %e, "Config update rejected by validate(); restoring previous config");
+        *config = config_snapshot;
+        return Err(AppError::Validation(format!(
+            "Config validation failed: {}",
+            e
+        )));
     }
 
     } // end of config write lock scope — lock is released here
