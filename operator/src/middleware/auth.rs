@@ -80,8 +80,6 @@ pub struct AuthenticatedUser {
 pub struct AuthState {
     /// In-memory cache of API keys to roles
     api_keys: Arc<RwLock<HashMap<String, Role>>>,
-    /// In-memory cache of admin wallets to roles
-    admin_wallets: Arc<RwLock<HashMap<String, Role>>>,
     /// Secret for verifying JWT tokens
     jwt_secret: String,
     /// Whether to allow unauthenticated readonly access
@@ -93,21 +91,18 @@ impl AuthState {
     pub fn new(jwt_secret: String) -> Self {
         Self {
             api_keys: Arc::new(RwLock::new(HashMap::new())),
-            admin_wallets: Arc::new(RwLock::new(HashMap::new())),
             jwt_secret,
             allow_anonymous_readonly: false,
         }
     }
 
-    /// Create auth state with pre-configured API keys and admin wallets
+    /// Create auth state with pre-configured API keys
     pub fn with_auth_config(
         api_keys: HashMap<String, Role>,
-        admin_wallets: HashMap<String, Role>,
         jwt_secret: String,
     ) -> Self {
         Self {
             api_keys: Arc::new(RwLock::new(api_keys)),
-            admin_wallets: Arc::new(RwLock::new(admin_wallets)),
             jwt_secret,
             allow_anonymous_readonly: false,
         }
@@ -131,15 +126,13 @@ impl AuthState {
         keys.get(key).copied()
     }
 
-    /// Check wallet address in memory cache
-    async fn check_admin_wallet(&self, address: &str) -> Option<Role> {
-        let wallets = self.admin_wallets.read().await;
-        wallets.get(address).copied()
-    }
-
-    /// Authenticate a token (tries API key first, then admin_wallets, then JWT)
+    /// Authenticate a token (tries API key first, then JWT).
+    ///
+    /// Raw wallet addresses are NOT accepted as Bearer tokens — they are public
+    /// information and would allow any observer to spoof an admin session.
+    /// All wallet-based sessions must go through /auth/wallet to obtain a JWT.
     pub async fn authenticate(&self, token: &str) -> Option<AuthenticatedUser> {
-        // First check in-memory API keys
+        // First check in-memory API keys (high-entropy random strings, not wallet addresses)
         if let Some(role) = self.check_api_key(token).await {
             return Some(AuthenticatedUser {
                 identifier: token.to_string(),
@@ -147,15 +140,7 @@ impl AuthState {
             });
         }
 
-        // Then check in-memory admin wallets (token could be a wallet address)
-        if let Some(role) = self.check_admin_wallet(token).await {
-            return Some(AuthenticatedUser {
-                identifier: token.to_string(),
-                role,
-            });
-        }
-
-        // Finally try to decode as JWT
+        // Try to decode as JWT
         use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 
         // Define minimal claims struct for verification

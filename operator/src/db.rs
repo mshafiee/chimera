@@ -11,7 +11,7 @@ use sqlx::{Pool, Row, Sqlite};
 
 use rust_decimal::prelude::*;
 use std::str::FromStr;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Type alias for the SQLite connection pool
 pub type DbPool = Pool<Sqlite>;
@@ -37,11 +37,9 @@ pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
         .map_err(AppError::Database)?
         // Enable WAL mode for concurrent reads
         .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-        // Set busy timeout to 30 seconds (increased from 5s for heavy concurrent load)
-        // This handles cases where Python Scout is merging roster while Operator is
-        // updating trade statuses. WAL mode helps, but ATTACH DATABASE operations
-        // can still cause brief locks during merge.
-        .busy_timeout(std::time::Duration::from_secs(30))
+        // Set busy timeout to 60 seconds to cover large roster merges under concurrent writes.
+        // ATTACH DATABASE operations can hold a write lock for >30 s on rosters with 50k+ wallets.
+        .busy_timeout(std::time::Duration::from_secs(60))
         // Enable foreign keys
         .foreign_keys(true)
         // Create if not exists
@@ -71,6 +69,49 @@ pub async fn run_migrations(pool: &DbPool) -> AppResult<()> {
 
     info!("Database migrations applied successfully");
     Ok(())
+}
+
+/// Run PRAGMA integrity_check and fail fast if the database is corrupt.
+/// Call this at startup before any reads or writes.
+pub async fn startup_integrity_check(pool: &DbPool) -> AppResult<()> {
+    let result: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Database(e.into()))?;
+
+    if result != "ok" {
+        return Err(AppError::Internal(format!(
+            "Database integrity check failed: {}",
+            result
+        )));
+    }
+    info!("Database integrity check passed");
+    Ok(())
+}
+
+/// Reset any trades stuck in EXECUTING to FAILED.
+///
+/// EXECUTING is an ephemeral in-flight state. If the process crashed after
+/// setting a trade to EXECUTING but before the on-chain result was written,
+/// the trade is orphaned — the signal is gone from the in-memory queue and
+/// there is no recovery path. Marking them FAILED surfaces them in the DLQ
+/// for manual review rather than leaving them permanently stuck.
+pub async fn recover_executing_trades(pool: &DbPool) -> AppResult<u32> {
+    let rows_affected = sqlx::query(
+        "UPDATE trades SET status = 'FAILED', error_message = 'Recovered from EXECUTING state after restart' WHERE status = 'EXECUTING'"
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| AppError::Database(e.into()))?
+    .rows_affected();
+
+    if rows_affected > 0 {
+        warn!(
+            count = rows_affected,
+            "Recovered EXECUTING-stuck trades → FAILED (process likely crashed mid-execution)"
+        );
+    }
+    Ok(rows_affected as u32)
 }
 
 /// Check if a trade_uuid already exists (for idempotency)
@@ -866,6 +907,13 @@ pub async fn close_position(
     sol_price_usd: Option<Decimal>,
     exit_fraction: Decimal,
 ) -> AppResult<()> {
+    if exit_fraction <= Decimal::ZERO || exit_fraction > Decimal::ONE {
+        tracing::warn!(
+            trade_uuid = %trade_uuid,
+            exit_fraction = %exit_fraction,
+            "exit_fraction out of range (0, 1] — clamping; check caller"
+        );
+    }
     let exit_fraction = exit_fraction.max(Decimal::ZERO).min(Decimal::ONE);
 
     // Begin a transaction so concurrent close_position calls for the same pair serialize.
@@ -993,18 +1041,31 @@ pub async fn close_position(
                 continue;
             }
         } else {
-            // Partial close: reduce remaining amount, keep position ACTIVE
+            // Partial close: reduce remaining amount, keep position ACTIVE.
+            // Accumulate realized_pnl_sol so repeated partial exits build up the correct total.
             let remaining_amount = entry_amount_dec - exited_amount;
             let rows = sqlx::query(
                 r#"
                 UPDATE positions
                 SET
                     entry_amount_sol = ?,
+                    exit_price = ?,
+                    exit_tx_signature = ?,
+                    realized_pnl_sol = COALESCE(realized_pnl_sol, 0.0) + ?,
+                    realized_pnl_usd = CASE
+                        WHEN ? IS NOT NULL THEN COALESCE(realized_pnl_usd, 0.0) + ?
+                        ELSE realized_pnl_usd
+                    END,
                     last_updated = CURRENT_TIMESTAMP
                 WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
                 "#,
             )
             .bind(remaining_amount.to_f64().unwrap_or(0.0))
+            .bind(exit_price.to_f64().unwrap_or(0.0))
+            .bind(signature)
+            .bind(pnl_sol.to_f64().unwrap_or(0.0))
+            .bind(pnl_usd_opt)
+            .bind(pnl_usd_opt)
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -1018,10 +1079,10 @@ pub async fn close_position(
         gross_pnl += pnl_sol;
     }
 
-    // Deduct both entry-leg and exit-leg costs for a true round-trip net PnL.
-    // Written inside the transaction so the close and net_pnl update are atomic.
+    // Accumulate net_pnl_sol rather than overwriting — each partial exit contributes its
+    // portion so the trades row reflects the total realised PnL across all exit legs.
     let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
-    sqlx::query("UPDATE trades SET net_pnl_sol = ? WHERE trade_uuid = ?")
+    sqlx::query("UPDATE trades SET net_pnl_sol = COALESCE(net_pnl_sol, 0.0) + ? WHERE trade_uuid = ?")
         .bind(net_pnl.to_f64().unwrap_or(0.0))
         .bind(trade_uuid)
         .execute(&mut *tx)
@@ -2163,6 +2224,16 @@ pub async fn count_trades(
 }
 
 /// Generate CSV content from trades
+/// Escape a string for CSV output: wrap in quotes if it contains commas, quotes, or newlines.
+/// Internal quotes are doubled per RFC 4180.
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
 pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
     let mut csv = String::new();
 
@@ -2177,7 +2248,7 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.trade_uuid,
             trade.wallet_address,
             trade.token_address,
-            trade.token_symbol.as_deref().unwrap_or(""),
+            csv_escape(trade.token_symbol.as_deref().unwrap_or("")),
             trade.strategy,
             trade.side,
             trade.amount_sol,

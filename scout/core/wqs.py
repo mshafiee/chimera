@@ -226,11 +226,16 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
             elif days_since_trade > 14:
                 score -= 10.0  # Stale wallet penalty
                 
-            # Bonus: Momentum check (7d ROI is positive and contributing heavily to 30d)
-            if (metrics.roi_7d or 0) > 0 and (metrics.roi_30d or 0) > 0:
-                # If >50% of monthly ROI came from this week, it's hot
-                if metrics.roi_7d >= (metrics.roi_30d * 0.5):
-                    score += 5.0
+            # Momentum check: reward hot wallets, penalize cooling wallets.
+            # A wallet that earned 80% of its monthly ROI last week is actively good;
+            # one that peaked 3 weeks ago (7d << 30d) is drifting and warrants a penalty.
+            roi_7d = metrics.roi_7d or 0
+            roi_30d = metrics.roi_30d or 0
+            if roi_7d > 0 and roi_30d > 0:
+                if roi_7d >= (roi_30d * 0.5):
+                    score += 5.0  # Hot wallet: recent outperformance
+            if roi_30d > 0 and roi_7d < (roi_30d * 0.3):
+                score -= 10.0  # Cooling wallet: peaked weeks ago, now underperforming
         except (ValueError, TypeError):
             pass
 

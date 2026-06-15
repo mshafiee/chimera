@@ -196,14 +196,35 @@ impl Vault {
     /// Writes to a `.tmp` sibling file first, then atomically renames it into place.
     /// This prevents a mid-write crash from corrupting the vault file — on POSIX,
     /// `rename()` is guaranteed atomic within the same filesystem.
+    /// The temp file is created with mode 0600 (owner read/write only) so the
+    /// encrypted keypair is never visible to other local users even transiently.
     pub fn save_secrets(
         &self,
         secrets: &VaultSecrets,
         path: impl AsRef<Path>,
     ) -> Result<(), VaultError> {
+        use std::io::Write;
+
         let encrypted = self.encrypt_secrets(secrets)?;
         let tmp_path = path.as_ref().with_extension("tmp");
-        std::fs::write(&tmp_path, &encrypted)?;
+
+        // Create with restricted permissions before writing any data
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&tmp_path)?;
+            f.write_all(encrypted.as_bytes())?;
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&tmp_path, &encrypted)?;
+        }
+
         std::fs::rename(&tmp_path, path)?;
         Ok(())
     }
@@ -258,19 +279,37 @@ fn rand_nonce() -> Result<[u8; 12], VaultError> {
 /// Try to load secrets from vault file, falling back to environment variables
 pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
     // Try vault file first
-    if let Ok(vault) = Vault::from_env() {
-        let vault_path = std::env::var("CHIMERA_VAULT_PATH")
-            .unwrap_or_else(|_| "config/secrets.enc".to_string());
+    let vault_key_set = std::env::var("CHIMERA_VAULT_KEY").is_ok();
+    let vault_path = std::env::var("CHIMERA_VAULT_PATH")
+        .unwrap_or_else(|_| "config/secrets.enc".to_string());
+    let vault_file_exists = Path::new(&vault_path).exists();
 
-        if Path::new(&vault_path).exists() {
-            match vault.load_secrets(&vault_path) {
-                Ok(secrets) => {
-                    tracing::info!("Loaded secrets from encrypted vault");
-                    return Ok(secrets);
+    match Vault::from_env() {
+        Ok(vault) => {
+            if vault_file_exists {
+                match vault.load_secrets(&vault_path) {
+                    Ok(secrets) => {
+                        tracing::info!("Loaded secrets from encrypted vault");
+                        return Ok(secrets);
+                    }
+                    Err(e) => {
+                        // Key is set and vault file exists but decryption failed —
+                        // this is almost certainly a misconfiguration (wrong key, corrupt file).
+                        // Failing hard prevents silent fallback to weaker env-var secrets.
+                        return Err(VaultError::InvalidKey(format!(
+                            "CHIMERA_VAULT_KEY is set and vault file exists but decryption failed: {}. \
+                             Fix the vault or unset CHIMERA_VAULT_KEY to use env-var fallback.",
+                            e
+                        )));
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Failed to load vault, falling back to env vars");
-                }
+            }
+        }
+        Err(e) => {
+            if vault_key_set {
+                // Key is explicitly configured but invalid — fail loudly rather than
+                // silently starting with weaker env-var secrets.
+                return Err(e);
             }
         }
     }

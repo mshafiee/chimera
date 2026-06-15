@@ -120,9 +120,9 @@ impl KellySizer {
             return Err("No valid trades for Kelly calculation".to_string());
         }
 
-        if valid_trades_count < 20 {
+        if valid_trades_count < 15 {
             return Err(format!(
-                "Insufficient trade history for reliable Kelly calculation ({valid_trades_count} trades, need ≥20)"
+                "Insufficient trade history for reliable Kelly calculation ({valid_trades_count} trades, need ≥15)"
             ));
         }
 

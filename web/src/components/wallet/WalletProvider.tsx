@@ -67,7 +67,7 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
       }>('/auth/wallet', {
         wallet_address: publicKey.toBase58(),
         message,
-        signature: Buffer.from(signature).toString('base64'),
+        signature: btoa(String.fromCharCode.apply(null, Array.from(signature))),
       })
 
       // Store auth state
@@ -88,29 +88,16 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
   // Handle wallet connection/disconnection
   useEffect(() => {
     if (connected && publicKey && !isAuthenticated) {
-      // Wallet connected but not authenticated - trigger auth
       authenticate()
-    } else if (!connected && isAuthenticated && user) {
-      // Wallet disconnected - only logout if user was authenticated via wallet signature (JWT token)
-      // Admin login uses wallet address directly as token (no JWT), so preserve it
-      // Check if token is a JWT (contains dots) vs wallet address (no dots, base58)
-      const isJwtToken = user.token.includes('.')
-      if (isJwtToken && user.identifier === publicKey?.toBase58()) {
-        // JWT token and identifier matches wallet - this was wallet-based auth, logout
-        logout()
-      }
-      // If token is not JWT (wallet address), it's admin login - preserve it
+    } else if (!connected && isAuthenticated && user && user.identifier === publicKey?.toBase58()) {
+      logout()
     }
   }, [connected, publicKey, isAuthenticated, user, authenticate, logout])
 
-  // Handle wallet change (only for wallet-based auth, not admin login)
+  // Handle wallet change — re-authenticate if a different wallet connects
   useEffect(() => {
     if (connected && publicKey && isAuthenticated && user) {
-      // Only handle wallet change for JWT-based auth (wallet signature)
-      // Admin login uses wallet address as token, so don't interfere
-      const isJwtToken = user.token.includes('.')
-      if (isJwtToken && user.identifier !== publicKey.toBase58()) {
-        // Different wallet connected - re-authenticate
+      if (user.identifier !== publicKey.toBase58()) {
         logout()
         authenticate()
       }

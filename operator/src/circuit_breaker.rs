@@ -265,18 +265,43 @@ impl CircuitBreaker {
             }
         }
 
-        // Sum realized USD PnL in the last 24h
+        // Sum realized USD PnL in the last 24h — explicitly exclude NULL rows.
+        // Positions closed when SOL price was unavailable have NULL realized_pnl_usd.
+        // SUM() silently ignores those rows, undercounting losses. We recover them
+        // by summing their SOL PnL separately and converting at the current price.
         let realized_usd_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
             FROM positions
             WHERE state = 'CLOSED'
               AND closed_at >= datetime('now', '-24 hours')
+              AND realized_pnl_usd IS NOT NULL
             "#,
         )
         .fetch_one(&self.db)
         .await?;
-        let realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
+
+        let null_price_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
+            FROM positions
+            WHERE state = 'CLOSED'
+              AND closed_at >= datetime('now', '-24 hours')
+              AND realized_pnl_usd IS NULL
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        if null_price_pnl_sol_f64 != 0.0 {
+            tracing::warn!(
+                null_price_pnl_sol = null_price_pnl_sol_f64,
+                "Circuit breaker: positions closed without USD price data in 24h window — \
+                 estimating their PnL from SOL-denominated value"
+            );
+        }
+
+        let mut realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
 
         // Get SOL price in USD from price cache
         let sol_price_usd = if let Some(ref cache) = self.price_cache {
@@ -284,6 +309,13 @@ impl CircuitBreaker {
         } else {
             Decimal::ZERO
         };
+
+        // Add best-effort USD estimate for positions closed without price data
+        if null_price_pnl_sol_f64 != 0.0 && sol_price_usd > Decimal::ZERO {
+            let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
+                .unwrap_or(Decimal::ZERO) * sol_price_usd;
+            realized_usd += estimated;
+        }
 
         let unrealized_usd = unrealized_sol * sol_price_usd;
         let total_pnl_usd = realized_usd + unrealized_usd;
@@ -440,18 +472,40 @@ impl CircuitBreaker {
         }
 
         // Re-evaluate breach conditions before clearing cooldown.
-        // Sum realized USD PnL in the last 24h
+        // Sum realized USD PnL in the last 24h — explicitly exclude NULL rows (see evaluate()).
         let realized_usd_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
             SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
             FROM positions
             WHERE state = 'CLOSED'
               AND closed_at >= datetime('now', '-24 hours')
+              AND realized_pnl_usd IS NOT NULL
             "#,
         )
         .fetch_one(&self.db)
         .await?;
-        let realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
+
+        let null_price_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+            r#"
+            SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
+            FROM positions
+            WHERE state = 'CLOSED'
+              AND closed_at >= datetime('now', '-24 hours')
+              AND realized_pnl_usd IS NULL
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+
+        if null_price_pnl_sol_f64 != 0.0 {
+            tracing::warn!(
+                null_price_pnl_sol = null_price_pnl_sol_f64,
+                "Circuit breaker cooldown: positions closed without USD price data in 24h window — \
+                 estimating their PnL from SOL-denominated value"
+            );
+        }
+
+        let mut realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
 
         // Get SOL price in USD from price cache.
         // If the price cache is unavailable or stale (returns None/zero), skip the
@@ -464,6 +518,12 @@ impl CircuitBreaker {
         };
 
         let usd_check_result = if let Some(price) = sol_price_usd {
+            // Add best-effort USD estimate for positions closed without price data
+            if null_price_pnl_sol_f64 != 0.0 {
+                let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
+                    .unwrap_or(Decimal::ZERO) * price;
+                realized_usd += estimated;
+            }
             let unrealized_usd = unrealized_sol * price;
             let total_pnl_usd = realized_usd + unrealized_usd;
             Some(total_pnl_usd)

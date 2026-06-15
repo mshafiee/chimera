@@ -14,6 +14,7 @@ use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
@@ -363,11 +364,37 @@ impl Executor {
                     // Track costs: Jito tip, DEX fee, slippage
                     let dex_fee_rate = self.config.strategy.dex_fee_rate;
                     let dex_fee_sol = signal.payload.amount_sol * dex_fee_rate;
-                    // Use actual price impact from Jupiter quote when available;
-                    // fall back to a size-based conservative estimate otherwise.
+                    // Use actual price impact from Jupiter quote when available.
+                    // When unavailable, compute a liquidity-aware estimate:
+                    //   slippage ≈ trade_size_usd / (2 × liquidity_usd)
+                    // This is the square-root market impact approximation. It correctly
+                    // reflects that illiquid tokens ($5k liquidity) with a 0.5 SOL trade
+                    // have ~5% slippage, not the flat 0.5% the old config-based fallback used.
+                    // Falls back to the config value when neither liquidity nor price is available.
                     let slippage_percent = self.last_price_impact.lock().take()
                         .map(|pct| pct / Decimal::from(100)) // convert 1.5% → 0.015 fraction
                         .unwrap_or_else(|| {
+                            // Try liquidity-aware estimate first
+                            if let (Some(liq_usd), Some(ref cache)) = (signal.liquidity_usd, &self.price_cache) {
+                                let sol_price = cache.get_price_usd(crate::constants::mints::SOL)
+                                    .unwrap_or(Decimal::ZERO);
+                                if sol_price > Decimal::ZERO && liq_usd > Decimal::ZERO {
+                                    let trade_usd = signal.payload.amount_sol * sol_price;
+                                    // Clamp between 0.1% and 30% to avoid absurd estimates
+                                    let est = (trade_usd / (liq_usd * Decimal::from(2)))
+                                        .max(dec!(0.001))
+                                        .min(dec!(0.30));
+                                    tracing::debug!(
+                                        trade_uuid = %signal.trade_uuid,
+                                        trade_usd = %trade_usd,
+                                        liquidity_usd = %liq_usd,
+                                        estimated_slippage_pct = %(est * Decimal::from(100)),
+                                        "Using liquidity-aware slippage estimate (no Jupiter price impact)"
+                                    );
+                                    return est;
+                                }
+                            }
+                            // Final fallback: config-based size tier
                             if signal.payload.amount_sol < self.config.strategy.slippage_fallback_threshold_sol {
                                 self.config.strategy.slippage_fallback_small_percent
                             } else {

@@ -51,8 +51,12 @@ pub async fn start_polling_task(
     let polling_state = Arc::new(RpcPollingState::new());
     let rate_limiter = Arc::new(RateLimiter::new(config.rate_limit, 1));
 
-    // Create RPC client (RpcClient::new doesn't return Result, just creates client)
-    let rpc_client = Arc::new(RpcClient::new(config.rpc_url.clone()));
+    // Create RPC client with a 5-second timeout. Without a timeout, a hung Helius
+    // connection blocks the entire polling loop and prevents failover to QuickNode.
+    let rpc_client = Arc::new(RpcClient::new_with_timeout(
+        config.rpc_url.clone(),
+        Duration::from_secs(5),
+    ));
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -277,12 +281,13 @@ async fn process_transaction(
         }
     }
 
-    // Create signal
+    // Create signal (liquidity_usd not available from RPC polling path — executor uses config fallback)
     let signal = Signal {
         trade_uuid,
         payload: payload.clone(),
         timestamp: tx.timestamp,
-        source_ip: Some("rpc_polling".to_string()), // Mark source as RPC polling
+        source_ip: Some("rpc_polling".to_string()),
+        liquidity_usd: None,
     };
 
     tracing::info!(

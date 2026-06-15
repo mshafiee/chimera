@@ -77,9 +77,19 @@ async fn main() -> anyhow::Result<()> {
         "Jupiter configuration loaded"
     );
 
+    // Validate vault/secrets early — fail loudly before any DB or network I/O.
+    // load_secrets_with_fallback() returns Err only when CHIMERA_VAULT_KEY is set but invalid
+    // or the vault file exists but cannot be decrypted; if vault is not configured it returns Ok
+    // with env-var secrets.
+    let _startup_secrets = vault::load_secrets_with_fallback()
+        .map_err(|e| anyhow::anyhow!("Vault startup validation failed: {}", e))?;
+    tracing::info!("Vault/secrets validated at startup");
+
     // Initialize database
     let db_pool = db::init_pool(&config.database).await?;
     db::run_migrations(&db_pool).await?;
+    db::startup_integrity_check(&db_pool).await?;
+    db::recover_executing_trades(&db_pool).await?;
     tracing::info!("Database initialized");
 
     // Create WebSocket state
@@ -982,28 +992,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut admin_wallets_map = std::collections::HashMap::new();
-    for wallet_config in &config.security.admin_wallets {
-        if let Ok(role) = wallet_config.role.parse::<Role>() {
-            admin_wallets_map.insert(wallet_config.address.clone(), role);
-            tracing::debug!(wallet = %wallet_config.address, role = %role, "Admin wallet configured");
-        } else {
-            tracing::warn!(wallet = %wallet_config.address, role = %wallet_config.role, "Invalid role in admin wallet config");
-        }
-    }
-
     let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
 
     let auth_state = Arc::new(AuthState::with_auth_config(
         api_keys_map,
-        admin_wallets_map,
         jwt_secret.clone(),
     ));
-    tracing::warn!(
+    tracing::info!(
         api_key_count = config.security.api_keys.len(),
-        admin_wallet_count = config.security.admin_wallets.len(),
-        admin_wallets = ?config.security.admin_wallets.iter().map(|w| &w.address).collect::<Vec<_>>(),
-        "Auth state initialized with admin wallets"
+        "Auth state initialized"
     );
 
     // Build health routes with AppState

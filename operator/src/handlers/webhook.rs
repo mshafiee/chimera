@@ -158,6 +158,17 @@ pub async fn webhook_handler(
     // EXIT signals don't need token validation, SELL signals already own the token
     if payload.strategy != Strategy::Exit {
         if let Some(ref token_address) = payload.token_address {
+            // Validate token address is a plausible Solana base58 pubkey before issuing RPC calls
+            if token_address.len() < 32 || token_address.len() > 44 || !token_address.chars().all(|c| c.is_alphanumeric()) {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(WebhookResponse {
+                        status: WebhookStatus::Rejected,
+                        trade_uuid,
+                        reason: Some(format!("Invalid token address format: {}", token_address)),
+                    }),
+                ));
+            }
             match state
                 .token_parser
                 .fast_check(token_address, payload.strategy)
@@ -398,6 +409,12 @@ pub async fn webhook_handler(
         } else {
             rust_decimal::Decimal::ZERO
         };
+
+        // Attach liquidity to the signal so the executor can compute a liquidity-aware
+        // slippage estimate when Jupiter price impact data is unavailable.
+        if liquidity_usd > rust_decimal::Decimal::ZERO {
+            signal.liquidity_usd = Some(liquidity_usd);
+        }
 
         // Get token age from Helius client
         let token_age_hours = if let Some(ref helius_client) = state.helius_client {

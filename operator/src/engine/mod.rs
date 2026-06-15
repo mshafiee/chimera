@@ -377,7 +377,17 @@ impl Engine {
         if let Err(e) =
             crate::db::update_trade_status(&self.db, &trade_uuid, "EXECUTING", None, None).await
         {
-            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING");
+            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING — marking FAILED to prevent phantom-QUEUED state");
+            // The signal was already dequeued; if we just return, the trade stays in QUEUED
+            // in the DB with no one processing it. Move it to FAILED so it's visible in DLQ.
+            let _ = crate::db::update_trade_status(
+                &self.db,
+                &trade_uuid,
+                "FAILED",
+                None,
+                Some("DB error: failed to transition QUEUED→EXECUTING"),
+            )
+            .await;
             return;
         }
 
@@ -741,6 +751,37 @@ impl Engine {
                             .and_then(|c| c.get_price_usd(signal.token_address()))
                             .unwrap_or(Decimal::ZERO)
                     };
+
+                    // Reject the signal if price data is completely unavailable. A zero entry_price
+                    // would cause the stop-loss manager to force-exit the position on the next tick,
+                    // wasting fees and slippage on a round-trip that never had a valid cost basis.
+                    if entry_price.is_zero() {
+                        let reason = "Price data unavailable at execution time (entry_price=0) — cannot open position without cost basis";
+                        tracing::error!(
+                            trade_uuid = %trade_uuid,
+                            token = %signal.payload.token,
+                            "BUY rejected: {}",
+                            reason
+                        );
+                        let _ = crate::db::update_trade_status(
+                            &self.db,
+                            &trade_uuid,
+                            "DEAD_LETTER",
+                            None,
+                            Some(reason),
+                        )
+                        .await;
+                        let _ = crate::db::insert_dead_letter(
+                            &self.db,
+                            Some(&trade_uuid),
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            "PRICE_DATA_UNAVAILABLE",
+                            Some(reason),
+                            signal.source_ip.as_deref(),
+                        )
+                        .await;
+                        return;
+                    }
 
                     // max_heat_sol = 20% of total capital — matched to PortfolioHeat::new default.
                     let max_heat_sol = self.config.position_sizing.total_capital_sol

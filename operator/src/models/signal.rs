@@ -148,6 +148,10 @@ pub struct Signal {
     pub timestamp: i64,
     /// Source IP address
     pub source_ip: Option<String>,
+    /// Token liquidity in USD at signal validation time (from Jupiter/DexScreener).
+    /// Used to compute a liquidity-aware slippage estimate when Jupiter price impact
+    /// is unavailable. None when the token safety check was skipped (dev mode, SELL signals).
+    pub liquidity_usd: Option<rust_decimal::Decimal>,
 }
 
 impl Signal {
@@ -159,6 +163,7 @@ impl Signal {
             payload,
             timestamp,
             source_ip,
+            liquidity_usd: None,
         }
     }
 

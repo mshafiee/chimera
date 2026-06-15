@@ -102,11 +102,10 @@ impl StopLossManager {
 
         // Calculate loss percentage using Decimal for precision
         // Negative when price has fallen (e.g. -15.0 for 15% drop), matching negative thresholds.
-        // Zero entry_price yields loss_percent=0 — no stop fires, position is held until data is
-        // corrected. Forcing an exit on corrupt data risks selling at an unknown price.
-        // Zero entry_price means the position was opened with corrupt data.
-        // Holding a position with no cost basis is worse than exiting at market — force exit
-        // immediately so the capital is recovered rather than locked indefinitely.
+        // The engine now rejects BUY signals with zero entry_price before opening the position.
+        // This guard is a last-resort safety net for positions that predate that check or were
+        // inserted directly into the DB — force-exit to recover capital rather than holding
+        // a position with no cost basis indefinitely.
         if entry_price.is_zero() {
             tracing::error!(
                 trade_uuid = %trade_uuid,

@@ -330,8 +330,8 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     );
 
     // At -34%: entry $1.00, current $0.66 → -34% → None
-    // Use hard_stop=-100 to isolate volatility-widening behavior from the hard-stop sign bug.
-    // The widest_stop clamp is now -35% (tightened from -50%) so -34% is within the stop.
+    // Use max_stop_loss_distance=-35 so widest_stop=-35 applies the hardcoded cap.
+    // The widest_stop clamp is -35% so -34% is within the stop.
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.66").unwrap(),
@@ -339,7 +339,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     );
     let mgr = StopLossManager::new(
         pool.clone(),
-        config_with_hard_stop("-100.0"),
+        config_with_hard_stop("-35.0"),
         price_cache.clone(),
     );
     let action_near = mgr
@@ -363,7 +363,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         Decimal::from_str("0.64").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
+    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-35.0"), price_cache);
     let action_over = mgr2
         .check_stop_loss(
             "uuid-vol-over",
@@ -489,7 +489,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     insert_consensus_signal(&pool, TOKEN, "wallet_other").await;
 
     // -34% loss: $0.66 from $1.00 — within -35% threshold → None
-    // Use hard_stop=-100 to isolate consensus+volatility widening from the hard-stop sign bug.
+    // Use max_stop_loss_distance=-35 so the -35% widening cap applies.
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("0.66").unwrap(),
@@ -497,7 +497,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     );
     let mgr = StopLossManager::new(
         pool.clone(),
-        config_with_hard_stop("-100.0"),
+        config_with_hard_stop("-35.0"),
         price_cache.clone(),
     );
     let none = mgr
@@ -521,7 +521,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
         Decimal::from_str("0.64").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
+    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-35.0"), price_cache);
     let exit = mgr2
         .check_stop_loss(
             "uuid-cv-2",

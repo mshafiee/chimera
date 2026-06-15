@@ -149,6 +149,10 @@ pub async fn get_wallet(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<String>,
 ) -> Result<Json<WalletDetail>, AppError> {
+    // Validate Solana base58 address (32-44 chars, alphanumeric only)
+    if address.len() < 32 || address.len() > 44 || !address.chars().all(|c| c.is_alphanumeric()) {
+        return Err(AppError::Validation("Invalid wallet address format".to_string()));
+    }
     match db::get_wallet_by_address(&state.db, &address).await? {
         Some(wallet) => Ok(Json(wallet)),
         None => Err(AppError::NotFound(format!("Wallet not found: {}", address))),
