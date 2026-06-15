@@ -414,12 +414,11 @@ impl TransactionBuilder {
             .await?;
 
         // Extract priceImpactPct from the quote for cost tracking in the executor
-        // Jupiter returns this as a decimal string, e.g. "0.01234" = 1.234%
+        // Jupiter returns this as a percentage string, e.g. "1.234" = 1.234%
         let price_impact_pct: Option<Decimal> = quote
             .get("priceImpactPct")
             .and_then(|v| v.as_str())
-            .and_then(|s| Decimal::from_str(s).ok())
-            .map(|pct| pct * Decimal::from(100)); // convert 0.01234 → 1.234
+            .and_then(|s| Decimal::from_str(s).ok());
 
         // Then get the swap transaction
         // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)

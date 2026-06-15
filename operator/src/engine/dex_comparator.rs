@@ -207,7 +207,10 @@ impl DexComparator {
         let fee_sol = amount_sol * fee_percent;
 
         // Estimate slippage (simplified - Jupiter provides this in quote)
+        // Jupiter's priceImpactPct is a percentage string (e.g., "0.5" for 0.5%)
+        // We must divide by 100 to convert to a fraction before multiplying with amount_sol
         let slippage_percent = get_json_decimal(&quote, "priceImpactPct")
+            .map(|pct| pct / Decimal::from(100))
             .unwrap_or_else(|| Decimal::from_str("0.005").unwrap()); // Default 0.5% slippage
 
         let slippage_sol = amount_sol * slippage_percent;

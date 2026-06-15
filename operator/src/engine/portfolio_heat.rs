@@ -98,6 +98,7 @@ impl PortfolioHeat {
                 SELECT amount_sol as amount
                 FROM trades
                 WHERE status IN ('PENDING', 'QUEUED', 'EXECUTING', 'RETRY')
+                  AND side = 'BUY'
             )
             "#,
         )
@@ -212,6 +213,7 @@ impl PortfolioHeat {
                 SELECT strategy, amount_sol as amount
                 FROM trades
                 WHERE status IN ('PENDING', 'QUEUED', 'EXECUTING', 'RETRY')
+                  AND side = 'BUY'
             ) GROUP BY strategy
             "#,
         )

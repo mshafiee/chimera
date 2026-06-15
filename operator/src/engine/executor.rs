@@ -399,7 +399,7 @@ impl Executor {
                                 if sol_price > Decimal::ZERO && liq_usd > Decimal::ZERO {
                                     let trade_usd = signal.payload.amount_sol * sol_price;
                                     // Clamp between 0.1% and 30% to avoid absurd estimates
-                                    let est = (trade_usd / (liq_usd * Decimal::from(2)))
+                                    let est = ((trade_usd * Decimal::from(2)) / liq_usd)
                                         .max(dec!(0.001))
                                         .min(dec!(0.30));
                                     tracing::debug!(

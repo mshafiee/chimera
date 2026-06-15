@@ -254,19 +254,17 @@ impl ProfitTargetManager {
         // where the price may already be reversing.
         let mut tiered_action: Option<ProfitTargetAction> = None;
         {
-            let exit_pct = self.config.tiered_exit_percent / Decimal::from(100);
-            let mut compound_remaining = Decimal::ONE;
+            let mut total_exit_pct = Decimal::ZERO;
             let mut any_hit = false;
             for target in &profit_level_targets {
                 if profit_percent >= *target && !state.targets_hit.contains(target) {
                     state.targets_hit.push(*target);
                     state_changed = true;
                     any_hit = true;
-                    compound_remaining *= Decimal::ONE - exit_pct;
+                    total_exit_pct += self.config.tiered_exit_percent;
                 }
             }
             if any_hit {
-                let total_exit_pct = (Decimal::ONE - compound_remaining) * Decimal::from(100);
                 tiered_action = Some(ProfitTargetAction::ExitPercent(total_exit_pct));
             }
         }

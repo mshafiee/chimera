@@ -182,7 +182,7 @@ impl PreValidator {
 
             if let Ok(liq_usd) = fetcher.get_liquidity(token_address).await {
                 if liq_usd > Decimal::ZERO {
-                    let impact = (trade_usd / (Decimal::from(2) * liq_usd)) * Decimal::from(100);
+                    let impact = ((trade_usd * Decimal::from(2)) / liq_usd) * Decimal::from(100);
                     return impact.min(max_slippage);
                 }
             }

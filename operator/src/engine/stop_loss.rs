@@ -196,11 +196,9 @@ impl StopLossManager {
             );
         }
 
+        let adaptive_threshold = stop_loss_threshold;
+
         // Final clamp: never tighter than -5% or wider than the operator-configured maximum.
-        // [T-H2] Use config.max_stop_loss_distance directly as the widest_stop — the old
-        // dec!(-35).min(...) expression silently overrode the config value whenever it was
-        // wider than -35, defeating the purpose of the config knob.
-        // The -35 absolute floor is preserved as a separate guard below.
         let widest_stop   = self.config.max_stop_loss_distance;
         let tightest_stop = dec!(-5);
         stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
@@ -208,27 +206,22 @@ impl StopLossManager {
         // At 20% portfolio heat cap a single -50% stop wipes 10% of total capital.
         stop_loss_threshold = stop_loss_threshold.max(dec!(-35));
 
-        // max_stop_loss_distance is the floor on loss tolerance — the adaptive stop
-        // may widen due to volatility/consensus, but never past this value.
-        // max() on negative numbers gives the TIGHTER (less negative) threshold.
-        let effective_threshold = stop_loss_threshold.max(self.config.max_stop_loss_distance);
-
         // Warn when max_stop_loss_distance overrides adaptive widening so the operator can
         // see in logs that volatile/consensus tokens are being stopped tighter than intended.
         // To allow adaptive stops to breathe, set max_stop_loss_distance to a larger negative
         // value (e.g. -50) in config.yaml.
-        if self.config.max_stop_loss_distance > stop_loss_threshold {
+        if widest_stop > adaptive_threshold {
             tracing::warn!(
                 trade_uuid = %trade_uuid,
-                adaptive_threshold = %stop_loss_threshold,
+                adaptive_threshold = %adaptive_threshold,
                 max_stop_loss_distance = %self.config.max_stop_loss_distance,
-                effective_threshold = %effective_threshold,
+                effective_threshold = %stop_loss_threshold,
                 "Adaptive stop-loss widening overridden by max_stop_loss_distance; \
                  set max_stop_loss_distance to a larger negative (e.g. -50) to let adaptive stops breathe"
             );
         }
 
-        if loss_percent <= effective_threshold {
+        if loss_percent <= stop_loss_threshold {
             let elapsed_secs = chrono::Utc::now().signed_duration_since(entry_time).num_seconds();
             if elapsed_secs < self.config.wick_protection_secs as i64 {
                 // If the drop is catastrophic (worse than the absolute hard floor of -35%), bypass wick protection
