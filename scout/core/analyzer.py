@@ -1549,9 +1549,6 @@ class WalletAnalyzer:
             buy_trades = [t for t in sorted_trades if t.action == TradeAction.BUY]
             sell_trades = [t for t in sorted_trades if t.action == TradeAction.SELL]
             
-            # Find tokens that have buys but may not have been fully sold
-            set(t.token_address for t in buy_trades)
-            
             # Track sell amounts per token (use Decimal)
             sell_amounts = {}
             for t in sell_trades:

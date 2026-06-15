@@ -29,12 +29,16 @@ When updating the schema:
 The schema is automatically loaded from the shared file to prevent drift.
 """
 
+import fcntl
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -143,35 +147,46 @@ class RosterWriter:
     def write_roster(self, wallets: List[WalletRecord]) -> bool:
         """
         Write wallet roster to SQLite atomically.
-        
+
+        Acquires an exclusive file lock so that concurrent Scout processes
+        cannot corrupt the roster by writing simultaneously.
+
         Args:
             wallets: List of wallet records to write
-            
+
         Returns:
             True if write was successful, False otherwise
-            
+
         Raises:
+            RuntimeError: If another Scout process is already writing
             Exception: If write fails (temp file is cleaned up)
         """
-        try:
-            # Step 1: Write to temporary file
-            self._write_to_temp(wallets)
-            
-            # Step 2: Verify integrity
-            if not self._verify_integrity():
-                raise ValueError("Integrity check failed on temporary file")
-            
-            # Step 3: Atomic rename
-            self._atomic_rename()
-            
-            print(f"[RosterWriter] Successfully wrote {len(wallets)} wallets to {self.output_path}")
-            return True
-            
-        except Exception as e:
-            # Clean up temp file on failure
-            self._cleanup_temp()
-            print(f"[RosterWriter] ERROR: Failed to write roster: {e}")
-            raise
+        lock_path = self.output_path.with_suffix('.lock')
+        with open(lock_path, 'w') as lock_file:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except IOError:
+                raise RuntimeError("Another Scout process is already writing the roster")
+
+            try:
+                # Step 1: Write to temporary file
+                self._write_to_temp(wallets)
+
+                # Step 2: Verify integrity
+                if not self._verify_integrity():
+                    raise ValueError("Integrity check failed on temporary file")
+
+                # Step 3: Atomic rename
+                self._atomic_rename()
+
+                print(f"[RosterWriter] Successfully wrote {len(wallets)} wallets to {self.output_path}")
+                return True
+
+            except Exception as e:
+                # Clean up temp file on failure
+                self._cleanup_temp()
+                print(f"[RosterWriter] ERROR: Failed to write roster: {e}")
+                raise
     
     def _write_to_temp(self, wallets: List[WalletRecord]) -> None:
         """Write wallets to the temporary database file."""
@@ -236,7 +251,17 @@ class RosterWriter:
                 )
             
             conn.commit()
-            
+
+            # Checkpoint the WAL so the file is self-contained before rename.
+            ckpt = conn.execute("PRAGMA wal_checkpoint(FULL)")
+            row = ckpt.fetchone()
+            if row and row[1] != row[2]:  # pages_written != pages_checkpointed
+                logger.warning(
+                    "WAL checkpoint incomplete: written=%d checkpointed=%d",
+                    row[1],
+                    row[2],
+                )
+
         finally:
             conn.close()
     

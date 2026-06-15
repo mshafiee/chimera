@@ -78,10 +78,14 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
 
     # 2) Win Rate & Profit Factor (0-20 pts)
     win_rate = metrics.win_rate or 0.0
-    
+
     if win_rate >= 0.5:
         score += 5.0
     if win_rate >= 0.65:
+        score += 5.0
+    if win_rate >= 0.80:
+        score += 5.0
+    if win_rate >= 0.90:
         score += 5.0
         
             
@@ -150,6 +154,8 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
             score += 15.0  # Elite trader
         elif metrics.profit_factor > 1.5:
             score += 5.0   # Profitable
+        elif metrics.profit_factor >= 1.2:
+            score += 2.0   # Marginally profitable
         elif metrics.profit_factor < 1.0:
             # Losing trader (Gross Loss > Gross Win)
             score -= 40.0
