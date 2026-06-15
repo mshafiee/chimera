@@ -110,6 +110,13 @@ async fn main() -> anyhow::Result<()> {
     .with_total_capital(config.position_sizing.total_capital_sol)
     .with_price_cache(price_cache.clone()));
 
+    // FIX [R-C1]: Restore persisted circuit breaker state from DB before accepting connections.
+    // This ensures that a trip persisted before last restart is re-applied and evaluate()
+    // runs so cooldown expiry / breach re-evaluation happen immediately on startup.
+    if let Err(e) = circuit_breaker.restore_from_db().await {
+        tracing::error!(error = %e, "Failed to restore circuit breaker state from DB — starting Active");
+    }
+
     // Restore kill-switch if it was active before last restart.
     // Reads from kill_switch_state (single-row UPSERT table) which is written synchronously
     // by the kill-switch API handler before tripping the circuit breaker in memory.
@@ -806,50 +813,9 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Position monitoring task started");
     }
 
-    // Spawn wallet TTL expiration task (60-minute interval).
-    // Demotes wallets whose ttl_expires_at has passed from ACTIVE to CANDIDATE so they
-    // are not traded again until the Scout re-promotes them after re-validation.
-    {
-        let ttl_db = db_pool.clone();
-        let ttl_token = cancel_token.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
-            loop {
-                tokio::select! {
-                    _ = ttl_token.cancelled() => break,
-                    _ = interval.tick() => {
-                        match db::get_expired_ttl_wallets(&ttl_db).await {
-                            Ok(expired) if !expired.is_empty() => {
-                                for addr in &expired {
-                                    if let Err(e) = db::demote_wallet(
-                                        &ttl_db,
-                                        addr,
-                                        "TTL expired — demoted by background task",
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            wallet = %addr,
-                                            error = %e,
-                                            "Failed to demote TTL-expired wallet"
-                                        );
-                                    } else {
-                                        tracing::info!(
-                                            wallet = %addr,
-                                            "Wallet demoted: TTL expired"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(e) => tracing::warn!(error = %e, "TTL expiration check failed"),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        });
-        tracing::info!("Wallet TTL expiration task started (60-min interval)");
-    }
+    // FIX [B-M3]: Removed duplicate wallet TTL expiration task (3600s interval).
+    // The 60s interval task above (around line 505) already handles TTL expiration.
+    // Having a second task at 60-minute intervals duplicated demote_wallet calls.
 
     // Create metrics state (shared between task and router)
     let metrics_state = Arc::new(MetricsState::new());

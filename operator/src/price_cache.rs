@@ -22,12 +22,11 @@ const DEFAULT_CACHE_TTL_SECS: i64 = 30;
 /// Price update interval for active tokens
 const PRICE_UPDATE_INTERVAL_SECS: u64 = 5;
 
-/// Staleness threshold in seconds: if a tracked token has not received a price
-/// update within this window, risk management should treat the position as
-/// unmonitored and escalate (force exit or alert). This is deliberately longer
-/// than the cache TTL so that normal cache misses (30s) don't trigger
-/// escalation — only sustained feed outages (120s = 2 minutes) do.
-pub const STALENESS_THRESHOLD_SECS: i64 = 120;
+/// Staleness threshold in seconds: if a token's cached price is older than this
+/// window, it is considered stale and `get_price_usd` returns None.
+/// FIX [B-H8]: Reduced from 120 to 30 so stale prices don't silently feed
+/// risk calculations for up to 2 minutes after the price feed stops.
+pub const STALENESS_THRESHOLD_SECS: i64 = 30;
 
 /// Price entry in cache
 #[derive(Debug, Clone)]
@@ -61,52 +60,74 @@ impl std::fmt::Display for PriceSource {
     }
 }
 
+/// FIX [B-H7]: Combined inner state to allow atomic updates of prices + price_history
+/// under a single lock, preventing torn reads between the two maps.
+struct PriceCacheInner {
+    /// Cached prices by token address
+    prices: HashMap<String, PriceEntry>,
+    /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
+    price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
+}
+
 /// Price cache for token prices
 pub struct PriceCache {
-    /// Cached prices by token address
-    prices: Arc<RwLock<HashMap<String, PriceEntry>>>,
+    /// Combined inner state (prices + price_history) under one lock for atomic updates
+    inner: Arc<RwLock<PriceCacheInner>>,
     /// Cache TTL
     ttl: Duration,
     /// Tokens to actively track
     active_tokens: Arc<RwLock<Vec<String>>>,
     /// Whether the updater is running
     updater_running: Arc<RwLock<bool>>,
-    /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
-    #[allow(clippy::type_complexity)]
-    pub price_history: Arc<RwLock<HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>>>,
     /// SOL mint address (for market condition filtering)
     sol_mint: String,
+    /// Reusable HTTP client (FIX [R-L4]: built once, not per-fetch)
+    http_client: reqwest::Client,
 }
 
 impl PriceCache {
+    /// Build the shared reusable HTTP client
+    fn build_http_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default()
+    }
+
     /// Create a new price cache with default TTL
     pub fn new() -> Self {
         Self {
-            prices: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(PriceCacheInner {
+                prices: HashMap::new(),
+                price_history: HashMap::new(),
+            })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             updater_running: Arc::new(RwLock::new(false)),
-            price_history: Arc::new(RwLock::new(HashMap::new())),
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
+            http_client: Self::build_http_client(),
         }
     }
 
     /// Create with custom TTL
     pub fn with_ttl(ttl_secs: i64) -> Self {
         Self {
-            prices: Arc::new(RwLock::new(HashMap::new())),
+            inner: Arc::new(RwLock::new(PriceCacheInner {
+                prices: HashMap::new(),
+                price_history: HashMap::new(),
+            })),
             ttl: Duration::seconds(ttl_secs),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             updater_running: Arc::new(RwLock::new(false)),
-            price_history: Arc::new(RwLock::new(HashMap::new())),
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
+            http_client: Self::build_http_client(),
         }
     }
 
     /// Get price for a token
     pub fn get_price(&self, token_address: &str) -> Option<PriceEntry> {
-        let prices = self.prices.read();
-        let entry = prices.get(token_address)?;
+        let inner = self.inner.read();
+        let entry = inner.prices.get(token_address)?;
 
         // Check if expired
         let age = Utc::now().signed_duration_since(entry.fetched_at);
@@ -117,42 +138,57 @@ impl PriceCache {
         Some(entry.clone())
     }
 
-    /// Get price in USD (convenience method)
+    /// Get price in USD (convenience method).
+    /// FIX [R-M9]: Always check staleness even for untracked tokens — if stale, return None.
     pub fn get_price_usd(&self, token_address: &str) -> Option<Decimal> {
+        if self.is_price_stale(token_address) {
+            tracing::debug!(
+                token = token_address,
+                "get_price_usd: price is stale, returning None"
+            );
+            return None;
+        }
         self.get_price(token_address).map(|e| e.price_usd)
     }
 
-    /// Returns `true` if the token is actively tracked but has not received a
-    /// fresh price within [`STALENESS_THRESHOLD_SECS`]. This indicates a
-    /// sustained feed outage — callers should escalate (force exit or alert)
-    /// rather than silently disabling risk management.
+    /// Returns `true` if the cached price for the token has exceeded
+    /// [`STALENESS_THRESHOLD_SECS`], regardless of whether the token is actively
+    /// tracked. Returns `false` if the token has a recent price or has never been
+    /// seen (no expectation of data).
     ///
-    /// Returns `false` if the token is not tracked (no expectation of data) or
-    /// if a recent price exists.
+    /// FIX [R-M9]: Previously only reported staleness for actively-tracked tokens,
+    /// meaning an untracked-but-cached stale price could silently be returned.
     pub fn is_price_stale(&self, token_address: &str) -> bool {
+        let inner = self.inner.read();
+        match inner.prices.get(token_address) {
+            Some(entry) => {
+                let age = Utc::now().signed_duration_since(entry.fetched_at);
+                age.num_seconds() > STALENESS_THRESHOLD_SECS
+            }
+            // No cached entry — not stale (just missing)
+            None => false,
+        }
+    }
+
+    /// Returns `true` if the token is actively tracked but has not received a
+    /// fresh price within [`STALENESS_THRESHOLD_SECS`].
+    pub fn is_tracked_price_stale(&self, token_address: &str) -> bool {
         // If we're not actively tracking this token, we have no expectation
         // of fresh data — don't report staleness.
         let is_tracked = self.active_tokens.read().contains(&token_address.to_string());
         if !is_tracked {
             return false;
         }
-
-        let prices = self.prices.read();
-        match prices.get(token_address) {
-            Some(entry) => {
-                let age = Utc::now().signed_duration_since(entry.fetched_at);
-                age.num_seconds() > STALENESS_THRESHOLD_SECS
-            }
-            // Tracked but never received a price — stale from birth
-            None => true,
-        }
+        self.is_price_stale(token_address)
     }
 
-    /// Set price for a token
+    /// Set price for a token.
+    /// FIX [B-H7]: Updates both prices and price_history atomically under one lock.
     pub fn set_price(&self, token_address: &str, price_usd: Decimal, source: PriceSource) {
         let now = Utc::now();
-        let mut prices = self.prices.write();
-        prices.insert(
+        // Acquire a single write lock and update both maps atomically.
+        let mut inner = self.inner.write();
+        inner.prices.insert(
             token_address.to_string(),
             PriceEntry {
                 price_usd,
@@ -162,8 +198,7 @@ impl PriceCache {
         );
 
         // Update price history for volatility calculation (keep last 24 hours)
-        let mut history = self.price_history.write();
-        let token_history = history.entry(token_address.to_string()).or_default();
+        let token_history = inner.price_history.entry(token_address.to_string()).or_default();
         token_history.push_back((now, price_usd));
 
         // Keep only last 24 hours (assuming updates every 5 seconds = ~17,280 entries max)
@@ -182,8 +217,8 @@ impl PriceCache {
     /// Returns volatility as percentage (0.0-100.0)
     /// Returns None if insufficient data (< 2 price points)
     pub fn calculate_volatility(&self, token_address: &str) -> Option<f64> {
-        let history = self.price_history.read();
-        let token_history = history.get(token_address)?;
+        let inner = self.inner.read();
+        let token_history = inner.price_history.get(token_address)?;
 
         if token_history.len() < 2 {
             return None;
@@ -252,7 +287,8 @@ impl PriceCache {
         self.active_tokens.read().clone()
     }
 
-    /// Start the background price updater
+    /// Start the background price updater with supervision.
+    /// FIX [B-H8]: If the inner update loop panics, the supervisor restarts it after 1s.
     pub async fn start_updater(self: Arc<Self>) {
         {
             let mut running = self.updater_running.write();
@@ -265,9 +301,28 @@ impl PriceCache {
 
         tracing::info!(
             interval_secs = PRICE_UPDATE_INTERVAL_SECS,
-            "Starting price cache updater"
+            "Starting supervised price cache updater"
         );
 
+        // Supervisor loop: respawn the inner update task if it panics.
+        loop {
+            let cache_clone = Arc::clone(&self);
+            let result = tokio::spawn(async move {
+                cache_clone.run_price_update_loop().await;
+            })
+            .await;
+            if let Err(e) = result {
+                tracing::error!("Price updater panicked, restarting: {:?}", e);
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            } else {
+                // run_price_update_loop returned normally (e.g. on shutdown) — exit supervisor.
+                break;
+            }
+        }
+    }
+
+    /// Inner price update loop (runs until cancellation or panic).
+    async fn run_price_update_loop(&self) {
         let mut update_interval =
             interval(std::time::Duration::from_secs(PRICE_UPDATE_INTERVAL_SECS));
 
@@ -299,7 +354,8 @@ impl PriceCache {
         Ok(())
     }
 
-    /// Fetch prices from Jupiter Price API
+    /// Fetch prices from Jupiter Price API.
+    /// FIX [R-L4]: Uses the reusable `self.http_client` rather than rebuilding on every call.
     async fn fetch_prices_jupiter(
         &self,
         tokens: &[String],
@@ -318,15 +374,8 @@ impl PriceCache {
             "Fetching prices from Jupiter"
         );
 
-        // Make HTTP request with retry logic
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .map_err(|e| {
-                PriceCacheError::HttpError(format!("Failed to create HTTP client: {}", e))
-            })?;
-
-        let response = client.get(&url).send().await.map_err(|e| {
+        // Reuse the pre-built HTTP client stored in self.
+        let response = self.http_client.get(&url).send().await.map_err(|e| {
             PriceCacheError::HttpError(format!("Jupiter price request failed: {}", e))
         })?;
 
@@ -407,13 +456,13 @@ impl PriceCache {
 
     /// Get cache statistics
     pub fn stats(&self) -> PriceCacheStats {
-        let prices = self.prices.read();
+        let inner = self.inner.read();
         let now = Utc::now();
 
         let mut valid_count = 0;
         let mut stale_count = 0;
 
-        for entry in prices.values() {
+        for entry in inner.prices.values() {
             let age = now.signed_duration_since(entry.fetched_at);
             if age <= self.ttl {
                 valid_count += 1;
@@ -423,7 +472,7 @@ impl PriceCache {
         }
 
         PriceCacheStats {
-            total_entries: prices.len(),
+            total_entries: inner.prices.len(),
             valid_entries: valid_count,
             stale_entries: stale_count,
             tracked_tokens: self.active_tokens.read().len(),
@@ -432,13 +481,38 @@ impl PriceCache {
 
     /// Clear expired entries
     pub fn prune_expired(&self) {
-        let mut prices = self.prices.write();
+        let mut inner = self.inner.write();
         let now = Utc::now();
 
-        prices.retain(|_, entry| {
+        inner.prices.retain(|_, entry| {
             let age = now.signed_duration_since(entry.fetched_at);
             age <= self.ttl
         });
+    }
+
+    /// Read the price history map under a lock.
+    /// Returns a guard that derefs to `HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>`.
+    /// Used by engine modules that need read access to price history for volatility
+    /// or momentum calculations. The returned guard holds the inner lock — callers
+    /// must not call any other `&self` method while holding it (would deadlock).
+    pub fn price_history_read(
+        &self,
+    ) -> PriceHistoryReadGuard<'_> {
+        PriceHistoryReadGuard {
+            guard: self.inner.read(),
+        }
+    }
+}
+
+/// Read guard for the price history map, exposing HashMap<String, VecDeque<...>> via Deref.
+pub struct PriceHistoryReadGuard<'a> {
+    guard: parking_lot::RwLockReadGuard<'a, PriceCacheInner>,
+}
+
+impl<'a> std::ops::Deref for PriceHistoryReadGuard<'a> {
+    type Target = HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>;
+    fn deref(&self) -> &Self::Target {
+        &self.guard.price_history
     }
 }
 

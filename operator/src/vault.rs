@@ -188,6 +188,14 @@ impl Vault {
         // Parse JSON
         let secrets: VaultSecrets = serde_json::from_slice(&plaintext)?;
 
+        // FIX [R-M5]: Validate that webhook_secret is non-empty after decryption.
+        // An empty secret would allow HMAC verification to pass for any request.
+        if secrets.webhook_secret.is_empty() {
+            return Err(VaultError::InvalidKey(
+                "webhook_secret must not be empty — vault contains an invalid secrets bundle".to_string(),
+            ));
+        }
+
         Ok(secrets)
     }
 
