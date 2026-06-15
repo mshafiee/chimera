@@ -153,6 +153,18 @@ impl SignalAggregator {
     /// # Returns
     /// True if divergence detected (others still hold)
     pub async fn check_divergence(&self, token_address: &str, exiting_wallet: &str) -> bool {
+        // Evict signals older than 1 hour before checking divergence.
+        // add_signal() only cleans up on the 5-minute window; without this, stale
+        // entries accumulate here indefinitely causing false divergence positives.
+        {
+            let cutoff = Instant::now() - Duration::from_secs(3600);
+            let mut signals = self.recent_signals.write().await;
+            signals.retain(|_, signals| {
+                signals.retain(|s| s.timestamp > cutoff);
+                !signals.is_empty()
+            });
+        }
+
         let signals = self.recent_signals.read().await;
 
         if let Some(token_signals) = signals.get(token_address) {

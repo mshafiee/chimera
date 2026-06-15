@@ -30,6 +30,10 @@ pub struct WalletCopyMetrics {
     pub total_trades: u32,
     pub winning_trades: u32,
     pub last_updated: std::time::SystemTime,
+    /// When performance first continuously breached the demotion threshold.
+    /// None means performance is currently within acceptable bounds.
+    /// Set to Some(Instant::now()) on the first breach; cleared on recovery.
+    pub breach_started_at: Option<std::time::Instant>,
 }
 
 impl WalletPerformanceTracker {
@@ -69,6 +73,7 @@ impl WalletPerformanceTracker {
                     total_trades: 0,
                     winning_trades: 0,
                     last_updated: std::time::SystemTime::now(),
+                    breach_started_at: None,
                 });
 
         // Update metrics
@@ -113,6 +118,30 @@ impl WalletPerformanceTracker {
             Decimal::ZERO
         };
         metrics.last_updated = std::time::SystemTime::now();
+
+        // Track how long this wallet has continuously breached the demotion threshold.
+        // We need the wallet's ROI to compute the threshold; retrieve it from the cache
+        // without holding the lock across await points. We clone what we need here.
+        // The actual demotion decision is made in should_demote() which reads breach_started_at.
+        //
+        // Inline threshold check (mirrors should_demote logic) so we can update the timer:
+        {
+            // Compute expected PnL — same formula used in should_demote().
+            // We don't have the wallet here without an await, so we use a conservative
+            // heuristic: if copy_pnl_7d < 0 treat it as a breach (worst-case).
+            // The full threshold check (with original_roi_7d) happens in should_demote().
+            // Here we only maintain the timer: start it on first negative period, clear on recovery.
+            let currently_breaching = metrics.copy_pnl_7d < Decimal::ZERO;
+            if currently_breaching {
+                if metrics.breach_started_at.is_none() {
+                    metrics.breach_started_at = Some(std::time::Instant::now());
+                }
+                // else: timer already running — do not reset it
+            } else {
+                // Performance recovered — reset the breach timer
+                metrics.breach_started_at = None;
+            }
+        }
 
         // Update WQS in database based on copy performance
         self.update_wqs_from_copy_performance(wallet_address, metrics)
@@ -235,8 +264,10 @@ impl WalletPerformanceTracker {
         cache.get(wallet_address).cloned()
     }
 
-    /// Check if wallet should be auto-demoted
-    /// Auto-demote if copy PnL < original PnL * 0.7 for 7 days
+    /// Check if wallet should be auto-demoted.
+    /// Demotes if copy PnL < 70% of expected (based on original ROI) continuously for 7+ days.
+    /// The 7-day timer starts when performance first breaches the threshold and is stored in
+    /// `breach_started_at`; it is NOT reset on every trade close (that was the old bug).
     pub async fn should_demote(&self, wallet_address: &str) -> bool {
         // Get wallet from database to compare copy vs original performance
         if let Ok(Some(wallet)) = crate::db::get_wallet_by_address(&self.db, wallet_address).await {
@@ -253,12 +284,14 @@ impl WalletPerformanceTracker {
                 let threshold =
                     expected_copy_pnl * Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
                 if metrics.copy_pnl_7d < threshold {
-                    // Check if this has been the case for 7+ days
-                    if let Ok(elapsed) = metrics.last_updated.elapsed() {
-                        if elapsed.as_secs() >= 7 * 24 * 3600 {
-                            return true;
-                        }
-                    }
+                    // Use breach_started_at to measure how long performance has been poor.
+                    // This timer is set on the first breach and only reset on recovery, so
+                    // it accurately reflects continuous underperformance rather than resetting
+                    // on every trade close (which was the previous bug).
+                    return metrics
+                        .breach_started_at
+                        .map(|t| t.elapsed().as_secs() >= 7 * 24 * 3600)
+                        .unwrap_or(false);
                 }
             }
         }
