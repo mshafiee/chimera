@@ -152,6 +152,10 @@ pub struct Signal {
     /// Used to compute a liquidity-aware slippage estimate when Jupiter price impact
     /// is unavailable. None when the token safety check was skipped (dev mode, SELL signals).
     pub liquidity_usd: Option<rust_decimal::Decimal>,
+    /// Token decimals (e.g. 9 for most SPL tokens, 6 for USDC).
+    /// [B-M1] Used by get_last_fill_price_sol_per_token to convert lamports/base_unit to
+    /// SOL/whole_token without hardcoding 9. None when not populated from token metadata.
+    pub token_decimals: Option<u8>,
 }
 
 impl Signal {
@@ -164,6 +168,7 @@ impl Signal {
             timestamp,
             source_ip,
             liquidity_usd: None,
+            token_decimals: None,
         }
     }
 

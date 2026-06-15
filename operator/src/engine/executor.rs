@@ -89,10 +89,17 @@ pub struct Executor {
     jito_searcher: Option<crate::engine::jito_searcher::JitoSearcherClient>,
     /// Price cache for volatility calculation
     price_cache: Option<Arc<PriceCache>>,
+    /// Shared market regime detector — reused across calls to avoid per-call construction.
+    /// [R-L1] Previously a new MarketRegimeDetector was instantiated on every check_execution_costs
+    /// call; now it is a field so the internal price_history is preserved across calls.
+    market_regime_detector: Option<Arc<crate::engine::market_regime::MarketRegimeDetector>>,
     /// Price impact from the most recent Jupiter quote (set by execute_jito/execute_standard)
     last_price_impact: parking_lot::Mutex<Option<Decimal>>,
     /// Fill price (lamports per token base unit) from the most recent Jupiter quote
     last_fill_price_lamports_per_base: parking_lot::Mutex<Option<Decimal>>,
+    /// Token decimals corresponding to the last fill price (None if unknown)
+    /// [B-M1] Used by get_last_fill_price_sol_per_token to avoid hardcoding 9 decimals.
+    last_fill_price_token_decimals: parking_lot::Mutex<Option<u8>>,
 }
 
 impl Executor {
@@ -150,8 +157,10 @@ impl Executor {
             tip_manager: None,
             jito_searcher,
             price_cache: None,
+            market_regime_detector: None,
             last_price_impact: parking_lot::Mutex::new(None),
             last_fill_price_lamports_per_base: parking_lot::Mutex::new(None),
+            last_fill_price_token_decimals: parking_lot::Mutex::new(None),
         }
     }
 
@@ -167,8 +176,13 @@ impl Executor {
         self
     }
 
-    /// Set the price cache for volatility calculation
+    /// Set the price cache for volatility calculation.
+    /// Also initialises the shared MarketRegimeDetector from the same cache. [R-L1]
     pub fn with_price_cache(mut self, price_cache: Arc<PriceCache>) -> Self {
+        let detector = Arc::new(crate::engine::market_regime::MarketRegimeDetector::new(
+            price_cache.clone(),
+        ));
+        self.market_regime_detector = Some(detector);
         self.price_cache = Some(price_cache);
         self
     }
@@ -464,10 +478,11 @@ impl Executor {
                         }
                     }
 
-                    // Check if we need to switch to fallback
-                    if failure_count >= self.config.rpc.max_consecutive_failures
-                        && rpc_mode == RpcMode::Jito
-                    {
+                    // [R-H3] Check if we need to switch to fallback.
+                    // Removed the `rpc_mode == RpcMode::Jito` guard — fallback must trigger
+                    // for any mode when the failure threshold is reached so that Standard-mode
+                    // primary failures also switch to the fallback URL.
+                    if failure_count >= self.config.rpc.max_consecutive_failures {
                         self.switch_to_fallback().await;
                     }
                 }
@@ -819,9 +834,13 @@ impl Executor {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
             })?;
 
-        // Capture actual price impact and fill price from Jupiter quote
+        // Capture actual price impact and fill price from Jupiter quote.
+        // [B-M1] Also store the token decimals from the signal so the getter can compute
+        // the correct SOL-per-token price without hardcoding 9 decimals.
+        // signal.token_decimals is currently not populated; store None to signal unknown.
         *self.last_price_impact.lock() = built_tx.price_impact_pct();
         *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
+        *self.last_fill_price_token_decimals.lock() = signal.token_decimals;
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
@@ -1092,9 +1111,11 @@ impl Executor {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
             })?;
 
-        // Capture actual price impact and fill price from Jupiter quote
+        // Capture actual price impact and fill price from Jupiter quote.
+        // [B-M1] Also capture token decimals for correct SOL-per-token conversion.
         *self.last_price_impact.lock() = built_tx.price_impact_pct();
         *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
+        *self.last_fill_price_token_decimals.lock() = signal.token_decimals;
 
         // Check total execution cost cap
         self.check_execution_costs(signal, built_tx.price_impact_pct(), Decimal::ZERO)?;
@@ -1570,28 +1591,25 @@ impl Executor {
             }
         };
 
-        // Apply dynamic limit expansion in high volatility regimes
+        // Apply dynamic limit expansion in high volatility regimes.
+        // [R-L1] Use the shared MarketRegimeDetector (initialised in with_price_cache) instead
+        // of constructing a new one per-call. A fresh detector has an empty price_history so
+        // detect_effective_regime always returned Sideways — the Bull/Bear expansion never fired.
+        // The shared detector uses the same Arc<PriceCache> so its price_history has real data.
         if limit > Decimal::ZERO {
-            if let Some(ref cache) = self.price_cache {
-                // Use a fresh detector but read the token regime from the shared price_cache
-                // (which is populated by the price update loop). detect_token_regime reads
-                // price_cache.price_history, which is the same Arc — it has real data.
-                // detect_effective_regime merges global SOL history, but the fresh detector's
-                // own price_history is always empty, so global always returns Sideways and the
-                // Bull expansion never fires. Using detect_token_regime gives accurate results.
-                use crate::engine::market_regime::{MarketRegime, MarketRegimeDetector};
+            if let Some(ref detector) = self.market_regime_detector {
+                use crate::engine::market_regime::MarketRegime;
                 use std::str::FromStr;
 
-                let detector = MarketRegimeDetector::new(cache.clone());
                 let regime = detector.detect_token_regime(signal.token_address());
-                
+
                 let multiplier = match regime {
                     MarketRegime::Bull | MarketRegime::Bear => Decimal::from_str("1.5").unwrap(), // Allow 50% more slippage in fast markets
                     MarketRegime::Sideways => Decimal::ONE,
                 };
-                
+
                 limit *= multiplier;
-                
+
                 if multiplier > Decimal::ONE {
                     tracing::debug!(
                         trade_uuid = %signal.trade_uuid,
@@ -1659,6 +1677,13 @@ impl Executor {
             {
                 tracing::error!(error = %e, "Failed to log RPC mode change");
             }
+        } else {
+            // [R-M3] No fallback URL configured: warn and reset failure count so future failures
+            // are still tracked from zero rather than immediately re-triggering this branch.
+            tracing::warn!(
+                "No fallback RPC URL configured; trading on degraded primary. Reset failure count."
+            );
+            self.mutable.lock().failure_count = 0;
         }
     }
 
@@ -1673,13 +1698,35 @@ impl Executor {
     }
 
     /// Get fill price in SOL per token from the most recent Jupiter quote.
-    /// Assumes 9-decimal tokens (standard SPL). Returns None if unavailable.
+    ///
+    /// Uses the token decimals stored alongside the fill price to compute the correct
+    /// SOL-per-whole-token price. Returns None if the fill price or token decimals are
+    /// unavailable (caller should fall back to the price cache).
+    ///
+    /// [B-M1] Previously hardcoded 9 decimals (standard SPL); now uses the stored decimals
+    /// so that 6-decimal tokens (e.g. USDC) are priced correctly.
     pub fn get_last_fill_price_sol_per_token(&self) -> Option<Decimal> {
         let lamports_per_base = (*self.last_fill_price_lamports_per_base.lock())?;
-        // Convert lamports/base_unit → SOL/token: divide by 1e9 (lamports→SOL) / 1e9 (base→token)
-        // For 9-decimal token: price_sol_per_token = lamports_per_base_unit / 1e9
+
+        // Look up token decimals from the cache stored at execution time.
+        let token_decimals = match *self.last_fill_price_token_decimals.lock() {
+            Some(d) => d,
+            None => {
+                tracing::warn!(
+                    "get_last_fill_price_sol_per_token: token decimals unknown (no metadata cache hit); \
+                     returning None so caller uses price-cache fallback"
+                );
+                return None;
+            }
+        };
+
+        // Convert: lamports_per_base_unit → SOL_per_whole_token
+        // SOL/token = lamports_per_base * 10^token_decimals / 1e9
+        // For 9-decimal token: factor = 1e9/1e9 = 1
+        // For 6-decimal token: factor = 1e6/1e9 = 0.001
+        let token_units_per_token = Decimal::from(10u64.pow(token_decimals as u32));
         let lamports_per_sol = Decimal::from(1_000_000_000u64);
-        Some(lamports_per_base / lamports_per_sol)
+        Some(lamports_per_base * token_units_per_token / lamports_per_sol)
     }
 
     /// Get time spent in fallback mode
