@@ -16,6 +16,44 @@ use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
 
+/// Persist circuit breaker state to the database
+async fn persist_cb_state(
+    db: &DbPool,
+    state: CircuitBreakerState,
+    tripped_at: Option<DateTime<Utc>>,
+    trip_reason: Option<&str>,
+) -> AppResult<()> {
+    let state_str = match state {
+        CircuitBreakerState::Active => "Active",
+        CircuitBreakerState::Tripped => "Tripped",
+        CircuitBreakerState::Cooldown => "Cooldown",
+    };
+    let tripped_at_str = tripped_at.map(|t| t.to_rfc3339());
+    sqlx::query(
+        r#"UPDATE circuit_breaker_state
+           SET state = ?, tripped_at = ?, trip_reason = ?, updated_at = datetime('now')
+           WHERE id = 1"#,
+    )
+    .bind(state_str)
+    .bind(tripped_at_str)
+    .bind(trip_reason)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Load persisted circuit breaker state from the database
+async fn load_cb_state(
+    db: &DbPool,
+) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
+    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT state, tripped_at, trip_reason FROM circuit_breaker_state WHERE id = 1",
+    )
+    .fetch_optional(db)
+    .await?;
+    Ok(row)
+}
+
 /// Circuit breaker state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitBreakerState {
@@ -152,6 +190,47 @@ impl CircuitBreaker {
         self
     }
 
+    /// Restore persisted circuit breaker state from DB on startup.
+    /// Call this after construction but before the server starts accepting connections.
+    pub async fn restore_from_db(&self) -> AppResult<()> {
+        match load_cb_state(&self.db).await? {
+            Some((state_str, tripped_at_str, trip_reason_str)) if state_str != "Active" => {
+                let tripped_at = tripped_at_str
+                    .as_deref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                let reason = trip_reason_str
+                    .clone()
+                    .map(|r| TripReason::Manual { reason: r })
+                    .unwrap_or(TripReason::Manual {
+                        reason: "Restored from persisted state".to_string(),
+                    });
+
+                {
+                    let mut state = self.state.write();
+                    state.state = CircuitBreakerState::Tripped;
+                    state.tripped_at = tripped_at;
+                    state.trip_reason = Some(reason);
+                }
+
+                tracing::warn!(
+                    persisted_state = %state_str,
+                    tripped_at = ?tripped_at_str,
+                    trip_reason = ?trip_reason_str,
+                    "Circuit breaker restored to non-Active state from persisted DB record"
+                );
+
+                // Re-evaluate immediately to transition Tripped → Cooldown → Active if appropriate
+                self.evaluate().await?;
+            }
+            _ => {
+                tracing::debug!("Circuit breaker persisted state is Active or absent — no restore needed");
+            }
+        }
+        Ok(())
+    }
+
     /// Set total capital in SOL (builder method, used at construction time)
     pub fn with_total_capital(self, total_capital_sol: Decimal) -> Self {
         *self.total_capital_sol.write() = total_capital_sol;
@@ -181,17 +260,17 @@ impl CircuitBreaker {
 
     /// Evaluate trip conditions and update state
     pub async fn evaluate(&self) -> AppResult<()> {
-        // Atomically check and update last_check under a single write lock.
-        // Holding read then write separately is a TOCTOU race: two concurrent calls could
-        // both pass the interval check before either updates last_check.
+        // FIX [R-M3]: Check interval under write lock but do NOT update last_check yet.
+        // last_check is updated only after DB queries succeed (see below).
         {
-            let mut state = self.state.write();
+            let state = self.state.write();
             if let Some(last_check) = state.last_check {
                 if Utc::now().signed_duration_since(last_check) < self.check_interval {
                     return Ok(());
                 }
             }
-            state.last_check = Some(Utc::now());
+            // Do NOT set last_check here — we set it after queries succeed.
+            // (write guard is released at end of this block)
         }
 
         // If in cooldown, check if cooldown period has passed
@@ -237,22 +316,26 @@ impl CircuitBreaker {
         .await?;
         let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
 
-        // Check 24h SOL portfolio stop (5% limit of total_capital_sol)
+        // FIX [R-H4]: Check 24h SOL portfolio stop using two clean separate queries to
+        // avoid double-counting positions that are still ACTIVE/EXITING but also have a
+        // closed_at timestamp (e.g. stuck positions).
         let total_capital = *self.total_capital_sol.read();
         if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
-            let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+            // Query 1: realized PnL from CLOSED positions in the last 24h
+            let realized_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
                 FROM positions
-                WHERE closed_at >= datetime('now', '-24 hours')
+                WHERE state = 'CLOSED'
+                  AND closed_at >= datetime('now', '-24 hours')
                 "#,
             )
             .fetch_one(&self.db)
             .await?;
-            let daily_pnl_sol = Decimal::from_f64_retain(daily_pnl_sol_f64).unwrap_or(Decimal::ZERO);
-            
-            // Total SOL loss includes realized and unrealized
-            let total_loss_sol = daily_pnl_sol + unrealized_sol;
+            // Query 2: unrealized PnL from currently open positions (already fetched above)
+            // unrealized_sol already holds SUM(unrealized_pnl_sol) WHERE state IN ('ACTIVE','EXITING')
+            let realized_pnl_sol = Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
+            let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
             if daily_loss_percent < loss_threshold {
@@ -352,17 +435,25 @@ impl CircuitBreaker {
             return Ok(());
         }
 
+        // FIX [R-M3]: Update last_check only after all DB queries have succeeded.
+        // If any query above fails (early return via ?), last_check is not advanced,
+        // so the next call will retry immediately rather than silently skipping a cycle.
+        {
+            self.state.write().last_check = Some(Utc::now());
+        }
+
         Ok(())
     }
 
     /// Trip the circuit breaker
     async fn trip(&self, reason: TripReason) -> AppResult<()> {
         let reason_str = reason.to_string();
+        let now = Utc::now();
 
         {
             let mut state = self.state.write();
             state.state = CircuitBreakerState::Tripped;
-            state.tripped_at = Some(Utc::now());
+            state.tripped_at = Some(now);
             state.trip_reason = Some(reason);
         }
 
@@ -370,6 +461,19 @@ impl CircuitBreaker {
             reason = %reason_str,
             "Circuit breaker TRIPPED - trading halted"
         );
+
+        // FIX [R-C1]: Persist state to DB so it survives restarts.
+        if let Err(e) = persist_cb_state(
+            &self.db,
+            CircuitBreakerState::Tripped,
+            Some(now),
+            Some(&reason_str),
+        )
+        .await
+        {
+            tracing::error!(error = %e, "Failed to persist circuit breaker TRIPPED state to DB");
+            // Non-fatal: in-memory state is already set; log the failure and continue.
+        }
 
         // Log to config audit
         db::log_config_change(
@@ -442,30 +546,37 @@ impl CircuitBreaker {
         .await?;
         let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
 
-        // Re-check portfolio stop realized SOL loss before exiting cooldown
+        // FIX [R-H4]: Re-check portfolio stop using two clean separate queries (same as evaluate()).
         let total_capital = *self.total_capital_sol.read();
         if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
-            let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
+            // Query 1: realized PnL from CLOSED positions in the last 24h only
+            let realized_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
                 r#"
                 SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
                 FROM positions
-                WHERE closed_at >= datetime('now', '-24 hours')
+                WHERE state = 'CLOSED'
+                  AND closed_at >= datetime('now', '-24 hours')
                 "#,
             )
             .fetch_one(&self.db)
             .await?;
-            let daily_pnl_sol = Decimal::from_f64_retain(daily_pnl_sol_f64).unwrap_or(Decimal::ZERO);
-            
-            // Total SOL loss includes realized and unrealized
-            let total_loss_sol = daily_pnl_sol + unrealized_sol;
+            // Query 2: unrealized PnL from open positions (already in unrealized_sol)
+            let realized_pnl_sol = Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
+            let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
             if daily_loss_percent < loss_threshold {
-                self.trip(TripReason::PortfolioStop24h {
+                let trip_reason = TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
                     threshold: 5.0,
-                })
-                .await?;
+                };
+                // FIX [R-M2]: Log re-trip event before calling trip().
+                tracing::warn!(
+                    reason = ?trip_reason,
+                    original_tripped_at = ?self.state.read().tripped_at,
+                    "Circuit breaker re-tripped during cooldown exit — clock reset"
+                );
+                self.trip(trip_reason).await?;
                 tracing::warn!("Circuit breaker cooldown expired but daily SOL loss still breached — re-tripped");
                 return Ok(());
             }
@@ -537,11 +648,17 @@ impl CircuitBreaker {
         if let Some(total_pnl_usd) = usd_check_result {
             if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
                 // Loss still breaches threshold — re-trip rather than resume.
-                self.trip(TripReason::MaxLoss24h {
+                let trip_reason = TripReason::MaxLoss24h {
                     loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
                     threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
-                })
-                .await?;
+                };
+                // FIX [R-M2]: Log re-trip event before calling trip().
+                tracing::warn!(
+                    reason = ?trip_reason,
+                    original_tripped_at = ?self.state.read().tripped_at,
+                    "Circuit breaker re-tripped during cooldown exit — clock reset"
+                );
+                self.trip(trip_reason).await?;
                 tracing::warn!("Circuit breaker cooldown expired but loss threshold still breached — re-tripped");
                 return Ok(());
             }
@@ -549,22 +666,34 @@ impl CircuitBreaker {
 
         let consecutive = db::get_consecutive_losses(&self.db).await?;
         if consecutive >= self.config.max_consecutive_losses {
-            self.trip(TripReason::ConsecutiveLosses {
+            let trip_reason = TripReason::ConsecutiveLosses {
                 count: consecutive,
                 threshold: self.config.max_consecutive_losses,
-            })
-            .await?;
+            };
+            // FIX [R-M2]: Log re-trip event before calling trip().
+            tracing::warn!(
+                reason = ?trip_reason,
+                original_tripped_at = ?self.state.read().tripped_at,
+                "Circuit breaker re-tripped during cooldown exit — clock reset"
+            );
+            self.trip(trip_reason).await?;
             tracing::warn!("Circuit breaker cooldown expired but consecutive losses still breached — re-tripped");
             return Ok(());
         }
 
         let drawdown = db::get_max_drawdown_percent(&self.db).await?;
         if drawdown >= self.config.max_drawdown_percent {
-            self.trip(TripReason::MaxDrawdown {
+            let trip_reason = TripReason::MaxDrawdown {
                 drawdown: drawdown.to_f64().unwrap_or(0.0),
                 threshold: self.config.max_drawdown_percent.to_f64().unwrap_or(0.0),
-            })
-            .await?;
+            };
+            // FIX [R-M2]: Log re-trip event before calling trip().
+            tracing::warn!(
+                reason = ?trip_reason,
+                original_tripped_at = ?self.state.read().tripped_at,
+                "Circuit breaker re-tripped during cooldown exit — clock reset"
+            );
+            self.trip(trip_reason).await?;
             tracing::warn!("Circuit breaker cooldown expired but drawdown still breached — re-tripped");
             return Ok(());
         }
@@ -577,6 +706,11 @@ impl CircuitBreaker {
         }
 
         tracing::info!("Circuit breaker exiting cooldown - trading resumed");
+
+        // FIX [R-C1]: Persist Active state so restarts see cleared state.
+        if let Err(e) = persist_cb_state(&self.db, CircuitBreakerState::Active, None, None).await {
+            tracing::error!(error = %e, "Failed to persist circuit breaker ACTIVE state to DB after cooldown exit");
+        }
 
         db::log_config_change(
             &self.db,
@@ -607,6 +741,11 @@ impl CircuitBreaker {
             previous_state = %previous_state,
             "Circuit breaker manually reset"
         );
+
+        // FIX [R-C1]: Persist Active state so restarts don't re-trip unnecessarily.
+        if let Err(e) = persist_cb_state(&self.db, CircuitBreakerState::Active, None, None).await {
+            tracing::error!(error = %e, "Failed to persist circuit breaker ACTIVE state to DB after reset");
+        }
 
         db::log_config_change(
             &self.db,

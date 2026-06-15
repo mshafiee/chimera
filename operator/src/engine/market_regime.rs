@@ -122,7 +122,7 @@ impl MarketRegimeDetector {
 
     /// Detect market regime for a specific token based on its price history in the cache
     pub fn detect_token_regime(&self, token_address: &str) -> MarketRegime {
-        let history = self.price_cache.price_history.read();
+        let history = self.price_cache.price_history_read();
         let token_history = match history.get(token_address) {
             Some(th) => th,
             None => return MarketRegime::Sideways,

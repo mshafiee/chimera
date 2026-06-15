@@ -485,7 +485,7 @@ impl Executor {
         if let Some(ref price_cache) = self.price_cache {
             // Get SOL price history to check for crash
             let sol_mint = crate::constants::mints::SOL;
-            let history = price_cache.price_history.read();
+            let history = price_cache.price_history_read();
             if let Some(sol_history) = history.get(sol_mint) {
                 if sol_history.len() >= 2 {
                     let one_hour_ago = Utc::now() - chrono::Duration::hours(1);

@@ -722,6 +722,15 @@ pub async fn update_config(
     if !auth.0.role.has_permission(Role::Admin) {
         return Err(AppError::Forbidden("Requires admin role".to_string()));
     }
+
+    // FIX [R-H8]: Collect audit log entries during the write lock, then drop the lock
+    // before issuing async DB writes. This prevents holding the RwLock across `.await`
+    // points which would block all config readers for the duration of every DB call.
+    //
+    // audit_entries: Vec<(key, old_value, new_value)>
+    let mut audit_entries: Vec<(String, Option<String>, String)> = Vec::new();
+
+    {
     let mut config = state.config.write().await;
 
     // Update circuit breakers if provided
@@ -731,56 +740,24 @@ pub async fn update_config(
             let old = config.circuit_breakers.max_loss_24h_usd;
             config.circuit_breakers.max_loss_24h_usd =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "circuit_breakers.max_loss_24h",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("circuit_breakers.max_loss_24h".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = cb.max_consecutive_losses {
             let old = config.circuit_breakers.max_consecutive_losses;
             config.circuit_breakers.max_consecutive_losses = v;
-            db::log_config_change(
-                &state.db,
-                "circuit_breakers.max_consecutive_losses",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("circuit_breakers.max_consecutive_losses".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = cb.max_drawdown_percent {
             use rust_decimal::prelude::*;
             let old = config.circuit_breakers.max_drawdown_percent;
             config.circuit_breakers.max_drawdown_percent =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "circuit_breakers.max_drawdown_percent",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("circuit_breakers.max_drawdown_percent".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = cb.cool_down_minutes {
             let old = config.circuit_breakers.cooldown_minutes;
             config.circuit_breakers.cooldown_minutes = v;
-            db::log_config_change(
-                &state.db,
-                "circuit_breakers.cooldown_minutes",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("circuit_breakers.cooldown_minutes".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
@@ -797,15 +774,11 @@ pub async fn update_config(
             let old_spear = config.strategy.spear_percent;
             config.strategy.shield_percent = shield;
             config.strategy.spear_percent = spear;
-            db::log_config_change(
-                &state.db,
-                "strategy.allocation",
-                Some(&format!("shield:{}/spear:{}", old_shield, old_spear)),
-                &format!("shield:{}/spear:{}", shield, spear),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push((
+                "strategy.allocation".to_string(),
+                Some(format!("shield:{}/spear:{}", old_shield, old_spear)),
+                format!("shield:{}/spear:{}", shield, spear),
+            ));
         }
     }
 
@@ -815,29 +788,13 @@ pub async fn update_config(
             use rust_decimal::prelude::*;
             let old = config.strategy.max_position_sol;
             config.strategy.max_position_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "strategy.max_position_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("strategy.max_position_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = s.min_position_sol {
             use rust_decimal::prelude::*;
             let old = config.strategy.min_position_sol;
             config.strategy.min_position_sol = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "strategy.min_position_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("strategy.min_position_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
@@ -850,41 +807,17 @@ pub async fn update_config(
             if let Some(v) = m.enabled {
                 let old = mon.enabled;
                 mon.enabled = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.enabled",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.enabled".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.webhook_registration_batch_size {
                 let old = mon.webhook_registration_batch_size;
                 mon.webhook_registration_batch_size = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.webhook_registration_batch_size",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.webhook_registration_batch_size".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.webhook_registration_delay_ms {
                 let old = mon.webhook_registration_delay_ms;
                 mon.webhook_registration_delay_ms = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.webhook_registration_delay_ms",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.webhook_registration_delay_ms".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.webhook_processing_rate_limit {
                 if v > 50 {
@@ -894,54 +827,22 @@ pub async fn update_config(
                 }
                 let old = mon.webhook_processing_rate_limit;
                 mon.webhook_processing_rate_limit = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.webhook_processing_rate_limit",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.webhook_processing_rate_limit".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.rpc_polling_enabled {
                 let old = mon.rpc_polling_enabled;
                 mon.rpc_polling_enabled = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.rpc_polling_enabled",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.rpc_polling_enabled".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.rpc_poll_interval_secs {
                 let old = mon.rpc_poll_interval_secs;
                 mon.rpc_poll_interval_secs = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.rpc_poll_interval_secs",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.rpc_poll_interval_secs".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.rpc_poll_batch_size {
                 let old = mon.rpc_poll_batch_size;
                 mon.rpc_poll_batch_size = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.rpc_poll_batch_size",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.rpc_poll_batch_size".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.rpc_poll_rate_limit {
                 if v > 50 {
@@ -951,28 +852,12 @@ pub async fn update_config(
                 }
                 let old = mon.rpc_poll_rate_limit;
                 mon.rpc_poll_rate_limit = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.rpc_poll_rate_limit",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.rpc_poll_rate_limit".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = m.max_active_wallets {
                 let old = mon.max_active_wallets;
                 mon.max_active_wallets = v;
-                db::log_config_change(
-                    &state.db,
-                    "monitoring.max_active_wallets",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("monitoring.max_active_wallets".to_string(), Some(old.to_string()), v.to_string()));
             }
         }
     }
@@ -996,15 +881,11 @@ pub async fn update_config(
                 .iter()
                 .map(|t| Decimal::from_f64_retain(*t).unwrap_or(Decimal::ZERO))
                 .collect();
-            db::log_config_change(
-                &state.db,
-                "profit_management.targets",
-                Some(&old),
-                &format!("{:?}", v),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push((
+                "profit_management.targets".to_string(),
+                Some(old),
+                format!("{:?}", v),
+            ));
         }
         if let Some(v) = pm.tiered_exit_percent {
             if !(0.0..=100.0).contains(&v) {
@@ -1015,43 +896,19 @@ pub async fn update_config(
             let old = config.profit_management.tiered_exit_percent;
             config.profit_management.tiered_exit_percent =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "profit_management.tiered_exit_percent",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("profit_management.tiered_exit_percent".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = pm.trailing_stop_activation {
             let old = config.profit_management.trailing_stop_activation;
             config.profit_management.trailing_stop_activation =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "profit_management.trailing_stop_activation",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("profit_management.trailing_stop_activation".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = pm.trailing_stop_distance {
             let old = config.profit_management.trailing_stop_distance;
             config.profit_management.trailing_stop_distance =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "profit_management.trailing_stop_distance",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("profit_management.trailing_stop_distance".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = pm.hard_stop_loss {
             if !(0.0..=100.0).contains(&v) {
@@ -1064,28 +921,12 @@ pub async fn update_config(
             // API accepts positive values (e.g. 25 = "stop at 25% loss"), so negate on store.
             config.profit_management.max_stop_loss_distance =
                 -Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "profit_management.hard_stop_loss",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("profit_management.hard_stop_loss".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = pm.time_exit_hours {
             let old = config.profit_management.time_exit_hours;
             config.profit_management.time_exit_hours = v;
-            db::log_config_change(
-                &state.db,
-                "profit_management.time_exit_hours",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("profit_management.time_exit_hours".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
@@ -1103,15 +944,7 @@ pub async fn update_config(
             }
             let old = config.position_sizing.base_size_sol;
             config.position_sizing.base_size_sol = v_dec;
-            db::log_config_change(
-                &state.db,
-                "position_sizing.base_size_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("position_sizing.base_size_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ps.max_size_sol {
             let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
@@ -1122,15 +955,7 @@ pub async fn update_config(
             }
             let old = config.position_sizing.max_size_sol;
             config.position_sizing.max_size_sol = v_dec;
-            db::log_config_change(
-                &state.db,
-                "position_sizing.max_size_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("position_sizing.max_size_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ps.min_size_sol {
             let v_dec = Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
@@ -1141,15 +966,7 @@ pub async fn update_config(
             }
             let old = config.position_sizing.min_size_sol;
             config.position_sizing.min_size_sol = v_dec;
-            db::log_config_change(
-                &state.db,
-                "position_sizing.min_size_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("position_sizing.min_size_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ps.consensus_multiplier {
             if !(1.0..=5.0).contains(&v) {
@@ -1160,28 +977,12 @@ pub async fn update_config(
             let old = config.position_sizing.consensus_multiplier;
             config.position_sizing.consensus_multiplier =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "position_sizing.consensus_multiplier",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("position_sizing.consensus_multiplier".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ps.max_concurrent_positions {
             let old = config.position_sizing.max_concurrent_positions;
             config.position_sizing.max_concurrent_positions = v;
-            db::log_config_change(
-                &state.db,
-                "position_sizing.max_concurrent_positions",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("position_sizing.max_concurrent_positions".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
@@ -1190,57 +991,25 @@ pub async fn update_config(
         if let Some(v) = mp.always_use_jito {
             let old = config.mev_protection.always_use_jito;
             config.mev_protection.always_use_jito = v;
-            db::log_config_change(
-                &state.db,
-                "mev_protection.always_use_jito",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("mev_protection.always_use_jito".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = mp.exit_tip_sol {
             let old = config.mev_protection.exit_tip_sol;
             config.mev_protection.exit_tip_sol =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "mev_protection.exit_tip_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("mev_protection.exit_tip_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = mp.consensus_tip_sol {
             let old = config.mev_protection.consensus_tip_sol;
             config.mev_protection.consensus_tip_sol =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "mev_protection.consensus_tip_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("mev_protection.consensus_tip_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = mp.standard_tip_sol {
             let old = config.mev_protection.standard_tip_sol;
             config.mev_protection.standard_tip_sol =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "mev_protection.standard_tip_sol",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("mev_protection.standard_tip_sol".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
@@ -1250,68 +1019,28 @@ pub async fn update_config(
             let old = config.token_safety.min_liquidity_shield_usd;
             config.token_safety.min_liquidity_shield_usd =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "token_safety.min_liquidity_shield_usd",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("token_safety.min_liquidity_shield_usd".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ts.min_liquidity_spear_usd {
             let old = config.token_safety.min_liquidity_spear_usd;
             config.token_safety.min_liquidity_spear_usd =
                 Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO);
-            db::log_config_change(
-                &state.db,
-                "token_safety.min_liquidity_spear_usd",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("token_safety.min_liquidity_spear_usd".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ts.honeypot_detection_enabled {
             let old = config.token_safety.honeypot_detection_enabled;
             config.token_safety.honeypot_detection_enabled = v;
-            db::log_config_change(
-                &state.db,
-                "token_safety.honeypot_detection_enabled",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("token_safety.honeypot_detection_enabled".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ts.cache_capacity {
             let old = config.token_safety.cache_capacity;
             config.token_safety.cache_capacity = v;
-            db::log_config_change(
-                &state.db,
-                "token_safety.cache_capacity",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("token_safety.cache_capacity".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = ts.cache_ttl_seconds {
             let old = config.token_safety.cache_ttl_seconds;
             config.token_safety.cache_ttl_seconds = v;
-            db::log_config_change(
-                &state.db,
-                "token_safety.cache_ttl_seconds",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("token_safety.cache_ttl_seconds".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
@@ -1321,123 +1050,51 @@ pub async fn update_config(
             if let Some(v) = t.enabled {
                 let old = config.notifications.telegram.enabled;
                 config.notifications.telegram.enabled = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.telegram.enabled",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.telegram.enabled".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = t.rate_limit_seconds {
                 let old = config.notifications.telegram.rate_limit_seconds;
                 config.notifications.telegram.rate_limit_seconds = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.telegram.rate_limit_seconds",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.telegram.rate_limit_seconds".to_string(), Some(old.to_string()), v.to_string()));
             }
         }
         if let Some(r) = n.rules {
             if let Some(v) = r.circuit_breaker_triggered {
                 let old = config.notifications.rules.circuit_breaker_triggered;
                 config.notifications.rules.circuit_breaker_triggered = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.rules.circuit_breaker_triggered",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.rules.circuit_breaker_triggered".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = r.wallet_drained {
                 let old = config.notifications.rules.wallet_drained;
                 config.notifications.rules.wallet_drained = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.rules.wallet_drained",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.rules.wallet_drained".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = r.position_exited {
                 let old = config.notifications.rules.position_exited;
                 config.notifications.rules.position_exited = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.rules.position_exited",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.rules.position_exited".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = r.wallet_promoted {
                 let old = config.notifications.rules.wallet_promoted;
                 config.notifications.rules.wallet_promoted = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.rules.wallet_promoted",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.rules.wallet_promoted".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = r.daily_summary {
                 let old = config.notifications.rules.daily_summary;
                 config.notifications.rules.daily_summary = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.rules.daily_summary",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.rules.daily_summary".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = r.rpc_fallback {
                 let old = config.notifications.rules.rpc_fallback;
                 config.notifications.rules.rpc_fallback = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.rules.rpc_fallback",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.rules.rpc_fallback".to_string(), Some(old.to_string()), v.to_string()));
             }
         }
         if let Some(ds) = n.daily_summary {
             if let Some(v) = ds.enabled {
                 let old = config.notifications.daily_summary.enabled;
                 config.notifications.daily_summary.enabled = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.daily_summary.enabled",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.daily_summary.enabled".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = ds.hour_utc {
                 if v > 23 {
@@ -1447,15 +1104,7 @@ pub async fn update_config(
                 }
                 let old = config.notifications.daily_summary.hour_utc;
                 config.notifications.daily_summary.hour_utc = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.daily_summary.hour_utc",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.daily_summary.hour_utc".to_string(), Some(old.to_string()), v.to_string()));
             }
             if let Some(v) = ds.minute {
                 if v > 59 {
@@ -1465,15 +1114,7 @@ pub async fn update_config(
                 }
                 let old = config.notifications.daily_summary.minute;
                 config.notifications.daily_summary.minute = v;
-                db::log_config_change(
-                    &state.db,
-                    "notifications.daily_summary.minute",
-                    Some(&old.to_string()),
-                    &v.to_string(),
-                    &auth.0.identifier,
-                    None,
-                )
-                .await?;
+                audit_entries.push(("notifications.daily_summary.minute".to_string(), Some(old.to_string()), v.to_string()));
             }
         }
     }
@@ -1483,15 +1124,7 @@ pub async fn update_config(
         if let Some(v) = q.capacity {
             let old = config.queue.capacity;
             config.queue.capacity = v;
-            db::log_config_change(
-                &state.db,
-                "queue.capacity",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("queue.capacity".to_string(), Some(old.to_string()), v.to_string()));
         }
         if let Some(v) = q.load_shed_threshold_percent {
             if v > 100 {
@@ -1501,20 +1134,26 @@ pub async fn update_config(
             }
             let old = config.queue.load_shed_threshold_percent;
             config.queue.load_shed_threshold_percent = v;
-            db::log_config_change(
-                &state.db,
-                "queue.load_shed_threshold_percent",
-                Some(&old.to_string()),
-                &v.to_string(),
-                &auth.0.identifier,
-                None,
-            )
-            .await?;
+            audit_entries.push(("queue.load_shed_threshold_percent".to_string(), Some(old.to_string()), v.to_string()));
         }
     }
 
+    } // end of config write lock scope — lock is released here
+
+    // Now issue all audit log DB writes outside the write lock.
+    for (key, old_val, new_val) in audit_entries {
+        db::log_config_change(
+            &state.db,
+            &key,
+            old_val.as_deref(),
+            &new_val,
+            &auth.0.identifier,
+            None,
+        )
+        .await?;
+    }
+
     // Return updated config
-    drop(config);
     get_config(State(state)).await
 }
 

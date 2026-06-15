@@ -132,7 +132,8 @@ impl MomentumExit {
             let hwm = hwm_map.entry(trade_uuid.to_string()).or_insert_with(|| {
                 // If not in memory (e.g., after restart), attempt to reconstruct from price history.
                 // This is a best-effort recovery; if history is also empty, it falls back to entry_price.
-                if let Some(history) = self.price_cache.price_history.read().get(token_address) {
+                let ph_guard = self.price_cache.price_history_read();
+                if let Some(history) = ph_guard.get(token_address) {
                     let entry_dt: chrono::DateTime<chrono::Utc> = entry_time.into();
                     let mut peak = entry_price;
                     for (time, price) in history.iter() {
@@ -295,7 +296,7 @@ impl MomentumExit {
     /// Returns Some((current_rsi, previous_rsi)) if sufficient data is available.
     async fn calculate_rsi(&self, token_address: &str) -> Option<(f64, f64)> {
         // Get price history from price cache
-        let history = self.price_cache.price_history.read();
+        let history = self.price_cache.price_history_read();
         let token_history = history.get(token_address)?;
 
         // Sample up to 30 price points at 20-second intervals (~10 min total window)
