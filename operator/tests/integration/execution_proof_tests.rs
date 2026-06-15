@@ -132,6 +132,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         UUID,
         None,
         Decimal::ONE,
+        true,
     )
     .await
     .unwrap();
@@ -212,6 +213,7 @@ async fn test_profit_capture_positive_pnl_recorded() {
         UUID,
         None,
         Decimal::ONE,
+        true,
     )
     .await
     .unwrap();

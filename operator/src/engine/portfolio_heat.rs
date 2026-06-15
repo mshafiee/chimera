@@ -267,6 +267,13 @@ impl PortfolioHeat {
         };
         Ok(current_heat + position_size_sol <= allocated_sol)
     }
+
+    /// Returns the 150% heat threshold limit directly in SOL
+    pub fn get_critical_threshold_sol(&self) -> Decimal {
+        let capital = *self.total_capital_sol.read();
+        let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
+        max_heat_sol * dec!(1.5)
+    }
 }
 
 #[cfg(test)]

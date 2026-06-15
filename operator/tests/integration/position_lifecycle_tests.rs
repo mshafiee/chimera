@@ -116,6 +116,7 @@ async fn test_close_position_no_active_position_is_noop() {
         "uuid-nosell",
         None,
         Decimal::ONE,
+        true,
     )
     .await;
 
@@ -187,6 +188,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         uuid,
         None,
         Decimal::ONE,
+        true,
     )
     .await
     .unwrap();
@@ -330,6 +332,7 @@ async fn test_full_trade_status_progression() {
         uuid,
         None,
         Decimal::ONE,
+        true,
     )
     .await
     .unwrap();

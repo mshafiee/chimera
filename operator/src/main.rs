@@ -1118,8 +1118,16 @@ async fn main() -> anyhow::Result<()> {
                                 continue;
                             }
                         };
-                        positions.sort_by_key(|p| p.entry_time);
+                        let mut simulated_exposure = match fl_heat.calculate_heat().await {
+                            Ok(h) => h.total_exposure_sol,
+                            Err(_) => rust_decimal::Decimal::ZERO,
+                        };
+                        let threshold_sol = fl_heat.get_critical_threshold_sol();
+
                         for pos in positions {
+                            if simulated_exposure <= threshold_sol {
+                                break;
+                            }
                             let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                             let _ = fl_engine.queue_signal(signal, None).await;
                             tracing::warn!(
@@ -1127,9 +1135,8 @@ async fn main() -> anyhow::Result<()> {
                                 token = %pos.token_address,
                                 "Force-exited position (heat overexposure)"
                             );
-                            if let Ok(false) = fl_heat.is_critically_overexposed().await {
-                                break;
-                            }
+                            let entry_size = pos.entry_amount_sol;
+                            simulated_exposure -= entry_size;
                         }
                     }
                 }

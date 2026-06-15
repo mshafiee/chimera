@@ -12,7 +12,7 @@
 use chimera_operator::config::DatabaseConfig;
 use chimera_operator::db::{
     close_position, init_pool, insert_trade, open_position, run_migrations, update_trade_costs,
-    update_trade_status,
+    update_trade_status, revert_position_exit,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -183,6 +183,7 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
         "uuid-multi-1",
         None,
         Decimal::ONE,
+        true,
     )
     .await
     .unwrap();
@@ -242,7 +243,7 @@ async fn test_close_position_zero_exit_price_records_full_loss() {
     .unwrap();
 
     // Close with exit_price = 0
-    let result = close_position(&pool, "token_z", "wallet_z", Decimal::ZERO, "sig_exit_z", uuid, None, Decimal::ONE).await;
+    let result = close_position(&pool, "token_z", "wallet_z", Decimal::ZERO, "sig_exit_z", uuid, None, Decimal::ONE, true).await;
 
     // The function returns Ok regardless — documents no validation on exit_price=0
     assert!(
@@ -537,6 +538,7 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
         "uuid-missing",
         None,
         Decimal::ONE,
+        true,
     )
     .await;
 
@@ -545,3 +547,184 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
         "BUG DOCUMENTED: close_position returns Ok() when no position found — silent no-op"
     );
 }
+
+// ─── Test 48 ── close_position with confirmed=false sets state to EXITING ──────
+
+#[tokio::test]
+async fn test_close_position_unconfirmed_sets_exiting_state() {
+    let (pool, _tmp) = create_test_db().await;
+    let uuid = "uuid-unconfirmed-exit";
+
+    insert_trade(
+        &pool,
+        uuid,
+        "wallet_unconf",
+        "token_unconf",
+        Some("UNC"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("1.0").unwrap(),
+        "ACTIVE",
+    )
+    .await
+    .unwrap();
+    open_position(
+        &pool,
+        uuid,
+        "wallet_unconf",
+        "token_unconf",
+        Some("UNC"),
+        "SHIELD",
+        Decimal::from_str("1.0").unwrap(),
+        Decimal::from_str("100.0").unwrap(),
+        "sig_unconf_buy",
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Close with confirmed = false
+    let result = close_position(
+        &pool,
+        "token_unconf",
+        "wallet_unconf",
+        Decimal::from_str("120.0").unwrap(),
+        "sig_unconf_sell",
+        uuid,
+        None,
+        Decimal::ONE,
+        false, // confirmed = false
+    )
+    .await;
+
+    assert!(result.is_ok());
+
+    let (state, closed_at): (String, Option<String>) =
+        sqlx::query_as("SELECT state, closed_at FROM positions WHERE trade_uuid = ?")
+            .bind(uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(state, "EXITING");
+    assert!(closed_at.is_none());
+}
+
+// ─── Test 49 ── revert_position_exit restores state and amount ──────────────────
+
+#[tokio::test]
+async fn test_revert_position_exit_restores_state_and_amount() {
+    let (pool, _tmp) = create_test_db().await;
+    let entry_uuid = "uuid-revert-entry";
+    let exit_uuid = "uuid-revert-exit";
+
+    // Setup Entry Trade and Position
+    insert_trade(
+        &pool,
+        entry_uuid,
+        "wallet_revert",
+        "token_revert",
+        Some("REV"),
+        "SHIELD",
+        "BUY",
+        Decimal::from_str("1.5").unwrap(),
+        "ACTIVE",
+    )
+    .await
+    .unwrap();
+    open_position(
+        &pool,
+        entry_uuid,
+        "wallet_revert",
+        "token_revert",
+        Some("REV"),
+        "SHIELD",
+        Decimal::from_str("1.5").unwrap(),
+        Decimal::from_str("100.0").unwrap(),
+        "sig_revert_buy",
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Setup Exit Trade row representing the pending/failed exit
+    insert_trade(
+        &pool,
+        exit_uuid,
+        "wallet_revert",
+        "token_revert",
+        Some("REV"),
+        "EXIT",
+        "SELL",
+        Decimal::from_str("0.5").unwrap(),
+        "EXITING",
+    )
+    .await
+    .unwrap();
+
+    // Update status to associate signature
+    sqlx::query("UPDATE trades SET tx_signature = ? WHERE trade_uuid = ?")
+        .bind("sig_revert_sell")
+        .bind(exit_uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Call close_position with confirmed = false for partial exit (0.5 SOL / 1.5 SOL = 0.333333 fraction)
+    close_position(
+        &pool,
+        "token_revert",
+        "wallet_revert",
+        Decimal::from_str("120.0").unwrap(),
+        "sig_revert_sell",
+        exit_uuid,
+        None,
+        Decimal::from_str("0.33333333").unwrap(),
+        false, // confirmed = false
+    )
+    .await
+    .unwrap();
+
+    // Verify DB states after unconfirmed partial close
+    let (state_before, amount_before, exit_price_before, exit_sig_before, pnl_before): (String, f64, Option<f64>, Option<String>, Option<f64>) =
+        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(state_before, "EXITING");
+    assert!((amount_before - 1.0).abs() < 1e-6); // Decremented from 1.5 to 1.0
+    assert!(exit_price_before.is_some());
+    assert_eq!(exit_sig_before, Some("sig_revert_sell".to_string()));
+    assert!(pnl_before.is_some());
+
+    // Revert the failed exit
+    let revert_res = revert_position_exit(&pool, entry_uuid).await;
+    assert!(revert_res.is_ok());
+
+    // Verify DB states after reversion
+    let (state_after, amount_after, exit_price_after, exit_sig_after, pnl_after): (String, f64, Option<f64>, Option<String>, Option<f64>) =
+        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+            .bind(entry_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(state_after, "ACTIVE");
+    assert!((amount_after - 1.5).abs() < 1e-6); // Restored back to 1.5
+    assert!(exit_price_after.is_none());
+    assert!(exit_sig_after.is_none());
+    assert!(pnl_after.is_none());
+
+    // Verify the exit trade status is marked FAILED
+    let exit_trade_status: (String,) =
+        sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+            .bind(exit_uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    assert_eq!(exit_trade_status.0, "FAILED");
+}
+

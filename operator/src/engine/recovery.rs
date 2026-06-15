@@ -402,7 +402,7 @@ impl RecoveryManager {
                 trade_uuid = %position.trade_uuid,
                 "On-chain balance is non-zero — reverting position to ACTIVE so stop-loss can manage exit"
             );
-            db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
+            db::revert_position_exit(&self.db, &position.trade_uuid).await?;
             db::insert_reconciliation_log(
                 &self.db,
                 &position.trade_uuid,

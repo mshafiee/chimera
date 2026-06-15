@@ -962,6 +962,7 @@ pub async fn close_position(
     trade_uuid: &str,
     sol_price_usd: Option<Decimal>,
     exit_fraction: Decimal,
+    confirmed: bool,
 ) -> AppResult<()> {
     if exit_fraction <= Decimal::ZERO || exit_fraction > Decimal::ONE {
         tracing::warn!(
@@ -1128,8 +1129,8 @@ pub async fn close_position(
                     exit_tx_signature = ?,
                     realized_pnl_sol = ?,
                     realized_pnl_usd = ?,
-                    closed_at = CURRENT_TIMESTAMP,
-                    state = 'CLOSED'
+                    closed_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+                    state = ?
                 WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
                 "#,
             )
@@ -1137,6 +1138,8 @@ pub async fn close_position(
             .bind(signature)
             .bind(pnl_sol.to_f64().unwrap_or(0.0))
             .bind(pnl_usd_opt)
+            .bind(if confirmed { 1 } else { 0 })
+            .bind(if confirmed { "CLOSED" } else { "EXITING" })
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -1146,7 +1149,7 @@ pub async fn close_position(
                 continue;
             }
         } else {
-            // Partial close: reduce remaining amount, keep position ACTIVE.
+            // Partial close: reduce remaining amount, keep position ACTIVE or EXITING.
             // Accumulate realized_pnl_sol so repeated partial exits build up the correct total.
             let remaining_amount = entry_amount_dec - exited_amount;
             let rows = sqlx::query(
@@ -1161,6 +1164,7 @@ pub async fn close_position(
                         WHEN ? IS NOT NULL THEN COALESCE(realized_pnl_usd, 0.0) + ?
                         ELSE realized_pnl_usd
                     END,
+                    state = ?,
                     last_updated = CURRENT_TIMESTAMP
                 WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
                 "#,
@@ -1171,6 +1175,7 @@ pub async fn close_position(
             .bind(pnl_sol.to_f64().unwrap_or(0.0))
             .bind(pnl_usd_opt)
             .bind(pnl_usd_opt)
+            .bind(if confirmed { "ACTIVE" } else { "EXITING" })
             .bind(id)
             .execute(&mut *tx)
             .await?;
@@ -1195,6 +1200,137 @@ pub async fn close_position(
 
     tx.commit().await?;
 
+    Ok(())
+}
+
+/// Reverts a failed exit transaction for a position back to ACTIVE state,
+/// restoring the entry amount and removing PnL increments if it was a partial close.
+pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+
+    // 1. Fetch the position details
+    let pos: Option<(f64, f64, Option<String>, Option<f64>, Option<f64>, String, String)> = sqlx::query_as(
+        r#"
+        SELECT entry_price, entry_amount_sol, exit_tx_signature, realized_pnl_sol, realized_pnl_usd, wallet_address, token_address
+        FROM positions WHERE trade_uuid = ?
+        "#
+    )
+    .bind(position_trade_uuid)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some((entry_price, _entry_amount_sol, Some(exit_sig), realized_pnl_sol, realized_pnl_usd, wallet_address, token_address)) = pos {
+        if !exit_sig.is_empty() {
+            // Find the failed exit trade
+            let exit_trade: Option<(String, f64)> = sqlx::query_as(
+                "SELECT trade_uuid, amount_sol FROM trades WHERE tx_signature = ? AND side = 'SELL'"
+            )
+            .bind(&exit_sig)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+            if let Some((exit_trade_uuid, exit_amount)) = exit_trade {
+                // Get the original entry amount from the BUY trade
+                let original_amount: f64 = sqlx::query_scalar(
+                    "SELECT amount_sol FROM trades WHERE trade_uuid = ?"
+                )
+                .bind(position_trade_uuid)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                // Get the sum of all confirmed exit trades (excluding this one)
+                let confirmed_exit_amount: f64 = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(amount_sol), 0.0) FROM trades WHERE wallet_address = ? AND token_address = ? AND side = 'SELL' AND status = 'CLOSED' AND tx_signature != ?"
+                )
+                .bind(&wallet_address)
+                .bind(&token_address)
+                .bind(&exit_sig)
+                .fetch_one(&mut *tx)
+                .await?;
+
+                // Calculate the correct reverted entry amount
+                let reverted_amount = original_amount - confirmed_exit_amount;
+
+                // Revert realized PnL
+                let mut new_realized_pnl_sol = None;
+                let mut new_realized_pnl_usd = None;
+
+                if confirmed_exit_amount > 0.0 {
+                    // There were other successful exits, so we adjust PnL instead of clearing it
+                    let entry_dec = Decimal::from_f64_retain(entry_price).unwrap_or(Decimal::ZERO);
+                    // Fetch current exit_price from position (written by the failed exit)
+                    let current_exit_price: Option<f64> = sqlx::query_scalar(
+                        "SELECT exit_price FROM positions WHERE trade_uuid = ?"
+                    )
+                    .bind(position_trade_uuid)
+                    .fetch_one(&mut *tx)
+                    .await?;
+
+                    if let Some(ep) = current_exit_price {
+                        let ep_dec = Decimal::from_f64_retain(ep).unwrap_or(Decimal::ZERO);
+                        let amt_dec = Decimal::from_f64_retain(exit_amount).unwrap_or(Decimal::ZERO);
+
+                        let failed_pnl_sol = if !entry_dec.is_zero() {
+                            ((ep_dec - entry_dec) / entry_dec) * amt_dec
+                        } else {
+                            Decimal::ZERO
+                        };
+
+                        let current_pnl_sol = realized_pnl_sol.map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
+                        let reverted_pnl_sol = current_pnl_sol - failed_pnl_sol;
+                        new_realized_pnl_sol = Some(reverted_pnl_sol.to_f64().unwrap_or(0.0));
+
+                        if let Some(r_usd) = realized_pnl_usd {
+                            if !current_pnl_sol.is_zero() {
+                                let failed_pnl_usd = failed_pnl_sol * (Decimal::from_f64_retain(r_usd).unwrap_or(Decimal::ZERO) / current_pnl_sol);
+                                new_realized_pnl_usd = Some((Decimal::from_f64_retain(r_usd).unwrap_or(Decimal::ZERO) - failed_pnl_usd).to_f64().unwrap_or(0.0));
+                            }
+                        }
+                    }
+                }
+
+                // Update the position state back to ACTIVE, clearing the failed exit tx details
+                sqlx::query(
+                    r#"
+                    UPDATE positions
+                    SET
+                        state = 'ACTIVE',
+                        entry_amount_sol = ?,
+                        exit_price = NULL,
+                        exit_tx_signature = NULL,
+                        realized_pnl_sol = ?,
+                        realized_pnl_usd = ?,
+                        closed_at = NULL,
+                        last_updated = CURRENT_TIMESTAMP
+                    WHERE trade_uuid = ?
+                    "#
+                )
+                .bind(reverted_amount)
+                .bind(new_realized_pnl_sol)
+                .bind(new_realized_pnl_usd)
+                .bind(position_trade_uuid)
+                .execute(&mut *tx)
+                .await?;
+
+                // Update the failed exit trade status to FAILED and clear net_pnl_sol
+                sqlx::query(
+                    r#"
+                    UPDATE trades
+                    SET
+                        status = 'FAILED',
+                        net_pnl_sol = NULL,
+                        error_message = 'Exit transaction failed to confirm on-chain (reverted by recovery manager)'
+                    WHERE trade_uuid = ?
+                    "#
+                )
+                .bind(&exit_trade_uuid)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+    }
+
+    tx.commit().await?;
     Ok(())
 }
 

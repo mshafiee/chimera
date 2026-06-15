@@ -799,7 +799,7 @@ impl Engine {
         }
 
         match result {
-            Ok(tx_signature) => {
+            Ok((tx_signature, confirmed)) => {
                 tracing::info!(
                     trade_uuid = %trade_uuid,
                     tx_signature = %tx_signature,
@@ -981,6 +981,7 @@ impl Engine {
                         &trade_uuid,
                         sol_price_usd_opt,
                         exit_fraction,
+                        confirmed,
                     )
                     .await
                     {

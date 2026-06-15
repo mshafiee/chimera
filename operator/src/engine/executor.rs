@@ -230,7 +230,7 @@ impl Executor {
     /// Execute a trade signal
     ///
     /// Returns the transaction signature on success
-    pub async fn execute(&self, signal: &Signal) -> Result<String, ExecutorError> {
+    pub async fn execute(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -347,7 +347,7 @@ impl Executor {
 
             // Handle result and track failures
             match &result {
-                Ok(sig) => {
+                Ok((sig, _confirmed)) => {
                     self.mutable.lock().failure_count = 0;
                     tracing::info!(
                         trade_uuid = %signal.trade_uuid,
@@ -814,7 +814,7 @@ impl Executor {
     }
 
     /// Execute via Jito bundle
-    async fn execute_jito(&self, signal: &Signal) -> Result<String, ExecutorError> {
+    async fn execute_jito(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via Jito bundle"
@@ -827,7 +827,7 @@ impl Executor {
                 "Devnet simulation mode: skipping RPC submission, returning simulated signature"
             );
             // Return a simulated signature (format: "simulated_<uuid>")
-            return Ok(format!("simulated_{}", signal.trade_uuid));
+            return Ok((format!("simulated_{}", signal.trade_uuid), true));
         }
 
         // Skip RPC health check - proceed with transaction
@@ -923,8 +923,8 @@ impl Executor {
                     );
                     // Poll for confirmation; on definitive on-chain failure propagate error.
                     // On timeout (still pending) return the signature so recovery handles it.
-                    self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
-                    return Ok(signature);
+                    let confirmed = self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
+                    return Ok((signature, confirmed));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -968,8 +968,8 @@ impl Executor {
                             signature = %signature,
                             "Bundle submitted via Helius Sender API"
                         );
-                        self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
-                        return Ok(signature);
+                        let confirmed = self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
+                        return Ok((signature, confirmed));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -989,23 +989,24 @@ impl Executor {
         );
 
         // Sign and send transaction via standard RPC (handles both legacy and versioned)
-        let signature = match &built_tx {
+        let (signature, confirmed) = match &built_tx {
             crate::engine::transaction_builder::BuiltTransaction::Legacy {
                 transaction, ..
             } => {
-                self.submit_transaction(transaction, &wallet_keypair)
-                    .await?
+                let sig = self.submit_transaction(transaction, &wallet_keypair).await?;
+                (sig, true)
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned {
                 transaction_bytes,
                 ..
             } => {
-                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair)
-                    .await?
+                let sig = self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?;
+                let confirmed = self.poll_signature_confirmation(&sig, &signal.trade_uuid).await?;
+                (sig, confirmed)
             }
         };
 
-        Ok(signature)
+        Ok((signature, confirmed))
     }
 
     /// Submit transaction via Helius Sender API (Jito bundles)
@@ -1107,7 +1108,7 @@ impl Executor {
     }
 
     /// Execute via standard TPU
-    async fn execute_standard(&self, signal: &Signal) -> Result<String, ExecutorError> {
+    async fn execute_standard(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via standard TPU"
@@ -1120,7 +1121,7 @@ impl Executor {
                 "Devnet simulation mode: skipping RPC submission, returning simulated signature"
             );
             // Return a simulated signature (format: "simulated_<uuid>")
-            return Ok(format!("simulated_{}", signal.trade_uuid));
+            return Ok((format!("simulated_{}", signal.trade_uuid), true));
         }
 
         // Skip RPC health check for devnet - just proceed with transaction
@@ -1157,23 +1158,24 @@ impl Executor {
         self.check_execution_costs(signal, built_tx.price_impact_pct(), Decimal::ZERO)?;
 
         // Submit transaction via RPC
-        let signature = match &built_tx {
+        let (signature, confirmed) = match &built_tx {
             crate::engine::transaction_builder::BuiltTransaction::Legacy {
                 transaction, ..
             } => {
-                self.submit_transaction(transaction, &wallet_keypair)
-                    .await?
+                let sig = self.submit_transaction(transaction, &wallet_keypair).await?;
+                (sig, true)
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned {
                 transaction_bytes,
                 ..
             } => {
-                self.submit_versioned_transaction(transaction_bytes, &wallet_keypair)
-                    .await?
+                let sig = self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?;
+                let confirmed = self.poll_signature_confirmation(&sig, &signal.trade_uuid).await?;
+                (sig, confirmed)
             }
         };
 
-        Ok(signature)
+        Ok((signature, confirmed))
     }
 
     /// Validate transaction size before submission
