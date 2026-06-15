@@ -234,8 +234,95 @@ class BacktestSimulator:
             passed=passed,
             failure_reason=failure_reason,
         )
-    
-    # Walk-forward logic inlined in PrePromotionValidator._validate_walk_forward()
+    def run_walk_forward(
+        self,
+        wallet_address: str,
+        trades: List[HistoricalTrade],
+        strategy: str = "SHIELD",
+        holdout_fraction: float = 0.3,
+        min_test_trades: int = 5,
+    ) -> SimulatedResult:
+        """
+        Run walk-forward validation.
+        
+        Splits trades chronologically:
+        - In-sample / Train set: older (1 - holdout_fraction) trades
+        - Out-of-sample / Test set: newer holdout_fraction trades
+        
+        Returns SimulatedResult indicating pass/fail.
+        """
+        if not trades:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=0,
+                simulated_trades=0,
+                rejected_trades=0,
+                original_pnl_sol=0.0,
+                simulated_pnl_sol=0.0,
+                pnl_difference_sol=0.0,
+                total_slippage_cost_sol=0.0,
+                total_fee_cost_sol=0.0,
+                passed=False,
+                failure_reason="No trades to simulate",
+            )
+            
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        holdout_n = int(max(1, round(len(sorted_trades) * holdout_fraction)))
+        
+        train_trades = sorted_trades[:-holdout_n]
+        test_trades = sorted_trades[-holdout_n:]
+        
+        if len(test_trades) < min_test_trades:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=len(sorted_trades),
+                simulated_trades=0,
+                rejected_trades=0,
+                original_pnl_sol=0.0,
+                simulated_pnl_sol=0.0,
+                pnl_difference_sol=0.0,
+                total_slippage_cost_sol=0.0,
+                total_fee_cost_sol=0.0,
+                passed=False,
+                failure_reason="Insufficient test data for walk-forward validation",
+            )
+            
+        # Run in-sample (train) first
+        train_result = self.simulate_wallet(wallet_address, train_trades, strategy)
+        if not train_result.passed:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=len(sorted_trades),
+                simulated_trades=train_result.simulated_trades,
+                rejected_trades=train_result.rejected_trades,
+                original_pnl_sol=train_result.original_pnl_sol,
+                simulated_pnl_sol=train_result.simulated_pnl_sol,
+                pnl_difference_sol=train_result.pnl_difference_sol,
+                total_slippage_cost_sol=train_result.total_slippage_cost_sol,
+                total_fee_cost_sol=train_result.total_fee_cost_sol,
+                passed=False,
+                failure_reason=f"FAILED_IN_SAMPLE: {train_result.failure_reason}",
+            )
+            
+        # Run out-of-sample (test) second
+        test_result = self.simulate_wallet(wallet_address, test_trades, strategy)
+        if not test_result.passed:
+            return SimulatedResult(
+                wallet_address=wallet_address,
+                total_trades=len(sorted_trades),
+                simulated_trades=train_result.simulated_trades + test_result.simulated_trades,
+                rejected_trades=train_result.rejected_trades + test_result.rejected_trades,
+                original_pnl_sol=train_result.original_pnl_sol + test_result.original_pnl_sol,
+                simulated_pnl_sol=train_result.simulated_pnl_sol + test_result.simulated_pnl_sol,
+                pnl_difference_sol=train_result.pnl_difference_sol + test_result.pnl_difference_sol,
+                total_slippage_cost_sol=train_result.total_slippage_cost_sol + test_result.total_slippage_cost_sol,
+                total_fee_cost_sol=train_result.total_fee_cost_sol + test_result.total_fee_cost_sol,
+                passed=False,
+                failure_reason=f"FAILED_WALK_FORWARD_OOS: {test_result.failure_reason}",
+            )
+            
+        return test_result
+
 
     def _simulate_trade_roundtrip(
         self,
@@ -274,24 +361,14 @@ class BacktestSimulator:
                 source="trade_attached",
             )
         else:
-            # FIX 5 [T-M4]: No historical liquidity data — skip the trade entirely to
-            # avoid survivorship bias (do NOT fall back to current liquidity).
-            trade_id = getattr(trade, 'tx_signature', trade.token_address)
-            logger.debug(
-                "Skipping trade %s: no historical liquidity data (survivorship bias guard)",
-                trade_id,
+            # Query the liquidity provider for historical or fallback liquidity
+            liquidity_data = self.liquidity.get_historical_liquidity_or_current(
+                trade.token_address, trade.timestamp
             )
-            return SimulatedTrade(
-                original_trade=trade,
-                current_liquidity_usd=Decimal('0'),
-                liquidity_sufficient=False,
-                estimated_slippage_percent=Decimal('1.0'),
-                slippage_cost_sol=trade.amount_sol,
-                fee_cost_sol=Decimal('0'),
-                simulated_pnl_sol=Decimal('0'),
-                rejected=True,
-                rejection_reason="No historical liquidity data (survivorship bias guard)",
-            ), "No historical liquidity data (survivorship bias guard)", False
+            if liquidity_data is not None:
+                source = getattr(liquidity_data, 'source', '')
+                if source and ('fallback' in source.lower() or 'low_confidence' in source.lower()):
+                    is_low_confidence = True
 
         if not liquidity_data:
             return SimulatedTrade(
