@@ -142,20 +142,25 @@ class BacktestSimulator:
             # trades from PnL totals entirely later in the loop.
             if is_low_confidence:
                 low_confidence_trades_count += 1
-            # Track original realized PnL (only SELL trades with pnl_sol)
-            if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
-                total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
-
             if sim_trade.rejected:
                 rejected_count += 1
                 rejected_details.append(
                     f"{trade.token_symbol}: {rejection_reason}"
                 )
+                # Track original PnL even for rejected trades so that pnl_reduction accurately reflects
+                # profits we cannot replicate due to liquidity constraints.
+                if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
+                    total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
             elif is_low_confidence:
-                # Exclude low-confidence trades from PnL totals to prevent survivorship bias.
+                # Exclude low-confidence trades from BOTH PnL totals to prevent survivorship bias
+                # and avoid apples-to-oranges PnL reduction calculations.
                 # They still count toward total_trades for the rejection-rate denominator.
                 pass
             else:
+                # Track original realized PnL for accepted trades
+                if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
+                    total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
+
                 # Track costs
                 total_slippage += sim_trade.slippage_cost_sol
                 total_fees += sim_trade.fee_cost_sol
