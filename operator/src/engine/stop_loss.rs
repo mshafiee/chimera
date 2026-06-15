@@ -195,7 +195,7 @@ impl StopLossManager {
         // would be a 50% widening, disproportionate relative to a -20% base.
         // A second clamp is applied immediately after so the combined result respects the envelope.
         if is_consensus {
-            stop_loss_threshold = stop_loss_threshold * dec!(1.25); // widen by 25% of current threshold
+            stop_loss_threshold *= dec!(1.25); // widen by 25% of current threshold
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,

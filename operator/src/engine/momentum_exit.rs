@@ -133,7 +133,7 @@ impl MomentumExit {
                 .await
                 .ok()
                 .flatten()
-                .and_then(|p| Decimal::from_f64(p))
+                .and_then(Decimal::from_f64)
         } else {
             None
         };

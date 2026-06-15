@@ -737,8 +737,7 @@ impl Engine {
             const FULL_REDUCTION_END: i64 = 300;   // 05:00 UTC
             const RAMP_UP_END: i64 = 360;           // 06:00 UTC
             let base_mult = self.config.position_sizing.off_hours_size_multiplier;
-            let off_hours_mult = if mins_since_midnight < RAMP_DOWN_START
-                || mins_since_midnight >= RAMP_UP_END
+            let off_hours_mult = if !(RAMP_DOWN_START..RAMP_UP_END).contains(&mins_since_midnight)
             {
                 rust_decimal::Decimal::ONE
             } else if mins_since_midnight < FULL_REDUCTION_START {
@@ -763,7 +762,7 @@ impl Engine {
                     original_amount_sol = %signal.payload.amount_sol,
                     "Off-hours window: reducing position size at execution time (gradual ramp)"
                 );
-                signal.payload.amount_sol = signal.payload.amount_sol * off_hours_mult;
+                signal.payload.amount_sol *= off_hours_mult;
             }
         }
 
@@ -846,6 +845,7 @@ impl Engine {
                         entry_price,
                         &tx_signature,
                         Some(max_heat_sol),
+                        Some(sol_price_usd),
                     )
                     .await
                     {

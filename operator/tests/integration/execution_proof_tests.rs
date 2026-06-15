@@ -91,6 +91,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("200.0").unwrap(),
         "sig_entry_r3",
+        None,
     )
     .await
     .unwrap();
@@ -196,6 +197,7 @@ async fn test_profit_capture_positive_pnl_recorded() {
         Decimal::from_str("1.5").unwrap(),
         Decimal::from_str("100.0").unwrap(),
         "sig_entry_profit",
+        None,
     )
     .await
     .unwrap();

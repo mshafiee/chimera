@@ -143,6 +143,7 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
         Decimal::from_str("2.0").unwrap(),
         Decimal::from_str("1.00").unwrap(),
         "sig1",
+        None,
     )
     .await
     .unwrap();
@@ -156,6 +157,7 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
         Decimal::from_str("2.0").unwrap(),
         Decimal::from_str("2.00").unwrap(),
         "sig2",
+        None,
     )
     .await
     .unwrap();
@@ -234,6 +236,7 @@ async fn test_close_position_zero_exit_price_records_full_loss() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("100.0").unwrap(),
         "sig_z",
+        None,
     )
     .await
     .unwrap();
@@ -307,6 +310,7 @@ async fn test_open_position_zero_entry_price_not_rejected() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::ZERO, // zero entry price
         "sig_ze",
+        None,
     )
     .await;
 
@@ -422,6 +426,7 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("1.0").unwrap(),
         "sig_o",
+        None,
     )
     .await
     .unwrap();
@@ -491,6 +496,7 @@ async fn test_pnl_precision_f64_roundtrip() {
         Decimal::from_str("1.0").unwrap(),
         precise_entry,
         "sig_p",
+        None,
     )
     .await
     .unwrap();

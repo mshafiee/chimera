@@ -508,20 +508,14 @@ pub async fn webhook_handler(
                 .map(|(_, _, wr)| *wr)
                 .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
 
-            let regime_multiplier = {
-                let base = if let Some(ref regime_detector) = state.market_regime {
-                    if let Some(ref token_address) = signal.payload.token_address {
-                        regime_detector.get_regime_multiplier(token_address)
-                    } else {
-                        Decimal::ONE
-                    }
+            let regime_multiplier = if let Some(ref regime_detector) = state.market_regime {
+                if let Some(ref token_address) = signal.payload.token_address {
+                    regime_detector.get_regime_multiplier(token_address)
                 } else {
                     Decimal::ONE
-                };
-                // Off-hours multiplier is applied at execution time (engine/mod.rs), not here,
-                // so that signals queued just before 02:00 UTC also get the reduction applied
-                // at the moment they actually execute — eliminating the timing edge case.
-                base
+                }
+            } else {
+                Decimal::ONE
             };
 
             let factors = SizingFactors {

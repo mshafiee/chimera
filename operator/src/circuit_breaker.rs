@@ -436,7 +436,8 @@ impl CircuitBreaker {
         }
 
         // Check drawdown
-        let drawdown = db::get_max_drawdown_percent(&self.db).await?;
+        let total_capital = *self.total_capital_sol.read();
+        let drawdown = db::get_max_drawdown_percent(&self.db, total_capital).await?;
         if drawdown >= self.config.max_drawdown_percent {
             self.trip(TripReason::MaxDrawdown {
                 drawdown: drawdown.to_f64().unwrap_or(0.0),
@@ -696,7 +697,8 @@ impl CircuitBreaker {
             return Ok(());
         }
 
-        let drawdown = db::get_max_drawdown_percent(&self.db).await?;
+        let total_capital = *self.total_capital_sol.read();
+        let drawdown = db::get_max_drawdown_percent(&self.db, total_capital).await?;
         if drawdown >= self.config.max_drawdown_percent {
             let trip_reason = TripReason::MaxDrawdown {
                 drawdown: drawdown.to_f64().unwrap_or(0.0),

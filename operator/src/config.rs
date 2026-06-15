@@ -773,6 +773,15 @@ pub struct ProfitManagementConfig {
     /// Set longer on congested chains; 30s covers most Solana confirmation delays.
     #[serde(default = "default_wick_protection_secs")]
     pub wick_protection_secs: u64,
+    /// Losing time-based exit for Shield strategy (hours)
+    #[serde(default = "default_losing_time_exit_hours_shield")]
+    pub losing_time_exit_hours_shield: u64,
+    /// Losing time-based exit for Spear strategy (hours)
+    #[serde(default = "default_losing_time_exit_hours_spear")]
+    pub losing_time_exit_hours_spear: u64,
+    /// Minimum loss percentage to trigger time-based exit (e.g. -3.0 for -3%)
+    #[serde(default = "default_losing_time_exit_threshold")]
+    pub losing_time_exit_threshold_percent: Decimal,
 }
 
 fn default_profit_targets() -> Vec<Decimal> {
@@ -810,6 +819,18 @@ fn default_wick_protection_secs() -> u64 {
     30
 }
 
+fn default_losing_time_exit_hours_shield() -> u64 {
+    4
+}
+
+fn default_losing_time_exit_hours_spear() -> u64 {
+    2
+}
+
+fn default_losing_time_exit_threshold() -> Decimal {
+    dec!(-3.0)
+}
+
 impl Default for ProfitManagementConfig {
     fn default() -> Self {
         Self {
@@ -820,6 +841,9 @@ impl Default for ProfitManagementConfig {
             max_stop_loss_distance: default_max_stop_loss_distance(),
             time_exit_hours: default_time_exit_hours(),
             wick_protection_secs: default_wick_protection_secs(),
+            losing_time_exit_hours_shield: default_losing_time_exit_hours_shield(),
+            losing_time_exit_hours_spear: default_losing_time_exit_hours_spear(),
+            losing_time_exit_threshold_percent: default_losing_time_exit_threshold(),
         }
     }
 }

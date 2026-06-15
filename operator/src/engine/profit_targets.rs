@@ -348,10 +348,20 @@ impl ProfitTargetManager {
                 // Low-profit: Shield 16h, Spear 8h — free capital before it goes flat
                 elapsed_hours >= if is_spear { 8 } else { 16 }
             } else {
-                // Losing: tighten exits — Spear 2h, Shield 4h.
-                // Solana memecoins rarely recover from sustained underwater positions;
-                // holding losers for 4-8h burns capital that could compound elsewhere.
-                elapsed_hours >= if is_spear { 2 } else { 4 }
+                // Losing: check if current loss is deeper than threshold (default: -3%)
+                if profit_percent <= self.config.losing_time_exit_threshold_percent {
+                    // Loss is significant — cut early to protect capital
+                    let exit_limit_hours = if is_spear {
+                        self.config.losing_time_exit_hours_spear
+                    } else {
+                        self.config.losing_time_exit_hours_shield
+                    };
+                    elapsed_hours >= exit_limit_hours
+                } else {
+                    // Loss is minor (between 0% and -3%) — allow it to hold longer to recover
+                    let exit_limit_hours = if is_spear { 8 } else { 16 };
+                    elapsed_hours >= exit_limit_hours
+                }
             }
         } else {
             false

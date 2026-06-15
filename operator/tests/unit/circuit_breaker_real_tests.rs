@@ -337,7 +337,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
 
     let (pool, _tmp) = create_test_db().await;
     let cb = CircuitBreaker::new(tight_config(), pool.clone())
-        .with_total_capital(Decimal::from(1000000));
+        .with_total_capital(Decimal::ZERO);
 
     // Insert positions with explicit timestamps to enforce ordering
     // Historical profitable positions: build peak of +1000 SOL

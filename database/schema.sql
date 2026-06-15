@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_tx_signature TEXT,
     realized_pnl_sol REAL,
     realized_pnl_usd REAL,
+    entry_sol_price_usd REAL,
     opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     closed_at TIMESTAMP,

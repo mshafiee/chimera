@@ -78,7 +78,7 @@ pub async fn startup_integrity_check(pool: &DbPool) -> AppResult<()> {
     let result: String = sqlx::query_scalar("PRAGMA integrity_check")
         .fetch_one(pool)
         .await
-        .map_err(|e| AppError::Database(e.into()))?;
+        .map_err(AppError::Database)?;
 
     if result != "ok" {
         return Err(AppError::Internal(format!(
@@ -103,7 +103,7 @@ pub async fn recover_executing_trades(pool: &DbPool) -> AppResult<u32> {
     )
     .execute(pool)
     .await
-    .map_err(|e| AppError::Database(e.into()))?
+    .map_err(AppError::Database)?
     .rows_affected();
 
     if rows_affected > 0 {
@@ -828,14 +828,15 @@ pub async fn open_position(
     amount_sol: Decimal,
     entry_price: Decimal,
     signature: &str,
+    entry_sol_price_usd: Option<Decimal>,
 ) -> AppResult<i64> {
     let result = sqlx::query(
         r#"
         INSERT INTO positions (
             trade_uuid, wallet_address, token_address, token_symbol, strategy,
-            entry_amount_sol, entry_price, entry_tx_signature, 
+            entry_amount_sol, entry_price, entry_tx_signature, entry_sol_price_usd,
             state, unrealized_pnl_sol, unrealized_pnl_percent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
         "#,
     )
     .bind(trade_uuid)
@@ -846,6 +847,7 @@ pub async fn open_position(
     .bind(amount_sol.to_f64().unwrap_or(0.0))
     .bind(entry_price.to_f64().unwrap_or(0.0))
     .bind(signature)
+    .bind(entry_sol_price_usd.map(|p| p.to_f64().unwrap_or(0.0)))
     .execute(pool)
     .await?;
 
@@ -862,6 +864,7 @@ pub async fn open_position(
 /// the transaction before the INSERT, preventing a race where two concurrent
 /// signals both pass the pre-execution heat check then both commit positions
 /// that together exceed the limit.
+#[allow(clippy::too_many_arguments)]
 pub async fn activate_trade_and_open_position(
     pool: &DbPool,
     trade_uuid: &str,
@@ -873,6 +876,7 @@ pub async fn activate_trade_and_open_position(
     entry_price: Decimal,
     tx_signature: &str,
     max_heat_sol: Option<Decimal>,
+    entry_sol_price_usd: Option<Decimal>,
 ) -> AppResult<()> {
     let mut tx = pool.begin().await?;
 
@@ -914,9 +918,9 @@ pub async fn activate_trade_and_open_position(
         r#"
         INSERT INTO positions (
             trade_uuid, wallet_address, token_address, token_symbol, strategy,
-            entry_amount_sol, entry_price, entry_tx_signature,
+            entry_amount_sol, entry_price, entry_tx_signature, entry_sol_price_usd,
             state, unrealized_pnl_sol, unrealized_pnl_percent
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 0, 0)
         "#,
     )
     .bind(trade_uuid)
@@ -927,6 +931,7 @@ pub async fn activate_trade_and_open_position(
     .bind(amount_sol.to_f64().unwrap_or(0.0))
     .bind(entry_price.to_f64().unwrap_or(0.0))
     .bind(tx_signature)
+    .bind(entry_sol_price_usd.map(|p| p.to_f64().unwrap_or(0.0)))
     .execute(&mut *tx)
     .await?;
 
@@ -947,6 +952,7 @@ pub async fn activate_trade_and_open_position(
 /// same (wallet, token) pair cannot double-close the same position. Each UPDATE includes a
 /// state guard (`AND state IN ('ACTIVE', 'EXITING')`) so that a position already CLOSED by a
 /// concurrent call is silently skipped rather than overwritten.
+#[allow(clippy::too_many_arguments)]
 pub async fn close_position(
     pool: &DbPool,
     token_address: &str,
@@ -971,9 +977,9 @@ pub async fn close_position(
 
     // Find all ACTIVE (or EXITING) positions for this wallet+token.
     // Include trade_uuid so we can fetch each position's entry-leg costs.
-    let active_positions: Vec<(i64, f64, f64, String)> = sqlx::query_as(
+    let active_positions: Vec<(i64, f64, f64, String, Option<f64>)> = sqlx::query_as(
         r#"
-        SELECT id, entry_price, entry_amount_sol, trade_uuid
+        SELECT id, entry_price, entry_amount_sol, trade_uuid, entry_sol_price_usd
         FROM positions
         WHERE wallet_address = ? AND token_address = ? AND state IN ('ACTIVE', 'EXITING')
         "#,
@@ -1026,11 +1032,11 @@ pub async fn close_position(
     // Collect the entry trade_uuids first, then issue one SELECT ... WHERE trade_uuid IN (...).
     let entry_uuids: Vec<String> = active_positions
         .iter()
-        .map(|(_, _, _, uuid)| uuid.clone())
+        .map(|(_, _, _, uuid, _)| uuid.clone())
         .collect();
 
-    // Build a HashMap<trade_uuid, (jito_tip, dex_fee, slippage)> from one round-trip.
-    let mut entry_costs_map: HashMap<String, (f64, f64, f64)> = HashMap::new();
+    // Build a HashMap<trade_uuid, (jito_tip, dex_fee, slippage, amount_sol)> from one round-trip.
+    let mut entry_costs_map: HashMap<String, (f64, f64, f64, f64)> = HashMap::new();
     if !entry_uuids.is_empty() {
         // sqlx does not support dynamic IN-list binding directly, so build the
         // parameterised SQL with the correct number of placeholders.
@@ -1040,16 +1046,16 @@ pub async fn close_position(
             .collect::<Vec<_>>()
             .join(", ");
         let bulk_sql = format!(
-            "SELECT trade_uuid, jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid IN ({})",
+            "SELECT trade_uuid, jito_tip_sol, dex_fee_sol, slippage_cost_sol, amount_sol FROM trades WHERE trade_uuid IN ({})",
             placeholders
         );
-        let mut bulk_q = sqlx::query_as::<_, (String, f64, f64, f64)>(&bulk_sql);
+        let mut bulk_q = sqlx::query_as::<_, (String, f64, f64, f64, f64)>(&bulk_sql);
         for uuid in &entry_uuids {
             bulk_q = bulk_q.bind(uuid);
         }
-        let cost_rows: Vec<(String, f64, f64, f64)> = bulk_q.fetch_all(&mut *tx).await?;
-        for (uuid, tip, dex, slip) in cost_rows {
-            entry_costs_map.insert(uuid, (tip, dex, slip));
+        let cost_rows: Vec<(String, f64, f64, f64, f64)> = bulk_q.fetch_all(&mut *tx).await?;
+        for (uuid, tip, dex, slip, amount) in cost_rows {
+            entry_costs_map.insert(uuid, (tip, dex, slip, amount));
         }
     }
 
@@ -1058,28 +1064,53 @@ pub async fn close_position(
 
     let is_full_close = exit_fraction >= Decimal::ONE;
 
-    for (id, entry_price_f64, entry_amount_sol_f64, entry_trade_uuid) in active_positions.iter() {
+    for (id, entry_price_f64, entry_amount_sol_f64, entry_trade_uuid, entry_sol_price_usd) in active_positions.iter() {
         let entry_price_dec = Decimal::from_f64_retain(*entry_price_f64).unwrap_or(Decimal::ZERO);
         let entry_amount_dec =
             Decimal::from_f64_retain(*entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
+        let entry_sol_price_dec = entry_sol_price_usd.and_then(Decimal::from_f64_retain);
 
         // Scale exit amount by fraction — partial exits only realise a portion of the position
         let exited_amount = entry_amount_dec * exit_fraction;
 
         let pnl_sol = if !entry_price_dec.is_zero() {
-            let diff = exit_price - entry_price_dec;
-            let ratio = diff / entry_price_dec;
-            ratio * exited_amount
+            if let (Some(entry_sol_price), Some(exit_sol_price)) = (entry_sol_price_dec, sol_price_usd) {
+                if !exit_sol_price.is_zero() && !entry_sol_price.is_zero() {
+                    let exit_price_sol = exit_price.checked_div(exit_sol_price).unwrap_or(Decimal::ZERO);
+                    let entry_price_sol = entry_price_dec.checked_div(entry_sol_price).unwrap_or(Decimal::ZERO);
+                    if !entry_price_sol.is_zero() {
+                        let diff = exit_price_sol - entry_price_sol;
+                        let ratio = diff / entry_price_sol;
+                        ratio * exited_amount
+                    } else {
+                        Decimal::ZERO
+                    }
+                } else {
+                    let diff = exit_price - entry_price_dec;
+                    let ratio = diff / entry_price_dec;
+                    ratio * exited_amount
+                }
+            } else {
+                let diff = exit_price - entry_price_dec;
+                let ratio = diff / entry_price_dec;
+                ratio * exited_amount
+            }
         } else {
             Decimal::ZERO
         };
 
-        // Scale entry-leg costs proportionally to the fraction being exited (from pre-fetched map)
-        if let Some(&(et, ed, es)) = entry_costs_map.get(entry_trade_uuid.as_str()) {
-            let proportional_entry_cost = (Decimal::from_f64_retain(et).unwrap_or(Decimal::ZERO)
+        // Scale entry-leg costs relative to original trade size (from pre-fetched map)
+        if let Some(&(et, ed, es, orig_amount_f64)) = entry_costs_map.get(entry_trade_uuid.as_str()) {
+            let orig_amount = Decimal::from_f64_retain(orig_amount_f64).unwrap_or(Decimal::ZERO);
+            let total_entry_cost = Decimal::from_f64_retain(et).unwrap_or(Decimal::ZERO)
                 + Decimal::from_f64_retain(ed).unwrap_or(Decimal::ZERO)
-                + Decimal::from_f64_retain(es).unwrap_or(Decimal::ZERO))
-                * exit_fraction;
+                + Decimal::from_f64_retain(es).unwrap_or(Decimal::ZERO);
+            let exited_fraction_of_original = if !orig_amount.is_zero() {
+                exited_amount.checked_div(orig_amount).unwrap_or(exit_fraction)
+            } else {
+                exit_fraction
+            };
+            let proportional_entry_cost = total_entry_cost * exited_fraction_of_original;
             entry_total_costs += proportional_entry_cost;
         }
 
@@ -1182,11 +1213,11 @@ pub struct PositionRecord {
 }
 
 /// Get positions stuck in EXITING state for too long
+#[allow(clippy::type_complexity)]
 pub async fn get_stuck_positions(
     pool: &DbPool,
     stuck_seconds: i64,
 ) -> AppResult<Vec<PositionRecord>> {
-    #[allow(clippy::type_complexity)]
     let modifier = format!("-{} seconds", stuck_seconds);
     let positions: Vec<(
         i64,
@@ -1295,7 +1326,7 @@ pub async fn insert_reconciliation_log(
 /// Get maximum drawdown from peak (for circuit breaker).
 /// Includes unrealized losses from open/exiting positions so the circuit breaker
 /// trips before a large open loser is closed (not after).
-pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
+pub async fn get_max_drawdown_percent(pool: &DbPool, total_capital_sol: Decimal) -> AppResult<Decimal> {
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
         WITH cumulative_pnl AS (
@@ -1321,12 +1352,14 @@ pub async fn get_max_drawdown_percent(pool: &DbPool) -> AppResult<Decimal> {
         )
         SELECT
             CAST(CASE
-                WHEN peak_pnl > 0 THEN ((peak_pnl - current_pnl) / peak_pnl) * 100.0
+                WHEN (? + peak_pnl) > 0 THEN ((peak_pnl - current_pnl) / (? + peak_pnl)) * 100.0
                 ELSE 0.0
             END AS REAL) as drawdown_percent
         FROM peaks
         "#,
     )
+    .bind(total_capital_sol.to_f64().unwrap_or(0.0))
+    .bind(total_capital_sol.to_f64().unwrap_or(0.0))
     .fetch_one(pool)
     .await
     .unwrap_or((Some(0.0),));
@@ -2535,6 +2568,7 @@ pub fn trades_to_pdf(trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
 // =============================================================================
 
 /// Upsert profit target state for a position into exit_targets table
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_exit_target(
     pool: &DbPool,
     trade_uuid: &str,

@@ -697,12 +697,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     _ = interval.tick() => {
                         // Check portfolio-level stop once per cycle before individual positions
-                        match monitor_sl.check_portfolio_stop(monitor_total_capital).await {
-                            StopLossAction::PauseAll => {
-                                tracing::warn!("Portfolio stop triggered — skipping position checks this cycle");
-                                continue;
-                            }
-                            _ => {}
+                        if let StopLossAction::PauseAll = monitor_sl.check_portfolio_stop(monitor_total_capital).await {
+                            tracing::warn!("Portfolio stop triggered — skipping position checks this cycle");
+                            continue;
                         }
 
                         let positions = match db::get_active_positions_with_entry(&monitor_db).await {
@@ -1139,9 +1136,8 @@ async fn main() -> anyhow::Result<()> {
                                 token = %pos.token_address,
                                 "Force-exited position (heat overexposure)"
                             );
-                            match fl_heat.is_critically_overexposed().await {
-                                Ok(false) => break,
-                                _ => {}
+                            if let Ok(false) = fl_heat.is_critically_overexposed().await {
+                                break;
                             }
                         }
                     }

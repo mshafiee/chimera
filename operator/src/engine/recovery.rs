@@ -202,8 +202,7 @@ impl RecoveryManager {
 
                 let tx_sig = position
                     .exit_tx_signature
-                    .as_ref()
-                    .map(|s| s.as_str())
+                    .as_deref()
                     .unwrap_or(tx_signature);
 
                 db::insert_reconciliation_log(

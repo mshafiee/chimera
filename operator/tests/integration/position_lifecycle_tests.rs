@@ -63,6 +63,7 @@ async fn test_duplicate_buy_uuid_idempotency() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("1.0").unwrap(),
         "sig1",
+        None,
     )
     .await
     .unwrap();
@@ -171,6 +172,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("100.0").unwrap(), // entry $100
         "sig_buy_f",
+        None,
     )
     .await
     .unwrap();
@@ -313,6 +315,7 @@ async fn test_full_trade_status_progression() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("50.0").unwrap(),
         "sig123",
+        None,
     )
     .await
     .unwrap();
