@@ -97,6 +97,10 @@ pub struct RpcConfig {
     /// Max consecutive failures before fallback
     #[serde(default = "default_max_failures")]
     pub max_consecutive_failures: u32,
+    /// When true, follows `getHealth` with a `getLatestBlockhash` probe to detect providers
+    /// that return "ok" unconditionally regardless of actual node state.
+    #[serde(default = "default_functional_health_check")]
+    pub functional_health_check: bool,
 }
 
 fn default_primary_provider() -> String {
@@ -117,6 +121,10 @@ fn default_rpc_timeout() -> u64 {
 
 fn default_max_failures() -> u32 {
     3
+}
+
+fn default_functional_health_check() -> bool {
+    true
 }
 
 /// Database configuration
@@ -270,6 +278,17 @@ pub struct StrategyConfig {
     /// Maximum total execution cost for Spear as a fraction of trade size (e.g. 0.08 for 8%)
     #[serde(default = "default_spear_max_cost")]
     pub spear_max_total_cost_percent: Decimal,
+    /// Fallback slippage fraction for trades below `slippage_fallback_threshold_sol` when
+    /// Jupiter price impact is unavailable (e.g. 0.005 = 0.5%)
+    #[serde(default = "default_slippage_fallback_small")]
+    pub slippage_fallback_small_percent: Decimal,
+    /// Fallback slippage fraction for trades at or above `slippage_fallback_threshold_sol`
+    /// (e.g. 0.01 = 1.0%)
+    #[serde(default = "default_slippage_fallback_large")]
+    pub slippage_fallback_large_percent: Decimal,
+    /// SOL amount boundary separating "small" from "large" trades for slippage fallback
+    #[serde(default = "default_slippage_fallback_threshold")]
+    pub slippage_fallback_threshold_sol: Decimal,
 }
 
 fn default_shield_percent() -> u32 {
@@ -306,6 +325,18 @@ fn default_shield_max_cost() -> Decimal {
 
 fn default_spear_max_cost() -> Decimal {
     Decimal::from_str("0.08").unwrap()
+}
+
+fn default_slippage_fallback_small() -> Decimal {
+    Decimal::from_str("0.005").unwrap()
+}
+
+fn default_slippage_fallback_large() -> Decimal {
+    Decimal::from_str("0.01").unwrap()
+}
+
+fn default_slippage_fallback_threshold() -> Decimal {
+    Decimal::from_str("0.5").unwrap()
 }
 
 /// Jito bundle tip configuration

@@ -368,11 +368,10 @@ impl Executor {
                     let slippage_percent = self.last_price_impact.lock().take()
                         .map(|pct| pct / Decimal::from(100)) // convert 1.5% → 0.015 fraction
                         .unwrap_or_else(|| {
-                            let half_sol = Decimal::from_str("0.5").unwrap();
-                            if signal.payload.amount_sol < half_sol {
-                                Decimal::from_str("0.005").unwrap()
+                            if signal.payload.amount_sol < self.config.strategy.slippage_fallback_threshold_sol {
+                                self.config.strategy.slippage_fallback_small_percent
                             } else {
-                                Decimal::from_str("0.01").unwrap()
+                                self.config.strategy.slippage_fallback_large_percent
                             }
                         });
                     let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
@@ -640,6 +639,71 @@ impl Executor {
         let timeout_duration = Duration::from_millis(self.config.rpc.timeout_ms);
         match timeout(timeout_duration, health_check).await {
             Ok(Ok(())) => {
+                // getHealth passed. When functional_health_check is enabled, also probe
+                // getLatestBlockhash — providers that unconditionally return "ok" to
+                // getHealth will still fail or return an error body here.
+                if self.config.rpc.functional_health_check {
+                    let probe_url = &self.config.rpc.primary_url;
+                    let probe_result = self
+                        .http_client
+                        .post(probe_url)
+                        .json(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "method": "getLatestBlockhash",
+                            "params": [{"commitment": "confirmed"}]
+                        }))
+                        .timeout(Duration::from_millis(self.config.rpc.timeout_ms))
+                        .send()
+                        .await;
+
+                    match probe_result {
+                        Ok(resp) if resp.status().is_success() => {
+                            let body: serde_json::Value =
+                                resp.json().await.unwrap_or_default();
+                            if body.get("result").is_none() {
+                                let health = RpcHealth {
+                                    healthy: false,
+                                    last_check: Utc::now(),
+                                    latency_ms: None,
+                                };
+                                *self.latest_rpc_health.write().await = Some(health);
+                                let err = ExecutorError::Rpc(
+                                    "RPC functional probe returned error body despite getHealth ok".to_string(),
+                                );
+                                tracing::warn!(error = %err, "RPC functional health probe failed");
+                                return Err(err);
+                            }
+                        }
+                        Ok(resp) => {
+                            let health = RpcHealth {
+                                healthy: false,
+                                last_check: Utc::now(),
+                                latency_ms: None,
+                            };
+                            *self.latest_rpc_health.write().await = Some(health);
+                            let err = ExecutorError::Rpc(format!(
+                                "RPC functional probe returned HTTP {}", resp.status()
+                            ));
+                            tracing::warn!(error = %err, "RPC functional health probe failed");
+                            return Err(err);
+                        }
+                        Err(e) => {
+                            let health = RpcHealth {
+                                healthy: false,
+                                last_check: Utc::now(),
+                                latency_ms: None,
+                            };
+                            *self.latest_rpc_health.write().await = Some(health);
+                            let err = ExecutorError::Rpc(format!(
+                                "RPC functional probe network error: {}", e
+                            ));
+                            tracing::warn!(error = %err, "RPC functional health probe failed");
+                            return Err(err);
+                        }
+                    }
+                }
+
                 let latency = start.elapsed().as_millis() as u64;
                 let health = RpcHealth {
                     healthy: true,
