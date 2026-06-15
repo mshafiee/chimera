@@ -204,15 +204,17 @@ impl StopLossManager {
             );
         }
 
-        // Final clamp: never tighter than -5% or wider than -35%.
-        // Tightened from -50% to -35% — at 20% portfolio heat cap, a single -50% stop
-        // would wipe 10% of total capital. The max_stop_loss_distance config field lets
-        // operators override this per-deployment if they deliberately want wider stops.
-        // Applied after ALL adjustments (volatility × + consensus ×) so every combination
-        // respects the envelope. widest_stop (-35) is numerically smaller; tightest_stop (-5) larger.
-        let widest_stop   = dec!(-35).min(self.config.max_stop_loss_distance);
+        // Final clamp: never tighter than -5% or wider than the operator-configured maximum.
+        // [T-H2] Use config.max_stop_loss_distance directly as the widest_stop — the old
+        // dec!(-35).min(...) expression silently overrode the config value whenever it was
+        // wider than -35, defeating the purpose of the config knob.
+        // The -35 absolute floor is preserved as a separate guard below.
+        let widest_stop   = self.config.max_stop_loss_distance;
         let tightest_stop = dec!(-5);
         stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
+        // Absolute floor: never wider than -35% regardless of config.
+        // At 20% portfolio heat cap a single -50% stop wipes 10% of total capital.
+        stop_loss_threshold = stop_loss_threshold.max(dec!(-35));
 
         // max_stop_loss_distance is the floor on loss tolerance — the adaptive stop
         // may widen due to volatility/consensus, but never past this value.

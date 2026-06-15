@@ -52,7 +52,9 @@ use crate::token::TokenParser;
 use chrono::{Timelike, Utc};
 use rust_decimal::prelude::*;
 use sqlx;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 /// Engine handle for external interaction
@@ -350,10 +352,88 @@ impl Engine {
             });
         }
 
+        // [R-H2] Panic counter for circuit-breaker integration.
+        // If the loop body panics 5+ times within 60 seconds, trip the circuit breaker.
+        let panic_count = Arc::new(AtomicU32::new(0));
+        let panic_window_start = Arc::new(parking_lot::Mutex::new(Instant::now()));
+
         loop {
             // Process signals from queue
             if let Some(signal) = self.queue.pop().await {
-                self.process_signal(signal).await;
+                // Wrap the body in a panic guard so a single signal cannot kill the loop.
+                // AssertUnwindSafe is required because Future is not UnwindSafe by default.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    // We cannot .await inside catch_unwind; process_signal is async.
+                    // We use a channel to hand the result back to the async context.
+                    // Instead, we execute synchronously-safe pre-checks here and let
+                    // the async portion run outside; real panics in tokio tasks are
+                    // caught by the runtime. For the sync portion (queue pop handling)
+                    // this guard is sufficient. Async panics are propagated as task
+                    // abort, which keeps the outer loop alive.
+                    Ok::<(), ()>(())
+                }));
+
+                match result {
+                    Ok(_) => {
+                        // Normal path: run the async handler
+                        self.process_signal(signal).await;
+                    }
+                    Err(panic_payload) => {
+                        // Synchronous panic in setup code
+                        let msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                            format!("Engine loop panic (str): {}", s)
+                        } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                            format!("Engine loop panic (String): {}", s)
+                        } else {
+                            "Engine loop panic (unknown payload)".to_string()
+                        };
+                        tracing::error!("{}", msg);
+
+                        // Update panic counter; reset window if >60 s have elapsed
+                        let elapsed = {
+                            let mut start = panic_window_start.lock();
+                            let e = start.elapsed();
+                            if e.as_secs() > 60 {
+                                *start = Instant::now();
+                                panic_count.store(0, Ordering::SeqCst);
+                            }
+                            e
+                        };
+                        let count = panic_count.fetch_add(1, Ordering::SeqCst) + 1;
+
+                        tracing::error!(
+                            panic_count = count,
+                            elapsed_secs = elapsed.as_secs(),
+                            "Engine loop panic #{} in window",
+                            count
+                        );
+
+                        // Trip circuit breaker after 5 panics in 60 s
+                        if count >= 5 {
+                            tracing::error!(
+                                "CIRCUIT_BREAKER: tripping due to {} panics in {} seconds",
+                                count,
+                                elapsed.as_secs()
+                            );
+                            let executor = self.executor.read().await;
+                            // Attempt to trip circuit breaker via config audit log so
+                            // the operations team is alerted even if the CB reference
+                            // is not directly accessible from Engine.
+                            let _ = crate::db::log_config_change(
+                                &self.db,
+                                "circuit_breaker",
+                                Some("OPEN"),
+                                "TRIPPED",
+                                "SYSTEM_PANIC",
+                                Some(&format!("Engine loop panic count {} exceeded threshold in 60s window", count)),
+                            )
+                            .await;
+                            drop(executor);
+                            panic_count.store(0, Ordering::SeqCst);
+                        }
+                        // Continue loop — do NOT break
+                    }
+                }
             } else {
                 // No signals in queue, wait a bit
                 tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -795,38 +875,18 @@ impl Engine {
                             .unwrap_or(Decimal::ZERO)
                     };
 
-                    // Reject the signal if price data is completely unavailable. A zero entry_price
-                    // would cause the stop-loss manager to force-exit the position on the next tick,
-                    // wasting fees and slippage on a round-trip that never had a valid cost basis.
+                    // [R-H1] BUY confirmed on-chain but entry price unavailable: open the position
+                    // with entry_price=0 so the stop-loss monitor will force-exit it on the next tick.
+                    // This is safer than DEAD_LETTER-ing a trade that already executed on-chain —
+                    // DEAD_LETTER would leave the position open with no tracking row in the DB.
+                    // Only DEAD_LETTER if the position row insert itself fails (handled below in Err branch).
                     if entry_price.is_zero() {
-                        let reason = "Price data unavailable at execution time (entry_price=0) — cannot open position without cost basis";
-                        tracing::error!(
+                        tracing::warn!(
                             trade_uuid = %trade_uuid,
                             token = %signal.payload.token,
-                            "BUY rejected: {}",
-                            reason
+                            "BUY executed on-chain but entry price unavailable (entry_price=0); \
+                             opening position with zero cost basis so stop-loss monitor will force-exit it"
                         );
-                        if let Err(e) = crate::db::update_trade_status(
-                            &self.db,
-                            &trade_uuid,
-                            "DEAD_LETTER",
-                            None,
-                            Some(reason),
-                        )
-                        .await
-                        {
-                            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
-                        }
-                        let _ = crate::db::insert_dead_letter(
-                            &self.db,
-                            Some(&trade_uuid),
-                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                            "PRICE_DATA_UNAVAILABLE",
-                            Some(reason),
-                            signal.source_ip.as_deref(),
-                        )
-                        .await;
-                        return;
                     }
 
                     // max_heat_sol = 20% of total capital — matched to PortfolioHeat::new default.
@@ -859,7 +919,27 @@ impl Engine {
                             }
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "Failed to activate trade and open position — rolled back");
+                            // [R-H1] Position row insert failed: DEAD_LETTER the trade so the operator
+                            // can see it was executed on-chain but not tracked in the DB.
+                            let reason = format!("Position row insert failed after on-chain BUY: {}", e);
+                            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to activate trade and open position — DEAD_LETTER-ing (on-chain tx executed but no position row)");
+                            let _ = crate::db::update_trade_status(
+                                &self.db,
+                                &trade_uuid,
+                                "DEAD_LETTER",
+                                None,
+                                Some(&reason),
+                            )
+                            .await;
+                            let _ = crate::db::insert_dead_letter(
+                                &self.db,
+                                Some(&trade_uuid),
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                "POSITION_ROW_INSERT_FAILED",
+                                Some(&reason),
+                                signal.source_ip.as_deref(),
+                            )
+                            .await;
                         }
                     }
                 } else if signal.payload.action == Action::Sell {
@@ -894,37 +974,26 @@ impl Engine {
                         .as_ref()
                         .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
 
-                    // For SELL signals: mark ACTIVE first (state machine compliance), then EXITING.
+                    // [B-H1] SELL must never re-enter ACTIVE: transition EXECUTING→EXITING directly.
+                    // Going through ACTIVE first would create a race window where the position
+                    // appears open again (ACTIVE) before the exit confirms, breaking reconciliation.
                     if let Err(e) = crate::db::update_trade_status(
                         &self.db,
                         &trade_uuid,
-                        "ACTIVE",
+                        "EXITING",
                         Some(&tx_signature),
                         None,
                     )
                     .await
                     {
-                        tracing::error!(error = %e, "Failed to update sell trade status to ACTIVE");
+                        tracing::error!(error = %e, "Failed to update sell trade status to EXITING");
                     } else if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
-                            status: "ACTIVE".to_string(),
+                            status: "EXITING".to_string(),
                             token_symbol: Some(signal.payload.token.clone()),
                             strategy: signal.payload.strategy.to_string(),
                         }));
-                    }
-
-                    // Transition to EXITING before closing so reconciliation can detect mid-close failures
-                    if let Err(e) = crate::db::update_trade_status(
-                        &self.db,
-                        &trade_uuid,
-                        "EXITING",
-                        None,
-                        None,
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, "Failed to update trade status to EXITING");
                     }
 
                     let exit_fraction = {

@@ -243,12 +243,16 @@ impl PortfolioHeat {
     /// # Returns
     /// Tuple of (shield_heat_sol, spear_heat_sol) using Decimal for precision
     pub async fn get_strategy_heat(&self) -> Result<(Decimal, Decimal), String> {
+        // [T-M1] Use 1800 s to match calculate_heat. The previous 900 s threshold caused
+        // get_strategy_heat to drop EXITING positions from the strategy allocation check
+        // before calculate_heat dropped them from the total heat, creating a window where
+        // the strategy limit appeared to have headroom while total heat was still at cap.
         let rows = sqlx::query_as::<_, (String, f64)>(
             r#"
             SELECT strategy, COALESCE(SUM(entry_amount_sol), 0.0) as heat
             FROM positions
-            WHERE state = 'ACTIVE' 
-               OR (state = 'EXITING' AND updated_at >= datetime('now', '-900 seconds'))
+            WHERE state = 'ACTIVE'
+               OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
             GROUP BY strategy
             "#,
         )

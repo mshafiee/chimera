@@ -291,6 +291,7 @@ async fn process_transaction(
         source_ip: Some("rpc_polling".to_string()),
         liquidity_usd: None,
         force_slow_path: false,
+        token_decimals: None,
     };
 
     tracing::info!(

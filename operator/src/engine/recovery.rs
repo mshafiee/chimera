@@ -174,25 +174,52 @@ impl RecoveryManager {
             "Evaluating stuck position"
         );
 
-        // Check on-chain state
-        // For EXITING positions, check the exit transaction signature
-        // If no exit signature yet, check entry signature as fallback
-        let tx_signature = position
-            .exit_tx_signature
-            .as_deref()
-            .unwrap_or(&position.entry_tx_signature);
+        // [R-H6] Check on-chain state.
+        // For EXITING positions, only check the exit transaction signature.
+        // If there is no exit signature, the exit tx was never submitted — do NOT fall back to
+        // the entry signature, which would confirm the BUY and mark the position CLOSED without
+        // ever executing the sell. Instead revert to ACTIVE so stop_loss can manage the exit.
+        let exit_sig = position.exit_tx_signature.as_deref().filter(|s| !s.is_empty());
 
+        if exit_sig.is_none() {
+            tracing::warn!(
+                trade_uuid = %position.trade_uuid,
+                "EXITING position has no exit_tx_signature — reverting to ACTIVE so stop-loss can manage exit"
+            );
+            db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
+            db::insert_reconciliation_log(
+                &self.db,
+                &position.trade_uuid,
+                "EXITING",
+                Some("NO_EXIT_SIG"),
+                "REVERTED_ACTIVE",
+                None,
+                Some("Auto-recovery: no exit signature; reverted to ACTIVE for stop-loss management"),
+            )
+            .await?;
+            if let Some(ref ws) = self.ws_state {
+                ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+                    trade_uuid: position.trade_uuid.clone(),
+                    state: "ACTIVE".to_string(),
+                    unrealized_pnl_percent: None,
+                }));
+            }
+            return Ok(RecoveryAction::RevertedToActive);
+        }
+
+        let tx_signature = exit_sig.unwrap();
         let on_chain_state = self.check_on_chain_state(tx_signature).await?;
 
         match on_chain_state {
             OnChainState::TransactionConfirmed => {
-                // Transaction confirmed, update to CLOSED
+                // Exit transaction confirmed on-chain, mark CLOSED.
                 db::update_position_state(&self.db, &position.trade_uuid, "CLOSED").await?;
 
                 let tx_sig = position
                     .exit_tx_signature
                     .as_ref()
-                    .unwrap_or(&position.entry_tx_signature);
+                    .map(|s| s.as_str())
+                    .unwrap_or(tx_signature);
 
                 db::insert_reconciliation_log(
                     &self.db,
