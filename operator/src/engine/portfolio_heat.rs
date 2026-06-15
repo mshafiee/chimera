@@ -296,7 +296,13 @@ impl PortfolioHeat {
             // 0% allocation means this strategy is disabled — block all positions
             return Ok(false);
         }
-        let allocated_sol = *self.total_capital_sol.read() * (allocation_pct / Decimal::from(100));
+        let capital_live = *self.total_capital_sol.read();
+        let capital = if !capital_live.is_zero() {
+            capital_live
+        } else {
+            *self.last_known_capital.read()
+        };
+        let allocated_sol = capital * (allocation_pct / Decimal::from(100));
         let current_heat = match strategy {
             crate::models::Strategy::Shield => shield_heat,
             crate::models::Strategy::Spear => spear_heat,

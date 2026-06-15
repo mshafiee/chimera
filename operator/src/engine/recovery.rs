@@ -18,6 +18,7 @@ use crate::error::{AppError, AppResult};
 use crate::handlers::{PositionUpdateData, WsEvent, WsState};
 use chrono::Utc;
 use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signature;
 use std::sync::Arc;
 use tokio::time::interval;
@@ -182,29 +183,13 @@ impl RecoveryManager {
         let exit_sig = position.exit_tx_signature.as_deref().filter(|s| !s.is_empty());
 
         if exit_sig.is_none() {
-            tracing::warn!(
-                trade_uuid = %position.trade_uuid,
-                "EXITING position has no exit_tx_signature — reverting to ACTIVE so stop-loss can manage exit"
-            );
-            db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
-            db::insert_reconciliation_log(
-                &self.db,
-                &position.trade_uuid,
-                "EXITING",
+            return self.revert_or_close_position(
+                position,
                 Some("NO_EXIT_SIG"),
                 "REVERTED_ACTIVE",
-                None,
-                Some("Auto-recovery: no exit signature; reverted to ACTIVE for stop-loss management"),
+                "Auto-recovery: no exit signature; reverted to ACTIVE for stop-loss management",
             )
-            .await?;
-            if let Some(ref ws) = self.ws_state {
-                ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
-                    trade_uuid: position.trade_uuid.clone(),
-                    state: "ACTIVE".to_string(),
-                    unrealized_pnl_percent: None,
-                }));
-            }
-            return Ok(RecoveryAction::RevertedToActive);
+            .await;
         }
 
         let tx_signature = exit_sig.unwrap();
@@ -244,44 +229,12 @@ impl RecoveryManager {
                 Ok(RecoveryAction::MarkedClosed)
             }
             OnChainState::TransactionNotFound | OnChainState::BlockhashExpired => {
-                // Transaction not found or blockhash expired, revert to ACTIVE
-                db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
-
-                db::insert_reconciliation_log(
-                    &self.db,
-                    &position.trade_uuid,
-                    "EXITING",
-                    Some("MISSING"),
-                    "MISSING_TX",
-                    None,
-                    Some(&format!(
-                        "Auto-recovery: {:?}, reverted to ACTIVE after {}s stuck",
-                        on_chain_state,
-                        stuck_duration.num_seconds()
-                    )),
-                )
-                .await?;
-
-                db::log_config_change(
-                    &self.db,
-                    &format!("position:{}", position.trade_uuid),
-                    Some("EXITING"),
-                    "ACTIVE",
-                    "SYSTEM_RECOVERY",
-                    Some("Stuck position reverted to ACTIVE"),
-                )
-                .await?;
-
-                // Broadcast position update via WebSocket
-                if let Some(ref ws) = self.ws_state {
-                    ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
-                        trade_uuid: position.trade_uuid.clone(),
-                        state: "ACTIVE".to_string(),
-                        unrealized_pnl_percent: None,
-                    }));
-                }
-
-                Ok(RecoveryAction::RevertedToActive)
+                let note = format!(
+                    "Auto-recovery: {:?}, reverted to ACTIVE after {}s stuck",
+                    on_chain_state,
+                    stuck_duration.num_seconds()
+                );
+                self.revert_or_close_position(position, Some("MISSING"), "MISSING_TX", &note).await
             }
             OnChainState::RpcError(ref rpc_err) => {
                 // Transient RPC error. If the position has been stuck long enough
@@ -321,24 +274,12 @@ impl RecoveryManager {
                     // retried by the normal exit path. Leaving the position in EXITING
                     // would permanently lock capital in the heat calculation.
                     // The dead letter entry ensures a human reviews the final outcome.
-                    db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
-                    db::log_config_change(
-                        &self.db,
-                        &format!("position:{}", position.trade_uuid),
-                        Some("EXITING"),
-                        "ACTIVE",
-                        "SYSTEM_RECOVERY",
-                        Some("Persistent RPC error: reverted to ACTIVE after dead letter escalation"),
-                    )
-                    .await?;
-                    if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
-                            trade_uuid: position.trade_uuid.clone(),
-                            state: "ACTIVE".to_string(),
-                            unrealized_pnl_percent: None,
-                        }));
-                    }
-                    Ok(RecoveryAction::RevertedToActive)
+                    let note = format!(
+                        "Escalated to dead letter after {}s: RPC error: {}",
+                        stuck_duration.num_seconds(),
+                        rpc_err
+                    );
+                    self.revert_or_close_position(position, None, "STATE_MISMATCH", &note).await
                 } else {
                     tracing::warn!(
                         trade_uuid = %position.trade_uuid,
@@ -349,6 +290,129 @@ impl RecoveryManager {
                     Ok(RecoveryAction::StillPending)
                 }
             }
+        }
+    }
+
+    /// Check if the on-chain SPL token balance is zero, indicating the position has already been exited.
+    /// Returns `Ok(true)` if balance is confirmed to be 0 or if the token account does not exist.
+    /// Returns `Ok(false)` if balance is > 0.
+    async fn check_is_balance_zero(&self, wallet_address: &str, token_address: &str) -> AppResult<bool> {
+        let wallet_pubkey = wallet_address
+            .parse::<Pubkey>()
+            .map_err(|e| AppError::Internal(format!("Invalid wallet address: {}", e)))?;
+        let token_mint = token_address
+            .parse::<Pubkey>()
+            .map_err(|e| AppError::Internal(format!("Invalid token address: {}", e)))?;
+
+        use solana_account_decoder::UiAccountData;
+        use solana_client::rpc_request::TokenAccountsFilter;
+
+        let accounts = self
+            .rpc_client
+            .get_token_accounts_by_owner(&wallet_pubkey, TokenAccountsFilter::Mint(token_mint))
+            .await
+            .map_err(|e| AppError::Rpc(format!("Failed to fetch token accounts for balance check: {}", e)))?;
+
+        let max_balance = accounts
+            .iter()
+            .filter_map(|keyed| {
+                if let UiAccountData::Json(parsed) = &keyed.account.data {
+                    parsed
+                        .parsed
+                        .get("info")
+                        .and_then(|i| i.get("tokenAmount"))
+                        .and_then(|ta| ta.get("amount"))
+                        .and_then(|a| a.as_str())
+                        .and_then(|s| s.parse::<u64>().ok())
+                } else {
+                    None
+                }
+            })
+            .max()
+            .unwrap_or(0);
+
+        Ok(max_balance == 0)
+    }
+
+    /// Reverts a stuck position to ACTIVE or marks it CLOSED if the on-chain balance is 0.
+    async fn revert_or_close_position(
+        &self,
+        position: &PositionRecord,
+        actual_on_chain: Option<&str>,
+        discrepancy: &str,
+        notes: &str,
+    ) -> AppResult<RecoveryAction> {
+        let is_zero = match self.check_is_balance_zero(&position.wallet_address, &position.token_address).await {
+            Ok(zero) => zero,
+            Err(e) => {
+                tracing::error!(
+                    trade_uuid = %position.trade_uuid,
+                    error = %e,
+                    "Failed to check on-chain token balance during recovery; assuming non-zero to be safe"
+                );
+                false
+            }
+        };
+
+        if is_zero {
+            tracing::warn!(
+                trade_uuid = %position.trade_uuid,
+                "Position is stuck in EXITING but on-chain token balance is 0 — marking CLOSED directly to avoid zombie loop"
+            );
+            db::update_position_state(&self.db, &position.trade_uuid, "CLOSED").await?;
+            db::insert_reconciliation_log(
+                &self.db,
+                &position.trade_uuid,
+                "EXITING",
+                Some("ZERO_BALANCE"),
+                "NONE",
+                None,
+                Some("Auto-recovery: stuck in EXITING but on-chain balance is zero; marked CLOSED directly"),
+            )
+            .await?;
+            if let Some(ref ws) = self.ws_state {
+                ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+                    trade_uuid: position.trade_uuid.clone(),
+                    state: "CLOSED".to_string(),
+                    unrealized_pnl_percent: None,
+                }));
+            }
+            Ok(RecoveryAction::MarkedClosed)
+        } else {
+            tracing::info!(
+                trade_uuid = %position.trade_uuid,
+                "On-chain balance is non-zero — reverting position to ACTIVE so stop-loss can manage exit"
+            );
+            db::update_position_state(&self.db, &position.trade_uuid, "ACTIVE").await?;
+            db::insert_reconciliation_log(
+                &self.db,
+                &position.trade_uuid,
+                "EXITING",
+                actual_on_chain,
+                discrepancy,
+                None,
+                Some(notes),
+            )
+            .await?;
+
+            db::log_config_change(
+                &self.db,
+                &format!("position:{}", position.trade_uuid),
+                Some("EXITING"),
+                "ACTIVE",
+                "SYSTEM_RECOVERY",
+                Some(notes),
+            )
+            .await?;
+
+            if let Some(ref ws) = self.ws_state {
+                ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {
+                    trade_uuid: position.trade_uuid.clone(),
+                    state: "ACTIVE".to_string(),
+                    unrealized_pnl_percent: None,
+                }));
+            }
+            Ok(RecoveryAction::RevertedToActive)
         }
     }
 

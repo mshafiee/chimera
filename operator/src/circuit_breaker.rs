@@ -391,29 +391,37 @@ impl CircuitBreaker {
 
         // Get SOL price in USD from price cache
         let sol_price_usd = if let Some(ref cache) = self.price_cache {
-            cache.get_price_usd(crate::constants::mints::SOL).unwrap_or(Decimal::ZERO)
+            cache.get_price_usd(crate::constants::mints::SOL)
         } else {
-            Decimal::ZERO
+            None
         };
 
-        // Add best-effort USD estimate for positions closed without price data
-        if null_price_pnl_sol_f64 != 0.0 && sol_price_usd > Decimal::ZERO {
-            let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
-                .unwrap_or(Decimal::ZERO) * sol_price_usd;
-            realized_usd += estimated;
-        }
+        if let Some(price) = sol_price_usd {
+            if price > Decimal::ZERO {
+                // Add best-effort USD estimate for positions closed without price data
+                if null_price_pnl_sol_f64 != 0.0 {
+                    let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
+                        .unwrap_or(Decimal::ZERO) * price;
+                    realized_usd += estimated;
+                }
 
-        let unrealized_usd = unrealized_sol * sol_price_usd;
-        let total_pnl_usd = realized_usd + unrealized_usd;
+                let unrealized_usd = unrealized_sol * price;
+                let total_pnl_usd = realized_usd + unrealized_usd;
 
-        // Check 24h loss in USD (sum of realized USD + unrealized USD)
-        if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
-            self.trip(TripReason::MaxLoss24h {
-                loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
-                threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
-            })
-            .await?;
-            return Ok(());
+                // Check 24h loss in USD (sum of realized USD + unrealized USD)
+                if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
+                    self.trip(TripReason::MaxLoss24h {
+                        loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
+                        threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
+                    })
+                    .await?;
+                    return Ok(());
+                }
+            } else {
+                tracing::warn!("SOL price from cache is zero — skipping USD loss check for this tick");
+            }
+        } else {
+            tracing::warn!("SOL price unavailable (stale cache) — skipping USD loss check for this tick");
         }
 
         // Check consecutive losses

@@ -15,7 +15,7 @@ WQS v2 improvements:
 
 from dataclasses import dataclass
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 @dataclass
@@ -216,14 +216,13 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
             last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
             last_trade = datetime.fromisoformat(last_trade_str)
             
-            # Ensure timezone-aware comparison (assume utcnow is naive, so use naive delta if needed or unify)
-            # best practice: use fromisoformat which handles offset if present. 
+            # Ensure timezone-aware comparison
+            # best practice: use fromisoformat which handles offset if present.
             # If naive, assume UTC.
-            now = datetime.utcnow()
-            if last_trade.tzinfo is not None:
-                # If last_trade is aware, make now aware (UTC)
-                from datetime import timezone
-                now = now.replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            if last_trade.tzinfo is None:
+                # If last_trade is naive, convert now to a naive UTC datetime
+                now = now.replace(tzinfo=None)
                 
             days_since_trade = (now - last_trade).days
             
