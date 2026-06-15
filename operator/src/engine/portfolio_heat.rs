@@ -135,10 +135,18 @@ impl PortfolioHeat {
         let capital = *self.total_capital_sol.read();
 
         // Calculate heat percentage using Decimal for precision
+        // §2.3 FIX: When capital is zero (wallet balance query failed or empty wallet),
+        // block all new positions. The previous logic set heat to 0% which passed the
+        // `< max_heat_percent` check, allowing unlimited trading with no capital backing.
         let current_heat_percent = if !capital.is_zero() {
             (total_exposure / capital) * Decimal::from(100)
         } else {
-            Decimal::ZERO
+            tracing::warn!(
+                "Portfolio heat: total_capital_sol is zero — blocking all new positions \
+                 (wallet balance may have failed to refresh)"
+            );
+            // Return 100% heat to block all new positions
+            Decimal::from(100)
         };
 
         // Calculate available heat

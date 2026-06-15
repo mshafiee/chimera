@@ -297,8 +297,8 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
 #[tokio::test]
 async fn test_high_wqs_high_volatility_widens_to_40pct() {
     // WQS ≥ 70 → base stop = -20%.  Volatility > 30% → multiplier = 2.0.
-    // -20% × 2.0 = -40%, clamped to [-50%, -5%] → stays -40%.
-    // -39% loss → None. -41% loss → Exit.
+    // -20% × 2.0 = -40%, clamped to [-35%, -5%] → clamps to -35% (tightened from -50%).
+    // -34% loss → None. -36% loss → Exit.
 
     let (pool, _tmp) = create_test_db().await;
 
@@ -329,11 +329,12 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         vol.unwrap()
     );
 
-    // At -39%: entry $1.00, current $0.61 → -39% → None
+    // At -34%: entry $1.00, current $0.66 → -34% → None
     // Use hard_stop=-100 to isolate volatility-widening behavior from the hard-stop sign bug.
+    // The widest_stop clamp is now -35% (tightened from -50%) so -34% is within the stop.
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.61").unwrap(),
+        Decimal::from_str("0.66").unwrap(),
         PriceSource::Jupiter,
     );
     let mgr = StopLossManager::new(
@@ -353,13 +354,13 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     assert_eq!(
         action_near,
         StopLossAction::None,
-        "-39% loss with -40% threshold should not exit"
+        "-34% loss with -35% (clamped) threshold should not exit"
     );
 
-    // At -41%: current $0.59 → Exit
+    // At -36%: current $0.64 → Exit (past the -35% clamp)
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.59").unwrap(),
+        Decimal::from_str("0.64").unwrap(),
         PriceSource::Jupiter,
     );
     let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
@@ -375,7 +376,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     assert_eq!(
         action_over,
         StopLossAction::Exit,
-        "-41% loss with -40% threshold must exit"
+        "-36% loss with -35% (clamped) threshold must exit"
     );
 }
 
@@ -462,8 +463,9 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
 
 #[tokio::test]
 async fn test_consensus_plus_high_volatility_widens_further() {
-    // WQS ≥ 70 (-20%) × 2.0 (>30% volatility) = -40%, then +consensus -5% = -45%.
-    // -44% loss → None. -46% loss → Exit.
+    // WQS ≥ 70 (-20%) × 2.0 (>30% volatility) = -40%, then ×1.25 consensus = -50%,
+    // clamped to widest_stop -35%.  Effective threshold: -35%.
+    // -34% loss → None. -36% loss → Exit.
 
     let (pool, _tmp) = create_test_db().await;
     insert_wallet(&pool, "wallet_cv", 75.0).await;
@@ -486,11 +488,11 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     insert_consensus_signal(&pool, TOKEN, "wallet_cv").await;
     insert_consensus_signal(&pool, TOKEN, "wallet_other").await;
 
-    // -44% loss: $0.56 from $1.00
+    // -34% loss: $0.66 from $1.00 — within -35% threshold → None
     // Use hard_stop=-100 to isolate consensus+volatility widening from the hard-stop sign bug.
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.56").unwrap(),
+        Decimal::from_str("0.66").unwrap(),
         PriceSource::Jupiter,
     );
     let mgr = StopLossManager::new(
@@ -510,13 +512,13 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     assert_eq!(
         none,
         StopLossAction::None,
-        "-44% should not exit when threshold is -45%"
+        "-34% should not exit when threshold is -35% (vol×2.0 × consensus×1.25 clamped)"
     );
 
-    // -46% loss: $0.54 from $1.00
+    // -36% loss: $0.64 from $1.00 — exceeds -35% threshold → Exit
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.54").unwrap(),
+        Decimal::from_str("0.64").unwrap(),
         PriceSource::Jupiter,
     );
     let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
@@ -532,7 +534,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     assert_eq!(
         exit,
         StopLossAction::Exit,
-        "-46% must exit when threshold is -45%"
+        "-36% must exit when threshold is -35% (vol×2.0 × consensus×1.25 clamped)"
     );
 }
 

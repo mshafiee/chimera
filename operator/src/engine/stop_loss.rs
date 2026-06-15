@@ -82,7 +82,22 @@ impl StopLossManager {
     ) -> StopLossAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
-            None => return StopLossAction::None,
+            None => {
+                // §1.5 FIX: If this token is actively tracked but hasn't received a
+                // price update in >2 minutes, force exit. Without a price feed, all
+                // stop-loss protection is silently disabled — the position could lose
+                // 100% before the feed recovers. Forcing exit is safer than holding
+                // an unmonitored position.
+                if self.price_cache.is_price_stale(token_address) {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        "STALE_PRICE: no price update for >2 min on tracked token — forcing exit (risk management blind)"
+                    );
+                    return StopLossAction::Exit;
+                }
+                return StopLossAction::None;
+            }
         };
 
         // Calculate loss percentage using Decimal for precision
@@ -175,11 +190,13 @@ impl StopLossManager {
             );
         }
 
-        // Widen stop-loss by 5% for consensus signals (additive, applied after volatility).
-        // A second clamp is applied immediately after so that the combined
-        // volatility + consensus adjustment can never exceed the [-50%, -5%] safety envelope.
+        // Widen stop-loss for consensus signals (applied after volatility).
+        // Use a proportional 25% widening instead of a flat -5% so that tight stops
+        // receive smaller absolute widening than wide stops — a flat -5% on a -10% base
+        // would be a 50% widening, disproportionate relative to a -20% base.
+        // A second clamp is applied immediately after so the combined result respects the envelope.
         if is_consensus {
-            stop_loss_threshold += dec!(-5); // widen (e.g. -40% → -45%)
+            stop_loss_threshold = stop_loss_threshold * dec!(1.25); // widen by 25% of current threshold
             tracing::debug!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
@@ -188,10 +205,13 @@ impl StopLossManager {
             );
         }
 
-        // Final clamp: never tighter than -5% or wider than -50%.
-        // Applied after ALL adjustments (volatility × + consensus +) so every combination
-        // respects the envelope. widest_stop (-50) is numerically smaller; tightest_stop (-5) larger.
-        let widest_stop   = dec!(-50);
+        // Final clamp: never tighter than -5% or wider than -35%.
+        // Tightened from -50% to -35% — at 20% portfolio heat cap, a single -50% stop
+        // would wipe 10% of total capital. The max_stop_loss_distance config field lets
+        // operators override this per-deployment if they deliberately want wider stops.
+        // Applied after ALL adjustments (volatility × + consensus ×) so every combination
+        // respects the envelope. widest_stop (-35) is numerically smaller; tightest_stop (-5) larger.
+        let widest_stop   = dec!(-35);
         let tightest_stop = dec!(-5);
         stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
 

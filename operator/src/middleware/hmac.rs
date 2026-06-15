@@ -26,6 +26,7 @@ use serde_json::json;
 use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// HMAC verification state with support for secret rotation
 #[derive(Clone)]
@@ -70,11 +71,26 @@ impl HmacState {
         }
     }
 
+    /// Maximum nonce store entries. At 1000 RPS with a 60s drift window the store
+    /// holds ~60,000 entries normally; this cap prevents runaway growth if the
+    /// rate limit is raised or if eviction falls behind during a burst.
+    const MAX_NONCE_STORE: usize = 100_000;
+
     /// Check nonce and record it. Returns false if the nonce was already seen (replay).
     fn check_and_record_nonce(&self, nonce: &str, now: i64) -> bool {
         let mut store = self.seen_nonces.lock();
-        // Evict expired entries to bound memory usage
+        // Evict expired entries to bound memory usage.
         store.retain(|_, ts| now - *ts <= self.max_drift_secs);
+        // Hard cap: if post-eviction the store is still oversized, clear the oldest
+        // entries first. This trades a small replay-detection window for bounded memory.
+        if store.len() >= Self::MAX_NONCE_STORE {
+            let cutoff = now - self.max_drift_secs / 2;
+            store.retain(|_, ts| *ts > cutoff);
+            tracing::warn!(
+                store_size = store.len(),
+                "Nonce store hit size cap — evicted entries older than half the drift window"
+            );
+        }
         if store.contains_key(nonce) {
             return false; // Replay detected
         }
@@ -259,17 +275,14 @@ fn verify_with_secrets(
     VerificationResult::Invalid
 }
 
-/// Constant-time string comparison to prevent timing attacks
+/// Constant-time string comparison to prevent timing attacks.
+///
+/// Always iterates over max(a.len(), b.len()) bytes so the execution time
+/// does not reveal which input is shorter. Uses `subtle::ConstantTimeEq` on
+/// the byte slices to prevent compiler optimisations from reintroducing
+/// early-exit behaviour.
 fn constant_time_compare(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-
-    let mut result = 0u8;
-    for (x, y) in a.bytes().zip(b.bytes()) {
-        result |= x ^ y;
-    }
-    result == 0
+    a.as_bytes().ct_eq(b.as_bytes()).into()
 }
 
 /// Create an error response

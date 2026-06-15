@@ -111,8 +111,9 @@ pub struct CircuitBreaker {
     check_interval: Duration,
     /// Optional WebSocket state for broadcasting events
     ws_state: Option<Arc<crate::handlers::WsState>>,
-    /// Total capital in SOL for portfolio stop calculation
-    total_capital_sol: Decimal,
+    /// Total capital in SOL for portfolio stop calculation — shared with PortfolioHeat so
+    /// that balance refreshes (every 60s in main.rs) propagate here automatically.
+    total_capital_sol: Arc<RwLock<Decimal>>,
     /// Price cache for converting unrealized SOL losses to USD
     price_cache: Option<Arc<crate::price_cache::PriceCache>>,
 }
@@ -140,7 +141,7 @@ impl CircuitBreaker {
             })),
             check_interval: Duration::seconds(30),
             ws_state,
-            total_capital_sol: Decimal::from(10), // default to 10 SOL
+            total_capital_sol: Arc::new(RwLock::new(Decimal::from(10))), // default to 10 SOL
             price_cache: None,
         }
     }
@@ -151,10 +152,15 @@ impl CircuitBreaker {
         self
     }
 
-    /// Set total capital in SOL
-    pub fn with_total_capital(mut self, total_capital_sol: Decimal) -> Self {
-        self.total_capital_sol = total_capital_sol;
+    /// Set total capital in SOL (builder method, used at construction time)
+    pub fn with_total_capital(self, total_capital_sol: Decimal) -> Self {
+        *self.total_capital_sol.write() = total_capital_sol;
         self
+    }
+
+    /// Update total capital in SOL (called from the live balance refresh loop)
+    pub fn update_capital(&self, new_capital: Decimal) {
+        *self.total_capital_sol.write() = new_capital;
     }
 
     /// Check if trading is allowed
@@ -232,7 +238,7 @@ impl CircuitBreaker {
         let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
 
         // Check 24h SOL portfolio stop (5% limit of total_capital_sol)
-        let total_capital = self.total_capital_sol;
+        let total_capital = *self.total_capital_sol.read();
         if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
             let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
                 r#"
@@ -405,7 +411,7 @@ impl CircuitBreaker {
         let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
 
         // Re-check portfolio stop realized SOL loss before exiting cooldown
-        let total_capital = self.total_capital_sol;
+        let total_capital = *self.total_capital_sol.read();
         if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
             let daily_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
                 r#"

@@ -5,9 +5,9 @@
 
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize)]
@@ -173,6 +173,13 @@ pub struct SecurityConfig {
 }
 
 /// API key configuration
+///
+/// # Security note
+/// The `key` field is read from config.yaml as plaintext. Prefer setting
+/// `CHIMERA_RPC__API_KEY` / `CHIMERA_RPC__FALLBACK_API_KEY` as environment
+/// variables or storing the key in the vault (`vault.rs`), which loads those
+/// env vars into an encrypted `VaultSecrets` bundle. The YAML field is a
+/// fallback for local development only and should never be committed to git.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiKeyConfig {
     /// The API key value
@@ -233,7 +240,7 @@ pub struct CircuitBreakerConfig {
 }
 
 fn default_max_loss() -> Decimal {
-    Decimal::from_str("500.0").unwrap()
+    dec!(500.0)
 }
 
 fn default_max_consecutive_losses() -> u32 {
@@ -241,7 +248,7 @@ fn default_max_consecutive_losses() -> u32 {
 }
 
 fn default_max_drawdown() -> Decimal {
-    Decimal::from_str("15.0").unwrap()
+    dec!(15.0)
 }
 
 fn default_cooldown() -> u32 {
@@ -308,35 +315,35 @@ fn default_spear_percent() -> u32 {
 }
 
 fn default_max_position() -> Decimal {
-    Decimal::from_str("1.0").unwrap()
+    dec!(1.0)
 }
 
 fn default_min_position() -> Decimal {
-    Decimal::from_str("0.01").unwrap()
+    dec!(0.01)
 }
 
 fn default_dex_fee_rate() -> Decimal {
-    Decimal::from_str("0.003").unwrap()
+    dec!(0.003)
 }
 
 fn default_shield_max_cost() -> Decimal {
-    Decimal::from_str("0.05").unwrap()
+    dec!(0.05)
 }
 
 fn default_spear_max_cost() -> Decimal {
-    Decimal::from_str("0.08").unwrap()
+    dec!(0.08)
 }
 
 fn default_slippage_fallback_small() -> Decimal {
-    Decimal::from_str("0.005").unwrap()
+    dec!(0.005)
 }
 
 fn default_slippage_fallback_large() -> Decimal {
-    Decimal::from_str("0.01").unwrap()
+    dec!(0.01)
 }
 
 fn default_slippage_fallback_threshold() -> Decimal {
-    Decimal::from_str("0.5").unwrap()
+    dec!(0.5)
 }
 
 /// Jito bundle tip configuration
@@ -378,11 +385,11 @@ fn default_helius_fallback() -> bool {
 }
 
 fn default_tip_floor() -> Decimal {
-    Decimal::from_str("0.001").unwrap()
+    dec!(0.001)
 }
 
 fn default_tip_ceiling() -> Decimal {
-    Decimal::from_str("0.01").unwrap()
+    dec!(0.01)
 }
 
 fn default_tip_percentile() -> u32 {
@@ -390,7 +397,7 @@ fn default_tip_percentile() -> u32 {
 }
 
 fn default_tip_percent_max() -> Decimal {
-    Decimal::from_str("0.10").unwrap()
+    dec!(0.10)
 }
 
 /// Jupiter API configuration
@@ -495,11 +502,11 @@ fn default_authority_whitelist() -> Vec<String> {
 }
 
 fn default_min_liquidity_shield() -> Decimal {
-    Decimal::from_str("10000.0").unwrap()
+    dec!(10000.0)
 }
 
 fn default_min_liquidity_spear() -> Decimal {
-    Decimal::from_str("5000.0").unwrap()
+    dec!(5000.0)
 }
 
 fn default_honeypot_detection() -> bool {
@@ -770,29 +777,29 @@ pub struct ProfitManagementConfig {
 
 fn default_profit_targets() -> Vec<Decimal> {
     vec![
-        Decimal::from_str("25.0").unwrap(),
-        Decimal::from_str("50.0").unwrap(),
-        Decimal::from_str("100.0").unwrap(),
-        Decimal::from_str("200.0").unwrap(),
+        dec!(25.0),
+        dec!(50.0),
+        dec!(100.0),
+        dec!(200.0),
     ]
 }
 
 fn default_tiered_exit_percent() -> Decimal {
     // Each exit sells this fraction of the *remaining* balance (compound, not original).
     // Four tiers at 33%: 33% + 22% + 15% + 10% ≈ 80% total; trailing stop handles the tail.
-    Decimal::from_str("33.0").unwrap()
+    dec!(33.0)
 }
 
 fn default_trailing_stop_activation() -> Decimal {
-    Decimal::from_str("50.0").unwrap()
+    dec!(50.0)
 }
 
 fn default_trailing_stop_distance() -> Decimal {
-    Decimal::from_str("20.0").unwrap()
+    dec!(20.0)
 }
 
 fn default_max_stop_loss_distance() -> Decimal {
-    Decimal::from_str("-25.0").unwrap()
+    dec!(-25.0)
 }
 
 fn default_time_exit_hours() -> u64 {
@@ -860,27 +867,27 @@ pub struct PositionSizingConfig {
 }
 
 fn default_base_size_sol() -> Decimal {
-    Decimal::from_str("0.1").unwrap()
+    dec!(0.1)
 }
 
 fn default_max_size_sol() -> Decimal {
-    Decimal::from_str("2.0").unwrap()
+    dec!(2.0)
 }
 
 fn default_min_size_sol() -> Decimal {
-    Decimal::from_str("0.05").unwrap()
+    dec!(0.05)
 }
 
 fn default_shield_max_size_sol() -> Decimal {
-    Decimal::from_str("2.0").unwrap()
+    dec!(2.0)
 }
 
 fn default_spear_max_size_sol() -> Decimal {
-    Decimal::from_str("0.5").unwrap()
+    dec!(0.5)
 }
 
 fn default_consensus_multiplier() -> Decimal {
-    Decimal::from_str("1.5").unwrap()
+    dec!(1.5)
 }
 
 fn default_max_concurrent_positions() -> usize {
@@ -892,19 +899,19 @@ fn default_use_kelly_sizing() -> bool {
 }
 
 fn default_total_capital_sol() -> Decimal {
-    Decimal::from_str("10.0").unwrap()
+    dec!(10.0)
 }
 
 fn default_kelly_fraction_shield() -> Decimal {
-    Decimal::from_str("0.25").unwrap() // 25% of full Kelly for Shield (conservative)
+    dec!(0.25) // 25% of full Kelly for Shield (conservative)
 }
 
 fn default_kelly_fraction_spear() -> Decimal {
-    Decimal::from_str("0.15").unwrap() // 15% of full Kelly for Spear (higher risk = smaller fraction)
+    dec!(0.15) // 15% of full Kelly for Spear (higher risk = smaller fraction)
 }
 
 fn default_off_hours_size_multiplier() -> Decimal {
-    Decimal::from_str("0.5").unwrap() // 50% of normal size during 02:00–06:00 UTC low-liquidity window
+    dec!(0.5) // 50% of normal size during 02:00–06:00 UTC low-liquidity window
 }
 
 impl Default for PositionSizingConfig {
@@ -948,15 +955,15 @@ fn default_always_use_jito() -> bool {
 }
 
 fn default_exit_tip_sol() -> Decimal {
-    Decimal::from_str("0.007").unwrap()
+    dec!(0.007)
 }
 
 fn default_consensus_tip_sol() -> Decimal {
-    Decimal::from_str("0.003").unwrap()
+    dec!(0.003)
 }
 
 fn default_standard_tip_sol() -> Decimal {
-    Decimal::from_str("0.0015").unwrap()
+    dec!(0.0015)
 }
 
 impl Default for MevProtectionConfig {
@@ -1073,6 +1080,12 @@ impl AppConfig {
                 "notifications.daily_summary.minute must be 0–59, got {}",
                 self.notifications.daily_summary.minute
             )));
+        }
+
+        if self.position_sizing.total_capital_sol <= Decimal::ZERO {
+            return Err(ConfigError::Message(
+                "position_sizing.total_capital_sol must be greater than zero".to_string(),
+            ));
         }
 
         Ok(())

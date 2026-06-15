@@ -75,7 +75,17 @@ impl PositionSizer {
         // guarantees ruin over a sufficient sample.
         let mut full_kelly_cap: Option<Decimal> = None;
         let mut size = if let Some(ref kelly) = self.kelly_sizer {
-            match kelly.calculate_kelly(&factors.wallet_address, factors.strategy, 30).await {
+            // Adaptive lookback: prefer the recent 14-day window for wallets that have
+            // changed strategy recently. Fall back to 30 days when the 14-day window
+            // has fewer than 20 trades — too few data points for reliable Kelly.
+            let kelly_result_14d = kelly.calculate_kelly(&factors.wallet_address, factors.strategy, 14).await;
+            let use_30d = kelly_result_14d.as_ref().map(|r| r.trade_count < 20).unwrap_or(true);
+            let kelly_result = if use_30d {
+                kelly.calculate_kelly(&factors.wallet_address, factors.strategy, 30).await
+            } else {
+                kelly_result_14d
+            };
+            match kelly_result {
                 Ok(result) => {
                     // Apply strategy-specific Kelly fraction: Shield uses a larger fraction
                     // (more conservative signal, wider stops) while Spear uses a smaller

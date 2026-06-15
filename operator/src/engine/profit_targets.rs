@@ -11,6 +11,7 @@ use crate::engine::market_regime::MarketRegimeDetector;
 use crate::engine::momentum_exit::MomentumExit;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
@@ -246,14 +247,27 @@ impl ProfitTargetManager {
         // Track whether state changed so we can persist once at the end
         let mut state_changed = is_new_peak;
 
-        // Check tiered profit targets
+        // Check tiered profit targets.
+        // If price jumps multiple tiers in a single tick (e.g. +20% → +110%), accumulate
+        // all newly-hit targets and compound the exit fraction so the caller sells the
+        // correct proportion in one transaction rather than deferring tiers to later ticks
+        // where the price may already be reversing.
         let mut tiered_action: Option<ProfitTargetAction> = None;
-        for target in &profit_level_targets {
-            if profit_percent >= *target && !state.targets_hit.contains(target) {
-                state.targets_hit.push(*target);
-                state_changed = true;
-                tiered_action = Some(ProfitTargetAction::ExitPercent(self.config.tiered_exit_percent));
-                break; // one target per tick
+        {
+            let exit_pct = self.config.tiered_exit_percent / Decimal::from(100);
+            let mut compound_remaining = Decimal::ONE;
+            let mut any_hit = false;
+            for target in &profit_level_targets {
+                if profit_percent >= *target && !state.targets_hit.contains(target) {
+                    state.targets_hit.push(*target);
+                    state_changed = true;
+                    any_hit = true;
+                    compound_remaining *= Decimal::ONE - exit_pct;
+                }
+            }
+            if any_hit {
+                let total_exit_pct = (Decimal::ONE - compound_remaining) * Decimal::from(100);
+                tiered_action = Some(ProfitTargetAction::ExitPercent(total_exit_pct));
             }
         }
 
@@ -268,16 +282,15 @@ impl ProfitTargetManager {
         // stop_loss.rs adaptive logic) so microcaps aren't stopped out by normal intraday
         // retracements. Cap at 40% so the stop remains actionable.
         let base_trailing_distance = if strategy == "SPEAR" {
-            self.config.trailing_stop_distance
-                * Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
+            self.config.trailing_stop_distance * dec!(1.5)
         } else {
             self.config.trailing_stop_distance
         };
         let trailing_distance = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
             let vol_mult = if vol > 50.0 {
-                Decimal::from_str("1.5").unwrap_or(Decimal::ONE)
+                dec!(1.5)
             } else if vol > 30.0 {
-                Decimal::from_str("1.25").unwrap_or(Decimal::ONE)
+                dec!(1.25)
             } else {
                 Decimal::ONE
             };
@@ -325,21 +338,20 @@ impl ProfitTargetManager {
         let is_spear = strategy == "SPEAR";
         let time_exit = if let Ok(elapsed) = state.entry_time.elapsed() {
             let elapsed_hours = elapsed.as_secs() / 3600;
-            let twenty_five_percent = Decimal::from_str("25.0").unwrap_or(Decimal::ZERO);
-            let ten_percent = Decimal::from_str("10.0").unwrap_or(Decimal::ZERO);
-            let zero = Decimal::ZERO;
-            if profit_percent > twenty_five_percent {
+            if profit_percent > dec!(25) {
                 // High-profit: Shield holds to 48h, Spear exits sooner at 24h
                 elapsed_hours >= if is_spear { 24 } else { 48 }
-            } else if profit_percent > ten_percent {
+            } else if profit_percent > dec!(10) {
                 // Medium-profit: Shield 24h, Spear 12h
                 elapsed_hours >= if is_spear { 12 } else { self.config.time_exit_hours }
-            } else if profit_percent > zero {
+            } else if profit_percent > Decimal::ZERO {
                 // Low-profit: Shield 16h, Spear 8h — free capital before it goes flat
                 elapsed_hours >= if is_spear { 8 } else { 16 }
             } else {
-                // Losing: Shield 8h, Spear 4h
-                elapsed_hours >= if is_spear { 4 } else { 8 }
+                // Losing: tighten exits — Spear 2h, Shield 4h.
+                // Solana memecoins rarely recover from sustained underwater positions;
+                // holding losers for 4-8h burns capital that could compound elsewhere.
+                elapsed_hours >= if is_spear { 2 } else { 4 }
             }
         } else {
             false

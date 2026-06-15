@@ -228,10 +228,18 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Engine task spawned");
 
+    // Shared RPC client for the recovery manager — reuses the same connection as
+    // the executor so that any failover logic applied to that client is also
+    // available to recovery operations instead of having a separate single-point
+    // connection with no fallback.
+    let shared_rpc_client = Arc::new(
+        solana_client::nonblocking::rpc_client::RpcClient::new(config.rpc.primary_url.clone()),
+    );
+
     // Spawn recovery manager
-    let recovery_manager = Arc::new(RecoveryManager::new_with_ws(
+    let recovery_manager = Arc::new(RecoveryManager::new_with_rpc(
         db_pool.clone(),
-        config.rpc.primary_url.clone(),
+        shared_rpc_client.clone(),
         Some(ws_state.clone()),
     ));
     let recovery_clone = recovery_manager.clone();
@@ -1070,6 +1078,7 @@ async fn main() -> anyhow::Result<()> {
         use solana_sdk::signature::Signer;
 
         let heat_clone = Arc::clone(&portfolio_heat);
+        let cb_clone = Arc::clone(&circuit_breaker);
         let rpc_url = config.rpc.primary_url.clone();
         match vault::load_secrets_with_fallback()
             .ok()
@@ -1088,6 +1097,9 @@ async fn main() -> anyhow::Result<()> {
                                 let sol = rust_decimal::Decimal::from(lamports)
                                     / rust_decimal::Decimal::from(1_000_000_000u64);
                                 heat_clone.update_capital(sol);
+                                // Keep circuit breaker capital in sync so its portfolio-stop
+                                // threshold reflects the live balance, not the startup value.
+                                cb_clone.update_capital(sol);
                                 tracing::debug!(capital_sol = ?sol, "Portfolio capital refreshed from wallet");
                             }
                             Err(e) => {

@@ -65,6 +65,26 @@ impl RecoveryManager {
         }
     }
 
+    /// Create with a pre-constructed RPC client shared with the executor.
+    ///
+    /// Preferred over `new_with_ws` — sharing the executor's client means the
+    /// recovery manager automatically benefits from any failover logic applied
+    /// to that client, and avoids creating a separate single-point-of-failure
+    /// connection that has no fallback during an outage.
+    pub fn new_with_rpc(
+        db: DbPool,
+        rpc_client: Arc<RpcClient>,
+        ws_state: Option<Arc<WsState>>,
+    ) -> Self {
+        Self {
+            db,
+            rpc_client,
+            stuck_threshold_secs: DEFAULT_STUCK_THRESHOLD_SECS,
+            enabled: true,
+            ws_state,
+        }
+    }
+
     /// Create with custom threshold and WebSocket support
     pub fn new_with_ws_and_threshold(
         db: DbPool,

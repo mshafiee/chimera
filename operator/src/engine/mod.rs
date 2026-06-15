@@ -649,21 +649,47 @@ impl Engine {
         }
 
         // Apply off-hours size reduction at execution time so signals queued just
-        // before 02:00 UTC also get the multiplier when they actually execute.
+        // before 01:00 UTC also get the multiplier when they actually execute.
+        // The multiplier ramps linearly 01:00–02:00 (1.0 → base), holds flat 02:00–05:00,
+        // then ramps back 05:00–06:00 (base → 1.0), avoiding the cliff effect of the old
+        // binary step that applied full reduction at exactly 02:00.
         if signal.payload.action == Action::Buy {
-            let hour_utc = Utc::now().time().hour();
-            if (2..6).contains(&hour_utc) {
-                let mult = self.config.position_sizing.off_hours_size_multiplier;
-                if mult < rust_decimal::Decimal::ONE {
-                    tracing::info!(
-                        trade_uuid = %trade_uuid,
-                        hour_utc = hour_utc,
-                        multiplier = %mult,
-                        original_amount_sol = %signal.payload.amount_sol,
-                        "Off-hours window: reducing position size at execution time"
-                    );
-                    signal.payload.amount_sol = signal.payload.amount_sol * mult;
-                }
+            let now_time = Utc::now().time();
+            let hour_utc = now_time.hour();
+            let minute_utc = now_time.minute();
+            let mins_since_midnight = (hour_utc * 60 + minute_utc) as i64;
+            const RAMP_DOWN_START: i64 = 60;      // 01:00 UTC
+            const FULL_REDUCTION_START: i64 = 120; // 02:00 UTC
+            const FULL_REDUCTION_END: i64 = 300;   // 05:00 UTC
+            const RAMP_UP_END: i64 = 360;           // 06:00 UTC
+            let base_mult = self.config.position_sizing.off_hours_size_multiplier;
+            let off_hours_mult = if mins_since_midnight < RAMP_DOWN_START
+                || mins_since_midnight >= RAMP_UP_END
+            {
+                rust_decimal::Decimal::ONE
+            } else if mins_since_midnight < FULL_REDUCTION_START {
+                // linear ramp 1.0 → base_mult over 01:00–02:00
+                let t = rust_decimal::Decimal::from(mins_since_midnight - RAMP_DOWN_START)
+                    / rust_decimal::Decimal::from(60);
+                rust_decimal::Decimal::ONE - t * (rust_decimal::Decimal::ONE - base_mult)
+            } else if mins_since_midnight < FULL_REDUCTION_END {
+                base_mult
+            } else {
+                // linear ramp base_mult → 1.0 over 05:00–06:00
+                let t = rust_decimal::Decimal::from(mins_since_midnight - FULL_REDUCTION_END)
+                    / rust_decimal::Decimal::from(60);
+                base_mult + t * (rust_decimal::Decimal::ONE - base_mult)
+            };
+            if off_hours_mult < rust_decimal::Decimal::ONE {
+                tracing::info!(
+                    trade_uuid = %trade_uuid,
+                    hour_utc = hour_utc,
+                    minute_utc = minute_utc,
+                    multiplier = %off_hours_mult,
+                    original_amount_sol = %signal.payload.amount_sol,
+                    "Off-hours window: reducing position size at execution time (gradual ramp)"
+                );
+                signal.payload.amount_sol = signal.payload.amount_sol * off_hours_mult;
             }
         }
 

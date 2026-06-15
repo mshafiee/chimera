@@ -22,6 +22,13 @@ const DEFAULT_CACHE_TTL_SECS: i64 = 30;
 /// Price update interval for active tokens
 const PRICE_UPDATE_INTERVAL_SECS: u64 = 5;
 
+/// Staleness threshold in seconds: if a tracked token has not received a price
+/// update within this window, risk management should treat the position as
+/// unmonitored and escalate (force exit or alert). This is deliberately longer
+/// than the cache TTL so that normal cache misses (30s) don't trigger
+/// escalation — only sustained feed outages (120s = 2 minutes) do.
+pub const STALENESS_THRESHOLD_SECS: i64 = 120;
+
 /// Price entry in cache
 #[derive(Debug, Clone)]
 pub struct PriceEntry {
@@ -113,6 +120,32 @@ impl PriceCache {
     /// Get price in USD (convenience method)
     pub fn get_price_usd(&self, token_address: &str) -> Option<Decimal> {
         self.get_price(token_address).map(|e| e.price_usd)
+    }
+
+    /// Returns `true` if the token is actively tracked but has not received a
+    /// fresh price within [`STALENESS_THRESHOLD_SECS`]. This indicates a
+    /// sustained feed outage — callers should escalate (force exit or alert)
+    /// rather than silently disabling risk management.
+    ///
+    /// Returns `false` if the token is not tracked (no expectation of data) or
+    /// if a recent price exists.
+    pub fn is_price_stale(&self, token_address: &str) -> bool {
+        // If we're not actively tracking this token, we have no expectation
+        // of fresh data — don't report staleness.
+        let is_tracked = self.active_tokens.read().contains(&token_address.to_string());
+        if !is_tracked {
+            return false;
+        }
+
+        let prices = self.prices.read();
+        match prices.get(token_address) {
+            Some(entry) => {
+                let age = Utc::now().signed_duration_since(entry.fetched_at);
+                age.num_seconds() > STALENESS_THRESHOLD_SECS
+            }
+            // Tracked but never received a price — stale from birth
+            None => true,
+        }
     }
 
     /// Set price for a token

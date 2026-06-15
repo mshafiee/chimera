@@ -10,6 +10,7 @@
 use crate::models::{Signal, Strategy};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Priority queue for trading signals
 pub struct PriorityQueue {
@@ -21,6 +22,10 @@ pub struct PriorityQueue {
     spear_high_wqs: Mutex<VecDeque<Signal>>,
     /// Low priority queue (SPEAR signals with WQS < 70)
     low: Mutex<VecDeque<Signal>>,
+    /// Atomic total length counter — updated on every push/pop so `len()` never
+    /// needs to acquire all four locks simultaneously (which would give a non-atomic
+    /// snapshot that may never have been true under concurrent access).
+    total_len: AtomicUsize,
     /// Maximum capacity
     capacity: usize,
     /// Load shedding threshold (percentage)
@@ -40,18 +45,20 @@ impl PriorityQueue {
             medium: Mutex::new(VecDeque::new()),
             spear_high_wqs: Mutex::new(VecDeque::new()),
             low: Mutex::new(VecDeque::new()),
+            total_len: AtomicUsize::new(0),
             capacity,
             load_shed_threshold: load_shed_threshold_percent,
             spear_high_wqs_capacity,
         }
     }
 
-    /// Get total queue length
+    /// Get total queue length.
+    ///
+    /// Reads a single atomic counter rather than acquiring all four sub-queue
+    /// locks in sequence — the old approach produced a snapshot that may never
+    /// have been true under concurrent push/pop.
     pub fn len(&self) -> usize {
-        self.high.lock().len()
-            + self.medium.lock().len()
-            + self.spear_high_wqs.lock().len()
-            + self.low.lock().len()
+        self.total_len.load(Ordering::Relaxed)
     }
 
     /// Check if queue is empty
@@ -76,6 +83,7 @@ impl PriorityQueue {
         match signal.payload.strategy {
             Strategy::Exit => {
                 self.high.lock().push_back(signal);
+                self.total_len.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             }
             Strategy::Shield => {
@@ -83,6 +91,7 @@ impl PriorityQueue {
                     return Err("Queue is full".to_string());
                 }
                 self.medium.lock().push_back(signal);
+                self.total_len.fetch_add(1, Ordering::Relaxed);
             }
             Strategy::Spear => {
                 // Route high-WQS SPEAR signals (WQS >= 70) to dedicated high-priority queue
@@ -94,6 +103,8 @@ impl PriorityQueue {
                             // Add to high-WQS SPEAR queue
                             let trade_uuid = signal.trade_uuid.clone();
                             spear_high_wqs.push_back(signal);
+                            drop(spear_high_wqs);
+                            self.total_len.fetch_add(1, Ordering::Relaxed);
                             tracing::debug!(
                                 trade_uuid = %trade_uuid,
                                 wallet_wqs = wqs,
@@ -140,6 +151,7 @@ impl PriorityQueue {
                 }
                 // Add to regular SPEAR queue
                 self.low.lock().push_back(signal);
+                self.total_len.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -150,21 +162,29 @@ impl PriorityQueue {
     pub async fn pop(&self) -> Option<Signal> {
         // Try high priority first (EXIT signals)
         if let Some(signal) = self.high.lock().pop_front() {
+            self.total_len.fetch_sub(1, Ordering::Relaxed);
             return Some(signal);
         }
 
         // Then medium priority (SHIELD signals)
         if let Some(signal) = self.medium.lock().pop_front() {
+            self.total_len.fetch_sub(1, Ordering::Relaxed);
             return Some(signal);
         }
 
         // Then high-WQS SPEAR signals (before regular SPEAR to prevent starvation)
         if let Some(signal) = self.spear_high_wqs.lock().pop_front() {
+            self.total_len.fetch_sub(1, Ordering::Relaxed);
             return Some(signal);
         }
 
         // Finally low priority (regular SPEAR signals)
-        self.low.lock().pop_front()
+        if let Some(signal) = self.low.lock().pop_front() {
+            self.total_len.fetch_sub(1, Ordering::Relaxed);
+            return Some(signal);
+        }
+
+        None
     }
 
     /// Get queue depths by priority

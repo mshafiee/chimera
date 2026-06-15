@@ -37,16 +37,6 @@ pub struct MomentumExit {
     high_water_marks: Arc<RwLock<HashMap<String, Decimal>>>,
 }
 
-/// Position entry data for momentum tracking
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct PositionEntry {
-    trade_uuid: String,
-    token_address: String,
-    entry_price: Decimal,
-    entry_time: SystemTime,
-    entry_amount_sol: Decimal,
-}
 
 impl MomentumExit {
     /// Create a new momentum exit detector
@@ -119,7 +109,20 @@ impl MomentumExit {
         // Get current price
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
-            None => return MomentumExitAction::None, // No price data, skip check
+            None => {
+                // §1.5 FIX: If this token is actively tracked but hasn't received a
+                // price update in >2 minutes, force exit. Aligns with stop_loss.rs
+                // staleness guard — both modules must agree on escalation.
+                if self.price_cache.is_price_stale(token_address) {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        "STALE_PRICE: no price update for >2 min on tracked token — momentum exit forcing exit"
+                    );
+                    return MomentumExitAction::Exit;
+                }
+                return MomentumExitAction::None; // No price data, skip check
+            }
         };
 
         // Update high-water mark. The lock is held only for the map mutation; drop it
@@ -302,7 +305,13 @@ impl MomentumExit {
         let mut prices = Vec::new();
         let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
 
-        for (time, price) in token_history.iter().rev() {
+        // Sort by timestamp before sampling. In practice insertions are always
+        // chronological (set_price uses Utc::now() under a write lock), but this
+        // guard prevents future out-of-order inserts from producing a misleading RSI.
+        let mut sorted_history: Vec<_> = token_history.iter().collect();
+        sorted_history.sort_by_key(|(t, _)| *t);
+
+        for (time, price) in sorted_history.iter().rev() {
             if let Some(last_time) = last_sampled_time {
                 if last_time.signed_duration_since(*time).num_seconds() >= RSI_SAMPLE_INTERVAL_SECS {
                     prices.push(price.to_f64().unwrap_or(0.0));

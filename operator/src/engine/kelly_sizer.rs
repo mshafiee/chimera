@@ -31,6 +31,8 @@ pub struct KellyResult {
     pub avg_win: Decimal,
     /// Average loss amount (using Decimal for precision)
     pub avg_loss: Decimal,
+    /// Number of closed trades used to compute this result
+    pub trade_count: usize,
 }
 
 impl KellySizer {
@@ -188,6 +190,7 @@ impl KellySizer {
             win_rate,
             avg_win,
             avg_loss,
+            trade_count: trades.len(),
         })
     }
 
