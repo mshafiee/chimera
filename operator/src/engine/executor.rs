@@ -272,6 +272,10 @@ impl Executor {
                 ));
             }
 
+            // Reset price impact at the start of each execution attempt to avoid stale data
+            // from a previous attempt being used in slippage cost calculation on BlockhashExpired retries.
+            *self.last_price_impact.lock() = None;
+
             // Execute based on mode
             let result = match rpc_mode {
                 RpcMode::Jito => self.execute_jito(signal).await,
@@ -845,10 +849,20 @@ impl Executor {
         // Try direct Jito Searcher first if configured
         // Note: Jito bundles currently only support legacy transactions
         if let Some(ref jito_searcher) = self.jito_searcher {
-            let tip_lamports = (tip * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or_else(|| {
-                tracing::warn!(tip = %tip, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
-                10_000_000u64
-            }); // Convert SOL to lamports
+            // Cap tip at 1 SOL before lamport conversion to avoid u64 overflow.
+            // Without this, a computed tip > 18.4 SOL would silently fall back to
+            // 0.01 SOL, causing the bundle to miss inclusion on a congested network.
+            let capped_tip = tip.min(Decimal::ONE);
+            if capped_tip < tip {
+                tracing::warn!(
+                    original_tip = %tip,
+                    capped_tip = %capped_tip,
+                    "Jito tip capped at 1 SOL to prevent u64 overflow"
+                );
+            }
+            let tip_lamports = (capped_tip * Decimal::from(1_000_000_000u64))
+                .to_u64()
+                .unwrap_or(10_000_000u64); // Convert SOL to lamports
 
             // Serialize based on transaction type using Legacy config for Solana wire compatibility
             let tx_bytes = match &built_tx {
@@ -980,11 +994,18 @@ impl Executor {
 
         let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
 
-        // Convert SOL to lamports
-        let tip_lamports = (tip_sol * Decimal::from(1_000_000_000u64)).to_u64().unwrap_or_else(|| {
-            tracing::warn!(tip_sol = %tip_sol, "Jito tip conversion overflow — clamping to 0.01 SOL (10_000_000 lamports)");
-            10_000_000u64
-        });
+        // Cap tip at 1 SOL before lamport conversion to avoid u64 overflow (same guard as execute_jito).
+        let capped_tip_sol = tip_sol.min(Decimal::ONE);
+        if capped_tip_sol < tip_sol {
+            tracing::warn!(
+                original_tip = %tip_sol,
+                capped_tip = %capped_tip_sol,
+                "Jito tip capped at 1 SOL to prevent u64 overflow (Helius sender)"
+            );
+        }
+        let tip_lamports = (capped_tip_sol * Decimal::from(1_000_000_000u64))
+            .to_u64()
+            .unwrap_or(10_000_000u64);
 
         // Build proper tip transaction (SOL transfer to Jito tip account)
         let jito_tip_account =

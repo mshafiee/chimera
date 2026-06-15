@@ -104,8 +104,11 @@ impl PriorityQueue {
                             // Add to high-WQS SPEAR queue
                             let trade_uuid = signal.trade_uuid.clone();
                             spear_high_wqs.push_back(signal);
-                            drop(spear_high_wqs);
+                            // Increment counter while the lock is still held to prevent
+                            // a TOCTOU race where two threads both pass the capacity check
+                            // before either increments total_len.
                             self.total_len.fetch_add(1, Ordering::AcqRel);
+                            drop(spear_high_wqs);
                             tracing::debug!(
                                 trade_uuid = %trade_uuid,
                                 wallet_wqs = wqs,

@@ -17,6 +17,10 @@ pub struct PortfolioHeat {
     /// Total capital in SOL — wrapped in Arc<RwLock> so the background wallet-balance
     /// refresh task can update it without rebuilding the struct.
     total_capital_sol: Arc<RwLock<Decimal>>,
+    /// Last non-zero capital value seen from a successful balance fetch.
+    /// Used as a fallback when `total_capital_sol` is zero (e.g. RPC failure),
+    /// preventing a transient fetch error from halting all trading (DoS condition).
+    last_known_capital: Arc<RwLock<Decimal>>,
 }
 
 /// Portfolio heat result
@@ -35,10 +39,16 @@ pub struct HeatResult {
 impl PortfolioHeat {
     /// Create a new portfolio heat manager
     pub fn new(db: DbPool, total_capital_sol: Decimal) -> Self {
+        let last_known = if !total_capital_sol.is_zero() {
+            total_capital_sol
+        } else {
+            Decimal::ZERO
+        };
         Self {
             db,
             max_heat_percent: dec!(20),
             total_capital_sol: Arc::new(RwLock::new(total_capital_sol)),
+            last_known_capital: Arc::new(RwLock::new(last_known)),
         }
     }
 
@@ -49,17 +59,28 @@ impl PortfolioHeat {
         max_heat_percent: Decimal,
     ) -> Self {
         let max_heat = max_heat_percent.max(Decimal::ZERO).min(Decimal::from(100));
+        let last_known = if !total_capital_sol.is_zero() {
+            total_capital_sol
+        } else {
+            Decimal::ZERO
+        };
         Self {
             db,
             max_heat_percent: max_heat,
             total_capital_sol: Arc::new(RwLock::new(total_capital_sol)),
+            last_known_capital: Arc::new(RwLock::new(last_known)),
         }
     }
 
     /// Update the capital figure from a live wallet balance query.
     /// Called by the background refresh task in main.rs every 60 seconds.
+    /// Only updates `last_known_capital` when the new value is non-zero so that
+    /// a failed RPC fetch (returning 0) does not overwrite a valid cached figure.
     pub fn update_capital(&self, new_capital: Decimal) {
         *self.total_capital_sol.write() = new_capital;
+        if !new_capital.is_zero() {
+            *self.last_known_capital.write() = new_capital;
+        }
     }
 
     /// Returns true when exposure exceeds 150% of the configured heat limit.
@@ -135,20 +156,38 @@ impl PortfolioHeat {
             );
         }
         let total_exposure = Decimal::from_f64_retain(total_exposure_f64).unwrap_or(Decimal::ZERO);
-        let capital = *self.total_capital_sol.read();
+        let capital_live = *self.total_capital_sol.read();
 
-        // Calculate heat percentage using Decimal for precision
-        // §2.3 FIX: When capital is zero (wallet balance query failed or empty wallet),
-        // block all new positions. The previous logic set heat to 0% which passed the
-        // `< max_heat_percent` check, allowing unlimited trading with no capital backing.
+        // Resolve effective capital: prefer live value, fall back to last known non-zero
+        // value to avoid a transient RPC failure causing a DoS (blocking all new positions).
+        let capital = if !capital_live.is_zero() {
+            // Opportunistically refresh cache on every successful live read.
+            *self.last_known_capital.write() = capital_live;
+            capital_live
+        } else {
+            let cached = *self.last_known_capital.read();
+            if !cached.is_zero() {
+                tracing::warn!(
+                    cached_capital_sol = %cached,
+                    "Portfolio heat: live wallet balance is zero — using last-known capital \
+                     as fallback (RPC fetch may have failed)"
+                );
+                cached
+            } else {
+                tracing::error!(
+                    "Portfolio heat: live wallet balance is zero with no cached fallback — \
+                     blocking all new positions"
+                );
+                Decimal::ZERO
+            }
+        };
+
+        // Calculate heat percentage using Decimal for precision.
+        // capital==0 only when both live fetch and cache are zero (genuinely empty wallet
+        // or first boot before any successful fetch), so blocking here is correct.
         let current_heat_percent = if !capital.is_zero() {
             (total_exposure / capital) * Decimal::from(100)
         } else {
-            tracing::warn!(
-                "Portfolio heat: total_capital_sol is zero — blocking all new positions \
-                 (wallet balance may have failed to refresh)"
-            );
-            // Return 100% heat to block all new positions
             Decimal::from(100)
         };
 
@@ -181,9 +220,15 @@ impl PortfolioHeat {
             return Ok(false);
         }
 
-        // Check if new position would exceed heat limit using Decimal for precision
+        // Check if new position would exceed heat limit using Decimal for precision.
+        // Use the same fallback logic as calculate_heat(): prefer live capital, then cache.
         let new_exposure = heat.total_exposure_sol + position_size_sol;
-        let capital = *self.total_capital_sol.read();
+        let capital_live = *self.total_capital_sol.read();
+        let capital = if !capital_live.is_zero() {
+            capital_live
+        } else {
+            *self.last_known_capital.read()
+        };
         let new_heat_percent = if !capital.is_zero() {
             (new_exposure / capital) * Decimal::from(100)
         } else {

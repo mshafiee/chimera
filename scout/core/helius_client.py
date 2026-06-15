@@ -486,6 +486,11 @@ class HeliusClient:
         - rawTokenAmount: { tokenAmount: "123", decimals: 6 }
         - tokenAmount: number (already UI amount)
         - tokenAmount: { uiAmount, uiAmountString, amount, decimals }
+
+        Raises:
+            ValueError: If no valid amount can be parsed from the transfer payload.
+                        Callers must catch this and skip/drop the transfer rather
+                        than proceeding with an implicit 0.0 amount.
         """
         # 1) rawTokenAmount is the most precise
         raw = transfer.get("rawTokenAmount")
@@ -493,10 +498,9 @@ class HeliusClient:
             try:
                 raw_amt = raw.get("tokenAmount")
                 dec = int(raw.get("decimals", 0))
-                if raw_amt is None:
-                    return 0.0
-                raw_amt_f = float(raw_amt)
-                return raw_amt_f / (10 ** dec) if dec > 0 else raw_amt_f
+                if raw_amt is not None:
+                    raw_amt_f = float(raw_amt)
+                    return raw_amt_f / (10 ** dec) if dec > 0 else raw_amt_f
             except Exception:
                 pass
 
@@ -516,15 +520,18 @@ class HeliusClient:
                     dec = int(ta.get("decimals", 0))
                     return raw_amt / (10 ** dec) if dec > 0 else raw_amt
                 except Exception:
-                    return 0.0
+                    pass
 
         # 3) tokenAmount as scalar
-        try:
-            if ta is None:
-                return 0.0
-            return float(ta)
-        except Exception:
-            return 0.0
+        if ta is not None:
+            try:
+                return float(ta)
+            except Exception:
+                pass
+
+        raise ValueError(
+            f"Could not parse ui_token_amount from transfer payload: {transfer!r}"
+        )
     
     def _validate_wallet_address(self, address: str) -> bool:
         """Validate that an address is a valid Solana wallet address."""
@@ -762,12 +769,17 @@ class HeliusClient:
         print(f"[Helius] Discovering from {len(token_addresses)} active tokens...")
 
         if use_parallel and len(token_addresses) > 1:
-            # Use parallel processing with rate limiting (asyncio, not ThreadPoolExecutor)
-            min(5, len(token_addresses))  # Limit concurrent requests
+            # Limit concurrent RPC requests to avoid overwhelming the API.
+            max_concurrent = int(os.getenv("SCOUT_DISCOVERY_CONCURRENCY", "50"))
+            semaphore = asyncio.Semaphore(max_concurrent)
+
+            async def _bounded_query(token_addr: str) -> Tuple[str, List[Dict[str, Any]]]:
+                async with semaphore:
+                    return await self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
 
             # Create async tasks for all tokens
             tasks = [
-                self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
+                _bounded_query(token_addr)
                 for token_addr in token_addresses
                 if self._api_calls_made < self._max_api_calls
             ]
@@ -1457,7 +1469,15 @@ class HeliusClient:
             mint = tr.get("mint", "")
             if not mint:
                 continue
-            amt_ui = self._parse_ui_token_amount(tr)
+            try:
+                amt_ui = self._parse_ui_token_amount(tr)
+            except ValueError:
+                logging.getLogger(__name__).warning(
+                    "Skipping token transfer with unparseable amount (mint=%s): %r",
+                    mint,
+                    tr,
+                )
+                continue
 
             from_acc = tr.get("fromUserAccount")
             to_acc = tr.get("toUserAccount")

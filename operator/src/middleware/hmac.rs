@@ -61,7 +61,10 @@ impl HmacState {
             .collect();
 
         if secret_bytes.is_empty() {
-            tracing::warn!("HmacState created with no valid secrets!");
+            panic!(
+                "No valid HMAC secrets configured — refusing to start. \
+                 Set CHIMERA_SECURITY__WEBHOOK_SECRET."
+            );
         }
 
         Self {
@@ -557,19 +560,22 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "No valid HMAC secrets configured — refusing to start."
+    )]
     fn test_hmac_state_empty_secrets() {
-        // Test that empty secrets list is handled
-        let state = HmacState::with_rotation(vec![], 60);
-        assert_eq!(state.secrets.len(), 0);
-        assert!(!state.is_rotation_active());
+        // with_rotation must panic when the secrets list is empty
+        let _ = HmacState::with_rotation(vec![], 60);
     }
 
     #[test]
+    #[should_panic(
+        expected = "No valid HMAC secrets configured — refusing to start."
+    )]
     fn test_hmac_state_all_empty_strings() {
-        // Test that all empty strings are filtered out
-        let state =
+        // with_rotation must panic when all provided secrets are empty strings
+        let _ =
             HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
-        assert_eq!(state.secrets.len(), 0);
     }
 
     #[test]

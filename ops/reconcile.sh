@@ -41,7 +41,7 @@ notify() {
             [[ "$level" == "CRITICAL" ]] && emoji="🚨"
             [[ "$level" == "WARNING" ]] && emoji="⚠️"
             
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            curl -s --max-time 30 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
                 -d "chat_id=${TELEGRAM_CHAT_ID}" \
                 -d "text=${emoji} Chimera Reconciliation: ${message}" \
                 -d "parse_mode=HTML" > /dev/null 2>&1 || true
@@ -54,7 +54,7 @@ check_transaction() {
     local signature="$1"
     local result
     
-    result=$(curl -s -X POST "$RPC_URL" \
+    result=$(curl -s --max-time 30 -X POST "$RPC_URL" \
         -H "Content-Type: application/json" \
         -d '{
             "jsonrpc": "2.0",
@@ -95,7 +95,6 @@ reconcile() {
         JOIN trades t ON p.trade_uuid = t.trade_uuid
         WHERE p.state IN ('ACTIVE', 'EXITING')
         ORDER BY p.opened_at DESC
-        LIMIT 100
     " 2>/dev/null || echo "[]")
     
     # Handle case where no positions exist
@@ -193,7 +192,7 @@ reconcile() {
     if [[ -n "${API_URL:-}" ]] && [[ -n "${API_KEY:-}" ]]; then
         log "INFO" "Updating reconciliation metrics via API..."
         local metrics_response
-        metrics_response=$(curl -s -X POST "${API_URL}/api/v1/metrics/reconciliation" \
+        metrics_response=$(curl -s --max-time 30 -X POST "${API_URL}/api/v1/metrics/reconciliation" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer ${API_KEY}" \
             -d "{

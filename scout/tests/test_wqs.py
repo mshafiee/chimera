@@ -169,22 +169,40 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         max_drawdown_30d=5.0,
     )
     
-    # Case 3: Negative 30d ROI (should NOT trigger penalty)
+    # Case 3: Negative 30d ROI with extreme 7d spike — SHOULD trigger penalty.
+    # A -10% monthly with +50% weekly is a lucky spike, not a recovery trend.
+    # abs(-10.0) * 2 = 20; 50 > 20, so the penalty fires.
     wallet_negative_30d = WalletMetrics(
         address="test_negative_30d",
         roi_30d=-10.0,
-        roi_7d=50.0,  # High 7d but negative 30d - should NOT trigger
+        roi_7d=50.0,  # High 7d relative to abs(30d) — should trigger
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # non-dust so penalty section 5 is not triggered
     )
-    
+
+    # Case 4: Negative 30d ROI with modest 7d — should NOT trigger penalty.
+    wallet_negative_30d_modest = WalletMetrics(
+        address="test_negative_30d_modest",
+        roi_30d=-10.0,
+        roi_7d=5.0,  # Low 7d — 5 <= max(20, 5), no pump
+        win_streak_consistency=0.8,
+        trade_count_30d=25,
+        max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,
+    )
+
     score_exact = calculate_wqs(wallet_exact_2x)
     score_above = calculate_wqs(wallet_slightly_above)
     score_negative = calculate_wqs(wallet_negative_30d)
-    
+    score_negative_modest = calculate_wqs(wallet_negative_30d_modest)
+
     assert score_exact > score_above, "Exact 2x should score higher than slightly above 2x"
-    assert score_negative > score_above, "Negative 30d should not trigger pump penalty"
+    # Negative 30d with extreme 7d spike IS penalised (lucky shot, not recovery)
+    assert score_negative < score_negative_modest, (
+        "Extreme 7d spike on negative-30d wallet should trigger pump penalty"
+    )
 
 
 def test_wqs_drawdown_penalty():

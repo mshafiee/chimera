@@ -534,6 +534,38 @@ impl Engine {
 
                     return;
                 }
+            } else if signal.force_slow_path {
+                // fast-check errored at webhook time and token_parser is not available in the
+                // engine (e.g. dev-mode build). Reject rather than silently pass an unchecked token.
+                let reason = "Token parser unavailable; slow-path required by force_slow_path flag but cannot run — trade blocked".to_string();
+                tracing::error!(
+                    trade_uuid = %trade_uuid,
+                    "force_slow_path is set but token_parser is None — rejecting trade to prevent unchecked token execution"
+                );
+
+                if let Err(e) = crate::db::update_trade_status(
+                    &self.db,
+                    &trade_uuid,
+                    "DEAD_LETTER",
+                    None,
+                    Some(&reason),
+                )
+                .await
+                {
+                    tracing::error!(error = %e, "Failed to update trade status to DEAD_LETTER");
+                }
+
+                let _ = crate::db::insert_dead_letter(
+                    &self.db,
+                    Some(&trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "TOKEN_SLOW_SAFETY_UNAVAILABLE",
+                    Some(&reason),
+                    signal.source_ip.as_deref(),
+                )
+                .await;
+
+                return;
             }
         }
 

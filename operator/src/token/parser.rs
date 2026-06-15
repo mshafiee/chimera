@@ -197,7 +197,10 @@ impl TokenParser {
                     "Token has freeze authority: {}",
                     freeze_auth
                 ));
-                // Don't cache rejections - metadata might change
+                // Cache rejections with the same TTL as safe results. Freeze/mint authority
+                // changes are rare; re-checking every signal under load causes RPC thundering
+                // herd on known-bad tokens. The 1-hour TTL matches the safe-result TTL.
+                self.cache.insert(cache_key, result.clone());
                 return Ok(result);
             }
         }
@@ -209,6 +212,7 @@ impl TokenParser {
                     "Token has mint authority: {}",
                     mint_auth
                 ));
+                self.cache.insert(cache_key, result.clone());
                 return Ok(result);
             }
         }

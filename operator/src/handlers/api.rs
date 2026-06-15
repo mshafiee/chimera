@@ -2148,6 +2148,8 @@ pub async fn update_reconciliation_metrics(
         if checked > 0 {
             // Ensure payload.checked is the DELTA since last run, not total!
             state.metrics.reconciliation_checked.inc_by(checked as u64);
+        } else if checked < 0 {
+            tracing::warn!(checked = checked, "Negative delta in reconciliation metrics — ignoring");
         }
 
         db::log_config_change(
@@ -2168,6 +2170,8 @@ pub async fn update_reconciliation_metrics(
                 .metrics
                 .reconciliation_discrepancies
                 .inc_by(discrepancies as u64);
+        } else if discrepancies < 0 {
+            tracing::warn!(discrepancies = discrepancies, "Negative delta in reconciliation metrics — ignoring");
         }
 
         db::log_config_change(

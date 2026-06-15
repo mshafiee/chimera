@@ -388,18 +388,6 @@ pub async fn get_dead_letter_queue(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> AppResult<Vec<DeadLetterItem>> {
-    let mut query = String::from(
-        "SELECT id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry, received_at, processed_at FROM dead_letter_queue ORDER BY received_at DESC"
-    );
-
-    if let Some(lim) = limit {
-        query.push_str(&format!(" LIMIT {}", lim));
-    }
-
-    if let Some(off) = offset {
-        query.push_str(&format!(" OFFSET {}", off));
-    }
-
     // Query as tuple and map to struct (can_retry is INTEGER in DB, need to convert to bool)
     #[allow(clippy::type_complexity)]
     let rows: Vec<(
@@ -413,7 +401,13 @@ pub async fn get_dead_letter_queue(
         i64,
         String,
         Option<String>,
-    )> = sqlx::query_as(&query).fetch_all(pool).await?;
+    )> = sqlx::query_as(
+        "SELECT id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry, received_at, processed_at FROM dead_letter_queue ORDER BY received_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(limit.unwrap_or(100i64))
+    .bind(offset.unwrap_or(0i64))
+    .fetch_all(pool)
+    .await?;
 
     let items = rows
         .into_iter()
@@ -476,21 +470,13 @@ pub async fn get_config_audit(
     limit: Option<i64>,
     offset: Option<i64>,
 ) -> AppResult<Vec<ConfigAuditItem>> {
-    let mut query = String::from(
-        "SELECT id, key, old_value, new_value, changed_by, change_reason, changed_at FROM config_audit ORDER BY changed_at DESC"
-    );
-
-    if let Some(lim) = limit {
-        query.push_str(&format!(" LIMIT {}", lim));
-    }
-
-    if let Some(off) = offset {
-        query.push_str(&format!(" OFFSET {}", off));
-    }
-
-    let items = sqlx::query_as::<_, ConfigAuditItem>(&query)
-        .fetch_all(pool)
-        .await?;
+    let items = sqlx::query_as::<_, ConfigAuditItem>(
+        "SELECT id, key, old_value, new_value, changed_by, change_reason, changed_at FROM config_audit ORDER BY changed_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(limit.unwrap_or(100i64))
+    .bind(offset.unwrap_or(0i64))
+    .fetch_all(pool)
+    .await?;
 
     Ok(items)
 }
@@ -605,9 +591,7 @@ pub async fn get_strategy_performance(
     strategy: &str,
     days: i64,
 ) -> AppResult<(f64, Decimal, u32)> {
-    // Validate days to prevent negative or unreasonably large lookback windows
-    let days = days.clamp(1, 365);
-    let days_interval = format!("-{} days", days);
+    let days_interval = format!("-{} days", days.clamp(1, 365));
 
     let trades: Vec<(f64,)> = sqlx::query_as(
         r#"
@@ -1540,6 +1524,19 @@ pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePo
 }
 
 /// Update current_price, unrealized_pnl_sol, and unrealized_pnl_percent for active positions
+/// Get the persisted peak_price for a position (used to restore HWM after restart).
+/// Returns None if the position does not exist or has no recorded peak.
+pub async fn get_position_peak_price(pool: &DbPool, trade_uuid: &str) -> AppResult<Option<f64>> {
+    let row: Option<(Option<f64>,)> = sqlx::query_as(
+        "SELECT peak_price FROM positions WHERE trade_uuid = ?",
+    )
+    .bind(trade_uuid)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.and_then(|(v,)| v))
+}
+
 pub async fn update_position_unrealized_pnl(
     pool: &DbPool,
     trade_uuid: &str,

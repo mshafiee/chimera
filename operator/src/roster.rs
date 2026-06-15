@@ -373,71 +373,74 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
     }
 
     // Signal that a merge is in progress so the engine defers wallet-write operations.
-    // The flag is always cleared in a defer-like fashion (set false before every return path).
+    // FlagGuard clears the flag on Drop, guaranteeing it is reset even if the code
+    // below panics (e.g. OOM inside sqlx). Without RAII the flag could stay true
+    // forever and permanently block future merges.
     MERGING_ROSTER.store(true, Ordering::Release);
+    struct FlagGuard;
+    impl Drop for FlagGuard {
+        fn drop(&mut self) {
+            MERGING_ROSTER.store(false, Ordering::Release);
+        }
+    }
+    let _flag_guard = FlagGuard;
 
     // Write all rows in a single transaction — all-or-nothing, no partial commits.
     // Uses the pool (separate connection from conn so ATTACH on conn is unaffected).
-    let write_result: AppResult<()> = async {
-        let mut tx = pool.begin().await?;
-        for row in &all_rows {
-            // Use INSERT with ON CONFLICT to upsert, preserving Operator's updated_at
-            // and status if they're newer than Scout's. This prevents race conditions
-            // where Operator bans/demotes a wallet just before Scout writes its roster.
-            sqlx::query(
-                r#"
-                INSERT INTO wallets (
-                    address, status, wqs_score, roi_7d, roi_30d,
-                    trade_count_30d, win_rate, max_drawdown_30d,
-                    avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
-                    last_trade_at, promoted_at,
-                    ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
-                ON CONFLICT(address) DO UPDATE SET
-                    status = CASE
-                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
-                        THEN wallets.status  -- Preserve Operator's status if newer
-                        ELSE excluded.status
-                    END,
-                    wqs_score = excluded.wqs_score,
-                    roi_7d = excluded.roi_7d,
-                    roi_30d = excluded.roi_30d,
-                    trade_count_30d = excluded.trade_count_30d,
-                    win_rate = excluded.win_rate,
-                    max_drawdown_30d = excluded.max_drawdown_30d,
-                    avg_trade_size_sol = excluded.avg_trade_size_sol,
-                    avg_win_sol = excluded.avg_win_sol,
-                    avg_loss_sol = excluded.avg_loss_sol,
-                    profit_factor = excluded.profit_factor,
-                    realized_pnl_30d_sol = excluded.realized_pnl_30d_sol,
-                    last_trade_at = excluded.last_trade_at,
-                    promoted_at = excluded.promoted_at,
-                    ttl_expires_at = excluded.ttl_expires_at,
-                    notes = excluded.notes,
-                    archetype = excluded.archetype,
-                    avg_entry_delay_seconds = excluded.avg_entry_delay_seconds,
-                    updated_at = CASE
-                        WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
-                        THEN wallets.updated_at  -- Preserve Operator's updated_at if newer
-                        ELSE excluded.updated_at
-                    END
-                "#
-            )
-            .bind(&row.address).bind(&row.status).bind(row.wqs_score).bind(row.roi_7d).bind(row.roi_30d)
-            .bind(row.trade_count_30d).bind(row.win_rate).bind(row.max_drawdown_30d)
-            .bind(row.avg_trade_size_sol).bind(row.avg_win_sol).bind(row.avg_loss_sol).bind(row.profit_factor).bind(row.realized_pnl_30d_sol)
-            .bind(&row.last_trade_at).bind(&row.promoted_at)
-            .bind(&row.ttl_expires_at).bind(&row.notes).bind(&row.archetype).bind(row.avg_entry_delay_seconds).bind(&row.created_at)
-            .bind(&row.updated_at)
-            .execute(&mut *tx)
-            .await?;
-        }
-        tx.commit().await?;
-        Ok(())
-    }.await;
-
-    MERGING_ROSTER.store(false, Ordering::Release);
-    write_result?;
+    let mut tx = pool.begin().await?;
+    for row in &all_rows {
+        // Use INSERT with ON CONFLICT to upsert, preserving Operator's updated_at
+        // and status if they're newer than Scout's. This prevents race conditions
+        // where Operator bans/demotes a wallet just before Scout writes its roster.
+        sqlx::query(
+            r#"
+            INSERT INTO wallets (
+                address, status, wqs_score, roi_7d, roi_30d,
+                trade_count_30d, win_rate, max_drawdown_30d,
+                avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                last_trade_at, promoted_at,
+                ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+            ON CONFLICT(address) DO UPDATE SET
+                status = CASE
+                    WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
+                    THEN wallets.status  -- Preserve Operator's status if newer
+                    ELSE excluded.status
+                END,
+                wqs_score = excluded.wqs_score,
+                roi_7d = excluded.roi_7d,
+                roi_30d = excluded.roi_30d,
+                trade_count_30d = excluded.trade_count_30d,
+                win_rate = excluded.win_rate,
+                max_drawdown_30d = excluded.max_drawdown_30d,
+                avg_trade_size_sol = excluded.avg_trade_size_sol,
+                avg_win_sol = excluded.avg_win_sol,
+                avg_loss_sol = excluded.avg_loss_sol,
+                profit_factor = excluded.profit_factor,
+                realized_pnl_30d_sol = excluded.realized_pnl_30d_sol,
+                last_trade_at = excluded.last_trade_at,
+                promoted_at = excluded.promoted_at,
+                ttl_expires_at = excluded.ttl_expires_at,
+                notes = excluded.notes,
+                archetype = excluded.archetype,
+                avg_entry_delay_seconds = excluded.avg_entry_delay_seconds,
+                updated_at = CASE
+                    WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
+                    THEN wallets.updated_at  -- Preserve Operator's updated_at if newer
+                    ELSE excluded.updated_at
+                END
+            "#
+        )
+        .bind(&row.address).bind(&row.status).bind(row.wqs_score).bind(row.roi_7d).bind(row.roi_30d)
+        .bind(row.trade_count_30d).bind(row.win_rate).bind(row.max_drawdown_30d)
+        .bind(row.avg_trade_size_sol).bind(row.avg_win_sol).bind(row.avg_loss_sol).bind(row.profit_factor).bind(row.realized_pnl_30d_sol)
+        .bind(&row.last_trade_at).bind(&row.promoted_at)
+        .bind(&row.ttl_expires_at).bind(&row.notes).bind(&row.archetype).bind(row.avg_entry_delay_seconds).bind(&row.created_at)
+        .bind(&row.updated_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
 
     info!(
         wallets_written = all_rows.len(),

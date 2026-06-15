@@ -533,9 +533,12 @@ impl CircuitBreaker {
             Some(total_pnl_usd)
         } else {
             tracing::warn!(
-                "SOL price unavailable (stale cache) — skipping USD loss check during cooldown exit to avoid false clear"
+                "SOL price unavailable (stale cache) — cannot verify USD loss threshold. \
+                 Extending cooldown until price data is available."
             );
-            None
+            // Do not exit cooldown when we cannot verify the loss threshold — a stale
+            // cache could mask an ongoing breach. The caller will retry on the next tick.
+            return Ok(());
         };
 
         if let Some(total_pnl_usd) = usd_check_result {

@@ -125,11 +125,28 @@ impl MomentumExit {
             }
         };
 
+        // Seed HWM from DB peak_price before acquiring the write lock so the async
+        // lookup runs outside the lock. This restores trailing-stop state across restarts
+        // without relying solely on an in-memory price cache that is cold after startup.
+        let db_peak: Option<Decimal> = if !self.high_water_marks.read().contains_key(trade_uuid) {
+            crate::db::get_position_peak_price(&self.db, trade_uuid)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|p| Decimal::from_f64(p))
+        } else {
+            None
+        };
+
         // Update high-water mark. The lock is held only for the map mutation; drop it
         // before the checks below to keep the hot path as short as possible.
         let hwm_snap = {
             let mut hwm_map = self.high_water_marks.write();
             let hwm = hwm_map.entry(trade_uuid.to_string()).or_insert_with(|| {
+                // Priority: DB peak_price > price cache reconstruction > entry_price fallback
+                if let Some(db_hwm) = db_peak {
+                    if db_hwm > entry_price { return db_hwm; }
+                }
                 // If not in memory (e.g., after restart), attempt to reconstruct from price history.
                 // This is a best-effort recovery; if history is also empty, it falls back to entry_price.
                 if let Some(history) = self.price_cache.price_history.read().get(token_address) {
@@ -307,6 +324,11 @@ impl MomentumExit {
         let mut sorted_history: Vec<_> = token_history.iter().collect();
         sorted_history.sort_by_key(|(t, _)| *t);
 
+        // Iterate newest-first (rev) so each new sample is at least RSI_SAMPLE_INTERVAL_SECS
+        // before the PREVIOUSLY sampled point. The resulting `prices` vec is newest-first:
+        //   prices[0] = most recent, prices[len-1] = oldest.
+        // compute_rsi_from_prices() expects this order and reverses internally to produce
+        // chronological change deltas. Both directions are intentional and must stay in sync.
         for (time, price) in sorted_history.iter().rev() {
             if let Some(last_time) = last_sampled_time {
                 if last_time.signed_duration_since(*time).num_seconds() >= RSI_SAMPLE_INTERVAL_SECS {
@@ -328,6 +350,8 @@ impl MomentumExit {
             return None;
         }
 
+        // prices[0..len-1]: most-recent window (current RSI)
+        // prices[1..len]:   slightly-older window (previous RSI for trend direction)
         let current_rsi = compute_rsi_from_prices(&prices[0..prices.len()-1])?;
         let previous_rsi = compute_rsi_from_prices(&prices[1..prices.len()])?;
 

@@ -33,8 +33,15 @@ def merge_roster(roster_path: str, db_path: str) -> bool:
         main_conn = sqlite3.connect(str(db_path))
         main_cursor = main_conn.cursor()
         
+        # Validate roster_path before attaching (S3: prevent SQL injection via path)
+        roster_path_str = str(roster_path)
+        if not os.path.isfile(roster_path_str):
+            raise ValueError(f"Roster path does not exist: {roster_path_str}")
+        if any(c in roster_path_str for c in ("'", '"', ";", "\x00")):
+            raise ValueError(f"Roster path contains invalid characters: {roster_path_str}")
+
         # Attach roster database
-        main_cursor.execute(f"ATTACH DATABASE '{roster_path}' AS new_roster")
+        main_cursor.execute("ATTACH DATABASE ? AS new_roster", (roster_path_str,))
         
         # Check integrity
         integrity_result = main_cursor.execute("PRAGMA new_roster.integrity_check").fetchone()
@@ -62,6 +69,11 @@ def merge_roster(roster_path: str, db_path: str) -> bool:
         main_cursor.execute("BEGIN TRANSACTION")
         
         try:
+            # R4: Re-verify roster is non-empty inside the transaction to prevent data loss
+            count = main_cursor.execute("SELECT COUNT(*) FROM new_roster.wallets").fetchone()[0]
+            if count == 0:
+                raise ValueError("Scout roster is empty — aborting merge to prevent data loss. Check Scout output.")
+
             # Delete existing wallets
             main_cursor.execute("DELETE FROM wallets")
             
@@ -87,20 +99,25 @@ def merge_roster(roster_path: str, db_path: str) -> bool:
             # Count after
             after_count = main_cursor.execute("SELECT COUNT(*) FROM wallets").fetchone()[0]
             print(f"Wallets after merge: {after_count}")
-            
-            # Detach
-            main_cursor.execute("DETACH DATABASE new_roster")
-            main_conn.close()
-            
+
             print("✓ Merge completed successfully!")
             return True
             
-        except Exception as e:
-            main_cursor.execute("ROLLBACK")
-            main_cursor.execute("DETACH DATABASE new_roster")
+        except Exception:
+            # R6: Roll back on any transaction error; DETACH runs in finally below
+            try:
+                main_conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        finally:
+            # R6: Always detach to prevent DB lock leak
+            try:
+                main_conn.execute("DETACH DATABASE new_roster")
+            except Exception:
+                pass
             main_conn.close()
-            raise e
-            
+
     except Exception as e:
         print(f"ERROR: Merge failed: {e}")
         return False

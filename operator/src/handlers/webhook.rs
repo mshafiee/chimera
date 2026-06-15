@@ -155,6 +155,10 @@ pub async fn webhook_handler(
         ));
     }
 
+    // Tracks whether the fast-path check returned an error (vs. clean pass/reject).
+    // Used to set Signal::force_slow_path after the signal is constructed.
+    let mut fast_check_errored = false;
+
     // Fast path token safety check (for BUY signals only)
     // EXIT signals don't need token validation, SELL signals already own the token
     if payload.strategy != Strategy::Exit {
@@ -209,12 +213,17 @@ pub async fn webhook_handler(
                     }
                 }
                 Err(e) => {
-                    // Log error but allow through - slow path will do full check
+                    // Fast-check itself returned an error (RPC/network failure, not just
+                    // "unknown/unchecked"). Mark the signal so the engine enforces the
+                    // slow-path. If slow-path is also unavailable the trade must be
+                    // blocked — do NOT silently pass through an unchecked token.
                     tracing::warn!(
                         token = %token_address,
                         error = %e,
-                        "Fast-path token check failed, allowing to slow path"
+                        "Fast-path token check errored; signal flagged for mandatory slow-path verification"
                     );
+                    // force_slow_path is set on the Signal below after it is constructed
+                    fast_check_errored = true;
                 }
             }
         }
@@ -222,6 +231,12 @@ pub async fn webhook_handler(
 
     // Create signal
     let mut signal = Signal::new(payload, timestamp, None);
+
+    // If fast-check errored (RPC/network failure), flag signal for mandatory slow-path.
+    // The engine will reject the trade if slow-path is also unavailable.
+    if fast_check_errored {
+        signal.force_slow_path = true;
+    }
 
     // Fetch wallet data once (used for both quality check and queue routing).
     // For BUY signals, also gate on wallet status — only ACTIVE wallets may trigger buys.
@@ -379,7 +394,7 @@ pub async fn webhook_handler(
         // inserting a new row each time is correct (NULLs don't conflict in UNIQUE indexes).
         if let Some(ref token_address) = signal.payload.token_address {
             let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
-            let _ = sqlx::query(
+            if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO signal_aggregation
                     (token_address, wallet_address, direction, amount_sol, is_consensus)
@@ -391,7 +406,15 @@ pub async fn webhook_handler(
             .bind(amount_f64)
             .bind(is_consensus)
             .execute(&state.db)
-            .await;
+            .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    trade_uuid = %signal.trade_uuid,
+                    "Failed to record signal aggregation — consensus detection may be degraded"
+                );
+                // Do NOT return early — proceed with trade
+            }
         }
 
         // Get liquidity from token safety check result (if available)
@@ -702,18 +725,8 @@ pub async fn webhook_handler(
                 "Failed to queue signal"
             );
 
-            // Log to dead letter queue
-            db::insert_dead_letter(
-                &state.db,
-                Some(&signal.trade_uuid),
-                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                "QUEUE_FULL",
-                Some(&e.to_string()),
-                None,
-            )
-            .await?;
-
-            // Update trade status
+            // Update trade status to DEAD_LETTER first, then insert the DLQ entry.
+            // The status update is authoritative; the DLQ entry is supplementary audit data.
             db::update_trade_status(
                 &state.db,
                 &signal.trade_uuid,
@@ -722,6 +735,24 @@ pub async fn webhook_handler(
                 Some(&e.to_string()),
             )
             .await?;
+
+            // Log to dead letter queue (best-effort — status is already DEAD_LETTER above).
+            if let Err(dlq_err) = db::insert_dead_letter(
+                &state.db,
+                Some(&signal.trade_uuid),
+                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                "QUEUE_FULL",
+                Some(&e.to_string()),
+                None,
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %dlq_err,
+                    trade_uuid = %signal.trade_uuid,
+                    "Failed to insert into dead-letter queue — trade status is DEAD_LETTER but has no DLQ entry. Manual investigation required."
+                );
+            }
 
             Err(AppError::Queue(e.to_string()))
         }

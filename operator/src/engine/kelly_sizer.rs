@@ -137,7 +137,13 @@ impl KellySizer {
         };
 
         let avg_loss = if losses.is_empty() {
-            Decimal::ZERO
+            // No loss history yet (all trades were wins): use a conservative 15% assumed
+            // loss per trade to prevent ruin-level Kelly allocations on wallets with
+            // pure win streaks. Without this, avg_loss=0 collapses the formula to
+            // full_kelly = win_rate (e.g. 90% for a 90% win-rate wallet — catastrophic).
+            // This matches the Shield stop-loss depth and is revised downward as actual
+            // loss data accumulates.
+            dec!(0.15)
         } else {
             let sum: Decimal = losses.iter().sum();
             // Enforce a 1% floor: extremely tight stop-losses produce avg_loss → 0,

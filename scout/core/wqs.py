@@ -107,11 +107,11 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     score -= dd * 0.2
 
     # Anti-Pump-and-Dump / Lucky Shot Check
-    # If 7d ROI >> 30d ROI, it's likely a lucky recent pump we can't replicate.
-    # Also triggers when roi_30d=0 to prevent rewarding pure 7d spikes.
-    # Wallets with roi_30d < 0 already lose points through ROI scoring — no
-    # additional pump penalty applied there to avoid double-penalising.
-    if roi_30d >= 0 and roi_7d > max(roi_30d * 2.0, 5.0):
+    # If 7d ROI is unusually large relative to the 30d baseline, it's likely a lucky
+    # pump we cannot reliably replicate. Use abs(roi_30d) so the spike threshold
+    # scales correctly even when the monthly trend is negative — a wallet with
+    # -10% monthly but +50% weekly is a lucky spike, not a recovery trend.
+    if roi_7d > max(abs(roi_30d) * 2.0, 5.0):
         score -= 17.0  # Anti pump-and-dump
         
     # 5) Scalability / Liquidity Safety (Implicit in avg_trade_size)

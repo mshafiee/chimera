@@ -315,7 +315,15 @@ pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
     }
 
     // Fall back to environment variables
-    let webhook_secret = std::env::var("CHIMERA_SECURITY__WEBHOOK_SECRET").unwrap_or_default();
+    let webhook_secret = std::env::var("CHIMERA_SECURITY__WEBHOOK_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            VaultError::InvalidKey(
+                "CHIMERA_SECURITY__WEBHOOK_SECRET is not set or empty — refusing to start"
+                    .to_string(),
+            )
+        })?;
     let webhook_secret_previous = std::env::var("CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS").ok();
 
     // Load wallet private key from environment variable (hex-encoded 64 bytes)

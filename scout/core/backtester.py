@@ -137,8 +137,11 @@ class BacktestSimulator:
             )
             simulated_trades.append(sim_trade)
             
-            # Track low-confidence liquidity usage (check if liquidity was from fallback)
-            # We check the original trade's liquidity source by re-fetching if needed
+            # Track low-confidence liquidity usage (check if liquidity was from fallback).
+            # Fallback liquidity creates survivorship bias: mooned tokens show inflated
+            # historical PnL; rugged tokens show artificially high liquidity. Exclude these
+            # trades from PnL totals entirely rather than just counting them as low-confidence.
+            is_low_confidence = False
             if not trade.liquidity_at_trade_usd:
                 # Only check if we had to fetch liquidity (not from trade data)
                 liquidity_check = self.liquidity.get_historical_liquidity_or_current(
@@ -147,21 +150,26 @@ class BacktestSimulator:
                 )
                 if liquidity_check and "fallback_capped" in liquidity_check.source:
                     low_confidence_trades_count += 1
-            
+                    is_low_confidence = True
+
             # Track original realized PnL (only SELL trades with pnl_sol)
             if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
                 total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
-            
+
             if sim_trade.rejected:
                 rejected_count += 1
                 rejected_details.append(
                     f"{trade.token_symbol}: {rejection_reason}"
                 )
+            elif is_low_confidence:
+                # Exclude low-confidence trades from PnL totals to prevent survivorship bias.
+                # They still count toward total_trades for the rejection-rate denominator.
+                pass
             else:
                 # Track costs
                 total_slippage += sim_trade.slippage_cost_sol
                 total_fees += sim_trade.fee_cost_sol
-                
+
                 # Track simulated realized PnL (only SELL trades)
                 if trade.action == TradeAction.SELL and sim_trade.simulated_pnl_sol is not None:
                     total_simulated_realized_pnl += sim_trade.simulated_pnl_sol

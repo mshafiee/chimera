@@ -152,6 +152,11 @@ pub struct Signal {
     /// Used to compute a liquidity-aware slippage estimate when Jupiter price impact
     /// is unavailable. None when the token safety check was skipped (dev mode, SELL signals).
     pub liquidity_usd: Option<rust_decimal::Decimal>,
+    /// Set to true when the webhook fast-path token check returned an error (not just
+    /// "unknown/unchecked"). When true the engine MUST run the slow-path check; if the
+    /// slow-path is unavailable (token_parser is None) the trade must be blocked rather
+    /// than silently passed through.
+    pub force_slow_path: bool,
 }
 
 impl Signal {
@@ -164,6 +169,7 @@ impl Signal {
             timestamp,
             source_ip,
             liquidity_usd: None,
+            force_slow_path: false,
         }
     }
 

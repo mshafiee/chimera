@@ -1088,6 +1088,17 @@ impl AppConfig {
             ));
         }
 
+        // Validate admin wallet addresses are valid Solana public keys
+        for wallet in &self.security.admin_wallets {
+            use std::str::FromStr;
+            solana_sdk::pubkey::Pubkey::from_str(&wallet.address).map_err(|e| {
+                ConfigError::Message(format!(
+                    "Invalid admin wallet address '{}': {}",
+                    wallet.address, e
+                ))
+            })?;
+        }
+
         Ok(())
     }
 }
