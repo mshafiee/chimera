@@ -137,7 +137,7 @@ impl MomentumExit {
         let in_wick_window = elapsed.as_secs() < self.wick_protection_secs;
 
         if !in_wick_window {
-            // RSI requires 16 samples at 20-second intervals (~5 min). Before RSI is
+            // RSI requires 12 samples at 30-second intervals (~6 min). Before RSI is
             // available, use a tighter base so new positions get equivalent protection.
             // Once RSI is active (≥6 min), widen to 8% to avoid false exits on normal
             // Solana intraday noise (30%+ daily vol).
@@ -235,11 +235,11 @@ impl MomentumExit {
         let history = self.price_cache.price_history_read();
         let token_history = history.get(token_address)?;
 
-        // Sample up to 30 price points at 30-second intervals (~15 min total window)
-        // to allow the RSI EMA (Wilder's smoothing) to warm up properly.
-        // [B-M2] Use 30-second intervals to match the price cache update frequency (~5 sec)
-        // and avoid consecutive samples using the same price data point, which produces
-        // an artificially smooth RSI that under-reacts to actual price movements.
+    // Sample up to 30 price points at 30-second intervals (~15 min total window)
+    // to allow the RSI EMA (Wilder's smoothing) to warm up properly.
+    // Use 30-second intervals to match the price cache update frequency (~5 sec)
+    // and avoid consecutive samples using the same price data point, which produces
+    // an artificially smooth RSI that under-reacts to actual price movements.
         const RSI_SAMPLE_INTERVAL_SECS: i64 = 30;
         let mut prices = Vec::new();
         let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -268,8 +268,8 @@ impl MomentumExit {
             }
         }
 
-        if prices.len() < 16 {
-            // Need at least 16 data points spanning ~5 minutes for current and previous 14-period RSI
+        if prices.len() < 12 {
+            // Need at least 12 data points spanning ~6 minutes for current and previous 14-period RSI
             return None;
         }
 

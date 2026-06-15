@@ -201,7 +201,7 @@ impl StopLossManager {
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
                 consensus_threshold = %stop_loss_threshold,
-                "Consensus signal detected, widening stop-loss by 5%"
+                "Consensus signal detected, widening stop-loss by 25%"
             );
         }
 

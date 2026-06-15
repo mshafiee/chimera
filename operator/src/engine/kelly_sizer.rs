@@ -156,14 +156,13 @@ impl KellySizer {
         // Calculate Kelly Criterion using Decimal for precision
         // The Kelly formula for position size (when returns are fractional, not 100% loss) is:
         // kelly = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
-        let full_kelly = if !avg_win.is_zero() {
-            let numerator = (win_rate * avg_win) - (loss_rate * avg_loss);
-            let denominator = avg_win;
-            (numerator / denominator).max(Decimal::ZERO) // DO NOT clamp to 1.0 here; fractional returns often yield >1.0
-
-        } else {
-            Decimal::ZERO
-        };
+         let full_kelly = if !avg_win.is_zero() {
+             let numerator = (win_rate * avg_win) - (loss_rate * avg_loss);
+             let denominator = avg_win;
+             (numerator / denominator).max(Decimal::ZERO).min(Decimal::ONE)
+         } else {
+             Decimal::ZERO
+         };
 
         // Trade velocity confidence: a wallet with the same win rate is statistically
         // more reliable when it generates more trades per day because each outcome is

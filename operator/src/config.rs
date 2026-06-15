@@ -789,6 +789,10 @@ pub struct ProfitManagementConfig {
     /// Minimum loss percentage to trigger time-based exit (e.g. -3.0 for -3%)
     #[serde(default = "default_losing_time_exit_threshold")]
     pub losing_time_exit_threshold_percent: Decimal,
+    /// Minimum viable position size in SOL — tiered exits that would leave less
+    /// than this amount trigger a full exit instead, avoiding dust positions.
+    #[serde(default = "default_min_size_sol")]
+    pub min_size_sol: Decimal,
 }
 
 fn default_profit_targets() -> Vec<Decimal> {
@@ -851,6 +855,7 @@ impl Default for ProfitManagementConfig {
             losing_time_exit_hours_shield: default_losing_time_exit_hours_shield(),
             losing_time_exit_hours_spear: default_losing_time_exit_hours_spear(),
             losing_time_exit_threshold_percent: default_losing_time_exit_threshold(),
+            min_size_sol: default_min_size_sol(),
         }
     }
 }

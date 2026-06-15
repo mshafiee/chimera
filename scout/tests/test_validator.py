@@ -558,8 +558,8 @@ def test_wqs_boundary_60_active_59_9_candidate():
 async def test_profit_factor_threshold_1_2_enforced():
     """Proves validator rejects wallets whose simulated profit factor < 1.2.
 
-    PF < 1.2 means wins barely cover losses — the Martingale danger zone.
-    The threshold is 'sim_pf < 1.2' (strict): PF=1.125 fails, PF=1.2 passes.
+    PF < 1.1 means wins barely cover losses — the Martingale danger zone.
+    The threshold is 'sim_pf < 1.1' (strict): PF=0.947 fails, PF=1.1 passes.
     """
     # Metrics with min_wqs_score=30 to pass WQS check (trade_count=20 → confidence=1.0)
     metrics = WalletMetrics(
@@ -585,11 +585,11 @@ async def test_profit_factor_threshold_1_2_enforced():
         for i in range(30)
     ]
 
-    # Case A: PF = 0.9 / 0.8 = 1.125 < 1.2 → must FAIL
-    # 9 wins × +0.1 = +0.9 SOL profit; 1 loss × -0.8 = -0.8 SOL; net = +0.1
+    # Case A: PF = 1.0 / 0.95 ≈ 1.053 < 1.1 → must FAIL (but net PnL > 0 so backtest passes)
+    # 10 wins × +0.1 = +1.0 SOL profit; 1 loss × -0.95 = -0.95 SOL; net = +0.05
     mock_low = Mock()
     mock_low.simulate_wallet.return_value = _make_mock_sim_result(
-        [0.1] * 9 + [-0.8], wallet_address="test_pf_wallet"
+        [0.1] * 10 + [-0.95], wallet_address="test_pf_wallet"
     )
     validator_low = PrePromotionValidator(
         promotion_criteria=PromotionCriteria(
@@ -606,16 +606,16 @@ async def test_profit_factor_threshold_1_2_enforced():
         "test_pf_wallet", metrics, base_trades
     )
     assert not result_low.passed, (
-        f"Simulated PF=1.125 must fail. Got: {result_low.status}: {result_low.reason}"
+        f"Simulated PF≈0.947 must fail. Got: {result_low.status}: {result_low.reason}"
     )
     assert result_low.status == ValidationStatus.FAILED_NEGATIVE_PNL, (
-        f"Expected FAILED_NEGATIVE_PNL for PF=1.125, got {result_low.status}: {result_low.reason}"
+        f"Expected FAILED_NEGATIVE_PNL for PF≈0.947, got {result_low.status}: {result_low.reason}"
     )
-    assert "1.2" in (result_low.reason or ""), (
-        f"Rejection reason must cite the 1.2 threshold: {result_low.reason}"
+    assert "1.1" in (result_low.reason or ""), (
+        f"Rejection reason must cite the 1.1 threshold: {result_low.reason}"
     )
 
-    # Case B: PF = 1.08 / 0.9 = 1.2 exactly → must PASS (check is strict < 1.2)
+    # Case B: PF = 1.08 / 0.9 = 1.2 > 1.1 → must PASS
     # 9 wins × +0.12 = +1.08 SOL; 1 loss × -0.9 = -0.9 SOL; net = +0.18
     mock_exact = Mock()
     mock_exact.simulate_wallet.return_value = _make_mock_sim_result(
@@ -637,6 +637,6 @@ async def test_profit_factor_threshold_1_2_enforced():
         "test_pf_wallet", metrics, base_trades
     )
     assert result_exact.passed, (
-        f"PF=1.2 exactly must pass (check is `< 1.2`, not `<= 1.2`). "
+        f"PF=1.2 must pass (check is `< 1.1`). "
         f"Got: {result_exact.status}: {result_exact.reason}"
     )

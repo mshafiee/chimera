@@ -273,7 +273,25 @@ impl ProfitTargetManager {
                 }
                 
                 let exit_fraction_current = Decimal::ONE - current_retain;
-                tiered_action = Some(ProfitTargetAction::ExitPercent(exit_fraction_current * Decimal::from(100)));
+
+                // Dust check: if the remaining position after the tiered exit would be
+                // smaller than min_size_sol, perform a full exit instead of leaving an
+                // economically unviable dust position that costs more in gas to close
+                // than it is worth.
+                let remaining_after_exit = state.entry_amount_sol * current_retain;
+                if remaining_after_exit > Decimal::ZERO
+                    && remaining_after_exit < self.config.min_size_sol
+                {
+                    tracing::info!(
+                        trade_uuid,
+                        remaining_after_exit = %remaining_after_exit,
+                        min_size_sol = %self.config.min_size_sol,
+                        "Tiered exit would leave dust position — performing full exit instead"
+                    );
+                    tiered_action = Some(ProfitTargetAction::FullExit);
+                } else {
+                    tiered_action = Some(ProfitTargetAction::ExitPercent(exit_fraction_current * Decimal::from(100)));
+                }
             }
         }
 

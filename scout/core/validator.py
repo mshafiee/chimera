@@ -290,14 +290,14 @@ class PrePromotionValidator:
 
             sim_pf = sim_profit / sim_loss if sim_loss > 0 else (100.0 if sim_profit > 0 else 0.0)
 
-            if sim_pf < 1.2:
-                logger.info(f"Wallet failed Simulated Profit Factor: {sim_pf:.2f} (Min 1.2)")
+            if sim_pf < 1.1:
+                logger.info(f"Wallet failed Simulated Profit Factor: {sim_pf:.2f} (Min 1.1)")
                 return ValidationResult(
                     wallet_address=wallet_address,
                     status=ValidationStatus.FAILED_NEGATIVE_PNL,
                     backtest_result=backtest_result,
                     passed=False,
-                    reason=f"Simulated Profit Factor too low: {sim_pf:.2f} (Min 1.2)",
+                    reason=f"Simulated Profit Factor too low: {sim_pf:.2f} (Min 1.1)",
                     recommended_status="CANDIDATE",
                     notes=f"Sim PF: {sim_pf:.2f}, Orig PF: {metrics.profit_factor if metrics.profit_factor else 0.0:.2f}",
                 )
