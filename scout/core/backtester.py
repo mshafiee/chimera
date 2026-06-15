@@ -18,7 +18,7 @@ A wallet FAILS backtest if:
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, NamedTuple
 import logging
 
 from .models import (
@@ -132,26 +132,16 @@ class BacktestSimulator:
         simulated_sell_count = 0
         
         for trade in sorted_trades:
-            sim_trade, rejection_reason = self._simulate_trade_roundtrip(
+            sim_trade, rejection_reason, is_low_confidence = self._simulate_trade_roundtrip(
                 trade, min_liquidity_decimal, sol_price, positions
             )
             simulated_trades.append(sim_trade)
-            
-            # Track low-confidence liquidity usage (check if liquidity was from fallback).
-            # Fallback liquidity creates survivorship bias: mooned tokens show inflated
-            # historical PnL; rugged tokens show artificially high liquidity. Exclude these
-            # trades from PnL totals entirely rather than just counting them as low-confidence.
-            is_low_confidence = False
-            if not trade.liquidity_at_trade_usd:
-                # Only check if we had to fetch liquidity (not from trade data)
-                liquidity_check = self.liquidity.get_historical_liquidity_or_current(
-                    trade.token_address,
-                    trade.timestamp,
-                )
-                if liquidity_check and "fallback_capped" in liquidity_check.source:
-                    low_confidence_trades_count += 1
-                    is_low_confidence = True
-
+            # Track low-confidence liquidity usage (returned by _simulate_trade_roundtrip,
+            # no redundant fetch needed — FIX 6: double-fetch eliminated).
+            # Fallback liquidity creates survivorship bias, so we exclude these
+            # trades from PnL totals entirely later in the loop.
+            if is_low_confidence:
+                low_confidence_trades_count += 1
             # Track original realized PnL (only SELL trades with pnl_sol)
             if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
                 total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
@@ -245,103 +235,7 @@ class BacktestSimulator:
             failure_reason=failure_reason,
         )
     
-    def run_walk_forward(
-        self,
-        wallet_address: str,
-        trades: List[HistoricalTrade],
-        strategy: str = "SHIELD",
-        train_ratio: float = 0.7,
-        min_test_trades: int = 5,
-    ) -> SimulatedResult:
-        """
-        Walk-forward validation: split trades chronologically, simulate each half.
-
-        Prevents in-sample overfitting by requiring the wallet to be profitable
-        on the out-of-sample (OOS) test set, not just the in-sample training set.
-
-        Args:
-            wallet_address: Wallet being validated
-            trades: All historical trades (sorted chronologically)
-            strategy: 'SHIELD' or 'SPEAR'
-            train_ratio: Fraction of trades used for training (default 0.7)
-            min_test_trades: Minimum trades required in OOS set
-
-        Returns:
-            SimulatedResult representing OOS performance. A wallet must pass
-            both in-sample (passed=True on train) and OOS (returned result).
-        """
-        if not trades:
-            return SimulatedResult(
-                wallet_address=wallet_address,
-                total_trades=0,
-                simulated_trades=0,
-                rejected_trades=0,
-                original_pnl_sol=Decimal('0'),
-                simulated_pnl_sol=Decimal('0'),
-                pnl_difference_sol=Decimal('0'),
-                total_slippage_cost_sol=Decimal('0'),
-                total_fee_cost_sol=Decimal('0'),
-                passed=False,
-                failure_reason="No trades to walk-forward validate",
-            )
-
-        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
-        split = int(len(sorted_trades) * train_ratio)
-        train = sorted_trades[:split]
-        test = sorted_trades[split:]
-
-        if len(test) < min_test_trades:
-            return SimulatedResult(
-                wallet_address=wallet_address,
-                total_trades=len(sorted_trades),
-                simulated_trades=0,
-                rejected_trades=0,
-                original_pnl_sol=Decimal('0'),
-                simulated_pnl_sol=Decimal('0'),
-                pnl_difference_sol=Decimal('0'),
-                total_slippage_cost_sol=Decimal('0'),
-                total_fee_cost_sol=Decimal('0'),
-                passed=False,
-                failure_reason=(
-                    f"Insufficient test data: {len(test)} OOS trades < {min_test_trades} required"
-                ),
-            )
-
-        # In-sample check
-        train_result = self.simulate_wallet(wallet_address, train, strategy)
-        if not train_result.passed:
-            return SimulatedResult(
-                wallet_address=wallet_address,
-                total_trades=len(sorted_trades),
-                simulated_trades=train_result.simulated_trades,
-                rejected_trades=train_result.rejected_trades,
-                original_pnl_sol=train_result.original_pnl_sol,
-                simulated_pnl_sol=train_result.simulated_pnl_sol,
-                pnl_difference_sol=train_result.pnl_difference_sol,
-                total_slippage_cost_sol=train_result.total_slippage_cost_sol,
-                total_fee_cost_sol=train_result.total_fee_cost_sol,
-                passed=False,
-                failure_reason=f"FAILED_WALK_FORWARD_IN_SAMPLE: {train_result.failure_reason}",
-            )
-
-        # OOS check
-        oos_result = self.simulate_wallet(wallet_address, test, strategy)
-        if not oos_result.passed:
-            return SimulatedResult(
-                wallet_address=wallet_address,
-                total_trades=len(sorted_trades),
-                simulated_trades=oos_result.simulated_trades,
-                rejected_trades=oos_result.rejected_trades,
-                original_pnl_sol=oos_result.original_pnl_sol,
-                simulated_pnl_sol=oos_result.simulated_pnl_sol,
-                pnl_difference_sol=oos_result.pnl_difference_sol,
-                total_slippage_cost_sol=oos_result.total_slippage_cost_sol,
-                total_fee_cost_sol=oos_result.total_fee_cost_sol,
-                passed=False,
-                failure_reason=f"FAILED_WALK_FORWARD: {oos_result.failure_reason}",
-            )
-
-        return oos_result
+    # Walk-forward logic inlined in PrePromotionValidator._validate_walk_forward()
 
     def _simulate_trade_roundtrip(
         self,
@@ -349,23 +243,26 @@ class BacktestSimulator:
         min_liquidity: Decimal,
         sol_price: Decimal,
         positions: Dict[str, Dict[str, Decimal]],
-    ) -> Tuple[SimulatedTrade, Optional[str]]:
+    ) -> Tuple[SimulatedTrade, Optional[str], bool]:
         """
         Simulate a single trade using round-trip cashflow model.
-        
+
         Tracks positions per token and computes realized PnL only on SELL trades.
         Costs are applied at both entry (BUY) and exit (SELL).
-        
+
         Args:
             trade: Historical trade to simulate
             min_liquidity: Minimum liquidity requirement (USD)
             sol_price: Current SOL price in USD
             positions: Position ledger (mutated in-place)
-            
+
         Returns:
-            Tuple of (SimulatedTrade, rejection_reason)
+            Tuple of (SimulatedTrade, rejection_reason, is_low_confidence).
+            is_low_confidence is True when fallback (current) liquidity was used
+            instead of historical data (survivorship bias risk).
         """
         # Get liquidity data (historical-at-trade if available).
+        is_low_confidence = False
         liquidity_data = None
         if trade.liquidity_at_trade_usd is not None:
             liquidity_data = LiquidityData(
@@ -377,18 +274,25 @@ class BacktestSimulator:
                 source="trade_attached",
             )
         else:
-            liquidity_data = self.liquidity.get_historical_liquidity_or_current(
-                trade.token_address,
-                trade.timestamp,
+            # FIX 5 [T-M4]: No historical liquidity data — skip the trade entirely to
+            # avoid survivorship bias (do NOT fall back to current liquidity).
+            trade_id = getattr(trade, 'tx_signature', trade.token_address)
+            logger.debug(
+                "Skipping trade %s: no historical liquidity data (survivorship bias guard)",
+                trade_id,
             )
-            # Check if liquidity data is from fallback (low confidence)
-            if liquidity_data and "fallback_capped" in liquidity_data.source:
-                logger.warning(
-                    f"Using low-confidence fallback liquidity for trade simulation: "
-                    f"{trade.token_address[:8]}... at {trade.timestamp.isoformat()}. "
-                    f"Backtest results may be affected by survivorship bias."
-                )
-        
+            return SimulatedTrade(
+                original_trade=trade,
+                current_liquidity_usd=Decimal('0'),
+                liquidity_sufficient=False,
+                estimated_slippage_percent=Decimal('1.0'),
+                slippage_cost_sol=trade.amount_sol,
+                fee_cost_sol=Decimal('0'),
+                simulated_pnl_sol=Decimal('0'),
+                rejected=True,
+                rejection_reason="No historical liquidity data (survivorship bias guard)",
+            ), "No historical liquidity data (survivorship bias guard)", False
+
         if not liquidity_data:
             return SimulatedTrade(
                 original_trade=trade,
@@ -400,7 +304,7 @@ class BacktestSimulator:
                 simulated_pnl_sol=Decimal('0'),
                 rejected=True,
                 rejection_reason="Could not fetch liquidity data",
-            ), "Could not fetch liquidity data"
+            ), "Could not fetch liquidity data", False
 
         # PDD requirement:
         # - Check liquidity at the time of the historical trade (trade-time viability)
@@ -424,7 +328,7 @@ class BacktestSimulator:
                 simulated_pnl_sol=Decimal('0'),
                 rejected=True,
                 rejection_reason=f"Historical liquidity ${decimal_to_float(historical_liquidity):,.0f} < ${decimal_to_float(min_liquidity):,.0f}",
-            ), f"Insufficient historical liquidity: ${decimal_to_float(historical_liquidity):,.0f}"
+            ), f"Insufficient historical liquidity: ${decimal_to_float(historical_liquidity):,.0f}", is_low_confidence
 
         # Check current liquidity requirement (copyable now) - only when explicitly enabled.
         if (
@@ -443,7 +347,7 @@ class BacktestSimulator:
                     simulated_pnl_sol=Decimal('0'),
                     rejected=True,
                     rejection_reason="Could not fetch current liquidity",
-                ), "Could not fetch current liquidity"
+                ), "Could not fetch current liquidity", is_low_confidence
 
             current_liquidity_now = current_liq_data.liquidity_usd or Decimal('0')
             if current_liquidity_now < min_liquidity:
@@ -457,8 +361,8 @@ class BacktestSimulator:
                     simulated_pnl_sol=Decimal('0'),
                     rejected=True,
                     rejection_reason=f"Current liquidity ${decimal_to_float(current_liquidity_now):,.0f} < ${decimal_to_float(min_liquidity):,.0f}",
-                ), f"Insufficient current liquidity: ${decimal_to_float(current_liquidity_now):,.0f}"
-        
+                ), f"Insufficient current liquidity: ${decimal_to_float(current_liquidity_now):,.0f}", is_low_confidence
+
         # Get trade size in SOL (use sol_amount if available, fallback to amount_sol)
         trade_size_sol = float_to_decimal(trade.sol_amount if trade.sol_amount is not None else trade.amount_sol)
         if trade_size_sol <= Decimal('0'):
@@ -472,7 +376,7 @@ class BacktestSimulator:
                 simulated_pnl_sol=Decimal('0'),
                 rejected=True,
                 rejection_reason="Invalid trade size",
-            ), "Invalid trade size"
+            ), "Invalid trade size", is_low_confidence
         
         # Estimate slippage using historical liquidity (trade-time conditions).
         # Convert to float for estimate_slippage (it may still use float internally)
@@ -498,7 +402,7 @@ class BacktestSimulator:
                 simulated_pnl_sol=Decimal('0'),
                 rejected=True,
                 rejection_reason=f"Slippage {decimal_to_float(slippage * Decimal('100')):.1f}% > {decimal_to_float(self.config.max_slippage_percent * Decimal('100')):.1f}%",
-            ), f"Excessive slippage: {decimal_to_float(slippage * Decimal('100')):.1f}%"
+            ), f"Excessive slippage: {decimal_to_float(slippage * Decimal('100')):.1f}%", is_low_confidence
         
         # Calculate costs per trade using Decimal
         slippage_cost = trade_size_sol * slippage
@@ -553,7 +457,7 @@ class BacktestSimulator:
                     simulated_pnl_sol=Decimal('0'),
                     rejected=True,
                     rejection_reason="Missing token quantity for SELL",
-                ), "Missing token quantity for SELL"
+                ), "Missing token quantity for SELL", is_low_confidence
             
             if position["qty"] <= Decimal('0'):
                 # Can't sell what we don't have - this is a data issue
@@ -584,8 +488,8 @@ class BacktestSimulator:
             simulated_pnl_sol=simulated_pnl,
             rejected=False,
             rejection_reason=None,
-        ), None
-    
+        ), None, is_low_confidence
+
     def _simulate_trade(
         self,
         trade: HistoricalTrade,
@@ -594,15 +498,19 @@ class BacktestSimulator:
     ) -> Tuple[SimulatedTrade, Optional[str]]:
         """
         Legacy per-trade simulation (kept for backward compatibility).
-        
+
         For new code, use _simulate_trade_roundtrip instead.
         This method uses a simple per-trade model without position tracking.
         """
         # Convert float parameters to Decimal for internal use
         min_liquidity_decimal = float_to_decimal(min_liquidity)
         sol_price_decimal = float_to_decimal(sol_price)
-        # Use empty positions dict for legacy behavior (no position tracking)
-        return self._simulate_trade_roundtrip(trade, min_liquidity_decimal, sol_price_decimal, {})
+        # Use empty positions dict for legacy behavior (no position tracking).
+        # Strip the third element (is_low_confidence) for backward compat.
+        sim_trade, reason, _ = self._simulate_trade_roundtrip(
+            trade, min_liquidity_decimal, sol_price_decimal, {}
+        )
+        return sim_trade, reason
     
 
 
