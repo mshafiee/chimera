@@ -183,9 +183,9 @@ impl TipManager {
         let min_tip_f64 = min_tip.to_f64().unwrap_or(0.0);
         let max_tip_f64 = max_tip.to_f64().unwrap_or(0.0);
 
-        let stats: Vec<(i64,)> = sqlx::query_as(
+        let stats: Vec<(i64, i64)> = sqlx::query_as(
             r#"
-            SELECT 
+            SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as successful
             FROM jito_tip_history
@@ -198,25 +198,9 @@ impl TipManager {
         .fetch_all(&self.db)
         .await?;
 
-        if let Some((total,)) = stats.first() {
+        if let Some((total, successful)) = stats.first() {
             if *total > 0 {
-                // Query for successful count
-                let success_count: Vec<(i64,)> = sqlx::query_as(
-                    r#"
-                    SELECT COUNT(*)
-                    FROM jito_tip_history
-                    WHERE tip_amount_sol >= ? AND tip_amount_sol <= ?
-                    AND success = 1
-                    AND created_at >= datetime('now', '-7 days')
-                    "#,
-                )
-                .bind(min_tip_f64)
-                .bind(max_tip_f64)
-                .fetch_all(&self.db)
-                .await?;
-
-                let success = success_count.first().map(|(s,)| *s).unwrap_or(0);
-                return Ok(success as f64 / *total as f64);
+                return Ok(*successful as f64 / *total as f64);
             }
         }
 

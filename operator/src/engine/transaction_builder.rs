@@ -156,18 +156,15 @@ impl TransactionBuilder {
                         scaled_bal
                     }
                     _ => {
-                        let est = self.estimate_token_amount_from_price(
-                            signal.payload.amount_sol,
-                            &signal.payload.token,
-                        );
-                        tracing::warn!(
+                        tracing::error!(
                             wallet = %wallet_keypair.pubkey(),
                             token = %signal.payload.token,
                             sol_value = %signal.payload.amount_sol,
-                            estimated_lamports = est,
-                            "SELL: on-chain balance unavailable, falling back to price estimate"
+                            "SELL: on-chain token balance unavailable and price estimate fallback is disabled — refusing to guess sell amount"
                         );
-                        est
+                        return Err(crate::error::AppError::Rpc(
+                            "Cannot determine token balance for SELL: on-chain fetch failed and no reliable price source available".to_string(),
+                        ));
                     }
                 };
 
@@ -376,28 +373,6 @@ impl TransactionBuilder {
                 }
             })
             .max()
-    }
-
-    /// Estimate token amount from SOL value using recent price data.
-    ///
-    /// Fallback for SELL orders when on-chain balance fetch is unavailable.
-    fn estimate_token_amount_from_price(&self, sol_value: Decimal, token_mint: &str) -> u64 {
-        // Try to get price from cache if available
-        // If cache is unavailable or token not found, use conservative default
-        let price_usd = Decimal::from_str("0.10").unwrap_or(Decimal::from(1));
-
-        let token_amount = sol_value / price_usd;
-        let amount_lamports = token_amount * Decimal::from(1_000_000);
-
-        tracing::debug!(
-            token = token_mint,
-            sol_value = %sol_value,
-            estimated_price_usd = %price_usd,
-            estimated_token_amount = %token_amount,
-            "Estimated token amount from price"
-        );
-
-        amount_lamports.to_u64().unwrap_or(0)
     }
 
     /// Get swap transaction from Jupiter Swap API

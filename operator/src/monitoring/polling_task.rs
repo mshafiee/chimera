@@ -284,6 +284,7 @@ async fn process_transaction(
     // Create signal (liquidity_usd not available from RPC polling path — executor uses config fallback)
     // force_slow_path is false: RPC polling signals have not gone through fast_check at all,
     // so slow-path runs unconditionally in the engine as normal.
+    let token_decimals = token_parser.get_token_decimals(&token_address).await;
     let signal = Signal {
         trade_uuid,
         payload: payload.clone(),
@@ -291,7 +292,7 @@ async fn process_transaction(
         source_ip: Some("rpc_polling".to_string()),
         liquidity_usd: None,
         force_slow_path: false,
-        token_decimals: None,
+        token_decimals,
     };
 
     tracing::info!(

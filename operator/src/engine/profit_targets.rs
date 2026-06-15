@@ -136,12 +136,11 @@ impl ProfitTargetManager {
         token_address: &str,
         entry_time: std::time::SystemTime,
     ) {
-        // Skip if already tracked in-memory (idempotent)
-        {
-            let targets = self.active_targets.read().await;
-            if targets.contains_key(trade_uuid) {
-                return;
-            }
+        let mut targets = self.active_targets.write().await;
+
+        // Skip if already tracked in-memory (idempotent) — check under write lock to prevent TOCTOU race
+        if targets.contains_key(trade_uuid) {
+            return;
         }
 
         let current_price = self
@@ -168,8 +167,6 @@ impl ProfitTargetManager {
                     targets_hit,
                     trailing_stop_active: trailing_active,
                     trailing_stop_price: t_price,
-                    // Use the actual trade open time so time-based exits fire correctly
-                    // even after a restart.
                     entry_time,
                 }
             }
@@ -197,7 +194,6 @@ impl ProfitTargetManager {
             }
         };
 
-        let mut targets = self.active_targets.write().await;
         targets.insert(trade_uuid.to_string(), state);
     }
 
