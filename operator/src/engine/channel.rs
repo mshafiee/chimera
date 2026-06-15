@@ -58,7 +58,7 @@ impl PriorityQueue {
     /// locks in sequence — the old approach produced a snapshot that may never
     /// have been true under concurrent push/pop.
     pub fn len(&self) -> usize {
-        self.total_len.load(Ordering::Relaxed)
+        self.total_len.load(Ordering::Acquire)
     }
 
     /// Check if queue is empty
@@ -83,15 +83,16 @@ impl PriorityQueue {
         match signal.payload.strategy {
             Strategy::Exit => {
                 self.high.lock().push_back(signal);
-                self.total_len.fetch_add(1, Ordering::Relaxed);
+                self.total_len.fetch_add(1, Ordering::AcqRel);
                 return Ok(());
             }
             Strategy::Shield => {
-                if self.len() >= self.capacity {
+                let mut medium = self.medium.lock();
+                if self.total_len.load(Ordering::Acquire) >= self.capacity {
                     return Err("Queue is full".to_string());
                 }
-                self.medium.lock().push_back(signal);
-                self.total_len.fetch_add(1, Ordering::Relaxed);
+                medium.push_back(signal);
+                self.total_len.fetch_add(1, Ordering::AcqRel);
             }
             Strategy::Spear => {
                 // Route high-WQS SPEAR signals (WQS >= 70) to dedicated high-priority queue
@@ -104,7 +105,7 @@ impl PriorityQueue {
                             let trade_uuid = signal.trade_uuid.clone();
                             spear_high_wqs.push_back(signal);
                             drop(spear_high_wqs);
-                            self.total_len.fetch_add(1, Ordering::Relaxed);
+                            self.total_len.fetch_add(1, Ordering::AcqRel);
                             tracing::debug!(
                                 trade_uuid = %trade_uuid,
                                 wallet_wqs = wqs,
@@ -146,12 +147,13 @@ impl PriorityQueue {
                     );
                 }
 
-                if self.len() >= self.capacity {
+                let mut low = self.low.lock();
+                if self.total_len.load(Ordering::Acquire) >= self.capacity {
                     return Err("Queue is full".to_string());
                 }
                 // Add to regular SPEAR queue
-                self.low.lock().push_back(signal);
-                self.total_len.fetch_add(1, Ordering::Relaxed);
+                low.push_back(signal);
+                self.total_len.fetch_add(1, Ordering::AcqRel);
             }
         }
 
@@ -162,25 +164,25 @@ impl PriorityQueue {
     pub async fn pop(&self) -> Option<Signal> {
         // Try high priority first (EXIT signals)
         if let Some(signal) = self.high.lock().pop_front() {
-            self.total_len.fetch_sub(1, Ordering::Relaxed);
+            self.total_len.fetch_sub(1, Ordering::AcqRel);
             return Some(signal);
         }
 
         // Then medium priority (SHIELD signals)
         if let Some(signal) = self.medium.lock().pop_front() {
-            self.total_len.fetch_sub(1, Ordering::Relaxed);
+            self.total_len.fetch_sub(1, Ordering::AcqRel);
             return Some(signal);
         }
 
         // Then high-WQS SPEAR signals (before regular SPEAR to prevent starvation)
         if let Some(signal) = self.spear_high_wqs.lock().pop_front() {
-            self.total_len.fetch_sub(1, Ordering::Relaxed);
+            self.total_len.fetch_sub(1, Ordering::AcqRel);
             return Some(signal);
         }
 
         // Finally low priority (regular SPEAR signals)
         if let Some(signal) = self.low.lock().pop_front() {
-            self.total_len.fetch_sub(1, Ordering::Relaxed);
+            self.total_len.fetch_sub(1, Ordering::AcqRel);
             return Some(signal);
         }
 

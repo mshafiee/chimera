@@ -380,14 +380,17 @@ impl Engine {
             tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING — marking FAILED to prevent phantom-QUEUED state");
             // The signal was already dequeued; if we just return, the trade stays in QUEUED
             // in the DB with no one processing it. Move it to FAILED so it's visible in DLQ.
-            let _ = crate::db::update_trade_status(
+            if let Err(e2) = crate::db::update_trade_status(
                 &self.db,
                 &trade_uuid,
                 "FAILED",
                 None,
                 Some("DB error: failed to transition QUEUED→EXECUTING"),
             )
-            .await;
+            .await
+            {
+                tracing::error!(error = %e2, trade_uuid = %trade_uuid, "Failed to mark trade FAILED after EXECUTING transition failed — trade is stuck in QUEUED");
+            }
             return;
         }
 
@@ -545,7 +548,9 @@ impl Engine {
                     tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: portfolio heat limit reached");
 
                     // Reject trade and set status to DEAD_LETTER
-                    let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                    if let Err(e) = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await {
+                        tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
+                    }
                     let _ = crate::db::insert_dead_letter(
                         &self.db,
                         Some(&trade_uuid),
@@ -582,7 +587,9 @@ impl Engine {
                     tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: strategy allocation limit reached");
 
                     // Reject trade and set status to DEAD_LETTER
-                    let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                    if let Err(e) = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await {
+                        tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
+                    }
                     let _ = crate::db::insert_dead_letter(
                         &self.db,
                         Some(&trade_uuid),
@@ -626,7 +633,9 @@ impl Engine {
                         // duplicate position if we default to 0. Reject the signal instead.
                         let reason = format!("DB error during duplicate check — rejecting signal (fail-safe): {}", e);
                         tracing::error!(trade_uuid = %trade_uuid, error = %e, "DB error in duplicate position check — rejecting signal");
-                        let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                        if let Err(e2) = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await {
+                            tracing::error!(error = %e2, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
+                        }
                         let _ = crate::db::insert_dead_letter(
                             &self.db, Some(&trade_uuid),
                             &serde_json::to_string(&signal.payload).unwrap_or_default(),
@@ -639,7 +648,9 @@ impl Engine {
                 if existing > 0 {
                     let reason = format!("Duplicate position rejected: already ACTIVE/EXITING in {}", token_address);
                     tracing::warn!(trade_uuid = %trade_uuid, token_address = %token_address, "Duplicate token position rejected");
-                    let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                    if let Err(e) = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await {
+                        tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
+                    }
                     let _ = crate::db::insert_dead_letter(
                         &self.db, Some(&trade_uuid),
                         &serde_json::to_string(&signal.payload).unwrap_or_default(),
@@ -763,14 +774,17 @@ impl Engine {
                             "BUY rejected: {}",
                             reason
                         );
-                        let _ = crate::db::update_trade_status(
+                        if let Err(e) = crate::db::update_trade_status(
                             &self.db,
                             &trade_uuid,
                             "DEAD_LETTER",
                             None,
                             Some(reason),
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
+                        }
                         let _ = crate::db::insert_dead_letter(
                             &self.db,
                             Some(&trade_uuid),
@@ -975,7 +989,9 @@ impl Engine {
                 tracing::warn!(trade_uuid = %trade_uuid, reason = %reason, "Trade rejected due to cost efficiency");
 
                 // Update trade status to DEAD_LETTER
-                let _ = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await;
+                if let Err(e) = crate::db::update_trade_status(&self.db, &trade_uuid, "DEAD_LETTER", None, Some(&reason)).await {
+                    tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to set trade status to DEAD_LETTER");
+                }
 
                 // Log to dead letter queue
                 let _ = crate::db::insert_dead_letter(

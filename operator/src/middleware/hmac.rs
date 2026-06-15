@@ -81,15 +81,16 @@ impl HmacState {
         let mut store = self.seen_nonces.lock();
         // Evict expired entries to bound memory usage.
         store.retain(|_, ts| now - *ts <= self.max_drift_secs);
-        // Hard cap: if post-eviction the store is still oversized, clear the oldest
-        // entries first. This trades a small replay-detection window for bounded memory.
+        // Hard cap: if post-eviction the store is still oversized, reject the new nonce
+        // rather than dropping valid replay-protection entries. This prevents a burst of
+        // requests from opening a replay window — callers receive false here and the
+        // request is treated as a duplicate (safe fail-closed).
         if store.len() >= Self::MAX_NONCE_STORE {
-            let cutoff = now - self.max_drift_secs / 2;
-            store.retain(|_, ts| *ts > cutoff);
             tracing::warn!(
                 store_size = store.len(),
-                "Nonce store hit size cap — evicted entries older than half the drift window"
+                "Nonce store at capacity — rejecting nonce to preserve replay protection"
             );
+            return false;
         }
         if store.contains_key(nonce) {
             return false; // Replay detected

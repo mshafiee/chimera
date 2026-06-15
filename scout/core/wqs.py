@@ -109,6 +109,8 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # Anti-Pump-and-Dump / Lucky Shot Check
     # If 7d ROI >> 30d ROI, it's likely a lucky recent pump we can't replicate.
     # Also triggers when roi_30d=0 to prevent rewarding pure 7d spikes.
+    # Wallets with roi_30d < 0 already lose points through ROI scoring — no
+    # additional pump penalty applied there to avoid double-penalising.
     if roi_30d >= 0 and roi_7d > max(roi_30d * 2.0, 5.0):
         score -= 17.0  # Anti pump-and-dump
         
@@ -196,8 +198,8 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
                 score -= 30.0  # Massive Penalty
             elif loss_ratio > 0.2:  # Losses > 20% of gains
                 score -= 15.0
-        elif metrics.total_unrealized_loss_sol > 1.0:  # Has losses but no realized profit
-            # If they have significant unrealized losses but no realized profit, they're a bag holder
+        elif metrics.total_unrealized_loss_sol > 0:  # Has any unrealized losses but no realized profit
+            # Any unrealized loss with zero realized profit flags a bag holder
             score -= 20.0
     
     # 11) Recency Bias (Freshness)

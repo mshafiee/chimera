@@ -214,14 +214,17 @@ impl CircuitBreaker {
             return Ok(());
         }
 
+        // Read state once — avoids TOCTOU between two separate current_state() calls.
+        let current = self.current_state();
+
         // Transition from Tripped → Cooldown after trip is recorded
-        if self.current_state() == CircuitBreakerState::Tripped {
+        if current == CircuitBreakerState::Tripped {
             self.enter_cooldown().await?;
             return Ok(());
         }
 
         // If still in cooldown or tripped, don't evaluate further
-        if self.current_state() != CircuitBreakerState::Active {
+        if current != CircuitBreakerState::Active {
             return Ok(());
         }
 
@@ -254,7 +257,7 @@ impl CircuitBreaker {
             // Total SOL loss includes realized and unrealized
             let total_loss_sol = daily_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            let loss_threshold = Decimal::from_str("-5.0").expect("literal");
             if daily_loss_percent < loss_threshold {
                 self.trip(TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
@@ -401,11 +404,12 @@ impl CircuitBreaker {
         {
             let mut state = self.state.write();
             if state.state != CircuitBreakerState::Tripped {
+                tracing::debug!("enter_cooldown called but state is not Tripped — no-op");
                 return Ok(());
             }
             state.state = CircuitBreakerState::Cooldown;
         }
-
+        // Only reaches here when an actual Tripped → Cooldown transition occurred.
         tracing::info!(
             cooldown_minutes = self.config.cooldown_minutes,
             "Circuit breaker entering cooldown"
@@ -459,7 +463,7 @@ impl CircuitBreaker {
             // Total SOL loss includes realized and unrealized
             let total_loss_sol = daily_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
+            let loss_threshold = Decimal::from_str("-5.0").expect("literal");
             if daily_loss_percent < loss_threshold {
                 self.trip(TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),

@@ -292,7 +292,8 @@ CREATE TABLE IF NOT EXISTS signal_aggregation (
     signature TEXT,
     is_consensus INTEGER DEFAULT 0,
     consensus_wallet_count INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
 );
 
 -- Unique dedup for signals that carry an on-chain signature

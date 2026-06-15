@@ -204,25 +204,22 @@ class BacktestSimulator:
                 passed = False
                 failure_reason = f"PnL reduction too high: {decimal_to_float(pnl_reduction * Decimal('100')):.0f}%"
         
-        # Warn about survivorship bias if significant portion of trades used low-confidence liquidity
+        # Fail the backtest when too many trades relied on fallback/capped liquidity.
+        # Inflated PnL from mooned tokens or filtered rugged tokens is not a valid signal.
         if low_confidence_trades_count > 0:
             low_confidence_ratio = low_confidence_trades_count / len(sorted_trades)
             if low_confidence_ratio > 0.3:  # More than 30% of trades
                 logger.warning(
                     f"⚠️  SURVIVORSHIP BIAS RISK: {low_confidence_trades_count}/{len(sorted_trades)} "
                     f"({low_confidence_ratio*100:.0f}%) trades used fallback liquidity data. "
-                    f"Backtest results may be inflated for tokens that mooned or filtered for tokens that rugged. "
-                    f"Backtest confidence: LOW."
+                    f"Backtest results may be inflated. Failing wallet."
                 )
-                # Add warning to failure reason if it exists, or create a note
+                passed = False
+                bias_msg = f"Low-confidence liquidity on {low_confidence_ratio*100:.0f}% of trades (survivorship bias risk)"
                 if failure_reason:
-                    failure_reason += f" (Also: {low_confidence_ratio*100:.0f}% trades used low-confidence liquidity)"
+                    failure_reason += f"; {bias_msg}"
                 else:
-                    # Don't fail, but note the risk
-                    logger.info(
-                        "Backtest passed but with survivorship bias risk. "
-                        "Consider requiring Birdeye historical data for production."
-                    )
+                    failure_reason = bias_msg
         
         return SimulatedResult(
             wallet_address=wallet_address,

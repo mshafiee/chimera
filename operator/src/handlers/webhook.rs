@@ -19,6 +19,7 @@ use crate::models::{Signal, SignalPayload, Strategy};
 use crate::monitoring::{HeliusClient, SignalAggregator};
 use crate::token::TokenParser;
 use rust_decimal::prelude::*;
+use solana_sdk::pubkey::Pubkey;
 
 /// Webhook request - already validated by HMAC middleware
 /// Body is the SignalPayload
@@ -158,8 +159,7 @@ pub async fn webhook_handler(
     // EXIT signals don't need token validation, SELL signals already own the token
     if payload.strategy != Strategy::Exit {
         if let Some(ref token_address) = payload.token_address {
-            // Validate token address is a plausible Solana base58 pubkey before issuing RPC calls
-            if token_address.len() < 32 || token_address.len() > 44 || !token_address.chars().all(|c| c.is_alphanumeric()) {
+            if token_address.parse::<Pubkey>().is_err() {
                 return Ok((
                     StatusCode::BAD_REQUEST,
                     Json(WebhookResponse {

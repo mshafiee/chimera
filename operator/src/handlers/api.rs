@@ -24,6 +24,7 @@ use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use rust_decimal::prelude::*;
+use solana_sdk::pubkey::Pubkey;
 
 // =============================================================================
 // API STATE
@@ -149,8 +150,7 @@ pub async fn get_wallet(
     State(state): State<Arc<ApiState>>,
     Path(address): Path<String>,
 ) -> Result<Json<WalletDetail>, AppError> {
-    // Validate Solana base58 address (32-44 chars, alphanumeric only)
-    if address.len() < 32 || address.len() > 44 || !address.chars().all(|c| c.is_alphanumeric()) {
+    if address.parse::<Pubkey>().is_err() {
         return Err(AppError::Validation("Invalid wallet address format".to_string()));
     }
     match db::get_wallet_by_address(&state.db, &address).await? {

@@ -258,6 +258,24 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Recovery manager task spawned");
 
+    // Periodic EXECUTING cleanup: catch trades that get stuck in EXECUTING due to a
+    // crash or panic mid-flight. The startup sweep only covers the previous run; this
+    // covers long-running operators that never restart.
+    {
+        let exec_cleanup_db = db_pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                match db::recover_executing_trades(&exec_cleanup_db).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::warn!(count = n, "Periodic sweep: recovered stuck EXECUTING trades to FAILED"),
+                    Err(e) => tracing::error!(error = %e, "Periodic EXECUTING cleanup failed"),
+                }
+            }
+        });
+    }
+
     // Spawn PnL refresh task — updates unrealized_pnl_percent every 30 seconds for active positions
     {
         let pnl_db = db_pool.clone();
@@ -1490,6 +1508,18 @@ fn init_tracing() {
 fn load_config() -> anyhow::Result<AppConfig> {
     // Load .env file if present
     dotenvy::dotenv().ok();
+
+    // Hard-fail if dev mode is active in a production environment. CHIMERA_ENV=production
+    // must not coexist with CHIMERA_DEV_MODE — the latter skips token safety and config
+    // validation, creating a silent security bypass that is hard to detect post-deploy.
+    if std::env::var("CHIMERA_DEV_MODE").is_ok()
+        && std::env::var("CHIMERA_ENV").as_deref() == Ok("production")
+    {
+        return Err(anyhow::anyhow!(
+            "CHIMERA_DEV_MODE is set in a production environment (CHIMERA_ENV=production). \
+             Unset CHIMERA_DEV_MODE before deploying to production."
+        ));
+    }
 
     let config = AppConfig::load().map_err(|e| {
         tracing::error!(error = %e, "Failed to load configuration");

@@ -394,7 +394,12 @@ impl Executor {
                                     return est;
                                 }
                             }
-                            // Final fallback: config-based size tier
+                            // Final fallback: config-based size tier (neither Jupiter impact nor
+                            // liquidity data available — cost estimate may be significantly off).
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                "Using config-based slippage tier — no Jupiter impact or liquidity data; actual slippage may differ substantially"
+                            );
                             if signal.payload.amount_sol < self.config.strategy.slippage_fallback_threshold_sol {
                                 self.config.strategy.slippage_fallback_small_percent
                             } else {
@@ -1387,7 +1392,6 @@ impl Executor {
                 tx_base64,
                 {
                     "encoding": "base64",
-                    "skipPreflight": true, // Skip preflight to avoid address lookup table validation issues
                     "maxRetries": 3,
                 }
             ]
