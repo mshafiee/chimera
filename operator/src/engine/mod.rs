@@ -20,7 +20,7 @@ pub mod signal_quality;
 pub mod stop_loss;
 pub mod tips;
 pub mod transaction_builder;
-mod v0_reconstruction;
+pub mod v0_reconstruction;
 pub mod volume_cache;
 
 pub use channel::*;

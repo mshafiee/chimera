@@ -212,6 +212,38 @@ impl PriceCache {
         }
     }
 
+    /// Set price for a token with a custom timestamp (test only).
+    #[cfg(test)]
+    pub fn set_price_with_time(
+        &self,
+        token_address: &str,
+        price_usd: Decimal,
+        source: PriceSource,
+        time: DateTime<Utc>,
+    ) {
+        let mut inner = self.inner.write();
+        inner.prices.insert(
+            token_address.to_string(),
+            PriceEntry {
+                price_usd,
+                fetched_at: time,
+                source,
+            },
+        );
+
+        let token_history = inner.price_history.entry(token_address.to_string()).or_default();
+        token_history.push_back((time, price_usd));
+
+        let cutoff = time - Duration::hours(24);
+        while let Some(front) = token_history.front() {
+            if front.0 < cutoff {
+                token_history.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
     /// Calculate volatility for a token (24h window)
     ///
     /// Returns volatility as percentage (0.0-100.0)

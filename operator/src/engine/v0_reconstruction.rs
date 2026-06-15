@@ -163,9 +163,56 @@ pub async fn reconstruct_v0_message_with_blockhash(
     // For now, let's use a workaround: we'll try to use the message's account keys
     // and reconstruct using try_compile with the instructions converted.
 
-    // Use the message's account_keys field to get all accounts in order
-    // This includes static accounts + resolved ALT accounts in the correct order
-    let all_account_keys: Vec<Pubkey> = v0_message.account_keys.clone();
+    // 1. Static account keys
+    let mut all_account_keys: Vec<Pubkey> = components.static_account_keys.clone();
+    let num_static_accounts = all_account_keys.len();
+
+    // 2. Resolve writable ALT accounts
+    let mut writable_alt_keys = Vec::new();
+    for alt_lookup in &components.address_table_lookups {
+        let alt_account = alt_accounts
+            .iter()
+            .find(|a| a.key == alt_lookup.account_key)
+            .ok_or_else(|| format!("ALT account {} not found", alt_lookup.account_key))?;
+
+        for &idx in &alt_lookup.writable_indexes {
+            let addr = alt_account
+                .addresses
+                .get(idx as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "Writable ALT index {} out of bounds for table {}",
+                        idx, alt_lookup.account_key
+                    )
+                })?;
+            writable_alt_keys.push(*addr);
+        }
+    }
+    let total_writable_alt_keys = writable_alt_keys.len();
+    all_account_keys.extend(writable_alt_keys);
+
+    // 3. Resolve read-only ALT accounts
+    let mut readonly_alt_keys = Vec::new();
+    for alt_lookup in &components.address_table_lookups {
+        let alt_account = alt_accounts
+            .iter()
+            .find(|a| a.key == alt_lookup.account_key)
+            .ok_or_else(|| format!("ALT account {} not found", alt_lookup.account_key))?;
+
+        for &idx in &alt_lookup.readonly_indexes {
+            let addr = alt_account
+                .addresses
+                .get(idx as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "Readonly ALT index {} out of bounds for table {}",
+                        idx, alt_lookup.account_key
+                    )
+                })?;
+            readonly_alt_keys.push(*addr);
+        }
+    }
+    all_account_keys.extend(readonly_alt_keys);
 
     // Get message header for signer/writable determination (field, not method)
     let header = &v0_message.header;
@@ -173,7 +220,6 @@ pub async fn reconstruct_v0_message_with_blockhash(
     let num_readonly_signed_accounts = header.num_readonly_signed_accounts as usize;
     let num_readonly_unsigned_accounts = header.num_readonly_unsigned_accounts as usize;
     let num_writable_signed = num_required_signatures - num_readonly_signed_accounts;
-    let num_static_accounts = components.static_account_keys.len();
 
     // Convert CompiledInstructions to Instructions by resolving account indices
     use solana_sdk::instruction::{AccountMeta, Instruction};
@@ -190,7 +236,7 @@ pub async fn reconstruct_v0_message_with_blockhash(
         let account_metas: Vec<AccountMeta> = compiled_ix
             .accounts
             .iter()
-            .map(|&idx| {
+            .map(|&idx| -> Result<AccountMeta, String> {
                 let account_key = *all_account_keys
                     .get(idx as usize)
                     .ok_or_else(|| format!("Account index {} out of range", idx))?;
@@ -206,35 +252,8 @@ pub async fn reconstruct_v0_message_with_blockhash(
                             && (idx as usize)
                                 < num_static_accounts - num_readonly_unsigned_accounts)
                 } else {
-                    // Account from ALT: check if it's in writable_indexes of any ALT lookup
-                    let mut current_alt_start = num_static_accounts;
-                    for alt_lookup in &components.address_table_lookups {
-                        let alt_account = alt_accounts
-                            .iter()
-                            .find(|a| a.key == alt_lookup.account_key)
-                            .ok_or_else(|| {
-                                format!("ALT account {} not found", alt_lookup.account_key)
-                            })?;
-
-                        let alt_size = alt_account.addresses.len();
-                        if (idx as usize) >= current_alt_start
-                            && (idx as usize) < current_alt_start + alt_size
-                        {
-                            // This account is from this ALT
-                            let alt_index = (idx as usize) - current_alt_start;
-                            // Check if this index is in writable_indexes
-                            let is_writable =
-                                alt_lookup.writable_indexes.contains(&(alt_index as u8));
-                            return Ok::<AccountMeta, String>(AccountMeta {
-                                pubkey: account_key,
-                                is_signer,
-                                is_writable,
-                            });
-                        }
-                        current_alt_start += alt_size;
-                    }
-                    // Default to writable if we can't determine (conservative)
-                    true
+                    // Account from ALT: writable if in the writable ALT keys range
+                    (idx as usize) < num_static_accounts + total_writable_alt_keys
                 };
 
                 Ok(AccountMeta {
@@ -243,7 +262,7 @@ pub async fn reconstruct_v0_message_with_blockhash(
                     is_writable,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<AccountMeta>, String>>()?;
 
         let instruction = Instruction {
             program_id,

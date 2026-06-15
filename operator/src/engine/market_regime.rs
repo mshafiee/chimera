@@ -54,17 +54,15 @@ impl MarketRegimeDetector {
         }
     }
 
-    /// Update price history (called periodically)
     pub async fn update_price_history(&self) {
         if let Some(price_entry) = self.price_cache.get_price(&self.sol_mint) {
             let mut history = self.price_history.write();
-            let now = chrono::Utc::now();
 
-            // Add current price
-            history.push_back((now, price_entry.price_usd));
+            // Add current price with its actual fetch time
+            history.push_back((price_entry.fetched_at, price_entry.price_usd));
 
-            // Keep only last 24 hours (assuming updates every hour = 24 entries)
-            let cutoff = now - chrono::Duration::hours(24);
+            // Keep only last 24 hours based on the latest fetched time
+            let cutoff = price_entry.fetched_at - chrono::Duration::hours(24);
             while let Some(front) = history.front() {
                 if front.0 < cutoff {
                     history.pop_front();
@@ -84,6 +82,13 @@ impl MarketRegimeDetector {
 
         if history.len() < 3 {
             // Not enough data, default to sideways
+            return MarketRegime::Sideways;
+        }
+
+        // Enforce a minimum history span of 12 hours to avoid treating short-term noise as regime changes
+        let first_time = history.front().map(|(t, _)| *t).unwrap();
+        let last_time = history.back().map(|(t, _)| *t).unwrap();
+        if last_time.signed_duration_since(first_time) < chrono::Duration::hours(12) {
             return MarketRegime::Sideways;
         }
 
@@ -130,6 +135,13 @@ impl MarketRegimeDetector {
 
         if token_history.len() < 3 {
             // Not enough data, default to sideways
+            return MarketRegime::Sideways;
+        }
+
+        // Enforce a minimum history span of 2 hours for token-specific trend detection
+        let first_time = token_history.front().map(|(t, _)| *t).unwrap();
+        let last_time = token_history.back().map(|(t, _)| *t).unwrap();
+        if last_time.signed_duration_since(first_time) < chrono::Duration::hours(2) {
             return MarketRegime::Sideways;
         }
 
@@ -308,8 +320,83 @@ impl MarketRegimeDetector {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn test_regime_detection() {
-        // This would be tested with actual price history in integration tests
+    use super::*;
+    use crate::price_cache::{PriceCache, PriceSource};
+    use chrono::{Duration, Utc};
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn test_regime_detection_insufficient_span() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let detector = MarketRegimeDetector::new(price_cache.clone());
+        let sol_mint = "So11111111111111111111111111111111111111112";
+        let now = Utc::now();
+
+        // Push 3 price points spanning only 1 hour (price went up 10%)
+        price_cache.set_price_with_time(sol_mint, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(1));
+        detector.update_price_history().await;
+        
+        price_cache.set_price_with_time(sol_mint, Decimal::from(105), PriceSource::Jupiter, now - Duration::minutes(30));
+        detector.update_price_history().await;
+
+        price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now);
+        detector.update_price_history().await;
+
+        // Even though price went up 10%, span is only 1 hour (< 12 hours required), so must default to Sideways
+        assert_eq!(detector.detect_regime(), MarketRegime::Sideways);
+    }
+
+    #[tokio::test]
+    async fn test_regime_detection_sufficient_span_bull() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let detector = MarketRegimeDetector::new(price_cache.clone());
+        let sol_mint = "So11111111111111111111111111111111111111112";
+        let now = Utc::now();
+
+        // Push 3 price points spanning 13 hours (price went up 10%)
+        price_cache.set_price_with_time(sol_mint, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(13));
+        detector.update_price_history().await;
+
+        price_cache.set_price_with_time(sol_mint, Decimal::from(105), PriceSource::Jupiter, now - Duration::hours(6));
+        detector.update_price_history().await;
+
+        price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now);
+        detector.update_price_history().await;
+
+        // Span is 13 hours (>= 12 hours) and price went up 10%, so it should detect Bull
+        assert_eq!(detector.detect_regime(), MarketRegime::Bull);
+    }
+
+    #[tokio::test]
+    async fn test_token_regime_detection_insufficient_span() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let detector = MarketRegimeDetector::new(price_cache.clone());
+        let token = "Token111111111111111111111111111111111111111";
+        let now = Utc::now();
+
+        // Push 3 price points spanning only 1 hour (price went down 10%)
+        price_cache.set_price_with_time(token, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(1));
+        price_cache.set_price_with_time(token, Decimal::from(95), PriceSource::Jupiter, now - Duration::minutes(30));
+        price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now);
+
+        // Even though price went down 10%, span is only 1 hour (< 2 hours required), so must default to Sideways
+        assert_eq!(detector.detect_token_regime(token), MarketRegime::Sideways);
+    }
+
+    #[tokio::test]
+    async fn test_token_regime_detection_sufficient_span_bear() {
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let detector = MarketRegimeDetector::new(price_cache.clone());
+        let token = "Token111111111111111111111111111111111111111";
+        let now = Utc::now();
+
+        // Push 3 price points spanning 3 hours (price went down 10%)
+        price_cache.set_price_with_time(token, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(3));
+        price_cache.set_price_with_time(token, Decimal::from(95), PriceSource::Jupiter, now - Duration::hours(1));
+        price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now);
+
+        // Span is 3 hours (>= 2 hours) and price went down 10%, so it should detect Bear
+        assert_eq!(detector.detect_token_regime(token), MarketRegime::Bear);
     }
 }
