@@ -1628,19 +1628,6 @@ pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePo
 }
 
 /// Update current_price, unrealized_pnl_sol, and unrealized_pnl_percent for active positions
-/// Get the persisted peak_price for a position (used to restore HWM after restart).
-/// Returns None if the position does not exist or has no recorded peak.
-pub async fn get_position_peak_price(pool: &DbPool, trade_uuid: &str) -> AppResult<Option<f64>> {
-    let row: Option<(Option<f64>,)> = sqlx::query_as(
-        "SELECT peak_price FROM positions WHERE trade_uuid = ?",
-    )
-    .bind(trade_uuid)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.and_then(|(v,)| v))
-}
-
 pub async fn update_position_unrealized_pnl(
     pool: &DbPool,
     trade_uuid: &str,
