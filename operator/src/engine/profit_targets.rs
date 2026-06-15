@@ -254,18 +254,30 @@ impl ProfitTargetManager {
         // where the price may already be reversing.
         let mut tiered_action: Option<ProfitTargetAction> = None;
         {
-            let mut total_exit_pct = Decimal::ZERO;
-            let mut any_hit = false;
+            let mut new_targets_hit = 0;
+            
             for target in &profit_level_targets {
                 if profit_percent >= *target && !state.targets_hit.contains(target) {
                     state.targets_hit.push(*target);
                     state_changed = true;
-                    any_hit = true;
-                    total_exit_pct += self.config.tiered_exit_percent;
+                    new_targets_hit += 1;
                 }
             }
-            if any_hit {
-                tiered_action = Some(ProfitTargetAction::ExitPercent(total_exit_pct));
+            
+            if new_targets_hit > 0 {
+                // Calculate compounding exit percentage of the CURRENT position.
+                // Selling f% of the remaining balance k times leaves (1 - f)^k of the balance.
+                // The fraction of the current balance to sell in this tick is 1 - (1 - f)^k.
+                let exit_fraction_remaining = self.config.tiered_exit_percent / Decimal::from(100);
+                let retain_fraction = Decimal::ONE - exit_fraction_remaining;
+                
+                let mut current_retain = Decimal::ONE;
+                for _ in 0..new_targets_hit {
+                    current_retain *= retain_fraction;
+                }
+                
+                let exit_fraction_current = Decimal::ONE - current_retain;
+                tiered_action = Some(ProfitTargetAction::ExitPercent(exit_fraction_current * Decimal::from(100)));
             }
         }
 

@@ -93,7 +93,7 @@ impl PortfolioHeat {
                 SELECT entry_amount_sol as amount
                 FROM positions
                 WHERE state = 'ACTIVE'
-                   OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
+                   OR (state = 'EXITING' AND last_updated >= datetime('now', '-1800 seconds'))
                 UNION ALL
                 SELECT amount_sol as amount
                 FROM trades
@@ -115,7 +115,7 @@ impl PortfolioHeat {
             SELECT COUNT(*)
             FROM positions
             WHERE state = 'EXITING'
-              AND updated_at < datetime('now', '-300 seconds')
+              AND last_updated < datetime('now', '-300 seconds')
             "#,
         )
         .fetch_one(&self.db)
@@ -127,7 +127,7 @@ impl PortfolioHeat {
                 SELECT COALESCE(SUM(entry_amount_sol), 0.0)
                 FROM positions
                 WHERE state = 'EXITING'
-                  AND updated_at < datetime('now', '-300 seconds')
+                  AND last_updated < datetime('now', '-300 seconds')
                 "#,
             )
             .fetch_one(&self.db)
@@ -208,7 +208,7 @@ impl PortfolioHeat {
                 SELECT strategy, entry_amount_sol as amount
                 FROM positions
                 WHERE state = 'ACTIVE'
-                   OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
+                   OR (state = 'EXITING' AND last_updated >= datetime('now', '-1800 seconds'))
                 UNION ALL
                 SELECT strategy, amount_sol as amount
                 FROM trades
