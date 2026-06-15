@@ -19,7 +19,7 @@ use crate::handlers::{PositionUpdateData, WsEvent, WsState};
 use chrono::Utc;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
-use solana_sdk::signature::Signature;
+use solana_sdk::signature::{Signature, Signer};
 use std::sync::Arc;
 use tokio::time::interval;
 
@@ -295,10 +295,12 @@ impl RecoveryManager {
     /// Check if the on-chain SPL token balance is zero, indicating the position has already been exited.
     /// Returns `Ok(true)` if balance is confirmed to be 0 or if the token account does not exist.
     /// Returns `Ok(false)` if balance is > 0.
-    async fn check_is_balance_zero(&self, wallet_address: &str, token_address: &str) -> AppResult<bool> {
-        let wallet_pubkey = wallet_address
-            .parse::<Pubkey>()
-            .map_err(|e| AppError::Internal(format!("Invalid wallet address: {}", e)))?;
+    async fn check_is_balance_zero(&self, token_address: &str) -> AppResult<bool> {
+        let secrets = crate::vault::load_secrets_with_fallback()
+            .map_err(|e| AppError::Internal(format!("Failed to load secrets: {}", e)))?;
+        let wallet_keypair = crate::engine::transaction_builder::load_wallet_keypair(&secrets)?;
+        let wallet_pubkey = wallet_keypair.pubkey();
+
         let token_mint = token_address
             .parse::<Pubkey>()
             .map_err(|e| AppError::Internal(format!("Invalid token address: {}", e)))?;
@@ -341,7 +343,7 @@ impl RecoveryManager {
         discrepancy: &str,
         notes: &str,
     ) -> AppResult<RecoveryAction> {
-        let is_zero = match self.check_is_balance_zero(&position.wallet_address, &position.token_address).await {
+        let is_zero = match self.check_is_balance_zero(&position.token_address).await {
             Ok(zero) => zero,
             Err(e) => {
                 tracing::error!(

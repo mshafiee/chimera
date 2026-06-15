@@ -257,11 +257,13 @@ impl PositionSizer {
         // wallet. Reject immediately — trading at min_size_sol in this case causes "death
         // by a thousand cuts" as the engine bleeds capital on negative-EV signals.
         if let Some(cap) = full_kelly_cap {
-            if cap.is_zero() {
+            if cap < self.config.min_size_sol {
                 tracing::warn!(
                     wallet = %factors.wallet_address,
                     strategy = ?factors.strategy,
-                    "Kelly cap is zero (negative EV or insufficient allocation) — rejecting trade"
+                    cap = %cap,
+                    min_size_sol = %self.config.min_size_sol,
+                    "Kelly cap is below min_size_sol (negative EV or insufficient allocation) — rejecting trade"
                 );
                 return Decimal::ZERO;
             }
