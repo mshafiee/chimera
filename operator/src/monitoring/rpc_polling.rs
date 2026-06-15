@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use lru::LruCache;
 use rust_decimal::Decimal;
 use serde_json::Value;
-use solana_client::rpc_client::RpcClient;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -99,23 +99,67 @@ pub async fn poll_wallet_transactions(
         .acquire_standard(RequestPriority::Polling)
         .await;
 
-    // Get recent signatures for the wallet
-    let signatures = rpc_client
-        .get_signatures_for_address(&wallet_address.parse().context("Invalid wallet address")?)
-        .context("Failed to get signatures")?;
+    // Paginated fetch: signatures are returned newest-first. Walk pages of 10 until
+    // the anchor (last_signature) is found or we exhaust 5 pages (50 signatures max).
+    const PAGE_SIZE: usize = 10;
+    const MAX_PAGES: usize = 5;
 
-    // Signatures are returned newest-first. Collect everything BEFORE last_signature
-    // (i.e., lower index = newer). Stop when we hit the anchor; if not found within
-    // the page, take all 10 (gap: > 10 new txs since last poll — will catch up).
-    let mut new_signatures = Vec::new();
+    let pubkey = wallet_address
+        .parse()
+        .context("Invalid wallet address")?;
 
-    for sig_info in signatures.iter().take(10) {
-        if let Some(last) = last_signature {
-            if sig_info.signature == last {
-                break; // Reached the last-seen anchor — everything before this is new
-            }
+    let mut new_signatures: Vec<String> = Vec::new();
+    let mut anchor_found = false;
+    let mut before_sig: Option<String> = None;
+
+    'pages: for _page in 0..MAX_PAGES {
+        rate_limiter
+            .acquire_standard(RequestPriority::Polling)
+            .await;
+
+        let config = solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
+            before: before_sig
+                .as_deref()
+                .and_then(|s| s.parse::<solana_sdk::signature::Signature>().ok()),
+            limit: Some(PAGE_SIZE),
+            ..Default::default()
+        };
+
+        let page = rpc_client
+            .get_signatures_for_address_with_config(&pubkey, config)
+            .await
+            .context("Failed to get signatures")?;
+
+        if page.is_empty() {
+            break;
         }
-        new_signatures.push(sig_info.signature.to_string());
+
+        for sig_info in &page {
+            if let Some(last) = last_signature {
+                if sig_info.signature == last {
+                    anchor_found = true;
+                    break 'pages; // Everything collected so far is newer than anchor
+                }
+            }
+            new_signatures.push(sig_info.signature.clone());
+        }
+
+        // Set the cursor to the oldest signature in this page for the next iteration
+        before_sig = page.last().map(|s| s.signature.clone());
+
+        if page.len() < PAGE_SIZE {
+            // No more pages available
+            break;
+        }
+    }
+
+    if last_signature.is_some() && !anchor_found && !new_signatures.is_empty() {
+        tracing::warn!(
+            wallet = wallet_address,
+            count = new_signatures.len(),
+            "Anchor signature not found in {} transactions, possible gap in signal detection",
+            new_signatures.len()
+        );
     }
 
     // Parse transactions (limited to save credits)
@@ -132,6 +176,7 @@ pub async fn poll_wallet_transactions(
         if let Ok(sig) = sig_str.parse::<solana_sdk::signature::Signature>() {
             if let Ok(tx) = rpc_client
                 .get_transaction(&sig, solana_transaction_status::UiTransactionEncoding::Json)
+                .await
             {
                 // Convert UiTransaction to JSON Value for parser
                 let tx_json: Value =
