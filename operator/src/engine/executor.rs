@@ -466,13 +466,28 @@ impl Executor {
                         "Trade execution failed"
                     );
 
-                    // Record failed tip if using Jito and tip manager is available
+                    // Record costs even for failed trades — Jito tip was still paid
                     if rpc_mode == RpcMode::Jito {
+                        let jito_tip = self.calculate_jito_tip(signal);
+                        if let Err(cost_err) = crate::db::update_trade_costs(
+                            &self.db,
+                            &signal.trade_uuid,
+                            jito_tip,
+                            Decimal::ZERO,
+                            Decimal::ZERO,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                error = %cost_err,
+                                "Failed to record Jito tip cost for failed trade"
+                            );
+                        }
                         if let Some(ref tip_manager) = self.tip_manager {
-                            let tip = self.calculate_jito_tip(signal);
-                            if let Err(e) = tip_manager
+                            if let Err(tip_err) = tip_manager
                                 .record_tip(
-                                    tip,
+                                    jito_tip,
                                     None, // No signature for failed trades
                                     signal.payload.strategy,
                                     false, // failure
@@ -480,7 +495,7 @@ impl Executor {
                                 .await
                             {
                                 tracing::warn!(
-                                    error = %e,
+                                    error = %tip_err,
                                     "Failed to record failed tip in TipManager"
                                 );
                             }
@@ -854,9 +869,8 @@ impl Executor {
             })?;
 
         // Capture actual price impact and fill price from Jupiter quote.
-        // [B-M1] Also store the token decimals from the signal so the getter can compute
-        // the correct SOL-per-token price without hardcoding 9 decimals.
-        // signal.token_decimals is currently not populated; store None to signal unknown.
+        // [B-M1] Token decimals are now populated at webhook time from on-chain metadata,
+        // enabling correct SOL-per-token conversion without hardcoding 9 decimals.
         *self.last_price_impact.lock() = built_tx.price_impact_pct();
         *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
         *self.last_fill_price_token_decimals.lock() = signal.token_decimals;

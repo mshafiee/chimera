@@ -294,6 +294,11 @@ impl PriceCache {
         Some(std_dev.abs())
     }
 
+    /// Get SOL price in USD
+    pub fn get_sol_price_usd(&self) -> Option<Decimal> {
+        self.get_price_usd(&self.sol_mint)
+    }
+
     /// Get SOL price volatility (for market condition filtering)
     pub fn get_sol_volatility(&self) -> Option<f64> {
         self.calculate_volatility(&self.sol_mint)

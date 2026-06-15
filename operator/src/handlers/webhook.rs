@@ -236,6 +236,13 @@ pub async fn webhook_handler(
     // Create signal
     let mut signal = Signal::new(payload, timestamp, None);
 
+    // Populate token decimals from on-chain metadata for correct fill price conversion.
+    // [B-M1] Without correct decimals, lamports-per-base-unit → SOL-per-token assumes 9 decimals,
+    // which is wrong for USDC (6), USDT (6), and other non-standard tokens.
+    if let Some(ref token_address) = signal.payload.token_address {
+        signal.token_decimals = state.token_parser.get_token_decimals(token_address).await;
+    }
+
     // If fast-check errored (RPC/network failure), flag signal for mandatory slow-path.
     // The engine will reject the trade if slow-path is also unavailable.
     if fast_check_errored {

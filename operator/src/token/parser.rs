@@ -230,6 +230,22 @@ impl TokenParser {
         Ok(result)
     }
 
+    /// Get token decimals from on-chain metadata.
+    /// Returns None if metadata is unavailable.
+    pub async fn get_token_decimals(&self, token_address: &str) -> Option<u8> {
+        match self.fetcher.get_metadata(token_address).await {
+            Ok(metadata) => Some(metadata.decimals),
+            Err(e) => {
+                tracing::warn!(
+                    token = token_address,
+                    error = %e,
+                    "Failed to fetch token decimals — fill price conversion will assume 9 decimals"
+                );
+                None
+            }
+        }
+    }
+
     /// Slow path check - full validation including honeypot detection
     ///
     /// Checks:

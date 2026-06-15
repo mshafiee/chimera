@@ -155,10 +155,10 @@ impl KellySizer {
 
         // Calculate Kelly Criterion using Decimal for precision
         // The Kelly formula for position size (when returns are fractional, not 100% loss) is:
-        // kelly = (win_rate * avg_win - loss_rate * avg_loss) / (avg_win * avg_loss)
-        let full_kelly = if !avg_win.is_zero() && !avg_loss.is_zero() {
+        // kelly = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
+        let full_kelly = if !avg_win.is_zero() {
             let numerator = (win_rate * avg_win) - (loss_rate * avg_loss);
-            let denominator = avg_win * avg_loss;
+            let denominator = avg_win;
             (numerator / denominator).max(Decimal::ZERO) // DO NOT clamp to 1.0 here; fractional returns often yield >1.0
 
         } else {
@@ -260,10 +260,9 @@ mod tests {
     #[test]
     fn test_kelly_calculation() {
         // Example: 60% win rate, avg win = 10% (0.1), avg loss = 5% (0.05)
-        // kelly = (0.6 * 0.1 - 0.4 * 0.05) / (0.1 * 0.05)
-        // kelly = (0.06 - 0.02) / 0.005 = 8.0
-        // Clamped to 1.0 (100%)
-        // Conservative (25%) = 0.25 = 25% of capital
+        // kelly = (0.6 * 0.1 - 0.4 * 0.05) / 0.1
+        // kelly = (0.06 - 0.02) / 0.1 = 0.4
+        // Conservative (25%) = 0.10 = 10% of capital
 
         // This would be tested with actual database in integration tests
     }

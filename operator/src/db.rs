@@ -902,6 +902,27 @@ pub async fn activate_trade_and_open_position(
         }
     }
 
+    // TOCTOU guard: re-check for duplicate positions inside the transaction.
+    // The pre-transaction check in process_signal can race with concurrent BUY
+    // signals — both see count=0, both proceed. This inner check serializes
+    // via the write lock from BEGIN IMMEDIATE.
+    let dupe_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM positions WHERE token_address = ? AND state IN ('ACTIVE','EXITING')"
+    )
+    .bind(token_address)
+    .fetch_one(&mut *tx)
+    .await?;
+    if dupe_count > 0 {
+        tracing::warn!(
+            trade_uuid = %trade_uuid,
+            token_address = %token_address,
+            "Duplicate position detected at write time — rolling back"
+        );
+        return Err(AppError::Internal(
+            "Duplicate position detected at write time".to_string(),
+        ));
+    }
+
     sqlx::query(
         r#"
         UPDATE trades
@@ -1077,6 +1098,7 @@ pub async fn close_position(
         let pnl_sol = if !entry_price_dec.is_zero() {
             if let (Some(entry_sol_price), Some(exit_sol_price)) = (entry_sol_price_dec, sol_price_usd) {
                 if !exit_sol_price.is_zero() && !entry_sol_price.is_zero() {
+                    // Path A: both SOL prices available — correct SOL-denominated PnL
                     let exit_price_sol = exit_price.checked_div(exit_sol_price).unwrap_or(Decimal::ZERO);
                     let entry_price_sol = entry_price_dec.checked_div(entry_sol_price).unwrap_or(Decimal::ZERO);
                     if !entry_price_sol.is_zero() {
@@ -1087,14 +1109,49 @@ pub async fn close_position(
                         Decimal::ZERO
                     }
                 } else {
-                    let diff = exit_price - entry_price_dec;
-                    let ratio = diff / entry_price_dec;
-                    ratio * exited_amount
+                    // Path B: SOL prices are zero — use USD return scaled by entry SOL price
+                    // to convert USD PnL to SOL PnL: (exit_usd - entry_usd) / entry_sol_price_usd
+                    if !entry_sol_price.is_zero() {
+                        let usd_diff = exit_price - entry_price_dec;
+                        usd_diff / entry_sol_price
+                    } else {
+                        tracing::error!(
+                            trade_uuid = %trade_uuid,
+                            "Cannot compute SOL PnL: entry_sol_price is zero"
+                        );
+                        Decimal::ZERO
+                    }
                 }
             } else {
-                let diff = exit_price - entry_price_dec;
-                let ratio = diff / entry_price_dec;
-                ratio * exited_amount
+                // Path C: SOL prices unavailable — approximate using entry SOL price if available
+                if let Some(entry_sol_price) = entry_sol_price_dec {
+                    if !entry_sol_price.is_zero() {
+                        let entry_price_sol = entry_price_dec / entry_sol_price;
+                        let token_amount = if !entry_price_sol.is_zero() {
+                            exited_amount / entry_price_sol
+                        } else {
+                            Decimal::ZERO
+                        };
+                        // SOL PnL ≈ token_amount * (exit_price_sol - entry_price_sol)
+                        // Approximate exit_price_sol using entry_sol_price as fallback
+                        let exit_price_sol_approx = exit_price / entry_sol_price;
+                        let entry_price_sol = entry_price_dec / entry_sol_price;
+                        token_amount * (exit_price_sol_approx - entry_price_sol)
+                    } else {
+                        tracing::error!(
+                            trade_uuid = %trade_uuid,
+                            "Cannot compute SOL PnL: entry_sol_price is zero"
+                        );
+                        Decimal::ZERO
+                    }
+                } else {
+                    // No SOL price data at all — log error and return zero to avoid wrong PnL
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        "Cannot compute SOL PnL: no SOL price data available — skipping PnL calculation"
+                    );
+                    Decimal::ZERO
+                }
             }
         } else {
             Decimal::ZERO
@@ -1758,6 +1815,7 @@ pub struct ActivePositionSummary {
     pub token_address: String,
     pub entry_price: Decimal,
     pub entry_amount_sol: Decimal,
+    pub entry_sol_price_usd: Option<Decimal>,
 }
 
 /// Get the peak price recorded for a position (used by trailing stop / profit-target logic).
@@ -1775,9 +1833,9 @@ pub async fn get_position_peak_price(pool: &DbPool, trade_uuid: &str) -> AppResu
 
 /// Get trade_uuid, token_address, entry_price, and size for all ACTIVE/EXITING positions (PnL refresh)
 pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePositionSummary>> {
-    let rows: Vec<(String, String, f64, f64)> = sqlx::query_as(
+    let rows: Vec<(String, String, f64, f64, Option<f64>)> = sqlx::query_as(
         r#"
-        SELECT trade_uuid, token_address, entry_price, entry_amount_sol
+        SELECT trade_uuid, token_address, entry_price, entry_amount_sol, entry_sol_price_usd
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
         "#,
@@ -1787,11 +1845,12 @@ pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePo
 
     Ok(rows
         .into_iter()
-        .map(|(uuid, token, price, size)| ActivePositionSummary {
+        .map(|(uuid, token, price, size, sol_price)| ActivePositionSummary {
             trade_uuid: uuid,
             token_address: token,
             entry_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
             entry_amount_sol: Decimal::from_f64_retain(size).unwrap_or(Decimal::ZERO),
+            entry_sol_price_usd: sol_price.and_then(Decimal::from_f64_retain),
         })
         .collect())
 }

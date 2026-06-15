@@ -79,7 +79,19 @@ impl MomentumExit {
     ) -> MomentumExitAction {
         // Get current price
         let current_price = match self.price_cache.get_price_usd(token_address) {
-            Some(price) => price,
+            Some(price) => {
+                // Check staleness even when price is cached — aligns with stop_loss.rs
+                // staleness guard. Both modules must agree on escalation.
+                if self.price_cache.is_price_stale(token_address) {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        "STALE_PRICE: cached price is stale (>30s old) — momentum exit forcing exit"
+                    );
+                    return MomentumExitAction::Exit;
+                }
+                price
+            }
             None => {
                 // §1.5 FIX: If this token is actively tracked but hasn't received a
                 // price update in >2 minutes, force exit. Aligns with stop_loss.rs
@@ -223,9 +235,12 @@ impl MomentumExit {
         let history = self.price_cache.price_history_read();
         let token_history = history.get(token_address)?;
 
-        // Sample up to 30 price points at 20-second intervals (~10 min total window)
+        // Sample up to 30 price points at 30-second intervals (~15 min total window)
         // to allow the RSI EMA (Wilder's smoothing) to warm up properly.
-        const RSI_SAMPLE_INTERVAL_SECS: i64 = 20;
+        // [B-M2] Use 30-second intervals to match the price cache update frequency (~5 sec)
+        // and avoid consecutive samples using the same price data point, which produces
+        // an artificially smooth RSI that under-reacts to actual price movements.
+        const RSI_SAMPLE_INTERVAL_SECS: i64 = 30;
         let mut prices = Vec::new();
         let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
 

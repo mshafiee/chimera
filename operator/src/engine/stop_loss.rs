@@ -73,13 +73,22 @@ impl StopLossManager {
         entry_time: chrono::DateTime<chrono::Utc>,
     ) -> StopLossAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
-            Some(price) => price,
+            Some(price) => {
+                // Check staleness even when price is cached — a cached price can be
+                // hours old if the feed is stale. Without this check, stop-loss
+                // protection silently degrades for tokens with stale feeds.
+                if self.price_cache.is_price_stale(token_address) {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        "STALE_PRICE: cached price is stale (>30s old) — forcing exit (risk management blind)"
+                    );
+                    return StopLossAction::Exit;
+                }
+                price
+            }
             None => {
-                // §1.5 FIX: If this token is actively tracked but hasn't received a
-                // price update in >2 minutes, force exit. Without a price feed, all
-                // stop-loss protection is silently disabled — the position could lose
-                // 100% before the feed recovers. Forcing exit is safer than holding
-                // an unmonitored position.
+                // No cached price at all — check if this is a tracked token with a stale feed
                 if self.price_cache.is_price_stale(token_address) {
                     tracing::error!(
                         trade_uuid = %trade_uuid,

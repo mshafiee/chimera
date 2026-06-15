@@ -300,22 +300,57 @@ async fn main() -> anyhow::Result<()> {
                 match db::get_active_position_tokens(&pnl_db).await {
                     Ok(positions) => {
                         for pos in positions {
-                            if let Some(current) = pnl_pc.get_price_usd(&pos.token_address) {
+                            if let Some(current_usd) = pnl_pc.get_price_usd(&pos.token_address) {
                                 let entry = if pos.entry_price.is_zero() {
-                                    current
+                                    current_usd
                                 } else {
                                     pos.entry_price
                                 };
-                                let pnl_sol = (current - entry) * pos.entry_amount_sol;
+                                // Get current SOL/USD price for converting USD prices to SOL terms
+                                let current_sol_price = pnl_pc.get_sol_price_usd();
+                                let pnl_sol = match (pos.entry_sol_price_usd, current_sol_price) {
+                                    (Some(entry_sol), Some(curr_sol)) if !entry_sol.is_zero() && !curr_sol.is_zero() => {
+                                        // Convert both entry and current USD prices to SOL-denominated terms
+                                        let entry_price_sol = pos.entry_price / entry_sol;
+                                        let current_price_sol = current_usd / curr_sol;
+                                        let token_amount = pos.entry_amount_sol / entry_price_sol;
+                                        (current_price_sol - entry_price_sol) * token_amount
+                                    }
+                                    // Fallback: if SOL price unavailable, compute with what we have
+                                    _ => {
+                                        if !entry.is_zero() {
+                                            let usd_pnl = current_usd - entry;
+                                            // Approximate SOL PnL using entry SOL price if available
+                                            // or just use the USD difference scaled by entry ratio
+                                            match pos.entry_sol_price_usd {
+                                                Some(entry_sol) if !entry_sol.is_zero() => {
+                                                    let pnl_fraction = usd_pnl / entry;
+                                                    // Scale USD return to SOL terms
+                                                    pnl_fraction * pos.entry_amount_sol * (entry / entry_sol)
+                                                }
+                                                _ => {
+                                                    // Last resort: USD difference (misleading but won't crash)
+                                                    tracing::warn!(
+                                                        token = %pos.token_address,
+                                                        "SOL price unavailable for PnL calc — using approximate value"
+                                                    );
+                                                    (current_usd - entry) / entry * pos.entry_amount_sol
+                                                }
+                                            }
+                                        } else {
+                                            rust_decimal::Decimal::ZERO
+                                        }
+                                    }
+                                };
                                 let pnl_pct = if !entry.is_zero() {
-                                    (current - entry) / entry * rust_decimal::Decimal::from(100)
+                                    (current_usd - entry) / entry * rust_decimal::Decimal::from(100)
                                 } else {
                                     rust_decimal::Decimal::ZERO
                                 };
                                 if let Err(e) = db::update_position_unrealized_pnl(
                                     &pnl_db,
                                     &pos.trade_uuid,
-                                    current,
+                                    current_usd,
                                     pnl_sol,
                                     pnl_pct,
                                 )
@@ -1111,7 +1146,7 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                         tracing::warn!("HEAT_OVEREXPOSED: capital drain detected — force-exiting oldest positions");
-                        let mut positions = match db::get_active_positions_with_entry(&fl_db).await {
+                        let positions = match db::get_active_positions_with_entry(&fl_db).await {
                             Ok(p) => p,
                             Err(e) => {
                                 tracing::error!(error = %e, "Force-liquidation: DB query failed");

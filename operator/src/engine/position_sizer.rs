@@ -333,8 +333,10 @@ impl PositionSizer {
         let success_rate =
             match crate::db::get_wallet_copy_performance(&self.db, wallet_address).await {
                 Ok(Some(metrics)) => Decimal::from_f64_retain(metrics.signal_success_rate / 100.0)
-                    .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ZERO)),
-                _ => Decimal::from_str("0.5").unwrap_or(Decimal::ZERO), // Default fallback if no performance data exists
+                    .unwrap_or(Decimal::from_str("0.4").unwrap_or(Decimal::ZERO)),
+                // Default to 0.4 for unproven/stale wallets — produces a 0.8× performance
+                // penalty rather than neutral 1.0×, reflecting the uncertainty of no data.
+                _ => Decimal::from_str("0.4").unwrap_or(Decimal::ZERO),
             };
 
         // Get token age if token address and Helius client are provided
