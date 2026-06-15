@@ -237,7 +237,7 @@ pub async fn update_trade_costs(
     let result = sqlx::query(
         r#"
         UPDATE trades
-        SET jito_tip_sol = ?, dex_fee_sol = ?, slippage_cost_sol = ?, total_cost_sol = ?
+        SET jito_tip_sol = COALESCE(jito_tip_sol, 0.0) + ?, dex_fee_sol = COALESCE(dex_fee_sol, 0.0) + ?, slippage_cost_sol = COALESCE(slippage_cost_sol, 0.0) + ?, total_cost_sol = COALESCE(total_cost_sol, 0.0) + ?
         WHERE trade_uuid = ?
         "#,
     )
@@ -709,12 +709,14 @@ pub async fn get_strategy_performance(
 pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
     // Get the most recent closed trades and count consecutive losses.
     // trades.pnl_usd is never written (inserts omit it); use positions.realized_pnl_sol
-    // joined on trade_uuid instead — this is the same column used by get_pnl_24h.
-    let trades: Vec<(Option<f64>,)> = sqlx::query_as(
+    // LEFT JOINed on trade_uuid instead — this is the same column used by get_pnl_24h.
+    // LEFT JOIN ensures closed trades without a position row (legacy data, race condition)
+    // are still counted as zero-PnL rather than silently dropped.
+    let trades: Vec<(f64,)> = sqlx::query_as(
         r#"
-        SELECT p.realized_pnl_sol
+        SELECT COALESCE(p.realized_pnl_sol, 0.0)
         FROM trades t
-        JOIN positions p ON p.trade_uuid = t.trade_uuid
+        LEFT JOIN positions p ON p.trade_uuid = t.trade_uuid
         WHERE t.status = 'CLOSED'
         ORDER BY t.created_at DESC
         LIMIT 20
@@ -724,13 +726,8 @@ pub async fn get_consecutive_losses(pool: &DbPool) -> AppResult<u32> {
     .await?;
 
     let mut consecutive = 0u32;
-    for (pnl_opt,) in trades {
-        // Convert f64 to Decimal for precise financial comparison
-        let pnl = if let Some(pnl_f64) = pnl_opt {
-            Decimal::from_f64_retain(pnl_f64).unwrap_or(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
+    for (pnl_f64,) in trades {
+        let pnl = Decimal::from_f64_retain(pnl_f64).unwrap_or(Decimal::ZERO);
 
         // Use Decimal comparison to avoid floating point precision issues
         if pnl < Decimal::ZERO {
@@ -1123,20 +1120,14 @@ pub async fn close_position(
                     }
                 }
             } else {
-                // Path C: SOL prices unavailable — approximate using entry SOL price if available
+                // Path C: current SOL price unavailable — fall through to Path B's
+                // USD-difference formula which only needs entry_sol_price.
+                // Using entry_sol_price to convert current USD prices mixes time
+                // references and misstates PnL when SOL price has moved.
                 if let Some(entry_sol_price) = entry_sol_price_dec {
                     if !entry_sol_price.is_zero() {
-                        let entry_price_sol = entry_price_dec / entry_sol_price;
-                        let token_amount = if !entry_price_sol.is_zero() {
-                            exited_amount / entry_price_sol
-                        } else {
-                            Decimal::ZERO
-                        };
-                        // SOL PnL ≈ token_amount * (exit_price_sol - entry_price_sol)
-                        // Approximate exit_price_sol using entry_sol_price as fallback
-                        let exit_price_sol_approx = exit_price / entry_sol_price;
-                        let entry_price_sol = entry_price_dec / entry_sol_price;
-                        token_amount * (exit_price_sol_approx - entry_price_sol)
+                        let usd_diff = exit_price - entry_price_dec;
+                        usd_diff / entry_sol_price
                     } else {
                         tracing::error!(
                             trade_uuid = %trade_uuid,
@@ -1145,12 +1136,12 @@ pub async fn close_position(
                         Decimal::ZERO
                     }
                 } else {
-                    // No SOL price data at all — log error and return zero to avoid wrong PnL
-                    tracing::error!(
-                        trade_uuid = %trade_uuid,
-                        "Cannot compute SOL PnL: no SOL price data available — skipping PnL calculation"
-                    );
-                    Decimal::ZERO
+                    // Path D: No SOL price data at all — use USD price ratio directly.
+                    // This is the original pre-refactoring formula: (exit/entry - 1) * amount.
+                    // It requires no SOL/USD conversion and is mathematically correct since
+                    // the position is already denominated in SOL.
+                    let ratio = (exit_price - entry_price_dec) / entry_price_dec;
+                    ratio * exited_amount
                 }
             }
         } else {
@@ -1287,8 +1278,9 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
             .await?;
 
             if let Some((exit_trade_uuid, exit_amount)) = exit_trade {
-                // Get the original entry amount from the BUY trade
-                let original_amount: f64 = sqlx::query_scalar(
+                // Get the original BUY signal amount (may differ from current position
+                // amount after partial exits — this is the pre-exit signal quantity)
+                let buy_signal_amount_sol: f64 = sqlx::query_scalar(
                     "SELECT amount_sol FROM trades WHERE trade_uuid = ?"
                 )
                 .bind(position_trade_uuid)
@@ -1306,7 +1298,7 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
                 .await?;
 
                 // Calculate the correct reverted entry amount
-                let reverted_amount = original_amount - confirmed_exit_amount;
+                let reverted_amount = buy_signal_amount_sol - confirmed_exit_amount;
 
                 // Revert realized PnL
                 let mut new_realized_pnl_sol = None;

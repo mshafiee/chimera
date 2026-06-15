@@ -335,11 +335,10 @@ async fn test_open_position_zero_entry_price_not_rejected() {
 // ─── Test 44 (plan) ── trade costs overwritten on retry ──────────────────────
 
 #[tokio::test]
-async fn test_trade_costs_overwritten_on_retry_not_doubled() {
-    // update_trade_costs() has no idempotency guard. Calling it twice for the same
-    // trade_uuid overwrites costs with the second call's values (not additive).
-    // This means retried cost updates use the latest value, but the first call's costs
-    // are silently discarded — net effect: costs from only the last call are recorded.
+async fn test_trade_costs_accumulate_on_retry() {
+    // update_trade_costs() uses COALESCE accumulation so that retried cost
+    // updates add to existing values rather than silently discarding the
+    // first call's costs. Net effect: costs from all calls are summed.
 
     let (pool, _tmp) = create_test_db().await;
     let uuid = "uuid-costs";
@@ -356,7 +355,7 @@ async fn test_trade_costs_overwritten_on_retry_not_doubled() {
     .await
     .unwrap();
 
-    // Second call: different values
+    // Second call: different values — accumulates on top of first
     update_trade_costs(
         &pool,
         uuid,
@@ -374,15 +373,15 @@ async fn test_trade_costs_overwritten_on_retry_not_doubled() {
             .await
             .unwrap();
 
-    // Second call wins: jito = 0.002, total = 0.002+0.001+0.0004 = 0.0034
+    // Accumulated: jito = 0.001 + 0.002 = 0.003, total = 0.0017 + 0.0034 = 0.0051
     assert!(
-        (jito - 0.002).abs() < 1e-9,
-        "Second update overwrites first: jito_tip_sol should be 0.002, got {}",
+        (jito - 0.003).abs() < 1e-9,
+        "Accumulated jito_tip_sol should be 0.003, got {}",
         jito
     );
     assert!(
-        (total - 0.0034).abs() < 1e-9,
-        "Total cost should reflect second call only: 0.0034, got {}",
+        (total - 0.0051).abs() < 1e-9,
+        "Accumulated total cost should be 0.0051, got {}",
         total
     );
 }
