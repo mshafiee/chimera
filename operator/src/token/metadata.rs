@@ -18,7 +18,7 @@ use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Transaction simulation result
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +58,10 @@ pub struct TokenMetadataFetcher {
     rpc_client: Arc<RpcClient>,
     /// Metadata cache (separate from safety result cache)
     metadata_cache: RwLock<HashMap<String, TokenMetadata>>,
+    /// FIX 12: Tracks when each token was last fetched for TTL-based cache eviction
+    last_fetched: RwLock<HashMap<String, Instant>>,
+    /// TTL for cached metadata entries (default: 1 hour)
+    cache_ttl: Duration,
     /// Pool enumerator for DEX liquidity
     pool_enumerator: Option<Arc<PoolEnumerator>>,
     /// Optional rate limiter for RPC calls (simulation calls use higher weight)
@@ -99,6 +103,8 @@ impl TokenMetadataFetcher {
         Self {
             rpc_client: rpc_client_arc.clone(),
             metadata_cache: RwLock::new(HashMap::new()),
+            last_fetched: RwLock::new(HashMap::new()),
+            cache_ttl: Duration::from_secs(3600),
             pool_enumerator: Some(Arc::new(PoolEnumerator::new(
                 rpc_client_arc,
                 100, // cache capacity
@@ -143,6 +149,8 @@ impl TokenMetadataFetcher {
         Self {
             rpc_client,
             metadata_cache: RwLock::new(HashMap::new()),
+            last_fetched: RwLock::new(HashMap::new()),
+            cache_ttl: Duration::from_secs(3600),
             pool_enumerator,
             rate_limiter,
             jupiter_api_url,
@@ -162,23 +170,37 @@ impl TokenMetadataFetcher {
         self
     }
 
-    /// Get token metadata, using cache if available
+    /// Get token metadata, using cache if available and not stale (FIX 12: TTL eviction)
     pub async fn get_metadata(&self, token_address: &str) -> AppResult<TokenMetadata> {
-        // Check cache first
+        // Check cache first; evict if TTL has expired
         {
             let cache = self.metadata_cache.read();
+            let last_fetched = self.last_fetched.read();
             if let Some(metadata) = cache.get(token_address) {
-                return Ok(metadata.clone());
+                let is_fresh = last_fetched
+                    .get(token_address)
+                    .map(|ts| ts.elapsed() < self.cache_ttl)
+                    .unwrap_or(false);
+                if is_fresh {
+                    return Ok(metadata.clone());
+                }
+                // Cache entry is stale — fall through to re-fetch
+                tracing::debug!(
+                    token = token_address,
+                    "Metadata cache entry stale, re-fetching"
+                );
             }
         }
 
         // Fetch from RPC
         let metadata = self.fetch_metadata_from_rpc(token_address).await?;
 
-        // Cache the result
+        // Update cache with fresh timestamp
         {
             let mut cache = self.metadata_cache.write();
+            let mut last_fetched = self.last_fetched.write();
             cache.insert(token_address.to_string(), metadata.clone());
+            last_fetched.insert(token_address.to_string(), Instant::now());
         }
 
         Ok(metadata)
@@ -269,13 +291,31 @@ impl TokenMetadataFetcher {
     /// Calculates FDV = price * total_supply
     /// Uses Jupiter Price API for price and on-chain supply data
     /// Returns Decimal for precision in financial calculations
+    ///
+    /// FIX 5: entire slow-check wrapped in a 10-second tokio timeout to prevent hangs
     pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<Decimal> {
+        tokio::time::timeout(Duration::from_secs(10), self.get_market_cap_fdv_inner(token_address))
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    token = token_address,
+                    "get_market_cap_fdv timed out after 10s"
+                );
+                Err(AppError::Http("slow check timeout".to_string()))
+            })
+    }
+
+    /// Inner implementation for get_market_cap_fdv (called under timeout)
+    async fn get_market_cap_fdv_inner(&self, token_address: &str) -> AppResult<Decimal> {
         // Get token metadata (includes supply and decimals)
         let metadata = self.get_metadata(token_address).await?;
 
-        // Get current price from Jupiter (v2 API)
+        // Get current price from Jupiter (v2 API) — use pre-built client (FIX 5)
         let price_url = format!("https://lite-api.jup.ag/price/v2?ids={}", token_address);
-        let response = reqwest::get(&price_url)
+        let response = self
+            .http_client
+            .get(&price_url)
+            .send()
             .await
             .map_err(|e| AppError::Http(format!("Jupiter price request failed: {}", e)))?;
 
@@ -717,10 +757,12 @@ impl TokenMetadataFetcher {
         Ok(simulation_result)
     }
 
-    /// Clear the metadata cache
+    /// Clear the metadata cache and TTL timestamps
     pub fn clear_cache(&self) {
         let mut cache = self.metadata_cache.write();
         cache.clear();
+        let mut last_fetched = self.last_fetched.write();
+        last_fetched.clear();
     }
 
     /// Get cache size

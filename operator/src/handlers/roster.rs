@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::db::DbPool;
 use crate::error::AppError;
+use crate::middleware::{AuthExtension, Role};
 use crate::roster;
 
 /// Roster merge request
@@ -44,17 +45,47 @@ pub struct RosterState {
 /// Trigger roster merge
 ///
 /// POST /api/v1/roster/merge
+/// Requires: operator+ role (when auth middleware is present; devnet skips auth)
 ///
 /// Merges wallets from roster_new.db into the main database.
-/// In devnet, this endpoint can be called without authentication for easier testing.
 pub async fn roster_merge(
     State(state): State<Arc<RosterState>>,
+    // FIX 10: Auth extension may be absent in devnet mode (no bearer_auth middleware)
+    auth_opt: Option<axum::Extension<AuthExtension>>,
     Json(request): Json<MergeRequest>,
 ) -> Result<(StatusCode, Json<MergeResponse>), AppError> {
-    let roster_path = request
-        .roster_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| state.default_roster_path.clone());
+    // FIX 10: Enforce role when the auth extension is present (production mode)
+    if let Some(axum::Extension(ref auth)) = auth_opt {
+        if !auth.0.role.has_permission(Role::Operator) {
+            return Err(AppError::Forbidden(
+                "Requires operator role or higher".to_string(),
+            ));
+        }
+    }
+    // If auth_opt is None, we are in devnet mode (no middleware layer applied).
+
+    // FIX 10: Validate roster_path — reject paths with ".." or absolute paths outside /data
+    let roster_path = if let Some(ref path_str) = request.roster_path {
+        // Reject path traversal and absolute paths
+        if path_str.contains("..") {
+            return Err(AppError::Validation(
+                "roster_path must not contain '..' (path traversal not allowed)".to_string(),
+            ));
+        }
+        if std::path::Path::new(path_str).is_absolute() {
+            return Err(AppError::Validation(
+                "roster_path must be a relative path within the data directory".to_string(),
+            ));
+        }
+        // Construct path relative to the default roster directory
+        state
+            .default_roster_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("data"))
+            .join(path_str)
+    } else {
+        state.default_roster_path.clone()
+    };
 
     tracing::info!(
         roster_path = %roster_path.display(),

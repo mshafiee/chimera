@@ -154,6 +154,9 @@ pub async fn webhook_handler(
         ));
     }
 
+    // FIX 9: Store fast_check liquidity result here to avoid calling fast_check twice
+    let mut fast_check_liquidity_usd: Option<rust_decimal::Decimal> = None;
+
     // Fast path token safety check (for BUY signals only)
     // EXIT signals don't need token validation, SELL signals already own the token
     if payload.strategy != Strategy::Exit {
@@ -207,6 +210,8 @@ pub async fn webhook_handler(
                             }),
                         ));
                     }
+                    // FIX 9: Capture liquidity_usd from this result for reuse below
+                    fast_check_liquidity_usd = result.liquidity_usd;
                 }
                 Err(e) => {
                     // Log error but allow through - slow path will do full check
@@ -394,21 +399,8 @@ pub async fn webhook_handler(
             .await;
         }
 
-        // Get liquidity from token safety check result (if available)
-        let liquidity_usd = if let Some(ref token_address) = signal.payload.token_address {
-            // Try to get liquidity from token parser cache or metadata
-            // For now, use a conservative estimate - will be checked in slow path
-            match state
-                .token_parser
-                .fast_check(token_address, signal.payload.strategy)
-                .await
-            {
-                Ok(result) => result.liquidity_usd.unwrap_or(rust_decimal::Decimal::ZERO),
-                Err(_) => rust_decimal::Decimal::ZERO,
-            }
-        } else {
-            rust_decimal::Decimal::ZERO
-        };
+        // FIX 9: Reuse liquidity_usd captured from the first fast_check above (no second call)
+        let liquidity_usd = fast_check_liquidity_usd.unwrap_or(rust_decimal::Decimal::ZERO);
 
         // Attach liquidity to the signal so the executor can compute a liquidity-aware
         // slippage estimate when Jupiter price impact data is unavailable.

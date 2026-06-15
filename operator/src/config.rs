@@ -1088,6 +1088,52 @@ impl AppConfig {
             ));
         }
 
+        // FIX 6: Validate kelly_fraction bounds
+        if self.position_sizing.kelly_fraction_shield <= Decimal::ZERO
+            || self.position_sizing.kelly_fraction_shield > Decimal::ONE
+        {
+            return Err(ConfigError::Message(format!(
+                "position_sizing.kelly_fraction_shield must be in range (0, 1], got {}",
+                self.position_sizing.kelly_fraction_shield
+            )));
+        }
+        if self.position_sizing.kelly_fraction_spear <= Decimal::ZERO
+            || self.position_sizing.kelly_fraction_spear > Decimal::ONE
+        {
+            return Err(ConfigError::Message(format!(
+                "position_sizing.kelly_fraction_spear must be in range (0, 1], got {}",
+                self.position_sizing.kelly_fraction_spear
+            )));
+        }
+
+        // FIX 7: Validate profit_management bounds
+        if self.profit_management.tiered_exit_percent <= Decimal::ZERO
+            || self.profit_management.tiered_exit_percent > Decimal::from(100)
+        {
+            return Err(ConfigError::Message(format!(
+                "profit_management.tiered_exit_percent must be in range (0, 100], got {}",
+                self.profit_management.tiered_exit_percent
+            )));
+        }
+        if self.profit_management.trailing_stop_distance <= Decimal::ZERO {
+            return Err(ConfigError::Message(format!(
+                "profit_management.trailing_stop_distance must be > 0, got {}",
+                self.profit_management.trailing_stop_distance
+            )));
+        }
+        if self.profit_management.trailing_stop_activation <= Decimal::ZERO {
+            return Err(ConfigError::Message(format!(
+                "profit_management.trailing_stop_activation must be > 0, got {}",
+                self.profit_management.trailing_stop_activation
+            )));
+        }
+        if self.profit_management.max_stop_loss_distance >= Decimal::ZERO {
+            return Err(ConfigError::Message(format!(
+                "profit_management.max_stop_loss_distance must be < 0 (negative percentage), got {}",
+                self.profit_management.max_stop_loss_distance
+            )));
+        }
+
         Ok(())
     }
 }

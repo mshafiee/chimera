@@ -22,10 +22,11 @@ pub use rpc_polling::RpcPollingState;
 pub use signal_aggregator::SignalAggregator;
 pub use wallet_performance::WalletPerformanceTracker;
 
+use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db::DbPool;
-use crate::engine::EngineHandle;
-use crate::token::TokenMetadataFetcher;
+use crate::engine::{EngineHandle, PortfolioHeat};
+use crate::token::{TokenMetadataFetcher, TokenParser};
 use std::sync::Arc;
 
 /// Main monitoring state
@@ -40,6 +41,12 @@ pub struct MonitoringState {
     pub pre_validator: Arc<PreValidator>,
     pub exit_detector: Arc<ExitDetector>,
     pub wallet_performance: Arc<WalletPerformanceTracker>,
+    /// Circuit breaker — checked before queuing any signal from Helius webhooks
+    pub circuit_breaker: Option<Arc<CircuitBreaker>>,
+    /// Token parser — fast safety check before queuing
+    pub token_parser: Option<Arc<TokenParser>>,
+    /// Portfolio heat — checked before queuing new BUY signals
+    pub portfolio_heat: Option<Arc<PortfolioHeat>>,
 }
 
 impl MonitoringState {
@@ -103,7 +110,28 @@ impl MonitoringState {
             pre_validator,
             exit_detector,
             wallet_performance,
+            circuit_breaker: None,
+            token_parser: None,
+            portfolio_heat: None,
         })
+    }
+
+    /// Attach a circuit breaker (required for production use)
+    pub fn with_circuit_breaker(mut self, cb: Arc<CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(cb);
+        self
+    }
+
+    /// Attach a token parser for fast safety checks
+    pub fn with_token_parser(mut self, tp: Arc<TokenParser>) -> Self {
+        self.token_parser = Some(tp);
+        self
+    }
+
+    /// Attach a portfolio heat manager
+    pub fn with_portfolio_heat(mut self, ph: Arc<PortfolioHeat>) -> Self {
+        self.portfolio_heat = Some(ph);
+        self
     }
 }
 

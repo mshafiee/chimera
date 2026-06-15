@@ -5,17 +5,25 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine};
 use chrono::{TimeDelta, Utc};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::error::AppError;
+
+/// Key type for the auth nonce store: (wallet_address, timestamp)
+type AuthNonceKey = (String, i64);
 
 /// Auth state for wallet authentication
 pub struct WalletAuthState {
     pub db: SqlitePool,
     /// JWT secret for signing tokens (in production, use proper secret management)
     pub jwt_secret: String,
+    /// FIX 11: Nonce store to detect replayed wallet auth requests
+    /// Maps (wallet_address, timestamp) → received_at for eviction
+    pub seen_auth_nonces: Arc<Mutex<HashMap<AuthNonceKey, i64>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,6 +100,21 @@ pub async fn wallet_auth(
     // Verify signature
     if !signature.verify(pubkey.as_ref(), req.message.as_bytes()) {
         return Err(AppError::Auth("Invalid signature verification".to_string()));
+    }
+
+    // FIX 11: Replay detection — check (wallet_address, timestamp) was not recently used
+    {
+        let nonce_key: AuthNonceKey = (req.wallet_address.clone(), timestamp);
+        let mut store = state.seen_auth_nonces.lock();
+        let now = Utc::now().timestamp();
+        // Evict entries older than 300 seconds (the max drift window)
+        store.retain(|_, seen_at| now - *seen_at < 300);
+        if store.contains_key(&nonce_key) {
+            return Err(AppError::Auth(
+                "Replay detected: this authentication request has already been used".to_string(),
+            ));
+        }
+        store.insert(nonce_key, now);
     }
 
     // Check if wallet is in admin_wallets table
