@@ -211,7 +211,7 @@ impl StopLossManager {
         // operators override this per-deployment if they deliberately want wider stops.
         // Applied after ALL adjustments (volatility × + consensus ×) so every combination
         // respects the envelope. widest_stop (-35) is numerically smaller; tightest_stop (-5) larger.
-        let widest_stop   = dec!(-35);
+        let widest_stop   = dec!(-35).min(self.config.max_stop_loss_distance);
         let tightest_stop = dec!(-5);
         stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
 

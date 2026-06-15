@@ -298,16 +298,12 @@ impl MomentumExit {
         let history = self.price_cache.price_history.read();
         let token_history = history.get(token_address)?;
 
-        // Sample 16 price points at 20-second intervals (~5 min total window).
-        // Solana memecoins can rug or peak within minutes; the previous 60-second
-        // interval (15-min window) was too slow to catch liquidity events in time.
+        // Sample up to 30 price points at 20-second intervals (~10 min total window)
+        // to allow the RSI EMA (Wilder's smoothing) to warm up properly.
         const RSI_SAMPLE_INTERVAL_SECS: i64 = 20;
         let mut prices = Vec::new();
         let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
 
-        // Sort by timestamp before sampling. In practice insertions are always
-        // chronological (set_price uses Utc::now() under a write lock), but this
-        // guard prevents future out-of-order inserts from producing a misleading RSI.
         let mut sorted_history: Vec<_> = token_history.iter().collect();
         sorted_history.sort_by_key(|(t, _)| *t);
 
@@ -318,12 +314,11 @@ impl MomentumExit {
                     last_sampled_time = Some(*time);
                 }
             } else {
-                // Always sample the most recent price
                 prices.push(price.to_f64().unwrap_or(0.0));
                 last_sampled_time = Some(*time);
             }
 
-            if prices.len() >= 16 {
+            if prices.len() >= 30 {
                 break;
             }
         }
@@ -333,8 +328,8 @@ impl MomentumExit {
             return None;
         }
 
-        let current_rsi = compute_rsi_from_prices(&prices[0..15])?;
-        let previous_rsi = compute_rsi_from_prices(&prices[1..16])?;
+        let current_rsi = compute_rsi_from_prices(&prices[0..prices.len()-1])?;
+        let previous_rsi = compute_rsi_from_prices(&prices[1..prices.len()])?;
 
         Some((current_rsi, previous_rsi))
     }
@@ -361,23 +356,41 @@ fn compute_rsi_from_prices(prices: &[f64]) -> Option<f64> {
     if prices.len() < 15 {
         return None;
     }
-    let mut gains = Vec::new();
-    let mut losses = Vec::new();
-    for i in 1..prices.len() {
-        let change = prices[i - 1] - prices[i]; // Reversed order
-        if change > 0.0 {
-            gains.push(change);
-            losses.push(0.0);
+
+    // prices are newest at index 0, oldest at index len-1
+    // We need to calculate changes going FORWARD in time (oldest to newest)
+    let mut changes = Vec::with_capacity(prices.len() - 1);
+    for i in (1..prices.len()).rev() {
+        let change = prices[i - 1] - prices[i];
+        changes.push(change);
+    }
+
+    // Calculate initial SMA using the first 14 periods (the oldest 14 changes)
+    let mut avg_gain = 0.0;
+    let mut avg_loss = 0.0;
+    for change in &changes[0..14] {
+        if *change > 0.0 {
+            avg_gain += change;
         } else {
-            gains.push(0.0);
-            losses.push(change.abs());
+            avg_loss += change.abs();
         }
     }
-    if gains.is_empty() || losses.is_empty() {
-        return None;
+    avg_gain /= 14.0;
+    avg_loss /= 14.0;
+
+    // Apply Wilder's Smoothing for the remaining periods
+    for change in &changes[14..] {
+        let mut gain = 0.0;
+        let mut loss = 0.0;
+        if *change > 0.0 {
+            gain = *change;
+        } else {
+            loss = change.abs();
+        }
+        avg_gain = (avg_gain * 13.0 + gain) / 14.0;
+        avg_loss = (avg_loss * 13.0 + loss) / 14.0;
     }
-    let avg_gain: f64 = gains.iter().sum::<f64>() / gains.len() as f64;
-    let avg_loss: f64 = losses.iter().sum::<f64>() / losses.len() as f64;
+
     if avg_loss == 0.0 {
         return Some(100.0);
     }

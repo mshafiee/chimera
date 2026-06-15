@@ -184,7 +184,7 @@ impl PortfolioHeat {
         let new_heat_percent = if !capital.is_zero() {
             (new_exposure / capital) * Decimal::from(100)
         } else {
-            Decimal::ZERO
+            Decimal::from(100)
         };
 
         Ok(new_heat_percent <= self.max_heat_percent)

@@ -186,7 +186,11 @@ impl KellySizer {
         Ok(KellyResult {
             full_kelly,
             conservative_kelly,
-            recommended_size_percent: conservative_kelly * Decimal::from(100),
+            recommended_size_percent: if avg_loss > Decimal::ZERO {
+                (conservative_kelly / avg_loss) * Decimal::from(100)
+            } else {
+                conservative_kelly * Decimal::from(100)
+            },
             win_rate,
             avg_win,
             avg_loss,
@@ -211,7 +215,10 @@ impl KellySizer {
         lookback_days: i64,
     ) -> Result<Decimal, String> {
         let kelly = self.calculate_kelly(wallet_address, strategy, lookback_days).await?;
-        let size_sol = total_capital_sol * kelly.conservative_kelly;
+        let mut size_sol = total_capital_sol * kelly.conservative_kelly;
+        if kelly.avg_loss > Decimal::ZERO {
+            size_sol /= kelly.avg_loss;
+        }
         Ok(size_sol)
     }
 }
