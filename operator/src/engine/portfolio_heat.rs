@@ -89,10 +89,16 @@ impl PortfolioHeat {
         // new trades to open before the exit confirmed, creating up to 2× intended exposure.
         let total_exposure_f64: f64 = sqlx::query_scalar::<_, f64>(
             r#"
-            SELECT COALESCE(SUM(entry_amount_sol), 0.0)
-            FROM positions
-            WHERE state = 'ACTIVE'
-               OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
+            SELECT COALESCE(SUM(amount), 0.0) FROM (
+                SELECT entry_amount_sol as amount
+                FROM positions
+                WHERE state = 'ACTIVE'
+                   OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
+                UNION ALL
+                SELECT amount_sol as amount
+                FROM trades
+                WHERE status IN ('PENDING', 'QUEUED', 'EXECUTING', 'RETRY')
+            )
             "#,
         )
         .fetch_one(&self.db)
@@ -197,11 +203,16 @@ impl PortfolioHeat {
         // the strategy limit appeared to have headroom while total heat was still at cap.
         let rows = sqlx::query_as::<_, (String, f64)>(
             r#"
-            SELECT strategy, COALESCE(SUM(entry_amount_sol), 0.0) as heat
-            FROM positions
-            WHERE state = 'ACTIVE'
-               OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
-            GROUP BY strategy
+            SELECT strategy, SUM(amount) as heat FROM (
+                SELECT strategy, entry_amount_sol as amount
+                FROM positions
+                WHERE state = 'ACTIVE'
+                   OR (state = 'EXITING' AND updated_at >= datetime('now', '-1800 seconds'))
+                UNION ALL
+                SELECT strategy, amount_sol as amount
+                FROM trades
+                WHERE status IN ('PENDING', 'QUEUED', 'EXECUTING', 'RETRY')
+            ) GROUP BY strategy
             "#,
         )
         .fetch_all(&self.db)

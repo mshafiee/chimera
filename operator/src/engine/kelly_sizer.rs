@@ -173,8 +173,28 @@ impl KellySizer {
         //   0.5–1 trades/day  → 1.00× (neutral)
         //   1–2  trades/day   → 1.15× (good statistical depth)
         //   ≥ 2  trades/day   → 1.25× (high frequency, tighter confidence interval)
-        let trades_per_day = if lookback_days > 0 {
-            valid_trades_count as f64 / lookback_days as f64
+        let true_timespan_days = if let (Some(newest), Some(oldest)) = (trades.first(), trades.last()) {
+            let parse_time = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .map(|d| d.with_timezone(&chrono::Utc))
+                    .ok()
+                    .or_else(|| {
+                        let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
+                        Some(chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc))
+                    })
+            };
+            if let (Some(newest_time), Some(oldest_time)) = (parse_time(&newest.created_at), parse_time(&oldest.created_at)) {
+                let span = (newest_time - oldest_time).num_seconds() as f64 / 86400.0;
+                span.min(lookback_days as f64).max(1.0)
+            } else {
+                lookback_days as f64
+            }
+        } else {
+            lookback_days as f64
+        };
+
+        let trades_per_day = if true_timespan_days > 0.0 {
+            valid_trades_count as f64 / true_timespan_days
         } else {
             0.0
         };

@@ -258,12 +258,8 @@ impl MomentumExit {
             return None;
         }
 
-        // prices[0..len-1]: most-recent window (current RSI)
-        // prices[1..len]:   slightly-older window (previous RSI for trend direction)
-        let current_rsi = compute_rsi_from_prices(&prices[0..prices.len()-1])?;
-        let previous_rsi = compute_rsi_from_prices(&prices[1..prices.len()])?;
-
-        Some((current_rsi, previous_rsi))
+        // Compute current and previous RSI in a single pass to ensure Wilder's smoothing continuity
+        compute_rsi_from_prices(&prices)
     }
 
     /// Check if position should exit based on momentum
@@ -284,8 +280,8 @@ impl MomentumExit {
 }
 
 /// Helper function to calculate RSI from a slice of prices
-fn compute_rsi_from_prices(prices: &[f64]) -> Option<f64> {
-    if prices.len() < 15 {
+fn compute_rsi_from_prices(prices: &[f64]) -> Option<(f64, f64)> {
+    if prices.len() < 16 {
         return None;
     }
 
@@ -310,8 +306,21 @@ fn compute_rsi_from_prices(prices: &[f64]) -> Option<f64> {
     avg_gain /= 14.0;
     avg_loss /= 14.0;
 
+    let calc_rsi = |gain: f64, loss: f64| -> f64 {
+        if loss == 0.0 {
+            return 100.0;
+        }
+        let rs = gain / loss;
+        100.0 - (100.0 / (1.0 + rs))
+    };
+
+    let mut previous_rsi = calc_rsi(avg_gain, avg_loss);
+    let mut current_rsi = previous_rsi;
+
     // Apply Wilder's Smoothing for the remaining periods
     for change in &changes[14..] {
+        previous_rsi = current_rsi;
+
         let mut gain = 0.0;
         let mut loss = 0.0;
         if *change > 0.0 {
@@ -321,13 +330,11 @@ fn compute_rsi_from_prices(prices: &[f64]) -> Option<f64> {
         }
         avg_gain = (avg_gain * 13.0 + gain) / 14.0;
         avg_loss = (avg_loss * 13.0 + loss) / 14.0;
+        
+        current_rsi = calc_rsi(avg_gain, avg_loss);
     }
 
-    if avg_loss == 0.0 {
-        return Some(100.0);
-    }
-    let rs = avg_gain / avg_loss;
-    Some(100.0 - (100.0 / (1.0 + rs)))
+    Some((current_rsi, previous_rsi))
 }
 
 #[cfg(test)]
