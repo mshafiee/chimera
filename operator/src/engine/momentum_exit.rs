@@ -8,10 +8,7 @@
 use crate::db::DbPool;
 use crate::engine::volume_cache::VolumeCache;
 use crate::price_cache::PriceCache;
-use parking_lot::RwLock;
 use rust_decimal::prelude::*;
-use rust_decimal_macros::dec;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -33,8 +30,6 @@ pub struct MomentumExit {
     /// Grace period matching stop_loss.rs wick_protection_secs — price-drop check is suppressed
     /// during this window to avoid exiting on the entry-candle wick.
     wick_protection_secs: u64,
-    /// High-water mark per trade UUID — tracks peak observed price for trailing-stop logic.
-    high_water_marks: Arc<RwLock<HashMap<String, Decimal>>>,
 }
 
 
@@ -46,7 +41,6 @@ impl MomentumExit {
             price_cache,
             volume_cache: None,
             wick_protection_secs,
-            high_water_marks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -62,32 +56,9 @@ impl MomentumExit {
             price_cache,
             volume_cache: Some(volume_cache),
             wick_protection_secs,
-            high_water_marks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Remove HWM state when a position is closed to prevent unbounded map growth.
-    pub fn remove_position(&self, trade_uuid: &str) {
-        self.high_water_marks.write().remove(trade_uuid);
-    }
-
-    /// Sweep stale HWM entries for positions that closed via paths other than
-    /// `ProfitTargetManager::remove_position` (stop-loss, engine close, recovery).
-    /// Returns the number of entries removed.
-    pub async fn sweep_stale_entries(&self) -> usize {
-        let active = match crate::db::get_active_trade_uuids(&self.db).await {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "HWM sweep: DB query failed, skipping");
-                return 0;
-            }
-        };
-        let active_set: std::collections::HashSet<String> = active.into_iter().collect();
-        let mut map = self.high_water_marks.write();
-        let before = map.len();
-        map.retain(|uuid, _| active_set.contains(uuid));
-        before - map.len()
-    }
 
     /// Check for negative momentum and return action
     ///
@@ -125,49 +96,6 @@ impl MomentumExit {
             }
         };
 
-        // Seed HWM from DB peak_price before acquiring the write lock so the async
-        // lookup runs outside the lock. This restores trailing-stop state across restarts
-        // without relying solely on an in-memory price cache that is cold after startup.
-        let db_peak: Option<Decimal> = if !self.high_water_marks.read().contains_key(trade_uuid) {
-            crate::db::get_position_peak_price(&self.db, trade_uuid)
-                .await
-                .ok()
-                .flatten()
-                .and_then(Decimal::from_f64)
-        } else {
-            None
-        };
-
-        // Update high-water mark. The lock is held only for the map mutation; drop it
-        // before the checks below to keep the hot path as short as possible.
-        let hwm_snap = {
-            let mut hwm_map = self.high_water_marks.write();
-            let hwm = hwm_map.entry(trade_uuid.to_string()).or_insert_with(|| {
-                // Priority: DB peak_price > price cache reconstruction > entry_price fallback
-                if let Some(db_hwm) = db_peak {
-                    if db_hwm > entry_price { return db_hwm; }
-                }
-                // If not in memory (e.g., after restart), attempt to reconstruct from price history.
-                // This is a best-effort recovery; if history is also empty, it falls back to entry_price.
-                let ph_guard = self.price_cache.price_history_read();
-                if let Some(history) = ph_guard.get(token_address) {
-                    let entry_dt: chrono::DateTime<chrono::Utc> = entry_time.into();
-                    let mut peak = entry_price;
-                    for (time, price) in history.iter() {
-                        if *time >= entry_dt && *price > peak {
-                            peak = *price;
-                        }
-                    }
-                    peak
-                } else {
-                    entry_price
-                }
-            });
-            if current_price > *hwm {
-                *hwm = current_price;
-            }
-            *hwm
-        };
 
         // Guard: corrupt position data — align with stop_loss.rs behavior
         if entry_price.is_zero() {
@@ -249,27 +177,6 @@ impl MomentumExit {
             );
         }
 
-        // Check 2: Trailing stop from HWM.
-        // Only activates once the position is ≥50% in profit (HWM ≥ 1.5× entry) so normal
-        // early-stage volatility doesn't trigger it. Once active, exits if price falls 25%
-        // from the peak — protecting unrealized gains that the entry-price check cannot.
-        if !entry_price.is_zero() {
-            let hwm_gain_pct = (hwm_snap - entry_price) / entry_price * dec!(100);
-            if hwm_gain_pct >= dec!(50) {
-                let drop_from_hwm = (hwm_snap - current_price) / hwm_snap * dec!(100);
-                if drop_from_hwm >= dec!(25) {
-                    let drop_f64 = drop_from_hwm.to_f64().unwrap_or(0.0);
-                    let hwm_f64 = hwm_snap.to_f64().unwrap_or(0.0);
-                    tracing::warn!(
-                        trade_uuid = %trade_uuid,
-                        drop_from_hwm_pct = drop_f64,
-                        high_water_mark = hwm_f64,
-                        "Trailing stop hit: dropped from HWM"
-                    );
-                    return MomentumExitAction::Exit;
-                }
-            }
-        }
 
         // Check 3: Volume drop (>65% from 24h average).
         // Gated to positions ≥5 minutes old: volume naturally dips 40–60% outside US trading

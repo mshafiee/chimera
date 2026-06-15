@@ -158,8 +158,8 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     /// Create a new circuit breaker
-    pub fn new(config: CircuitBreakerConfig, db: DbPool) -> Self {
-        Self::new_with_ws(config, db, None)
+    pub fn new(config: CircuitBreakerConfig, db: DbPool, initial_capital_sol: Decimal) -> Self {
+        Self::new_with_ws(config, db, None, initial_capital_sol)
     }
 
     /// Create a new circuit breaker with WebSocket support
@@ -167,6 +167,7 @@ impl CircuitBreaker {
         config: CircuitBreakerConfig,
         db: DbPool,
         ws_state: Option<Arc<crate::handlers::WsState>>,
+        initial_capital_sol: Decimal,
     ) -> Self {
         Self {
             config,
@@ -179,7 +180,7 @@ impl CircuitBreaker {
             })),
             check_interval: Duration::seconds(30),
             ws_state,
-            total_capital_sol: Arc::new(RwLock::new(Decimal::from(10))), // default to 10 SOL
+            total_capital_sol: Arc::new(RwLock::new(initial_capital_sol)),
             price_cache: None,
         }
     }
@@ -231,11 +232,7 @@ impl CircuitBreaker {
         Ok(())
     }
 
-    /// Set total capital in SOL (builder method, used at construction time)
-    pub fn with_total_capital(self, total_capital_sol: Decimal) -> Self {
-        *self.total_capital_sol.write() = total_capital_sol;
-        self
-    }
+
 
     /// Update total capital in SOL (called from the live balance refresh loop)
     pub fn update_capital(&self, new_capital: Decimal) {
@@ -340,11 +337,11 @@ impl CircuitBreaker {
             let realized_pnl_sol = Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
             let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = Decimal::from_str("-5.0").expect("literal");
+            let loss_threshold = -self.config.portfolio_stop_loss_percent;
             if daily_loss_percent < loss_threshold {
                 self.trip(TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: 5.0,
+                    threshold: self.config.portfolio_stop_loss_percent.to_f64().unwrap_or(0.0),
                 })
                 .await?;
                 return Ok(());
@@ -577,11 +574,11 @@ impl CircuitBreaker {
             let realized_pnl_sol = Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
             let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = Decimal::from_str("-5.0").expect("literal");
+            let loss_threshold = -self.config.portfolio_stop_loss_percent;
             if daily_loss_percent < loss_threshold {
                 let trip_reason = TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: 5.0,
+                    threshold: self.config.portfolio_stop_loss_percent.to_f64().unwrap_or(0.0),
                 };
                 // FIX [R-M2]: Log re-trip event before calling trip().
                 tracing::warn!(

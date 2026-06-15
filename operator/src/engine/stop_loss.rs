@@ -23,11 +23,6 @@ pub struct StopLossManager {
     /// Optional in-memory consensus cache (avoids per-position DB query every 5 s).
     /// Set via `set_signal_aggregator` after construction.
     signal_aggregator: Arc<RwLock<Option<Arc<SignalAggregator>>>>,
-    /// Cache for daily *realized* PnL only: (timestamp_secs, realized_pnl_sol).
-    /// Unrealized PnL is NOT cached — it must be queried fresh every tick so that
-    /// a flash crash (positions going deeply negative within seconds) triggers the
-    /// portfolio stop without waiting for the cache TTL to expire.
-    realized_pnl_cache: RwLock<Option<(i64, Decimal)>>,
 }
 
 /// Stop-loss action
@@ -37,8 +32,6 @@ pub enum StopLossAction {
     None,
     /// Exit position (stop-loss hit)
     Exit,
-    /// Pause all trading (portfolio-level stop)
-    PauseAll,
 }
 
 impl StopLossManager {
@@ -52,7 +45,6 @@ impl StopLossManager {
             config,
             price_cache,
             signal_aggregator: Arc::new(RwLock::new(None)),
-            realized_pnl_cache: RwLock::new(None),
         }
     }
 
@@ -264,101 +256,5 @@ impl StopLossManager {
         StopLossAction::None
     }
 
-    /// Check portfolio-level stop (pause all trading if daily loss >5% of total capital).
-    ///
-    /// Must be called from the position monitoring loop in main.rs on every tick alongside
-    /// `check_stop_loss` — it is the only path that returns `StopLossAction::PauseAll`.
-    ///
-    /// `total_capital_sol` must be the configured total trading capital, not active exposure.
-    /// Using active exposure as the denominator shrinks as positions close, causing premature
-    /// triggers during drawdowns — use the stable config value instead.
-    pub async fn check_portfolio_stop(&self, total_capital_sol: Decimal) -> StopLossAction {
-        let now_secs = chrono::Utc::now().timestamp();
 
-        // Realized PnL: cache for 60 s. The trades-table aggregate scan is expensive
-        // (full 24 h filter); realized PnL changes only when trades close, so a
-        // 60-second cache window is safe. Cache hit avoids the expensive query.
-        let cached = {
-            let cache = self.realized_pnl_cache.read().await;
-            cache.filter(|(ts, _)| now_secs - ts < 60).map(|(_, pnl)| pnl)
-        };
-        let realized_pnl: Decimal = match cached {
-            Some(pnl) => {
-                tracing::debug!("Using cached realized PnL");
-                pnl
-            }
-            None => {
-                // Use net_pnl_sol (after fees/tips/slippage) for true round-trip cost.
-                match sqlx::query_scalar::<_, f64>(
-                    r#"
-                    SELECT COALESCE(SUM(net_pnl_sol), 0.0)
-                    FROM trades
-                    WHERE side = 'SELL'
-                      AND status = 'CLOSED'
-                      AND net_pnl_sol IS NOT NULL
-                      AND updated_at >= datetime('now', '-24 hours')
-                    "#,
-                )
-                .fetch_one(&self.db)
-                .await
-                {
-                    Ok(pnl) => {
-                        let pnl_dec = Decimal::from_f64_retain(pnl).unwrap_or(Decimal::ZERO);
-                        *self.realized_pnl_cache.write().await = Some((now_secs, pnl_dec));
-                        pnl_dec
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to query daily realized PnL — pausing all trading (fail-safe)");
-                        return StopLossAction::PauseAll;
-                    }
-                }
-            }
-        };
-
-        // Unrealized PnL: always queried fresh — NOT cached.
-        // This is a lightweight SUM over a small set of active positions, and it must
-        // be current so that a flash crash (positions going deeply negative within
-        // seconds) triggers the portfolio stop without waiting for a cache TTL.
-        let unrealized_pnl: Decimal = match sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
-            FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING')
-              AND unrealized_pnl_sol IS NOT NULL
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await
-        {
-            Ok(pnl) => Decimal::from_f64_retain(pnl).unwrap_or(Decimal::ZERO),
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to query unrealized PnL — pausing all trading (fail-safe)");
-                return StopLossAction::PauseAll;
-            }
-        };
-
-        let daily_pnl = realized_pnl + unrealized_pnl;
-        self.evaluate_portfolio_stop(daily_pnl, total_capital_sol)
-    }
-
-    fn evaluate_portfolio_stop(&self, daily_pnl: Decimal, total_capital_sol: Decimal) -> StopLossAction {
-        // Only check if total capital is meaningful (>0.1 SOL)
-        let min_capital = Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
-        if total_capital_sol > min_capital {
-            let daily_loss_percent = (daily_pnl / total_capital_sol) * Decimal::from(100);
-
-            let loss_threshold = Decimal::from_f64_retain(-5.0).unwrap_or(Decimal::ZERO);
-            if daily_loss_percent < loss_threshold {
-                tracing::warn!(
-                    daily_loss_percent = %daily_loss_percent,
-                    daily_pnl = %daily_pnl,
-                    total_capital_sol = %total_capital_sol,
-                    "Portfolio-level stop triggered: 24h loss exceeds 5% of capital"
-                );
-                return StopLossAction::PauseAll;
-            }
-        }
-
-        StopLossAction::None
-    }
 }

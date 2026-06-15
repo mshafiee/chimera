@@ -579,85 +579,8 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     );
 }
 
-// ─── Test 7 ──────────────────────────────────────────────────────────────────
 
-#[tokio::test]
-async fn test_portfolio_stop_db_error_returns_none() {
-    // When the daily PnL or exposure query fails, check_portfolio_stop() returns PauseAll
-    // (fail-safe). Trading is halted rather than continuing blind — capital preservation
-    // takes precedence over uptime. The operator must recover the DB to resume trading.
 
-    let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
-
-    // Drop the trades table to force a query error on the net_pnl_sol query
-    sqlx::query("DROP TABLE IF EXISTS trades")
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop(Decimal::from_str("10.0").unwrap()).await;
-
-    assert_eq!(
-        action,
-        StopLossAction::PauseAll,
-        "DB error must return PauseAll (fail-safe): halt trading rather than continue blind"
-    );
-}
-
-// ─── Test 8 ──────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_portfolio_stop_below_min_exposure_skips_check() {
-    // Total ACTIVE exposure = 0.09 SOL (below 0.1 SOL floor).
-    // Daily realized PnL = -1.0 SOL (enormous relative loss).
-    // Portfolio stop check is skipped because exposure < 0.1 threshold.
-    // Documents that tiny-exposure accounts can bypass the 5% daily loss guard.
-
-    let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
-
-    // Active position: 0.09 SOL (below floor)
-    insert_active_position(&pool, "uuid-exp-small", "wallet_s", "token_s", 0.09).await;
-    // Closed position with -1.0 SOL realized loss today
-    insert_closed_position(&pool, "uuid-pnl-bad", "wallet_s", "token_s2", 1.0, -1.0).await;
-
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop(Decimal::from_str("0.09").unwrap()).await;
-
-    assert_eq!(
-        action,
-        StopLossAction::None,
-        "Exposure below 0.1 SOL floor must skip portfolio stop (even with huge loss)"
-    );
-}
-
-// ─── Test 9 ──────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn test_portfolio_stop_triggers_at_5pct_daily_loss() {
-    // Total ACTIVE exposure = 10 SOL.
-    // Today's realized PnL = -0.51 SOL → -5.1% of 10 SOL exposure.
-    // 5% threshold is exceeded → PauseAll.
-
-    let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
-
-    // Active position providing 10 SOL exposure
-    insert_active_position(&pool, "uuid-exp-10", "wallet_p", "token_p1", 10.0).await;
-    // Closed position today with -0.51 SOL loss
-    insert_closed_position(&pool, "uuid-loss-51", "wallet_p", "token_p2", 1.0, -0.51).await;
-
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop(Decimal::from_str("10.0").unwrap()).await;
-
-    assert_eq!(
-        action,
-        StopLossAction::PauseAll,
-        "5.1% daily loss with 10 SOL exposure must trigger PauseAll"
-    );
-}
 
 // ─── Test 10 ─────────────────────────────────────────────────────────────────
 
@@ -749,24 +672,3 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     );
 }
 
-// ─── Test 12 — portfolio stop not triggered at 4.9% ─────────────────────────
-
-#[tokio::test]
-async fn test_portfolio_stop_not_triggered_below_threshold() {
-    // Total exposure = 10 SOL. Daily PnL = -0.49 SOL → -4.9% → below 5% threshold.
-
-    let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
-
-    insert_active_position(&pool, "uuid-exp-ok", "wallet_ok", "token_ok1", 10.0).await;
-    insert_closed_position(&pool, "uuid-ok-pnl", "wallet_ok", "token_ok2", 1.0, -0.49).await;
-
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
-    let action = mgr.check_portfolio_stop(Decimal::from_str("10.0").unwrap()).await;
-
-    assert_eq!(
-        action,
-        StopLossAction::None,
-        "4.9% daily loss should not trigger portfolio stop (threshold is 5%)"
-    );
-}

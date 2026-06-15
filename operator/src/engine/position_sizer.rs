@@ -97,7 +97,7 @@ impl PositionSizer {
                         crate::models::Strategy::Exit => self.config.kelly_fraction_shield,
                     };
                     full_kelly_cap = Some(factors.total_capital_sol * result.full_kelly);
-                    let kelly_pct = result.full_kelly * kelly_fraction;
+                    let kelly_pct = result.full_kelly * kelly_fraction * result.velocity_multiplier;
                     let kelly_base = factors.total_capital_sol * kelly_pct;
                     tracing::debug!(
                         wallet = %factors.wallet_address,

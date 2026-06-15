@@ -44,7 +44,7 @@ async fn create_test_circuit_breaker(config: CircuitBreakerConfig) -> (CircuitBr
     .await
     .unwrap();
 
-    let cb = CircuitBreaker::new(config, pool);
+    let cb = CircuitBreaker::new(config, pool, Decimal::from(100));
     (cb, temp_dir)
 }
 
@@ -54,6 +54,7 @@ async fn test_max_loss_24h_threshold() {
         max_loss_24h_usd: Decimal::from_str("500.0").unwrap(),
         max_consecutive_losses: 10,
         max_drawdown_percent: Decimal::from_str("20.0").unwrap(),
+        portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
     };
 
@@ -77,6 +78,7 @@ async fn test_max_consecutive_losses_threshold() {
         max_loss_24h_usd: Decimal::from_str("500.0").unwrap(),
         max_consecutive_losses: 5,
         max_drawdown_percent: Decimal::from_str("20.0").unwrap(),
+        portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
     };
 
@@ -100,6 +102,7 @@ async fn test_max_drawdown_percent_threshold() {
         max_loss_24h_usd: Decimal::from_str("500.0").unwrap(),
         max_consecutive_losses: 5,
         max_drawdown_percent: Decimal::from_str("15.0").unwrap(),
+        portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
     };
 

@@ -414,13 +414,21 @@ impl ProfitTargetManager {
         ProfitTargetAction::None
     }
 
-    /// Sweep HWM entries for positions that closed outside the FullExit path.
+    /// Sweep stale entries for positions that closed outside the FullExit path.
     /// Called periodically from the position monitoring loop (~every 5 minutes).
     pub async fn sweep_hwm_stale_entries(&self) -> usize {
-        match &self.momentum_exit {
-            Some(m) => m.sweep_stale_entries().await,
-            None => 0,
-        }
+        let active = match crate::db::get_active_trade_uuids(&self.db).await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "HWM sweep: DB query failed, skipping");
+                return 0;
+            }
+        };
+        let active_set: std::collections::HashSet<String> = active.into_iter().collect();
+        let mut map = self.active_targets.write().await;
+        let before = map.len();
+        map.retain(|uuid, _| active_set.contains(uuid));
+        before - map.len()
     }
 
     /// Remove position from tracking and delete persisted state
@@ -428,9 +436,6 @@ impl ProfitTargetManager {
         let mut targets = self.active_targets.write().await;
         targets.remove(trade_uuid);
         drop(targets);
-        if let Some(ref momentum) = self.momentum_exit {
-            momentum.remove_position(trade_uuid);
-        }
         if let Err(e) = db::delete_exit_target(&self.db, trade_uuid).await {
             tracing::warn!(trade_uuid, error = %e, "Failed to delete exit target state from DB");
         }

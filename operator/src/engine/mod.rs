@@ -133,6 +133,15 @@ impl EngineHandle {
             executor.read().await.refresh_rpc_health().await;
         }
     }
+
+    /// Get the active RPC client from the executor (async)
+    pub async fn active_rpc_client(&self) -> Option<Arc<solana_client::nonblocking::rpc_client::RpcClient>> {
+        if let Some(ref executor) = self.executor {
+            Some(executor.read().await.active_rpc_client_pub())
+        } else {
+            None
+        }
+    }
 }
 
 /// Main trading engine
@@ -160,6 +169,8 @@ pub struct Engine {
     token_parser: Option<Arc<TokenParser>>,
     /// Price cache for real-time pricing
     price_cache: Option<Arc<PriceCache>>,
+    /// Portfolio heat manager (shared from main.rs to use live wallet balance)
+    portfolio_heat: Option<Arc<PortfolioHeat>>,
 }
 
 impl Engine {
@@ -237,6 +248,7 @@ impl Engine {
             tip_manager,
             price_cache,
             None,
+            None,
         )
     }
 
@@ -251,6 +263,7 @@ impl Engine {
         tip_manager: Option<Arc<TipManager>>,
         price_cache: Option<Arc<PriceCache>>,
         token_parser: Option<Arc<TokenParser>>,
+        portfolio_heat: Option<Arc<PortfolioHeat>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
             config,
@@ -261,6 +274,7 @@ impl Engine {
             tip_manager,
             price_cache,
             token_parser,
+            portfolio_heat,
         )
     }
 
@@ -273,7 +287,7 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, None, None, None,
+            config, db, notifier, metrics, ws_state, None, None, None, None,
         )
     }
 
@@ -288,6 +302,7 @@ impl Engine {
         tip_manager: Option<Arc<TipManager>>,
         price_cache: Option<Arc<PriceCache>>,
         token_parser: Option<Arc<TokenParser>>,
+        portfolio_heat: Option<Arc<PortfolioHeat>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
         let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
@@ -329,6 +344,7 @@ impl Engine {
             ws_state,
             token_parser,
             price_cache,
+            portfolio_heat,
         };
 
         (engine, handle)
@@ -606,7 +622,11 @@ impl Engine {
 
         // Re-check portfolio heat and strategy allocation before execution (for BUY signals only)
         if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
-            let portfolio_heat = PortfolioHeat::new(self.db.clone(), self.config.position_sizing.total_capital_sol);
+            let portfolio_heat = if let Some(ref ph) = self.portfolio_heat {
+                Arc::clone(ph)
+            } else {
+                Arc::new(PortfolioHeat::new(self.db.clone(), self.config.position_sizing.total_capital_sol))
+            };
 
             // 1. Portfolio Heat Check
             match portfolio_heat.can_open_position(signal.payload.amount_sol).await {

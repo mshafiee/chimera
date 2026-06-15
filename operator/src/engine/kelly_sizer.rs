@@ -19,9 +19,9 @@ pub struct KellySizer {
 /// Kelly sizing result
 #[derive(Debug, Clone)]
 pub struct KellyResult {
-    /// Full Kelly percentage (0.0-1.0, using Decimal for precision)
+    /// Full Kelly percentage (can exceed 1.0 for highly profitable strategies, using Decimal for precision)
     pub full_kelly: Decimal,
-    /// Conservative Kelly percentage (25% of full, using Decimal for precision)
+    /// Conservative Kelly percentage (25% of full, max 1.0, using Decimal for precision)
     pub conservative_kelly: Decimal,
     /// Recommended position size as percentage of capital (using Decimal for precision)
     pub recommended_size_percent: Decimal,
@@ -33,6 +33,8 @@ pub struct KellyResult {
     pub avg_loss: Decimal,
     /// Number of closed trades used to compute this result
     pub trade_count: usize,
+    /// Velocity multiplier based on trade frequency
+    pub velocity_multiplier: Decimal,
 }
 
 impl KellySizer {
@@ -157,7 +159,8 @@ impl KellySizer {
         let full_kelly = if !avg_win.is_zero() && !avg_loss.is_zero() {
             let numerator = (win_rate * avg_win) - (loss_rate * avg_loss);
             let denominator = avg_win * avg_loss;
-            (numerator / denominator).max(Decimal::ZERO).min(Decimal::ONE) // Clamp to 0-1
+            (numerator / denominator).max(Decimal::ZERO) // DO NOT clamp to 1.0 here; fractional returns often yield >1.0
+
         } else {
             Decimal::ZERO
         };
@@ -189,7 +192,8 @@ impl KellySizer {
         // Hard-cap at full_kelly: the velocity bonus increases the effective Kelly
         // fraction but can never push past the mathematically optimal bound.
         let conservative_kelly = (full_kelly * self.conservative_multiplier * velocity_multiplier)
-            .min(full_kelly);
+            .min(full_kelly)
+            .min(Decimal::ONE); // Clamp to 100% of capital for the recommendation
 
         Ok(KellyResult {
             full_kelly,
@@ -201,6 +205,7 @@ impl KellySizer {
             avg_win,
             avg_loss,
             trade_count: trades.len(),
+            velocity_multiplier,
         })
     }
 

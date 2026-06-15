@@ -159,7 +159,7 @@ mod tests {
             create_test_config()
         };
 
-        let mut executor_standard = Executor::new(config_no_jito, db.clone());
+        let executor_standard = Executor::new(config_no_jito, db.clone());
 
         // If Jito is disabled, executor should be in Standard mode
         // Create Spear signal
@@ -236,7 +236,7 @@ mod tests {
         .await
         .unwrap();
 
-        let breaker = CircuitBreaker::new(config.circuit_breakers.clone(), db.clone());
+        let breaker = CircuitBreaker::new(config.circuit_breakers.clone(), db.clone(), config.position_sizing.total_capital_sol);
 
         // Starts in Active (un-tripped) state
         assert!(breaker.is_trading_allowed(), "Circuit breaker must start un-tripped");
@@ -623,7 +623,7 @@ mod tests {
         let (db, _temp) = create_test_db().await;
         let config = create_test_config();
 
-        let mut executor = Executor::new(config.clone(), db);
+        let executor = Executor::new(config.clone(), db);
 
         // Initially should be in Jito mode
         assert_eq!(executor.rpc_mode(), RpcMode::Jito);

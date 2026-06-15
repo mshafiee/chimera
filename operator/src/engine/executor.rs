@@ -643,16 +643,24 @@ impl Executor {
 
     /// Check health of primary RPC
     async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
+        self.check_health_impl(&self.config.rpc.primary_url, false).await
+    }
+
+    /// Check health of active RPC
+    async fn check_active_health(&self) -> Result<RpcHealth, ExecutorError> {
+        // active_rpc_url() returns a &str from a lock, we must drop it before await
+        let active_url = self.active_rpc_url().to_string();
+        self.check_health_impl(&active_url, true).await
+    }
+
+    /// Internal health check implementation
+    async fn check_health_impl(&self, url: &str, update_cache: bool) -> Result<RpcHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
-        // Always check the PRIMARY URL, not the currently active one.
-        // When in Standard (fallback) mode we are trying to determine if we can
-        // recover to primary — checking the fallback's health is meaningless here.
-        let active_url = &self.config.rpc.primary_url;
         let health_check = async {
             let response = self
                 .http_client
-                .post(active_url)
+                .post(url)
                 .json(&serde_json::json!({
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -669,13 +677,11 @@ impl Executor {
                 )));
             }
 
-            // Parse response to check if healthy
             let body: serde_json::Value = response
                 .json()
                 .await
                 .map_err(|e| ExecutorError::Rpc(format!("Failed to parse RPC response: {}", e)))?;
 
-            // Check for error in response
             if body.get("error").is_some() {
                 return Err(ExecutorError::Rpc(format!(
                     "RPC returned error: {:?}",
@@ -686,18 +692,13 @@ impl Executor {
             Ok(())
         };
 
-        // Apply timeout
         let timeout_duration = Duration::from_millis(self.config.rpc.timeout_ms);
         match timeout(timeout_duration, health_check).await {
             Ok(Ok(())) => {
-                // getHealth passed. When functional_health_check is enabled, also probe
-                // getLatestBlockhash — providers that unconditionally return "ok" to
-                // getHealth will still fail or return an error body here.
                 if self.config.rpc.functional_health_check {
-                    let probe_url = &self.config.rpc.primary_url;
                     let probe_result = self
                         .http_client
-                        .post(probe_url)
+                        .post(url)
                         .json(&serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": 2,
@@ -718,7 +719,9 @@ impl Executor {
                                     last_check: Utc::now(),
                                     latency_ms: None,
                                 };
-                                *self.latest_rpc_health.write().await = Some(health);
+                                if update_cache {
+                                    *self.latest_rpc_health.write().await = Some(health);
+                                }
                                 let err = ExecutorError::Rpc(
                                     "RPC functional probe returned error body despite getHealth ok".to_string(),
                                 );
@@ -732,7 +735,9 @@ impl Executor {
                                 last_check: Utc::now(),
                                 latency_ms: None,
                             };
-                            *self.latest_rpc_health.write().await = Some(health);
+                            if update_cache {
+                                *self.latest_rpc_health.write().await = Some(health);
+                            }
                             let err = ExecutorError::Rpc(format!(
                                 "RPC functional probe returned HTTP {}", resp.status()
                             ));
@@ -745,7 +750,9 @@ impl Executor {
                                 last_check: Utc::now(),
                                 latency_ms: None,
                             };
-                            *self.latest_rpc_health.write().await = Some(health);
+                            if update_cache {
+                                *self.latest_rpc_health.write().await = Some(health);
+                            }
                             let err = ExecutorError::Rpc(format!(
                                 "RPC functional probe network error: {}", e
                             ));
@@ -762,31 +769,34 @@ impl Executor {
                     latency_ms: Some(latency),
                 };
 
-                // Cache the health status
-                *self.latest_rpc_health.write().await = Some(health.clone());
+                if update_cache {
+                    *self.latest_rpc_health.write().await = Some(health.clone());
+                }
                 tracing::debug!(latency_ms = latency, "RPC health check passed");
 
                 Ok(health)
             }
             Ok(Err(e)) => {
-                // Cache unhealthy status
                 let health = RpcHealth {
                     healthy: false,
                     last_check: Utc::now(),
                     latency_ms: None,
                 };
-                *self.latest_rpc_health.write().await = Some(health);
+                if update_cache {
+                    *self.latest_rpc_health.write().await = Some(health);
+                }
                 tracing::warn!(error = %e, "RPC health check failed");
                 Err(e)
             }
             Err(_) => {
-                // Timeout - cache unhealthy status
                 let health = RpcHealth {
                     healthy: false,
                     last_check: Utc::now(),
                     latency_ms: None,
                 };
-                *self.latest_rpc_health.write().await = Some(health);
+                if update_cache {
+                    *self.latest_rpc_health.write().await = Some(health);
+                }
                 tracing::warn!("RPC health check timed out");
                 Err(ExecutorError::Timeout)
             }
@@ -800,7 +810,7 @@ impl Executor {
 
     /// Check RPC health and update cache (for periodic health checks)
     pub async fn refresh_rpc_health(&self) {
-        let _ = self.check_primary_health().await;
+        let _ = self.check_active_health().await;
     }
 
     /// Execute via Jito bundle
@@ -1770,6 +1780,11 @@ impl Executor {
             }
         }
         self.rpc_client.clone()
+    }
+
+    /// Expose active RPC client publicly
+    pub fn active_rpc_client_pub(&self) -> Arc<RpcClient> {
+        self.active_rpc_client()
     }
 
     /// Get the active RPC URL based on current mode

@@ -33,8 +33,10 @@ const RECOVERY_CHECK_INTERVAL_SECS: u64 = 30;
 pub struct RecoveryManager {
     /// Database pool
     db: DbPool,
-    /// RPC client for on-chain checks
-    rpc_client: Arc<RpcClient>,
+    /// Engine handle for dynamic RPC failover
+    engine_handle: Option<crate::engine::EngineHandle>,
+    /// Fallback static RPC client (for tests or legacy constructors)
+    static_rpc_client: Option<Arc<RpcClient>>,
     /// Stuck threshold in seconds
     stuck_threshold_secs: i64,
     /// Whether recovery is enabled
@@ -59,14 +61,15 @@ impl RecoveryManager {
         let rpc_client = Arc::new(RpcClient::new(rpc_url));
         Self {
             db,
-            rpc_client,
+            engine_handle: None,
+            static_rpc_client: Some(rpc_client),
             stuck_threshold_secs: DEFAULT_STUCK_THRESHOLD_SECS,
             enabled: true,
             ws_state,
         }
     }
 
-    /// Create with a pre-constructed RPC client shared with the executor.
+    /// Create with a pre-constructed EngineHandle to share the executor's client.
     ///
     /// Preferred over `new_with_ws` — sharing the executor's client means the
     /// recovery manager automatically benefits from any failover logic applied
@@ -74,12 +77,13 @@ impl RecoveryManager {
     /// connection that has no fallback during an outage.
     pub fn new_with_rpc(
         db: DbPool,
-        rpc_client: Arc<RpcClient>,
+        engine_handle: crate::engine::EngineHandle,
         ws_state: Option<Arc<WsState>>,
     ) -> Self {
         Self {
             db,
-            rpc_client,
+            engine_handle: Some(engine_handle),
+            static_rpc_client: None,
             stuck_threshold_secs: DEFAULT_STUCK_THRESHOLD_SECS,
             enabled: true,
             ws_state,
@@ -96,11 +100,25 @@ impl RecoveryManager {
         let rpc_client = Arc::new(RpcClient::new(rpc_url));
         Self {
             db,
-            rpc_client,
+            engine_handle: None,
+            static_rpc_client: Some(rpc_client),
             stuck_threshold_secs,
             enabled: true,
             ws_state,
         }
+    }
+
+    /// Get the active RPC client from the engine handle, or fallback to static client
+    async fn get_active_rpc(&self) -> AppResult<Arc<RpcClient>> {
+        if let Some(ref handle) = self.engine_handle {
+            if let Some(client) = handle.active_rpc_client().await {
+                return Ok(client);
+            }
+        }
+        if let Some(ref client) = self.static_rpc_client {
+            return Ok(client.clone());
+        }
+        Err(AppError::Internal("No RPC client available".to_string()))
     }
 
     /// Start the recovery background task
@@ -308,8 +326,8 @@ impl RecoveryManager {
         use solana_account_decoder::UiAccountData;
         use solana_client::rpc_request::TokenAccountsFilter;
 
-        let accounts = self
-            .rpc_client
+        let rpc = self.get_active_rpc().await?;
+        let accounts = rpc
             .get_token_accounts_by_owner(&wallet_pubkey, TokenAccountsFilter::Mint(token_mint))
             .await
             .map_err(|e| AppError::Rpc(format!("Failed to fetch token accounts for balance check: {}", e)))?;
@@ -430,8 +448,8 @@ impl RecoveryManager {
             ..Default::default()
         };
 
-        match self
-            .rpc_client
+        let rpc = self.get_active_rpc().await?;
+        match rpc
             .get_transaction_with_config(&signature, config)
             .await
         {

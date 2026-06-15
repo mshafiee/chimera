@@ -106,8 +106,8 @@ async fn main() -> anyhow::Result<()> {
         config.circuit_breakers.clone(),
         db_pool.clone(),
         Some(ws_state.clone()),
+        config.position_sizing.total_capital_sol,
     )
-    .with_total_capital(config.position_sizing.total_capital_sol)
     .with_price_cache(price_cache.clone()));
 
     // FIX [R-C1]: Restore persisted circuit breaker state from DB before accepting connections.
@@ -225,6 +225,15 @@ async fn main() -> anyhow::Result<()> {
     ));
     tracing::info!("Token parser initialized");
 
+    let portfolio_heat = Arc::new(PortfolioHeat::new(
+        db_pool.clone(),
+        config.position_sizing.total_capital_sol,
+    ));
+    tracing::info!(
+        total_capital_sol = ?config.position_sizing.total_capital_sol,
+        "Portfolio heat manager initialized"
+    );
+
     // Create engine
     let (engine, _engine_handle) =
         engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
@@ -236,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
             Some(tip_manager.clone()),
             Some(price_cache.clone()),
             Some(token_parser.clone()),
+            Some(portfolio_heat.clone()),
         );
     tracing::info!("Engine created");
 
@@ -245,18 +255,14 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("Engine task spawned");
 
-    // Shared RPC client for the recovery manager — reuses the same connection as
+    // Shared engine handle for the recovery manager — reuses the same connection as
     // the executor so that any failover logic applied to that client is also
     // available to recovery operations instead of having a separate single-point
     // connection with no fallback.
-    let shared_rpc_client = Arc::new(
-        solana_client::nonblocking::rpc_client::RpcClient::new(config.rpc.primary_url.clone()),
-    );
-
     // Spawn recovery manager
     let recovery_manager = Arc::new(RecoveryManager::new_with_rpc(
         db_pool.clone(),
-        shared_rpc_client.clone(),
+        _engine_handle.clone(),
         Some(ws_state.clone()),
     ));
     let recovery_clone = recovery_manager.clone();
@@ -683,7 +689,6 @@ async fn main() -> anyhow::Result<()> {
         let monitor_pt = profit_target_mgr;
         let monitor_engine = _engine_handle.clone();
         let monitor_token = cancel_token.clone();
-        let monitor_total_capital = config.position_sizing.total_capital_sol;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -696,12 +701,6 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     _ = interval.tick() => {
-                        // Check portfolio-level stop once per cycle before individual positions
-                        if let StopLossAction::PauseAll = monitor_sl.check_portfolio_stop(monitor_total_capital).await {
-                            tracing::warn!("Portfolio stop triggered — skipping position checks this cycle");
-                            continue;
-                        }
-
                         let positions = match db::get_active_positions_with_entry(&monitor_db).await {
                             Ok(p) => { db_fail_count = 0; p }
                             Err(e) => {
@@ -1039,14 +1038,6 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
     .ok();
 
-    let portfolio_heat = Arc::new(PortfolioHeat::new(
-        db_pool.clone(),
-        config.position_sizing.total_capital_sol,
-    ));
-    tracing::info!(
-        total_capital_sol = ?config.position_sizing.total_capital_sol,
-        "Portfolio heat manager initialized"
-    );
 
     // Refresh total_capital_sol from the live wallet balance every 60 seconds so that
     // compounding gains and drawdown recovery propagate into heat capacity without restart.

@@ -234,6 +234,9 @@ pub struct CircuitBreakerConfig {
     /// Maximum drawdown percentage before emergency exit
     #[serde(default = "default_max_drawdown")]
     pub max_drawdown_percent: Decimal,
+    /// Maximum portfolio loss in 24h (percent) before halting
+    #[serde(default = "default_portfolio_stop_loss_percent")]
+    pub portfolio_stop_loss_percent: Decimal,
     /// Cooldown period in minutes after circuit trips
     #[serde(default = "default_cooldown")]
     pub cooldown_minutes: u32,
@@ -249,6 +252,10 @@ fn default_max_consecutive_losses() -> u32 {
 
 fn default_max_drawdown() -> Decimal {
     dec!(15.0)
+}
+
+fn default_portfolio_stop_loss_percent() -> Decimal {
+    dec!(5.0)
 }
 
 fn default_cooldown() -> u32 {
