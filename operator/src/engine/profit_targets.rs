@@ -310,11 +310,15 @@ impl ProfitTargetManager {
 
         // Ratchet trailing stop price on new high — use peak_price, not current_price,
         // so a stale price_cache read can't set the stop tighter than the actual peak.
+        // Ensure the stop price is monotonically increasing (never drops due to a sudden
+        // spike in volatility widening the trailing distance).
         if state.trailing_stop_active && is_new_peak {
             let trailing_distance_ratio = trailing_distance / Decimal::from(100);
-            state.trailing_stop_price =
-                state.peak_price * (Decimal::ONE - trailing_distance_ratio);
-            state_changed = true;
+            let new_trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
+            if new_trailing_stop_price > state.trailing_stop_price {
+                state.trailing_stop_price = new_trailing_stop_price;
+                state_changed = true;
+            }
         }
 
         // Snapshot state for DB persistence (before releasing the lock)

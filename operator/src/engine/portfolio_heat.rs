@@ -90,7 +90,12 @@ impl PortfolioHeat {
     /// The 1.5× buffer avoids false triggers on normal market fluctuations.
     pub async fn is_critically_overexposed(&self) -> Result<bool, String> {
         let heat = self.calculate_heat().await?;
-        let capital = *self.total_capital_sol.read();
+        let capital_live = *self.total_capital_sol.read();
+        let capital = if !capital_live.is_zero() {
+            capital_live
+        } else {
+            *self.last_known_capital.read()
+        };
         let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
         Ok(heat.total_exposure_sol > max_heat_sol * dec!(1.5))
     }
