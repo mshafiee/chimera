@@ -302,7 +302,8 @@ impl PortfolioHeat {
         } else {
             *self.last_known_capital.read()
         };
-        let allocated_sol = capital * (allocation_pct / Decimal::from(100));
+        let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
+        let allocated_sol = max_heat_sol * (allocation_pct / Decimal::from(100));
         let current_heat = match strategy {
             crate::models::Strategy::Shield => shield_heat,
             crate::models::Strategy::Spear => spear_heat,
