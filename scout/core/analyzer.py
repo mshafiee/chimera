@@ -17,7 +17,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from .wqs import WalletMetrics
 from .models import HistoricalTrade, TradeAction, LiquidityData, TraderArchetype
@@ -885,6 +885,7 @@ class WalletAnalyzer:
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
             is_unproven_from_parse=is_unproven_from_parse,
+            parse_rate=parse_rate,
         )
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
@@ -1204,6 +1205,33 @@ class WalletAnalyzer:
         Check if a token is safe (not a honeypot, rug, or freeze risk).
         
         CRITICAL: Honeypot Filter.
+        Results are cached with a TTL to avoid redundant RPC calls
+        for frequently-traded tokens across multiple wallets.
+        """
+        if not token_address:
+            return False
+
+        # Check in-memory cache first (TTL-based)
+        _cache_key = token_address
+        if hasattr(self, '_token_safety_cache') and _cache_key in self._token_safety_cache:
+            cached_result, cached_time = self._token_safety_cache[_cache_key]
+            cache_ttl = 300  # 5-minute cache
+            if time.time() - cached_time < cache_ttl:
+                return cached_result
+
+        # Initialize cache if not present
+        if not hasattr(self, '_token_safety_cache'):
+            self._token_safety_cache: Dict[str, Tuple[bool, float]] = {}
+
+        result = await self._is_token_safe_uncached(token_address)
+
+        # Store in cache
+        self._token_safety_cache[_cache_key] = (result, time.time())
+        return result
+
+    async def _is_token_safe_uncached(self, token_address: str) -> bool:
+        """
+        Uncached token safety check (honeypot, rug, freeze risk).
         """
         if not token_address:
             return False
@@ -1515,7 +1543,7 @@ class WalletAnalyzer:
         self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -1655,6 +1683,55 @@ class WalletAnalyzer:
         else:
             profit_factor = decimal_to_float(safe_decimal_divide(gross_profit, gross_loss))
 
+        # Bag-holder penalty on profit_factor (Phase 2.4)
+        # Reconstruct positions from all trades and penalize PF for bags held > 30 days.
+        # Mirrors compute_wallet_trade_stats logic to ensure bag-aware PF reaches WQS.
+        import time as _time_module
+        bag_positions: dict = {}
+        for t in sorted_trades:
+            if t.action == TradeAction.BUY:
+                pos = bag_positions.setdefault(t.token_address, {"qty": Decimal('0'), "cost": Decimal('0')})
+                qty = t.token_amount
+                if qty is None or qty == Decimal('0'):
+                    if t.price_at_trade and t.price_at_trade > Decimal('0'):
+                        qty = safe_decimal_divide(t.amount_sol, t.price_at_trade)
+                    else:
+                        qty = Decimal('0')
+                if qty > Decimal('0'):
+                    pos["qty"] += qty
+                    pos["cost"] += t.amount_sol
+            elif t.action == TradeAction.SELL:
+                pos = bag_positions.get(t.token_address)
+                if pos and pos["qty"] > Decimal('0'):
+                    qty = t.token_amount
+                    if qty is None or qty == Decimal('0'):
+                        if t.price_at_trade and t.price_at_trade > Decimal('0'):
+                            qty = safe_decimal_divide(t.amount_sol, t.price_at_trade)
+                        else:
+                            qty = Decimal('0')
+                    if qty > Decimal('0') and pos["qty"] > Decimal('0'):
+                        fraction = min(Decimal('1.0'), safe_decimal_divide(qty, pos["qty"]))
+                        pos["qty"] -= qty
+                        pos["cost"] -= (pos["cost"] * fraction)
+
+        _now_ts = Decimal(str(int(_time_module.time())))
+        _max_bag_age = Decimal('2592000')
+        bag_count = 0
+        for token, pos in bag_positions.items():
+            if pos["qty"] > Decimal('0'):
+                last_buy = None
+                for t in sorted_trades:
+                    if t.token_address == token and t.action == TradeAction.BUY:
+                        last_buy = t.timestamp
+                if last_buy:
+                    bag_age = _now_ts - Decimal(str(int(last_buy.timestamp())))
+                    if bag_age > _max_bag_age:
+                        bag_count += 1
+
+        if bag_count > 0:
+            bag_penalty = min(Decimal('0.5'), Decimal(bag_count) * Decimal('0.1'))
+            profit_factor = float(Decimal(str(profit_factor)) * (Decimal('1.0') - bag_penalty))
+
         # 2. Calculate Average Entry Delay (Sniper Check)
         avg_entry_delay = None
         entry_delays = []
@@ -1785,8 +1862,18 @@ class WalletAnalyzer:
                     and t.sol_amount > 0
                 ]
                 if sell_trades:
-                    # per-trade return fraction = pnl / proceeds_received
-                    trade_returns = [float(t.pnl_sol / t.sol_amount) for t in sell_trades]
+                    # per-trade return fraction = pnl / cost_basis
+                    # Infer cost basis: cost_basis = sol_amount - pnl_sol (since pnl = proceeds - cost)
+                    # Fall back to sol_amount if pnl is None or cost_basis would be zero
+                    def _infer_return(t) -> float:
+                        if t.pnl_sol is None:
+                            return 0.0
+                        cost_basis = t.sol_amount - t.pnl_sol
+                        if cost_basis <= 0:
+                            return 0.0
+                        return float(t.pnl_sol / cost_basis)
+
+                    trade_returns = [_infer_return(t) for t in sell_trades]
                     avg_return = sum(trade_returns) / len(trade_returns)
                     downside_returns = [r for r in trade_returns if r < 0]
                     if downside_returns:
@@ -1828,6 +1915,7 @@ class WalletAnalyzer:
             is_fresh_wallet=is_fresh_wallet,
             is_unproven=(profit_factor is None or is_unproven_from_parse),
             sortino_ratio=sortino_ratio,
+            parse_rate=parse_rate,
             total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
             total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
             dex_diversity_score=dex_diversity_score,

@@ -21,7 +21,8 @@ merges this into the main database via SIGHUP or API call.
 import argparse
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 import asyncio
@@ -491,7 +492,7 @@ async def analyze_wallets(
     # only the top-WQS wallet per cluster to prevent correlated risk.
     if os.getenv("SCOUT_CLUSTER_DEDUP", "true").lower() == "true":
         try:
-            records = await cluster_and_dedup(records)
+            records = await cluster_and_dedup(records, helius_client=analyzer.helius_client)
         except Exception as e:
             print(f"[Scout] Clustering dedup skipped ({e})")
     
@@ -675,6 +676,7 @@ async def main_async():
                 priority_fee_sol_per_trade=args.priority_fee_sol,
                 jito_tip_sol_per_trade=args.jito_tip_sol,
                 enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",  # Default True for promotion safety
+                simulate_at_size_sol=Decimal(os.getenv("SCOUT_COPIER_SIZE_SOL", "0")) if os.getenv("SCOUT_COPIER_SIZE_SOL") else None,
             )
 
             # Fetch dynamic fees from Helius if available (overrides static values)

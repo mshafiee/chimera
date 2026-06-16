@@ -288,6 +288,12 @@ class BacktestConfig:
     # and cost estimation instead of the original trader's size. Keeps the
     # original size for PnL ratio computation. Defaults to None (use original).
     simulate_at_size_sol: Optional[Decimal] = None
+
+    # Time-decay weighting: when enabled, recent trades are weighted more heavily
+    # in the simulated PnL aggregation, reflecting that recent performance is
+    # more predictive of future results.
+    backtest_time_decay_enabled: bool = False
+    backtest_time_decay_half_life_days: int = 14
     
     def __post_init__(self):
         """Coerce all Decimal fields so tests can pass plain floats/ints."""

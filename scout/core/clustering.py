@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 async def cluster_and_dedup(
     records: List,
     top_n: int = 50,
+    helius_client = None,
 ) -> List:
     """
     Group wallets by shared funder address and return only the top-WQS
@@ -28,6 +29,7 @@ async def cluster_and_dedup(
     Args:
         records: List of WalletRecord objects with status="ACTIVE"
         top_n: Maximum number of active records to return after dedup
+        helius_client: Optional existing HeliusClient instance (reuses session)
 
     Returns:
         Deduplicated list of WalletRecord objects (ACTIVE only, reduced)
@@ -44,13 +46,15 @@ async def cluster_and_dedup(
 
     # Fetch funders for all active wallets in batch
     funder_map: Dict[str, Optional[str]] = {}
-    # Use existing funder cache or Helius client if available
+    # Use existing HeliusClient if provided, otherwise create one
     try:
         from .helius_client import HeliusClient
-        api_key = os.getenv("HELIUS_API_KEY")
-        if api_key:
-            helius = HeliusClient(api_key=api_key)
-            coros = [helius.get_wallet_funder(r.address) for r in active]
+        if helius_client is None:
+            api_key = os.getenv("HELIUS_API_KEY")
+            if api_key:
+                helius_client = HeliusClient(api_key=api_key)
+        if helius_client:
+            coros = [helius_client.get_wallet_funder(r.address) for r in active]
             results = await asyncio.gather(*coros, return_exceptions=True)
             for record, funder in zip(active, results):
                 if isinstance(funder, Exception) or funder is None:

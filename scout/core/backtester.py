@@ -153,6 +153,8 @@ class BacktestSimulator:
         # Round-trip position tracking: {token_address: {"qty": Decimal, "cost_basis_sol": Decimal}}
         positions: Dict[str, Dict[str, Decimal]] = initial_positions
         
+        from datetime import datetime as _dt, timezone as _tz
+
         # Track results
         simulated_trades: List[SimulatedTrade] = []
         rejected_details: List[str] = []
@@ -165,6 +167,12 @@ class BacktestSimulator:
         total_fees = Decimal('0')
         rejected_count = 0
         simulated_sell_count = 0
+
+        # Time-decay weighting for PnL aggregation
+        _use_decay = getattr(self.config, 'backtest_time_decay_enabled', False)
+        _decay_half_life = getattr(self.config, 'backtest_time_decay_half_life_days', 14)
+        _now = _dt.now(_tz.utc)
+        _total_weight = Decimal('0')
         
         for trade in sorted_trades:
             sim_trade, rejection_reason, is_low_confidence = self._simulate_trade_roundtrip(
@@ -192,6 +200,15 @@ class BacktestSimulator:
                 # They still count toward total_trades for the rejection-rate denominator.
                 pass
             else:
+                # Calculate time-decay weight for this trade
+                weight = Decimal('1.0')
+                if _use_decay and trade.timestamp.tzinfo is None:
+                    trade_age_seconds = (_now.replace(tzinfo=None) - trade.timestamp).total_seconds()
+                    age_days = max(0.0, trade_age_seconds / 86400.0)
+                    weight_float = 2.0 ** (-age_days / _decay_half_life)
+                    weight = float_to_decimal(weight_float)
+                    _total_weight += weight
+
                 # Track original realized PnL for accepted trades
                 if trade.action == TradeAction.SELL and trade.pnl_sol is not None:
                     total_original_realized_pnl += float_to_decimal(trade.pnl_sol)
@@ -202,7 +219,7 @@ class BacktestSimulator:
 
                 # Track simulated realized PnL (only SELL trades)
                 if trade.action == TradeAction.SELL and sim_trade.simulated_pnl_sol is not None:
-                    total_simulated_realized_pnl += sim_trade.simulated_pnl_sol
+                    total_simulated_realized_pnl += sim_trade.simulated_pnl_sol * weight
                     simulated_sell_count += 1
         
         # Calculate rejection rate
@@ -236,7 +253,36 @@ class BacktestSimulator:
         # Inflated PnL from mooned tokens or filtered rugged tokens is not a valid signal.
         if low_confidence_trades_count > 0:
             low_confidence_ratio = low_confidence_trades_count / len(sorted_trades)
-            if low_confidence_ratio > 0.30:  # More than 30% of trades
+            threshold = 0.15 if strategy.upper() == "SHIELD" else 0.10
+
+            # Per-trade-type check: if ALL non-rejected SELL trades are low-confidence,
+            # fail immediately — the wallet's profitability is entirely unverifiable.
+            non_rejected_sells = [
+                st for st in simulated_trades
+                if not st.rejected
+                and st.original_trade.action == TradeAction.SELL
+                and st.simulated_pnl_sol is not None
+            ]
+            all_sells_low_conf = (
+                len(non_rejected_sells) > 0
+                and sum(
+                    1 for st in non_rejected_sells
+                    if st.original_trade.liquidity_at_trade_usd is None
+                ) == len(non_rejected_sells)
+            )
+
+            if all_sells_low_conf:
+                logger.warning(
+                    f"⚠️  SURVIVORSHIP BIAS RISK: All SELL trades ({len(non_rejected_sells)}) "
+                    f"used fallback liquidity. Failing wallet."
+                )
+                passed = False
+                bias_msg = "All SELL trades used low-confidence liquidity (survivorship bias)"
+                if failure_reason:
+                    failure_reason += f"; {bias_msg}"
+                else:
+                    failure_reason = bias_msg
+            elif low_confidence_ratio > threshold:
                 logger.warning(
                     f"⚠️  SURVIVORSHIP BIAS RISK: {low_confidence_trades_count}/{len(sorted_trades)} "
                     f"({low_confidence_ratio*100:.0f}%) trades used fallback liquidity data. "
@@ -298,10 +344,21 @@ class BacktestSimulator:
             )
             
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
-        holdout_n = int(max(1, round(len(sorted_trades) * holdout_fraction)))
         
-        train_trades = sorted_trades[:-holdout_n]
-        test_trades = sorted_trades[-holdout_n:]
+        # Date-based split: use chronological holdout rather than count-based.
+        # Count-based splits can put trades from the same week into both train and test,
+        # defeating the purpose of walk-forward validation.
+        total_span = (sorted_trades[-1].timestamp - sorted_trades[0].timestamp).total_seconds()
+        if total_span >= 7 * 86400:  # 7+ days of data → use date-based split
+            from datetime import timedelta
+            holdout_cutoff = sorted_trades[-1].timestamp - timedelta(seconds=total_span * holdout_fraction)
+            train_trades = [t for t in sorted_trades if t.timestamp < holdout_cutoff]
+            test_trades = [t for t in sorted_trades if t.timestamp >= holdout_cutoff]
+        else:
+            # Fall back to count-based for short date ranges
+            holdout_n = int(max(1, round(len(sorted_trades) * holdout_fraction)))
+            train_trades = sorted_trades[:-holdout_n]
+            test_trades = sorted_trades[-holdout_n:]
         
         if len(test_trades) < min_test_trades:
             return SimulatedResult(
@@ -571,7 +628,6 @@ class BacktestSimulator:
         
         if trade.action == TradeAction.BUY:
             # BUY: apply costs, increase position
-            net_sol_spent = trade_size_sol + total_cost
             token_qty = trade.token_amount if trade.token_amount is not None else Decimal('0')
             
             # If token_amount not available, estimate from price
@@ -580,7 +636,7 @@ class BacktestSimulator:
             
             if token_qty > Decimal('0'):
                 position["qty"] += token_qty
-                position["cost_basis_sol"] += net_sol_spent
+                position["cost_basis_sol"] += trade_size_sol
                 # No realized PnL on BUY
                 simulated_pnl = Decimal('0')
             else:

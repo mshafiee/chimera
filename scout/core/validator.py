@@ -14,7 +14,7 @@ A wallet is promoted to ACTIVE only if ALL checks pass.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Optional
 import logging
 
@@ -221,8 +221,20 @@ class PrePromotionValidator:
         wf_notes = None
         if self.criteria.walk_forward_enabled and trades:
             sorted_trades = sorted(trades, key=lambda t: t.timestamp)
-            holdout_n = int(max(1, round(len(sorted_trades) * self.criteria.walk_forward_holdout_fraction)))
-            wf_trades = sorted_trades[-holdout_n:]
+            
+            # Date-based split: use chronological holdout rather than count-based.
+            # Count-based splits can put trades from the same week into both train and test,
+            # defeating the purpose of walk-forward validation.
+            total_span = (sorted_trades[-1].timestamp - sorted_trades[0].timestamp).total_seconds()
+            if total_span >= 7 * 86400:  # 7+ days of data → use date-based split
+                holdout_cutoff = sorted_trades[-1].timestamp - timedelta(seconds=total_span * self.criteria.walk_forward_holdout_fraction)
+                wf_trades = [t for t in sorted_trades if t.timestamp >= holdout_cutoff]
+                in_sample_trades = [t for t in sorted_trades if t.timestamp < holdout_cutoff]
+            else:
+                # Fall back to count-based for short date ranges
+                holdout_n = int(max(1, round(len(sorted_trades) * self.criteria.walk_forward_holdout_fraction)))
+                wf_trades = sorted_trades[-holdout_n:]
+                in_sample_trades = sorted_trades[:-holdout_n]
             wf_closes = [t for t in wf_trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None]
             if len(wf_closes) < self.criteria.walk_forward_min_trades:
                 # If holdout too small, fall back to full set WITH penalty
@@ -256,7 +268,7 @@ class PrePromotionValidator:
                     )
             else:
                 is_walk_forward = True
-                in_sample_trades = sorted_trades[:-holdout_n]
+                # in_sample_trades already set above (date-based or count-based)
                 wf_notes = f"Walk-forward holdout: {len(wf_trades)}/{len(trades)} trades"
 
         # Step 3b: Validate in-sample period first (prevents curve-fitting on OOS)

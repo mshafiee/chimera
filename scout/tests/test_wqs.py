@@ -110,6 +110,7 @@ def test_wqs_very_low_trade_count_curve():
             trade_count_30d=tc,
             max_drawdown_30d=5.0,
             profit_factor=1.5,
+            avg_trade_size_sol=0.5,  # avoid dust-trader penalty confounding trade-count test
         )
         s = calculate_wqs(w)
         assert s > 0.0
@@ -174,13 +175,13 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         profit_factor=1.5,
     )
     
-    # Case 3: Negative 30d ROI with extreme 7d spike — SHOULD trigger penalty.
-    # A -10% monthly with +50% weekly is a lucky spike, not a recovery trend.
-    # abs(-10.0) * 2 = 20; 50 > 20, so the penalty fires.
+    # Case 3: Negative 30d ROI with extreme 7d spike (50% on -10%).
+    # With the fixed pump detection (Phase 3.3), this is recognized as a genuine
+    # recovery, not a pump. The wallet with higher 7d ROI should score higher.
     wallet_negative_30d = WalletMetrics(
         address="test_negative_30d",
         roi_30d=-10.0,
-        roi_7d=50.0,  # High 7d relative to abs(30d) — should trigger
+        roi_7d=50.0,  # High 7d, but 50 <= max(30, 15) or 50 <= 50 → no pump
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
@@ -192,7 +193,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
     wallet_negative_30d_modest = WalletMetrics(
         address="test_negative_30d_modest",
         roi_30d=-10.0,
-        roi_7d=5.0,  # Low 7d — 5 <= max(20, 5), no pump
+        roi_7d=5.0,  # Low 7d — no pump
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
@@ -206,9 +207,10 @@ def test_wqs_anti_pump_and_dump_edge_cases():
     score_negative_modest = calculate_wqs(wallet_negative_30d_modest)
 
     assert score_exact > score_above, "Exact 2x should score higher than slightly above 2x"
-    # Negative 30d with extreme 7d spike IS penalised (lucky shot, not recovery)
-    assert score_negative < score_negative_modest, (
-        "Extreme 7d spike on negative-30d wallet should trigger pump penalty"
+    # With the fixed pump detection (Phase 3.3), -10% 30d + 50% 7d is a genuine
+    # recovery, not a pump. The wallet with higher 7d should score higher.
+    assert score_negative > score_negative_modest, (
+        "Genuine recovery (50% 7d on -10% 30d) should score higher than modest 7d (5%)"
     )
 
 
