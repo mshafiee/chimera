@@ -121,41 +121,43 @@ impl PositionSizer {
                     }
                 }
                 Err(_) => {
-                    // < 10 closed trades: scale base size by WQS quality and sample confidence
+                    // < 15 closed trades: scale base size by WQS quality and sample confidence.
+                    // Uses the same 15-trade minimum as Kelly Criterion for consistency.
                     let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
                         .await
                         .unwrap_or(0);
                     // Floor at 0.05 (5%) so unproven wallets (0 trades) get a minimal but
-                    // non-zero base. The previous 0.2 floor gave new wallets a 20% allocation,
-                    // which is too generous for an unvalidated signal source.
-                    let confidence = Decimal::from_f64_retain((trade_count as f64 / 10.0).clamp(0.05, 1.0))
+                    // non-zero base.
+                    let confidence = Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
                         .unwrap_or(Decimal::ONE);
                     let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                         .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
                     // Set a conservative capital cap so the multiplicative chain (regime,
                     // consensus, quality) cannot push an unproven wallet past a modest
-                    // fraction of total capital. Scales linearly: 0 trades → 2%, 9 trades → 9.2%.
-                    // This mirrors the full_kelly_cap guard used when Kelly is available.
+                    // fraction of total capital. Scales linearly: 0 trades → 2%, 14 trades → 9.5%.
+                    // Uses 15-trade denominator to match Kelly's minimum threshold.
                     let fallback_cap_pct = Decimal::from_f64_retain(
-                        (trade_count as f64 / 10.0 * 0.08 + 0.02).min(0.10)
+                        (trade_count as f64 / 15.0 * 0.075 + 0.02).min(0.10)
                     ).unwrap_or(dec!(0.02));
                     full_kelly_cap = Some(factors.total_capital_sol * fallback_cap_pct);
+                    // Do NOT clamp to min_size_sol here — the fallback cap already
+                    // constrains unproven wallets. Clamping up would inflate a
+                    // negative-EV or unproven signal past the conservative cap.
                     (self.config.base_size_sol * wqs_factor * confidence)
-                        .max(self.config.min_size_sol)
                         .min(self.config.max_size_sol)
                 }
             }
         } else {
             // Kelly not enabled: apply WQS + confidence scaling directly
+            // Uses 15-trade denominator to match Kelly's minimum threshold
             let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
                 .await
                 .unwrap_or(0);
-            let confidence = Decimal::from_f64_retain((trade_count as f64 / 10.0).clamp(0.05, 1.0))
+            let confidence = Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
                 .unwrap_or(Decimal::ONE);
             let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                 .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
             (self.config.base_size_sol * wqs_factor * confidence)
-                .max(self.config.min_size_sol)
                 .min(self.config.max_size_sol)
         };
 

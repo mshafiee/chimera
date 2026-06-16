@@ -261,11 +261,29 @@ impl MomentumExit {
         for (time, price) in sorted_history.iter().rev() {
             if let Some(last_time) = last_sampled_time {
                 if last_time.signed_duration_since(*time).num_seconds() >= RSI_SAMPLE_INTERVAL_SECS {
-                    prices.push(price.to_f64().unwrap_or(0.0));
+                    let price_f64 = price.to_f64().unwrap_or(0.0);
+                    // If the Decimal price is non-zero but f64 is zero, precision was
+                    // lost — RSI computed from garbage data is worse than no RSI at all.
+                    if !price.is_zero() && price_f64 == 0.0 {
+                        tracing::debug!(
+                            token_address = token_address,
+                            "Skipping RSI: price too small for f64 precision"
+                        );
+                        return None;
+                    }
+                    prices.push(price_f64);
                     last_sampled_time = Some(*time);
                 }
             } else {
-                prices.push(price.to_f64().unwrap_or(0.0));
+                let price_f64 = price.to_f64().unwrap_or(0.0);
+                if !price.is_zero() && price_f64 == 0.0 {
+                    tracing::debug!(
+                        token_address = token_address,
+                        "Skipping RSI: price too small for f64 precision"
+                    );
+                    return None;
+                }
+                prices.push(price_f64);
                 last_sampled_time = Some(*time);
             }
 

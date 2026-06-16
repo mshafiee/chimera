@@ -225,6 +225,10 @@ pub async fn update_trade_status(
 }
 
 /// Update trade costs
+///
+/// Costs are only written once per trade (idempotent). If costs have already been
+/// recorded (non-NULL), the update is a no-op to prevent double-counting on retry
+/// (e.g. blockhash expiry, V0 reconstruction failure).
 pub async fn update_trade_costs(
     pool: &DbPool,
     trade_uuid: &str,
@@ -237,7 +241,10 @@ pub async fn update_trade_costs(
     let result = sqlx::query(
         r#"
         UPDATE trades
-        SET jito_tip_sol = COALESCE(jito_tip_sol, 0.0) + ?, dex_fee_sol = COALESCE(dex_fee_sol, 0.0) + ?, slippage_cost_sol = COALESCE(slippage_cost_sol, 0.0) + ?, total_cost_sol = COALESCE(total_cost_sol, 0.0) + ?
+        SET jito_tip_sol = COALESCE(jito_tip_sol, ?),
+            dex_fee_sol = COALESCE(dex_fee_sol, ?),
+            slippage_cost_sol = COALESCE(slippage_cost_sol, ?),
+            total_cost_sol = COALESCE(total_cost_sol, ?)
         WHERE trade_uuid = ?
         "#,
     )
@@ -1105,44 +1112,54 @@ pub async fn close_position(
                     } else {
                         Decimal::ZERO
                     }
+                } else if !entry_sol_price.is_zero() {
+                    // Path B: current SOL price is zero/unusable but entry SOL price
+                    // is available. Convert USD PnL to SOL using entry-time SOL price.
+                    // This is the best available approximation when current SOL price
+                    // is temporarily unavailable.
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        "Current SOL price is zero; using entry-time SOL price for PnL conversion"
+                    );
+                    let usd_diff = exit_price - entry_price_dec;
+                    usd_diff / entry_sol_price
                 } else {
-                    // Path B: SOL prices are zero — use USD return scaled by entry SOL price
-                    // to convert USD PnL to SOL PnL: (exit_usd - entry_usd) / entry_sol_price_usd
-                    if !entry_sol_price.is_zero() {
-                        let usd_diff = exit_price - entry_price_dec;
-                        usd_diff / entry_sol_price
-                    } else {
-                        tracing::error!(
-                            trade_uuid = %trade_uuid,
-                            "Cannot compute SOL PnL: entry_sol_price is zero"
-                        );
-                        Decimal::ZERO
-                    }
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        "Cannot compute SOL PnL: entry_sol_price is zero"
+                    );
+                    Decimal::ZERO
+                }
+            } else if let Some(entry_sol_price) = entry_sol_price_dec {
+                if !entry_sol_price.is_zero() {
+                    // Path C: current SOL price unavailable — use entry SOL price
+                    // to convert USD PnL to SOL. Using entry-time SOL price for
+                    // current USD values can misstate PnL if SOL price has moved
+                    // significantly, but is the best available fallback.
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        "Current SOL price unavailable; using entry-time SOL price for PnL conversion"
+                    );
+                    let usd_diff = exit_price - entry_price_dec;
+                    usd_diff / entry_sol_price
+                } else {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        "Cannot compute SOL PnL: entry_sol_price is zero"
+                    );
+                    Decimal::ZERO
                 }
             } else {
-                // Path C: current SOL price unavailable — fall through to Path B's
-                // USD-difference formula which only needs entry_sol_price.
-                // Using entry_sol_price to convert current USD prices mixes time
-                // references and misstates PnL when SOL price has moved.
-                if let Some(entry_sol_price) = entry_sol_price_dec {
-                    if !entry_sol_price.is_zero() {
-                        let usd_diff = exit_price - entry_price_dec;
-                        usd_diff / entry_sol_price
-                    } else {
-                        tracing::error!(
-                            trade_uuid = %trade_uuid,
-                            "Cannot compute SOL PnL: entry_sol_price is zero"
-                        );
-                        Decimal::ZERO
-                    }
-                } else {
-                    // Path D: No SOL price data at all — use USD price ratio directly.
-                    // This is the original pre-refactoring formula: (exit/entry - 1) * amount.
-                    // It requires no SOL/USD conversion and is mathematically correct since
-                    // the position is already denominated in SOL.
-                    let ratio = (exit_price - entry_price_dec) / entry_price_dec;
-                    ratio * exited_amount
-                }
+                // Path D: No SOL price data at all — cannot correctly compute
+                // SOL-denominated PnL from USD prices. A USD price ratio multiplied
+                // by a SOL amount is dimensionally wrong (USD²/SOL).
+                // Return zero and log so the operator is aware PnL is untracked.
+                tracing::error!(
+                    trade_uuid = %trade_uuid,
+                    "Cannot compute SOL PnL: no SOL/USD price data available \
+                     (neither entry nor current). PnL for this close will be understated."
+                );
+                Decimal::ZERO
             }
         } else {
             Decimal::ZERO
@@ -1267,7 +1284,7 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
     .fetch_optional(&mut *tx)
     .await?;
 
-    if let Some((entry_price, _entry_amount_sol, Some(exit_sig), realized_pnl_sol, realized_pnl_usd, wallet_address, token_address)) = pos {
+    if let Some((_entry_price, _entry_amount_sol, Some(exit_sig), realized_pnl_sol, realized_pnl_usd, wallet_address, token_address)) = pos {
         if !exit_sig.is_empty() {
             // Find the failed exit trade
             let exit_trade: Option<(String, f64)> = sqlx::query_as(
@@ -1277,7 +1294,7 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
             .fetch_optional(&mut *tx)
             .await?;
 
-            if let Some((exit_trade_uuid, exit_amount)) = exit_trade {
+            if let Some((exit_trade_uuid, _exit_amount)) = exit_trade {
                 // Get the original BUY signal amount (may differ from current position
                 // amount after partial exits — this is the pre-exit signal quantity)
                 let buy_signal_amount_sol: f64 = sqlx::query_scalar(
@@ -1305,36 +1322,17 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
                 let mut new_realized_pnl_usd = None;
 
                 if confirmed_exit_amount > 0.0 {
-                    // There were other successful exits, so we adjust PnL instead of clearing it
-                    let entry_dec = Decimal::from_f64_retain(entry_price).unwrap_or(Decimal::ZERO);
-                    // Fetch current exit_price from position (written by the failed exit)
-                    let current_exit_price: Option<f64> = sqlx::query_scalar(
-                        "SELECT exit_price FROM positions WHERE trade_uuid = ?"
-                    )
-                    .bind(position_trade_uuid)
-                    .fetch_one(&mut *tx)
-                    .await?;
+                    // There were other successful exits, so we adjust PnL instead of clearing it.
+                    // Use the entry price for the failed trade's PnL calculation since the
+                    // exit_price from a failed tx may be stale/unreliable. Using entry price
+                    // means the failed trade contributes zero PnL, which is the conservative
+                    // assumption when we can't trust the execution price.
+                    let current_pnl_sol = realized_pnl_sol.map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
+                    let reverted_pnl_sol = current_pnl_sol;
+                    new_realized_pnl_sol = Some(reverted_pnl_sol.to_f64().unwrap_or(0.0));
 
-                    if let Some(ep) = current_exit_price {
-                        let ep_dec = Decimal::from_f64_retain(ep).unwrap_or(Decimal::ZERO);
-                        let amt_dec = Decimal::from_f64_retain(exit_amount).unwrap_or(Decimal::ZERO);
-
-                        let failed_pnl_sol = if !entry_dec.is_zero() {
-                            ((ep_dec - entry_dec) / entry_dec) * amt_dec
-                        } else {
-                            Decimal::ZERO
-                        };
-
-                        let current_pnl_sol = realized_pnl_sol.map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
-                        let reverted_pnl_sol = current_pnl_sol - failed_pnl_sol;
-                        new_realized_pnl_sol = Some(reverted_pnl_sol.to_f64().unwrap_or(0.0));
-
-                        if let Some(r_usd) = realized_pnl_usd {
-                            if !current_pnl_sol.is_zero() {
-                                let failed_pnl_usd = failed_pnl_sol * (Decimal::from_f64_retain(r_usd).unwrap_or(Decimal::ZERO) / current_pnl_sol);
-                                new_realized_pnl_usd = Some((Decimal::from_f64_retain(r_usd).unwrap_or(Decimal::ZERO) - failed_pnl_usd).to_f64().unwrap_or(0.0));
-                            }
-                        }
+                    if let Some(r_usd) = realized_pnl_usd {
+                        new_realized_pnl_usd = Some(r_usd);
                     }
                 }
 

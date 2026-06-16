@@ -70,18 +70,42 @@ class BacktestSimulator:
     ) -> SimulatedResult:
         """
         Simulate all historical trades for a wallet using round-trip cashflow model.
-        
+
         This tracks positions per token and computes realized PnL only on SELL trades,
         applying costs realistically at both entry (BUY) and exit (SELL).
-        
+
         Args:
             wallet_address: Wallet address being validated
             trades: List of historical trades (should be sorted chronologically)
             strategy: Strategy type ('SHIELD' or 'SPEAR')
-            
+
         Returns:
             SimulatedResult with pass/fail and details
         """
+        return self._simulate_wallet_internal(wallet_address, trades, strategy, {})
+
+    def simulate_wallet_with_positions(
+        self,
+        wallet_address: str,
+        trades: List[HistoricalTrade],
+        strategy: str,
+        initial_positions: Dict[str, Dict[str, Decimal]],
+    ) -> SimulatedResult:
+        """
+        Simulate trades starting from a given position state.
+
+        Used by walk-forward validation to carry positions from the train phase
+        into the test phase so that SELL trades can reference BUYs from training.
+        """
+        return self._simulate_wallet_internal(wallet_address, trades, strategy, initial_positions)
+
+    def _simulate_wallet_internal(
+        self,
+        wallet_address: str,
+        trades: List[HistoricalTrade],
+        strategy: str,
+        initial_positions: Dict[str, Dict[str, Decimal]],
+    ) -> SimulatedResult:
         if not trades:
             return SimulatedResult(
                 wallet_address=wallet_address,
@@ -123,7 +147,7 @@ class BacktestSimulator:
         sol_price_current = sol_price
         
         # Round-trip position tracking: {token_address: {"qty": Decimal, "cost_basis_sol": Decimal}}
-        positions: Dict[str, Dict[str, Decimal]] = {}
+        positions: Dict[str, Dict[str, Decimal]] = initial_positions
         
         # Track results
         simulated_trades: List[SimulatedTrade] = []
@@ -245,6 +269,7 @@ class BacktestSimulator:
             trades=simulated_trades,  # Enables profit factor check in validator
             passed=passed,
             failure_reason=failure_reason,
+            final_positions=positions,
         )
     def run_walk_forward(
         self,
@@ -315,9 +340,12 @@ class BacktestSimulator:
                 passed=False,
                 failure_reason=f"FAILED_IN_SAMPLE: {train_result.failure_reason}",
             )
-            
-        # Run out-of-sample (test) second
-        test_result = self.simulate_wallet(wallet_address, test_trades, strategy)
+
+        # Run out-of-sample (test) second, carrying positions from train phase
+        # so that SELL trades in the test set can reference BUYs from the train set.
+        test_result = self.simulate_wallet_with_positions(
+            wallet_address, test_trades, strategy, train_result.final_positions
+        )
         if not test_result.passed:
             return SimulatedResult(
                 wallet_address=wallet_address,

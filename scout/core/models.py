@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 class TradeAction(Enum):
@@ -190,6 +190,10 @@ class SimulatedResult:
     # Overall result
     passed: bool = False
     failure_reason: Optional[str] = None
+
+    # Final position state after simulation (token_address -> {qty, cost_basis_sol})
+    # Used by walk-forward to carry positions from train to test phase.
+    final_positions: Dict[str, Dict[str, Decimal]] = field(default_factory=dict)
     
     @property
     def pnl_reduction_percent(self) -> float:

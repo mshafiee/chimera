@@ -259,7 +259,7 @@ impl Executor {
             // Check market conditions for BUY signals only — exits must always be allowed
             // through regardless of crash or volatility so stop-losses can close positions.
             if signal.payload.action == crate::models::Action::Buy {
-                if let Err(e) = self.check_market_conditions(&signal.payload.action).await {
+                if let Err(e) = self.check_market_conditions(&signal.payload.action, Some(signal.token_address())).await {
                     tracing::warn!(
                         trade_uuid = %signal.trade_uuid,
                         error = %e,
@@ -518,7 +518,7 @@ impl Executor {
 
     /// Check market conditions before executing trades
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
-    async fn check_market_conditions(&self, _action: &crate::models::Action) -> Result<(), String> {
+    async fn check_market_conditions(&self, _action: &crate::models::Action, token_address: Option<&str>) -> Result<(), String> {
         // Check 1: SOL price crash (>10% drop in last hour)
         // This requires price history - check if we have sufficient data
         if let Some(ref price_cache) = self.price_cache {
@@ -566,6 +566,43 @@ impl Executor {
                         "High market volatility detected: {:.2}% (threshold: 30%)",
                         volatility
                     ));
+                }
+            }
+        }
+
+        // Check 3: Individual token crash (>30% drop in last 15 minutes)
+        // A token can crash even when SOL is stable — we must check the
+        // specific token's price action before opening a new position.
+        if let (Some(token_addr), Some(ref price_cache)) = (token_address, &self.price_cache) {
+            let history = price_cache.price_history_read();
+            if let Some(token_history) = history.get(token_addr) {
+                if token_history.len() >= 2 {
+                    let fifteen_min_ago = Utc::now() - chrono::Duration::minutes(15);
+                    let mut price_15m_ago = None;
+                    let mut current_token_price = None;
+
+                    for (timestamp, price) in token_history.iter().rev() {
+                        if current_token_price.is_none() {
+                            current_token_price = Some(*price);
+                        }
+                        if *timestamp <= fifteen_min_ago && price_15m_ago.is_none() {
+                            price_15m_ago = Some(*price);
+                            break;
+                        }
+                    }
+
+                    if let (Some(old_price), Some(new_price)) = (price_15m_ago, current_token_price) {
+                        if old_price > Decimal::ZERO {
+                            let drop_percent =
+                                ((old_price - new_price) / old_price) * Decimal::from(100);
+                            if drop_percent > Decimal::from(30) {
+                                return Err(format!(
+                                    "Token price crash detected: {:.2}% drop in last 15 min ({} -> {})",
+                                    drop_percent, old_price, new_price
+                                ));
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -165,9 +165,10 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
             # Martingale Zone: Profitable but barely. High risk of blowup.
             score -= 20.0
     else:
-        # No closed-trade PnL data — unproven, penalise mildly to avoid ranking
-        # above wallets that have a demonstrated (if modest) profit factor.
-        score -= 5.0
+        # No closed-trade PnL data — unproven, penalise at least as much as
+        # the "Martingale Zone" to avoid ranking above wallets that have a
+        # demonstrated (if modest) profit factor.
+        score -= 20.0
     # 8) Sortino/Sharpe Proxy
     if metrics.sortino_ratio:
         if metrics.sortino_ratio >= 2.0:
