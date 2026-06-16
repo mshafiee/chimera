@@ -455,11 +455,38 @@ class HeliusClient:
         # Default tokens if none loaded
         if not tokens:
             tokens = [
+                # High-volume Solana tokens across categories
+                # Meme tokens
                 "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",  # BONK
                 "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",  # WIF
                 "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr",  # POPCAT
+                "ukHH6c7mMyiWCf1b9pnWe25TSpkDDt3H5pQZgZ74J82",  # PENGU
+                "HeLp6NuQkmYB4pYWo2zYs22mESHXPQYzXbB8n4V98jwC",  # AIXBT
+                "2weMjPLLybRMMva1fM3U31goWWrCpF59CHWNhnCJ9Vyh",  # FARTCOIN
+                "7D1iYWfT2jzNmvjmP6UQHjJkGbQCSAGkzCUN1puS4t8J",  # CHILLGUY
+                "EgPnvGxrGyPf7gn4kHozhPbcFXsTGRtkTBNi7dqVWmKx",  # MOODENG
+                "KENJSUYLASHUMRG5NL7FUTTPZCKC3GNWJDEWETUKGMBB",  # GOAT
+                "6ogzHhzdrQr9Pgv6hZ2MNze7UrzBMAFyBBWU5biqCzVz",  # ACT
+                "8Ki8nDpuSSzaGBbPGWhompkKMLw4YU1hR9tGuJgZpump",  # SHAR
+                # DeFi / infrastructure
                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
                 "So11111111111111111111111111111111111111112",  # SOL
+                "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN",  # JUP
+                "jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL",  # JTO
+                "2b1kV6DkPAnxd5ixfnxCpjxmKwqjjaJbGGxEorpnhBsv",  # PYTH
+                "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3",  # PYUSD
+                "3S8qX1MsMqRbiwKg2cQyx7nis1oHMgaCuc9c4VfvVdPN",  # DRIFT
+                "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So",  # mSOL
+                "J1toso1uCk3RLmjorhTtrVwY9NJ7HnPnQ2Yiq8yhkgDG",  # JitoSOL
+                "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6hN4tmbDEs7",  # bSOL
+                # AI tokens
+                "Grass7B4EwDqqUx2CM3vTRv16A3RgXKSPAA6RAgWHqRn",  # GRASS
+                "4GJ3TCQaDgMxLgXAGFy3GPMgTgdqRQZG7KAQmhRVF2tV",  # IO
+                # Gaming
+                "FmQs27d8WemVxDe8KuzUHXsdQrAHWBxHrBGx5TBrY4QB",  # SUPER
+                "MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUyScPP5",  # MEW
+                "9BB6NFfWjLxVxKZdXhzVTfD4WZnLGqTDF7jN3qZnVx4m",  # GIGA
+                "4k3DyjAgaQxjX1Qx1pVa1NB3khXTU4VjQmzxZgRqoLYT",  # ZEREBRO
             ]
         
         # Cache the result
@@ -1126,7 +1153,7 @@ class HeliusClient:
     async def discover_wallets_from_recent_swaps(
         self,
         limit: int = 1000,
-        min_trade_count: int = 3,
+        min_trade_count: int = 2,
         max_wallets: int = 200,
         hours_back: int = 24,
     ) -> List[str]:
@@ -1215,14 +1242,15 @@ class HeliusClient:
                 print(f"[Helius] Strategy 4 failed: {e}")
 
         # Strategy 5: Reverse Token Analysis (Trending Tokens)
-        # Only run if we still need wallets and have Birdeye key
-        if len(wallet_counts) < max_wallets and os.getenv("BIRDEYE_API_KEY"):
+        # Runs whenever we still need wallets. If BIRDEYE_API_KEY is set, a Birdeye-based
+        # trending query can be used; otherwise falls back to Helius active-token analysis.
+        if len(wallet_counts) < max_wallets:
             try:
                 print("[Helius] Strategy 5: Analyzing top trending tokens (Reverse Analysis)...")
                 trending_wallets = await self.discover_from_top_performing_tokens()
                 for wallet in trending_wallets:
                     # Give these a high initial weight as they are trading hot tokens
-                    wallet_counts[wallet] += min_trade_count 
+                    wallet_counts[wallet] += min_trade_count
                 if trending_wallets:
                     strategy_used = f"{strategy_used}+trending"
                 print(f"[Helius] Strategy 5 found {len(trending_wallets)} wallets")
@@ -1344,73 +1372,73 @@ class HeliusClient:
         # Safety break for pagination
         MAX_PAGES = int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", "50"))
 
-        before_sig: Optional[str] = None
-        all_txs: List[Dict[str, Any]] = []
-        pages = 0
-
         # Calculate cutoff timestamp once
         cutoff_timestamp = 0
         if days > 0:
             cutoff = datetime.utcnow() - timedelta(days=days)
             cutoff_timestamp = int(cutoff.timestamp())
 
-        print(f"  [{wallet_address[:8]}] Starting pagination (target={target}, max_pages={MAX_PAGES})")
-        while True:
-            # Stop if we have enough
-            if len(all_txs) >= target:
-                break
-            if pages >= MAX_PAGES:
-                break
+        async def _paginate_with_type(tx_type: Optional[str]) -> List[Dict[str, Any]]:
+            """Paginate through wallet transactions with optional type filter."""
+            nonlocal MAX_PAGES, BATCH_SIZE
+            before = None
+            result: List[Dict[str, Any]] = []
+            pg = 0
 
-            params = {
-                "type": "SWAP",
-                "limit": BATCH_SIZE  # Explicitly request 100 per page
-            }
-            if before_sig:
-                params["before"] = before_sig
+            print(f"  [{wallet_address[:8]}] Starting pagination (type={tx_type or 'ALL'}, target={target}, max_pages={MAX_PAGES})")
+            while True:
+                if len(result) >= target:
+                    break
+                if pg >= MAX_PAGES:
+                    break
 
-            print(f"  [{wallet_address[:8]}] Page {pages+1}: Requesting from API...")
-            data = await self._make_request(endpoint, params)
-            print(f"  [{wallet_address[:8]}] Page {pages+1}: Response received")
-            if not data:
-                break
+                params: Dict[str, Any] = {"limit": BATCH_SIZE}
+                if tx_type:
+                    params["type"] = tx_type
+                if before:
+                    params["before"] = before
 
-            batch = data if isinstance(data, list) else data.get("transactions", [])
-            if not batch:
-                break
+                data = await self._make_request(endpoint, params)
+                if not data:
+                    break
 
-            # Filter by time window immediately to stop pagination early if possible
-            batch_filtered = []
-            reached_cutoff = False
-            
-            for tx in batch:
-                tx_ts = tx.get("timestamp")
-                if tx_ts:
-                    if tx_ts < cutoff_timestamp:
-                        reached_cutoff = True
-                        # Don't break immediately, checking strictly might be safer 
-                        # but usually API returns desc order.
+                batch = data if isinstance(data, list) else data.get("transactions", [])
+                if not batch:
+                    break
+
+                # Filter by time window
+                batch_filtered = []
+                reached_cutoff = False
+                for tx in batch:
+                    tx_ts = tx.get("timestamp")
+                    if tx_ts:
+                        if tx_ts < cutoff_timestamp:
+                            reached_cutoff = True
+                        else:
+                            batch_filtered.append(tx)
                     else:
                         batch_filtered.append(tx)
-                else:
-                    # Keep if no timestamp (safe fallback)
-                    batch_filtered.append(tx)
-            
-            all_txs.extend(batch_filtered)
-            pages += 1
 
-            # Prepare next page using the LAST tx from the raw batch (not filtered)
-            # This ensures we traverse the chain correctly even if we filtered out 
-            # some transactions in this batch due to timestamp
-            last_sig = batch[-1].get("signature")
-            if not last_sig or last_sig == before_sig:
-                break
-            before_sig = last_sig
+                result.extend(batch_filtered)
 
-            if reached_cutoff:
-                break
+                last_sig = batch[-1].get("signature")
+                if not last_sig or last_sig == before:
+                    break
+                before = last_sig
+                pg += 1
 
-        # Final truncate to limit
+                if reached_cutoff:
+                    break
+
+            return result[:target]
+
+        all_txs = await _paginate_with_type("SWAP")
+
+        # Fallback: if SWAP type returned nothing, retry without type filter.
+        # Some wallets have token trades recorded under non-SWAP types or in
+        # Helius API versions that omit the type field.
+        if not all_txs:
+            all_txs = await _paginate_with_type(None)
         return all_txs[:target]
 
     def parse_defi_transaction(self, tx: Dict[str, Any], wallet_address: str) -> Optional[Dict[str, Any]]:
@@ -1579,11 +1607,19 @@ class HeliusClient:
                 nt.get("toUserAccount") == wallet_address):
                 return True
 
-        # Check accountData for balance changes
+        # Check accountData for balance changes (token AND native SOL)
         for acc in tx.get("accountData", []) or []:
             if acc.get("account") == wallet_address:
                 if acc.get("tokenBalanceChanges"):
                     return True
+                if acc.get("nativeBalanceChange") is not None:
+                    return True
+
+        # Check instructions for wallet involvement (DEX program interactions)
+        for instr in tx.get("instructions", []) or []:
+            accounts = instr.get("accounts", []) or []
+            if wallet_address in accounts:
+                return True
 
         return False
 
@@ -1803,6 +1839,11 @@ class HeliusClient:
                 return None
         else:
             return None
+
+        # When the primary token is a stablecoin, the direction is inverted in
+        # base-quote terms: "buying USDC with SOL" = SELL (you sold the base asset).
+        if primary_mint in stable_mints:
+            direction = "SELL" if direction == "BUY" else "BUY"
 
         price_sol = (sol_amount / token_amount) if token_amount > 0 else 0.0
 

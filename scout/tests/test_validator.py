@@ -540,14 +540,14 @@ async def test_realistic_losing_wallet_rejected():
 # ─── P3 ──────────────────────────────────────────────────────────────────────
 
 def test_wqs_boundary_60_active_59_9_candidate():
-    """Proves the ACTIVE/CANDIDATE promotion boundary is exactly at WQS 60.0.
+    """Proves the ACTIVE/CANDIDATE promotion boundary is exactly at WQS 65.0.
 
-    WQS=60.0 → ACTIVE; WQS=59.99 → CANDIDATE; WQS=19.99 → REJECTED.
+    WQS=65.0 → ACTIVE; WQS=64.99 → CANDIDATE; WQS=19.99 → REJECTED.
     This boundary is what separates copy-eligible wallets from candidates.
     """
-    assert classify_wallet(60.0) == "ACTIVE",    "WQS 60.0 must be ACTIVE"
-    assert classify_wallet(60.01) == "ACTIVE",   "WQS 60.01 must be ACTIVE"
-    assert classify_wallet(59.99) == "CANDIDATE","WQS 59.99 must be CANDIDATE (not ACTIVE)"
+    assert classify_wallet(65.0) == "ACTIVE",    "WQS 65.0 must be ACTIVE"
+    assert classify_wallet(65.01) == "ACTIVE",   "WQS 65.01 must be ACTIVE"
+    assert classify_wallet(64.99) == "CANDIDATE","WQS 64.99 must be CANDIDATE (not ACTIVE)"
     assert classify_wallet(20.0) == "CANDIDATE", "WQS 20.0 must be CANDIDATE"
     assert classify_wallet(19.99) == "REJECTED", "WQS 19.99 must be REJECTED"
 

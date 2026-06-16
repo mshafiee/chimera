@@ -134,9 +134,9 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
         if metrics.avg_entry_delay_seconds < 30:
             return 0.0 # IMMEDIATE REJECTION - DO NOT PASS 
         
-        # If they buy < 60s, heavily penalize
+        # If they buy < 60s, moderately penalize
         elif metrics.avg_entry_delay_seconds < 60:
-            score -= 30.0
+            score -= 15.0
             
         # If they wait 2 mins - 1 hour, they are "Smart Money" (Human/Algo analysis)
         # This is the "Sweet Spot" for copy trading.
@@ -161,10 +161,14 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
             score += 2.0   # Marginally profitable
         elif metrics.profit_factor < 1.0:
             # Losing trader (Gross Loss > Gross Win)
-            score -= 40.0
+            # Graduated: harsher penalty for deeply negative PF, lighter for near-breakeven
+            if metrics.profit_factor < 0.5:
+                score -= 40.0
+            else:
+                score -= 25.0
         elif metrics.profit_factor < 1.2:
             # Martingale Zone: Profitable but barely. High risk of blowup.
-            score -= 20.0
+            score -= 10.0
     else:
         # No closed-trade PnL data — the wallet is mid-position or unproven.
         # Apply a modest penalty rather than treating as "Martingale zone".
@@ -181,7 +185,7 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # Fresh wallets (created <24h before trading) are typically burners/insiders.
     # We penalize them heavily to avoid copying ephemeral addresses.
     if metrics.is_fresh_wallet:
-        score -= 20.0
+        score -= 10.0
     
     # 10) Smart Money Bonuses
     # DEX Diversity: Using multiple DEXs shows sophistication
@@ -202,7 +206,7 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # raw score above the ACTIVE threshold despite poor copy-trading viability.
     # Only award smart money bonuses if the wallet has demonstrated positive ROI,
     # ensuring tools are rewarded alongside results rather than as a substitute.
-    if metrics.roi_30d is not None and metrics.roi_30d <= 0:
+    if metrics.roi_30d is not None and metrics.roi_30d < -10:
         # Remove bonuses added above by zeroing them out
         if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
             score -= 5.0
@@ -217,12 +221,11 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
         if metrics.total_realized_profit_sol > 0:
             loss_ratio = metrics.total_unrealized_loss_sol / metrics.total_realized_profit_sol
-            if loss_ratio > 0.5:  # Losses > 50% of gains
-                score -= 30.0  # Massive Penalty
-            elif loss_ratio > 0.2:  # Losses > 20% of gains
-                score -= 15.0
-        elif metrics.total_unrealized_loss_sol > 0:  # Has any unrealized losses but no realized profit
-            # Any unrealized loss with zero realized profit flags a bag holder
+            if loss_ratio > 0.5:  # Losses > 50% of gains — severe bag holder
+                score -= 30.0
+            elif loss_ratio > 0.2:  # Losses > 20% of gains — moderate concern
+                score -= 10.0
+        elif metrics.total_unrealized_loss_sol > 0:  # Has unrealized losses but no realized profit
             score -= 20.0
     
     # 11) Recency Bias (Freshness)
@@ -336,7 +339,7 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
 
 def classify_wallet(
     wqs_score: float,
-    active_threshold: float = 60.0,
+    active_threshold: float = 65.0,
     candidate_threshold: float = 20.0,
 ) -> str:
     """
@@ -344,7 +347,7 @@ def classify_wallet(
 
     Args:
         wqs_score: Computed WQS (0-100)
-        active_threshold: Min score for ACTIVE status (default 60.0)
+        active_threshold: Min score for ACTIVE status (default 65.0)
         candidate_threshold: Min score for CANDIDATE status (default 20.0)
 
     Returns:

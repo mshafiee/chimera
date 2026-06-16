@@ -735,7 +735,17 @@ class WalletAnalyzer:
                     print(f"  [{address[:8]}]   - tokenTransfers: {len(tx.get('tokenTransfers', []))} items")
                     print(f"  [{address[:8]}]   - nativeTransfers: {len(tx.get('nativeTransfers', []))} items")
                     print(f"  [{address[:8]}]   - accountData: {len(tx.get('accountData', []))} items")
-                    print(f"  [{address[:8]}]   - events: {list(tx.get('events', {}).keys()) if tx.get('events') else 'none'}")
+                    if tx.get('events'):
+                        print(f"  [{address[:8]}]   - events: {list(tx.get('events', {}).keys())}")
+                    if reason == "unknown":
+                        print(f"  [{address[:8]}]   - tx keys: {list(tx.keys())}")
+                        # Log type-specific fields for SWAP and non-SWAP
+                        if tx.get("description"):
+                            print(f"  [{address[:8]}]   - description: {tx['description'][:120]}")
+                        if tx.get("instructions"):
+                            print(f"  [{address[:8]}]   - instructions: {len(tx['instructions'])} items")
+                        if tx.get("source"):
+                            print(f"  [{address[:8]}]   - source: {tx['source']}")
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
 
@@ -2183,13 +2193,24 @@ class WalletAnalyzer:
         if not self.helius_client._is_wallet_involved(tx, wallet_address):
             return "not_involved"
 
-        # Check for primary token availability
+        # Check if we have tokenTransfers at all
         token_transfers = tx.get("tokenTransfers") or []
         if not token_transfers:
-            return "no_primary_token"
+            # Check if events.swap exists — if so, parser should have used Strategy 2
+            events = tx.get("events", {}) or {}
+            if events.get("swap"):
+                # Events exist but were not sufficient for Strategy 2
+                native_input = events["swap"].get("nativeInput") or events["swap"].get("nativeIn")
+                native_output = events["swap"].get("nativeOutput") or events["swap"].get("nativeOut")
+                token_in = events["swap"].get("tokenInputs") or events["swap"].get("tokenIn")
+                token_out = events["swap"].get("tokenOutputs") or events["swap"].get("tokenOut")
+                if native_input or native_output or token_in or token_out:
+                    return "events_malformed"
+                return "events_empty"
+            return "no_token_transfers"
 
-        # Check for direction logic
-        token_deltas = {}
+        # Check for primary token availability
+        token_deltas: Dict[str, float] = {}
         for tr in token_transfers:
             mint = tr.get("mint", "")
             if not mint:
@@ -2204,7 +2225,24 @@ class WalletAnalyzer:
         if not has_non_sol:
             return "no_primary_token"
 
-        return "direction_ambiguous"
+        # Check for direction ambiguities
+        sol_delta = token_deltas.get("So11111111111111111111111111111111111111112", 0.0)
+        native_transfers = tx.get("nativeTransfers") or []
+        for nt in native_transfers:
+            if nt.get("fromUserAccount") == wallet_address:
+                sol_delta -= float(nt.get("amount", 0))
+            if nt.get("toUserAccount") == wallet_address:
+                sol_delta += float(nt.get("amount", 0))
+
+        non_sol_mints = [m for m in token_deltas if m != "So11111111111111111111111111111111111111112"]
+        has_positive = any(token_deltas[m] > 0 for m in non_sol_mints)
+        has_negative = any(token_deltas[m] < 0 for m in non_sol_mints)
+        has_sol_movement = abs(sol_delta) > 0.001
+
+        if not has_sol_movement and (not has_positive or not has_negative):
+            return "direction_ambiguous"
+
+        return "unknown"
 
     def print_parse_health_dashboard(self) -> None:
         """Print parse health diagnostics at end of run."""
