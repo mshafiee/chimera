@@ -280,7 +280,7 @@ class ScoutConfig:
     @staticmethod
     def get_redis_enabled() -> bool:
         """Get whether Redis caching is enabled."""
-        return os.getenv("REDIS_ENABLED", "false").lower() == "true"
+        return os.getenv("REDIS_ENABLED", "true").lower() == "true"
     
     @staticmethod
     def get_redis_url() -> str:

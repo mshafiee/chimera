@@ -691,7 +691,7 @@ class LiquidityProvider:
 
         final_slippage = base_slippage * turnover_factor + age_additive
 
-        return min(final_slippage + 0.005, 1.0)
+        return min(final_slippage + max(0.0005, min(0.005, trade_value_usd / 20000.0)), 1.0)
     
     async def get_sol_price_usd(self) -> float:
         """
@@ -780,37 +780,6 @@ class LiquidityProvider:
             volume_24h_usd=liquidity * random.uniform(0.1, 2.0),
             timestamp=datetime.utcnow(),
             source="simulated",
-        )
-    
-    def _simulate_historical_liquidity(
-        self,
-        token_address: str,
-        timestamp: datetime,
-    ) -> Optional[LiquidityData]:
-        """Simulate historical liquidity for testing."""
-        # Get current liquidity as baseline
-        current = self._simulate_current_liquidity(token_address)
-        if not current:
-            return None
-        
-        # Historical liquidity tends to be lower for newer tokens
-        days_ago = (datetime.utcnow() - timestamp).days
-        
-        # Apply a decay factor (older = potentially less liquidity)
-        # But also some randomness
-        if days_ago > 0:
-            decay_factor = max(0.3, 1.0 - (days_ago * 0.02))  # 2% per day, min 30%
-            decay_factor *= (0.7 + random.random() * 0.6)  # ±30% randomness
-        else:
-            decay_factor = 1.0
-        
-        return LiquidityData(
-            token_address=token_address,
-            liquidity_usd=current.liquidity_usd * decay_factor,
-            price_usd=current.price_usd * (0.5 + random.random()),  # Random historical price
-            volume_24h_usd=current.volume_24h_usd * decay_factor,
-            timestamp=timestamp,
-            source="simulated_historical",
         )
     
     def _get_from_cache(self, token_address: str) -> Optional[LiquidityData]:

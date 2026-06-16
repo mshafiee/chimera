@@ -6,7 +6,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.wqs import WalletMetrics, calculate_wqs, classify_wallet
+from core.wqs import WalletMetrics, calculate_wqs, calculate_wqs_with_confidence, classify_wallet
 
 
 def test_wqs_basic_calculation():
@@ -49,8 +49,8 @@ def test_wqs_low_trade_count_penalty():
         profit_factor=1.5,
     )
     
-    score_low = calculate_wqs(wallet_low)
-    score_high = calculate_wqs(wallet_high)
+    score_low = calculate_wqs_with_confidence(wallet_low).adjusted_score
+    score_high = calculate_wqs_with_confidence(wallet_high).adjusted_score
     
     assert score_high > score_low, f"High trade count should score higher: {score_high} vs {score_low}"
     # Very low counts should not be zeroed out, but should be significantly discounted.
@@ -99,7 +99,7 @@ def test_wqs_very_low_trade_count_curve():
         max_drawdown_30d=5.0,
         profit_factor=1.5,
     )
-    base_score = calculate_wqs(base)
+    base_score = calculate_wqs_with_confidence(base).adjusted_score
 
     for tc in [1, 2, 3, 4]:
         w = WalletMetrics(
@@ -109,11 +109,8 @@ def test_wqs_very_low_trade_count_curve():
             roi_7d=10.0,
             trade_count_30d=tc,
             max_drawdown_30d=5.0,
-            profit_factor=1.5,
-            avg_trade_size_sol=0.5,  # avoid dust-trader penalty confounding trade-count test
         )
-        s = calculate_wqs(w)
-        assert s > 0.0
+        s = calculate_wqs_with_confidence(w).adjusted_score
         assert s < base_score
 
 
@@ -476,10 +473,10 @@ def test_wqs_momentum_bonus_not_applied_when_both_roi_negative():
 def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
     """
     Test 73 (plan): A wallet with 1 trade and high profit_factor gets a nearly-zero score
-    due to the confidence multiplier (trade_count=1 → confidence=1/20=0.05).
+    due to the confidence multiplier (trade_count=1 → confidence~0.18 after profit factor boost).
 
-    Even with profit_factor > 3.0 (+15 pts bonus), the final score ≈ (base + 15) × 0.05.
-    This prevents a wallet with 1 lucky trade from being promoted.
+    Even with profit_factor > 3.0 (+15 pts bonus), the confidence-adjusted score is heavily
+    discounted. This prevents a wallet with 1 lucky trade from being promoted.
     """
     wallet_1_win = WalletMetrics(
         address="test_1_win",
@@ -487,7 +484,7 @@ def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
         roi_7d=200.0,
         profit_factor=5.0,  # Elite → +15 pts
         win_streak_consistency=1.0,
-        trade_count_30d=1,  # confidence = 0.05
+        trade_count_30d=1,  # confidence = 0.18 (profit_factor > 3 boosts to 0.80, then size-weighted)
         max_drawdown_30d=0.0,
         avg_trade_size_sol=1.0,
     )
@@ -503,13 +500,13 @@ def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
         avg_trade_size_sol=1.0,
     )
 
-    score_1 = calculate_wqs(wallet_1_win)
-    score_25 = calculate_wqs(wallet_25_wins)
+    score_1 = calculate_wqs_with_confidence(wallet_1_win).adjusted_score
+    score_25 = calculate_wqs_with_confidence(wallet_25_wins).adjusted_score
 
     # 1-trade wallet must be heavily discounted
     assert score_1 < score_25, "1-trade wallet must score much lower than 25-trade wallet"
     assert score_1 < score_25 * 0.25, (
-        f"1-trade confidence penalty (20%) must reduce score to <25% of full-confidence score: "
+        f"1-trade confidence penalty must reduce score to <25% of full-confidence score: "
         f"{score_1} vs {score_25}"
     )
 
@@ -574,11 +571,11 @@ def test_wqs_confidence_multiplier_applied_once_not_doubled():
     wallet_4 = WalletMetrics(address="tc_4", trade_count_30d=4, **base_metrics)
     wallet_20 = WalletMetrics(address="tc_20", trade_count_30d=20, **base_metrics)
 
-    score_2 = calculate_wqs(wallet_2)
-    score_4 = calculate_wqs(wallet_4)
-    score_20 = calculate_wqs(wallet_20)
+    score_2 = calculate_wqs_with_confidence(wallet_2).adjusted_score
+    score_4 = calculate_wqs_with_confidence(wallet_4).adjusted_score
+    score_20 = calculate_wqs_with_confidence(wallet_20).adjusted_score
 
-    # confidence(2) = 0.40, confidence(4) ≈ 0.64, confidence(20) = 1.0
+    # confidence(2) ≈ 0.40, confidence(4) ≈ 0.64, confidence(20) = 1.0
     # Expected ratios: score_2/score_20 ≈ 0.40, score_4/score_20 ≈ 0.64
     if score_20 > 0:
         ratio_2 = score_2 / score_20

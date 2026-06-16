@@ -76,8 +76,10 @@ async def cluster_and_dedup(
         funder = funder_map.get(record.address)
         if funder:
             clusters.setdefault(funder, []).append(record)
+            setattr(record, 'cluster_id', funder)
         else:
             clusters.setdefault(f"__singleton_{singleton_count}", []).append(record)
+            setattr(record, 'cluster_id', f"__singleton_{singleton_count}")
             singleton_count += 1
 
     # Select top-WQS wallet from each cluster
@@ -103,3 +105,63 @@ async def cluster_and_dedup(
             record.notes = (record.notes or "") + " | Demoted: cluster dedup (same funder as higher-WQS wallet)"
 
     return records
+
+
+def apply_cross_wallet_token_correlation(
+    records: List,
+    wallet_tokens: Dict[str, set],
+    max_overlap_ratio: float = 0.70,
+) -> int:
+    """
+    Detect ACTIVE wallets with >max_overlap_ratio shared tokens and demote
+    the lower-WQS wallet to CANDIDATE. This prevents a roster of wallets
+    all trading the same pool of tokens (correlated risk).
+    
+    Args:
+        records: List of WalletRecord objects
+        wallet_tokens: Dict mapping wallet_address -> set of token_addresses
+        max_overlap_ratio: Maximum allowed token overlap before demotion
+        
+    Returns:
+        Number of wallets demoted
+    """
+    active = [r for r in records if r.status == "ACTIVE" and r.address in wallet_tokens]
+    if len(active) < 2:
+        return 0
+    
+    demoted = 0
+    demoted_addresses = set()
+    
+    # Sort by WQS descending: higher-WQS wallets survive when overlap is high
+    active.sort(key=lambda r: r.wqs_score or 0, reverse=True)
+    
+    for i, r1 in enumerate(active):
+        if r1.address in demoted_addresses:
+            continue
+        tokens1 = wallet_tokens.get(r1.address, set())
+        if len(tokens1) < 2:
+            continue
+        for r2 in active[i + 1:]:
+            if r2.address in demoted_addresses:
+                continue
+            tokens2 = wallet_tokens.get(r2.address, set())
+            if len(tokens2) < 2:
+                continue
+            if not tokens1 & tokens2:
+                continue
+            overlap = len(tokens1 & tokens2)
+            min_size = min(len(tokens1), len(tokens2))
+            if min_size > 0 and overlap / min_size > max_overlap_ratio:
+                r2.status = "CANDIDATE"
+                r2.notes = (r2.notes or "") + (
+                    f" | Demoted: >{max_overlap_ratio*100:.0f}% token overlap "
+                    f"({overlap}/{min_size}) with higher-WQS ACTIVE wallet {r1.address[:8]}..."
+                )
+                demoted_addresses.add(r2.address)
+                demoted += 1
+    
+    if demoted > 0:
+        print(f"[Clustering] Cross-wallet token correlation: demoted {demoted} "
+              f"wallets with >{max_overlap_ratio*100:.0f}% token overlap")
+    
+    return demoted

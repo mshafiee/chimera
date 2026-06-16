@@ -69,7 +69,7 @@ def _compute_wmi(roi_7d: Optional[float], roi_30d: Optional[float], trade_count_
             roi_trend = 0.0
 
     if trade_count_30d is not None and trade_count_30d > 0:
-        activity_trend = 0.0
+        activity_trend = max(-1.0, min(1.0, (trade_count_30d - 20) / 60.0))
 
     wqs_trend = roi_trend * 0.5 + activity_trend * 0.5
     wmi = wqs_trend * 0.4 + roi_trend * 0.3 + activity_trend * 0.3
@@ -115,6 +115,7 @@ class WalletMetrics:
     address: str
     roi_7d: Optional[float] = None
     roi_30d: Optional[float] = None
+    roi_90d: Optional[float] = None  # 90-day ROI for multi-timeframe recovery check
     trade_count_30d: Optional[int] = None
     win_rate: Optional[float] = None  # 0.0 to 1.0
     max_drawdown_30d: Optional[float] = None  # percentage
@@ -129,6 +130,7 @@ class WalletMetrics:
     parse_rate: Optional[float] = None  # Fraction of transactions that parsed successfully (0.0-1.0)
     total_unrealized_loss_sol: Optional[float] = None  # Unrealized PnL from bag holdings
     total_realized_profit_sol: Optional[float] = None  # Total realized profit for comparison
+    total_unrealized_gain_sol: Optional[float] = None  # Paper gains from profitable open positions
     dex_diversity_score: Optional[int] = None  # Count of unique DEXs used
     uses_limit_orders: bool = False  # Detected Jupiter Limit Order usage
     uses_mev_protection: bool = False  # Detected Jito bundle/MEV protection usage
@@ -221,7 +223,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         if roi_30d > 0:
             tracker.add_pos("roi_score", min(25.0, (roi_30d / 100.0) * 25.0))
 
-    if roi_7d > 0:
+    if roi_7d > 0 and not _is_pump_spike:
         tracker.add_pos("roi_score", min(10.0, (roi_7d / 100.0) * 10.0))
 
     # Consistency Bonus: 7d is positive defined as > -5% (allow small pullback)
@@ -266,6 +268,11 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
 
     # Linear drawdown penalty: -0.2 points per percent of drawdown
     tracker.add_neg("drawdown_penalty", dd * 0.2)
+
+    # D3: Recovery fragility penalty — positive 30d ROI on a wallet with
+    # negative 90d ROI suggests the recent gains are a recovery, not an edge.
+    if metrics.roi_90d is not None and metrics.roi_90d < 0 and (metrics.roi_30d or 0) > 0:
+        tracker.add_neg("recovery_fragility", 10.0)
 
     # Anti-Pump-and-Dump / Lucky Shot Check
     if _is_pump_spike:
@@ -405,12 +412,18 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
         if metrics.total_realized_profit_sol > 0:
             loss_ratio = metrics.total_unrealized_loss_sol / metrics.total_realized_profit_sol
-            if loss_ratio > 0.5:
-                tracker.add_neg("martingale_penalty", 30.0)
-            elif loss_ratio > 0.2:
-                tracker.add_neg("martingale_penalty", 10.0)
+            tracker.add_neg("martingale_penalty", min(30.0, loss_ratio * 60.0))
         elif metrics.total_unrealized_loss_sol > 0:
             tracker.add_neg("martingale_penalty", 20.0)
+    
+    # 11b) Unproven Edge Penalty (D2: Paper vs Realized Gain Ratio)
+    # Flag wallets where paper gains exceed 60% of total gains as unproven.
+    if metrics.total_unrealized_gain_sol is not None and metrics.total_unrealized_gain_sol > 0:
+        total_gains = (metrics.total_realized_profit_sol or 0) + metrics.total_unrealized_gain_sol
+        if total_gains > 0:
+            paper_ratio = metrics.total_unrealized_gain_sol / total_gains
+            if paper_ratio > 0.60:
+                tracker.add_neg("martingale_penalty", 15.0)
     
     # 11) Recency Bias (Freshness)
     if metrics.last_trade_at:
@@ -462,12 +475,9 @@ def calculate_wqs(metrics: WalletMetrics, strategy: str = "SHIELD") -> float:
     """
     Calculate Wallet Quality Score (WQS) v2 (0-100).
 
-    This implementation matches the Scout test suite expectations and the PDD's
-    core intent: favor repeatable profitability with low drawdowns, penalize
-    recent ROI spikes, and discount low-sample wallets.
-
-    When strategy="SPEAR", weights shift toward upside capture and away from
-    drawdown conservatism, matching Spear's higher risk appetite.
+    Returns the RAW quality score WITHOUT confidence weighting.
+    Confidence is unbundled — use calculate_wqs_with_confidence() to get
+    both raw score and sample confidence separately.
 
     Scoring breakdown:
     - ROI performance: up to 25 points (capped at 100% ROI)
@@ -475,50 +485,24 @@ def calculate_wqs(metrics: WalletMetrics, strategy: str = "SHIELD") -> float:
     - Win rate fallback: up to 25 points (if consistency unavailable)
     - Activity bonus: +5 points if trade_count_30d >= 50
     - Anti-pump-and-dump: -25 points if 7d ROI > 2x 30d ROI (and 30d ROI > 0)
-    - Statistical significance: smooth confidence multiplier based on
-      realized closes (`trade_count_30d`), reaching 1.0 at 20+
     - Drawdown penalty: -0.2 * drawdown_percent
 
-    Confidence is applied ONLY to positive score components (bonuses).
     Penalties retain full weight regardless of sample size, so wallets
     with suspicious patterns (pump-and-dump, high drawdown, bag-holding)
-    are penalized MORE at low trade counts, not less.
+    are penalized regardless of confidence.
 
     Args:
         metrics: WalletMetrics object with wallet data
         strategy: "SHIELD" (conservative) or "SPEAR" (aggressive)
 
     Returns:
-        WQS score from 0 to 100
+        Raw WQS score from 0 to 100 (UN-weighted by confidence)
     """
     components = _calculate_raw_score(metrics, strategy=strategy)
     if components.is_instant_reject:
         return 0.0
 
-    trade_count = metrics.trade_count_30d or 0
-    confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics, metrics.is_unproven)
-    adjusted = max(0.0, components.positive * confidence - components.negative)
-
-    # Phase 2d: Time-decayed WQS — exponential decay based on days since last trade.
-    # Wallets that have stopped trading decay below thresholds automatically,
-    # preventing stale wallets from retaining ACTIVE status indefinitely.
-    # Grace period: first 14 days with no penalty (matching existing staleness check).
-    # Floor: 0.20 minimum multiplier to avoid zeroing ancient wallets entirely.
-    if metrics.last_trade_at:
-        try:
-            last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
-            last_trade = datetime.fromisoformat(last_trade_str)
-            now = datetime.now(timezone.utc)
-            if last_trade.tzinfo is None:
-                now = now.replace(tzinfo=None)
-            days_since = (now - last_trade).days
-            if days_since > 14:
-                decay = max(0.20, 0.97 ** (days_since - 14))
-                adjusted *= decay
-        except (ValueError, TypeError):
-            pass
-
-    return max(0.0, min(adjusted, 100.0))
+    return components.raw_score
 
 
 def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None, metrics: Optional[WalletMetrics] = None, is_unproven: bool = False) -> float:
@@ -595,21 +579,6 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIEL
     confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics, metrics.is_unproven)
     adjusted_score = max(0.0, min(components.positive * confidence - components.negative, 100.0))
 
-    # Phase 2d: Time-decayed WQS
-    if metrics.last_trade_at:
-        try:
-            last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
-            last_trade = datetime.fromisoformat(last_trade_str)
-            now = datetime.now(timezone.utc)
-            if last_trade.tzinfo is None:
-                now = now.replace(tzinfo=None)
-            days_since = (now - last_trade).days
-            if days_since > 14:
-                decay = max(0.20, 0.97 ** (days_since - 14))
-                adjusted_score *= decay
-        except (ValueError, TypeError):
-            pass
-
     adjusted_score = max(0.0, min(adjusted_score, 100.0))
     return WqsResult(score=components.raw_score, confidence=confidence, adjusted_score=adjusted_score)
 
@@ -618,19 +587,29 @@ def classify_wallet(
     wqs_score: float,
     active_threshold: float = 65.0,
     candidate_threshold: float = 20.0,
+    confidence: Optional[float] = None,
+    min_confidence: float = 0.70,
 ) -> str:
     """
-    Classify wallet based on WQS score.
+    Classify wallet based on WQS score and optional sample confidence.
+
+    When confidence is provided, ACTIVE status requires BOTH:
+    - wqs_score >= active_threshold
+    - confidence >= min_confidence
 
     Args:
-        wqs_score: Computed WQS (0-100)
+        wqs_score: Computed WQS (0-100) raw score
         active_threshold: Min score for ACTIVE status (default 65.0)
         candidate_threshold: Min score for CANDIDATE status (default 20.0)
+        confidence: Sample confidence 0.0-1.0 (optional)
+        min_confidence: Minimum confidence for ACTIVE status (default 0.70)
 
     Returns:
         'ACTIVE', 'CANDIDATE', or 'REJECTED'
     """
     if wqs_score >= active_threshold:
+        if confidence is not None and confidence < min_confidence:
+            return "CANDIDATE"
         return "ACTIVE"
     elif wqs_score >= candidate_threshold:
         return "CANDIDATE"

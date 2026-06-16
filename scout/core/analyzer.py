@@ -154,6 +154,75 @@ class PortfolioTracker:
         return decimal_to_float(total_unrealized_loss_sol)
     
     @staticmethod
+    def calculate_paper_gains(
+        trades: List[HistoricalTrade],
+        current_prices: Dict[str, float],
+        sol_price_usd: Optional[float] = None
+    ) -> float:
+        """
+        Calculate unrealized gains from positions currently in profit.
+        
+        Returns the total unrealized gain in SOL (positive value = gain).
+        Only counts positions where current value > cost basis by >20%.
+        """
+        holdings: Dict[str, Decimal] = {}
+        cost_basis: Dict[str, Decimal] = {}
+        sol_price_decimal = float_to_decimal(sol_price_usd) if sol_price_usd is not None else Decimal('1.0')
+        
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        for t in sorted_trades:
+            if t.action == TradeAction.BUY:
+                token_addr = t.token_address
+                token_amount = t.token_amount
+                if token_amount is None or token_amount == Decimal('0'):
+                    if t.price_sol and t.price_sol > Decimal('0'):
+                        token_amount = safe_decimal_divide(t.amount_sol, t.price_sol)
+                    elif t.price_at_trade and t.price_at_trade > Decimal('0'):
+                        token_amount = safe_decimal_divide(t.amount_sol, t.price_at_trade)
+                    else:
+                        continue
+                holdings[token_addr] = holdings.get(token_addr, Decimal('0')) + token_amount
+                cost_basis[token_addr] = cost_basis.get(token_addr, Decimal('0')) + t.amount_sol
+            elif t.action == TradeAction.SELL:
+                token_addr = t.token_address
+                current_qty = holdings.get(token_addr, Decimal('0'))
+                if current_qty <= Decimal('0'):
+                    continue
+                token_amount = t.token_amount
+                if token_amount is None or token_amount == Decimal('0'):
+                    if t.price_sol and t.price_sol > Decimal('0'):
+                        token_amount = safe_decimal_divide(t.amount_sol, t.price_sol)
+                    elif t.price_at_trade and t.price_at_trade > Decimal('0'):
+                        token_amount = safe_decimal_divide(t.amount_sol, t.price_at_trade)
+                    else:
+                        continue
+                ratio = min(Decimal('1.0'), safe_decimal_divide(token_amount, current_qty)) if current_qty > Decimal('0') else Decimal('0')
+                holdings[token_addr] = max(Decimal('0'), current_qty - token_amount)
+                cost_basis[token_addr] = cost_basis.get(token_addr, Decimal('0')) * (Decimal('1.0') - ratio)
+        
+        total_unrealized_gain_sol = Decimal('0')
+        for token, qty in holdings.items():
+            if qty <= Decimal('0'):
+                continue
+            remaining_cost_sol = cost_basis.get(token, Decimal('0'))
+            if remaining_cost_sol < Decimal('0.5'):
+                continue
+            current_price_usd_float = current_prices.get(token, 0.0)
+            current_price_usd = float_to_decimal(current_price_usd_float)
+            if current_price_usd <= Decimal('0'):
+                continue
+            current_val_usd = qty * current_price_usd
+            remaining_cost_usd = remaining_cost_sol * sol_price_decimal
+            if remaining_cost_usd > Decimal('0'):
+                profit_ratio = current_val_usd / remaining_cost_usd
+                if profit_ratio > Decimal('1.20'):
+                    gain_usd = current_val_usd - remaining_cost_usd
+                    gain_sol = safe_decimal_divide(gain_usd, sol_price_decimal) if sol_price_decimal > Decimal('0') else gain_usd
+                    total_unrealized_gain_sol += gain_sol
+        
+        return decimal_to_float(total_unrealized_gain_sol)
+    
+    @staticmethod
     async def fetch_bulk_prices(token_addresses: List[str]) -> Dict[str, float]:
         """
         Fetch current prices for multiple tokens from Jupiter Price API.
@@ -400,7 +469,7 @@ class WalletAnalyzer:
                 min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
 
                 # Phase 4a: Multi-timeframe discovery
-                _multi_timeframe = os.getenv("SCOUT_MULTI_TIMEFRAME_DISCOVERY", "false").lower() == "true"
+                _multi_timeframe = os.getenv("SCOUT_MULTI_TIMEFRAME_DISCOVERY", "true").lower() == "true"
 
                 if _multi_timeframe and CONFIG_AVAILABLE and ScoutConfig:
                     deep_hours = ScoutConfig.get_discovery_deep_hours()
@@ -502,11 +571,8 @@ class WalletAnalyzer:
         try:
             # Try main database first
             roster_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
-            # Also check for roster_new.db in the data directory
-            data_dir = Path(roster_path).parent
-            roster_new_path = data_dir / "roster_new.db"
             
-            for db_path in [roster_path, str(roster_new_path)]:
+            for db_path in [roster_path]:
                 if os.path.exists(db_path):
                     import sqlite3
                     conn = sqlite3.connect(db_path)
@@ -1673,7 +1739,7 @@ class WalletAnalyzer:
 
             risky_ratio = len(risky_tokens) / max(1, len(trades)) if risky_tokens else 0.0
             if risky_tokens:
-                if risky_ratio > 0.8:
+                if risky_ratio > 0.5:
                     # Circuit breaker: RugCheck API is likely degraded — too many
                     # tokens classified as risky. Fall back to safe-on-error behavior
                     # to avoid draining the roster.
@@ -1718,10 +1784,12 @@ class WalletAnalyzer:
         now = datetime.utcnow()
         cutoff_7d = now - timedelta(days=7)
         cutoff_30d = now - timedelta(days=30)
+        cutoff_90d = now - timedelta(days=90)
         
         trades_7d = [t for t in sorted_trades if t.timestamp >= cutoff_7d]
         trades_30d = [t for t in sorted_trades if t.timestamp >= cutoff_30d]
-        print(f"  [{address[:8]}] Trades: 7d={len(trades_7d)}, 30d={len(trades_30d)}")
+        trades_90d = [t for t in sorted_trades if t.timestamp >= cutoff_90d]
+        print(f"  [{address[:8]}] Trades: 7d={len(trades_7d)}, 30d={len(trades_30d)}, 90d={len(trades_90d)}")
 
         # IMPORTANT:
         # `trade_count_30d` is intentionally defined as the number of *realized closes*,
@@ -1737,7 +1805,9 @@ class WalletAnalyzer:
         # Calculate ROI from actual price changes
         roi_7d = self._calculate_roi_from_trades(trades_7d, days=7)
         roi_30d = self._calculate_roi_from_trades(trades_30d, days=30)
-        print(f"  [{address[:8]}] ROI: 7d={roi_7d:.1f}%, 30d={roi_30d:.1f}%")
+        roi_90d = self._calculate_roi_from_trades(trades_90d, days=90) if len(trades_90d) > len(trades_30d) else None
+        print(f"  [{address[:8]}] ROI: 7d={roi_7d:.1f}%, 30d={roi_30d:.1f}%"
+              + (f", 90d={roi_90d:.1f}%" if roi_90d is not None else ""))
         
         print(f"  [{address[:8]}] Calculating win rate...")
         # Calculate win rate from actual PnL data
@@ -1775,10 +1845,8 @@ class WalletAnalyzer:
         gross_loss = abs(sum(t.pnl_sol for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol and t.pnl_sol < Decimal('0')))
         
         profit_factor = 0.0
-        if gross_loss == Decimal('0'):
-            profit_factor = 100.0 if gross_profit > Decimal('0') else 0.0
-        else:
-            profit_factor = decimal_to_float(safe_decimal_divide(gross_profit, gross_loss))
+        win_count = sum(1 for t in trades_30d if t.action == TradeAction.SELL and t.pnl_sol and t.pnl_sol > Decimal('0'))
+        profit_factor = self._compute_base_profit_factor(gross_profit, gross_loss, win_count)
 
         # Bag-holder penalty on profit_factor (Phase 2.4)
         # Reconstruct positions from all trades and penalize PF for bags held > 30 days.
@@ -1893,6 +1961,7 @@ class WalletAnalyzer:
         # 5. Calculate Unrealized PnL (Bag Holder Detection)
         total_unrealized_loss_sol = None
         total_realized_profit_sol = None
+        total_unrealized_gain_sol = None
         
         try:
             # Calculate realized profit from SELL trades (use Decimal)
@@ -1930,13 +1999,20 @@ class WalletAnalyzer:
                 # Fetch prices in bulk
                 current_prices = await PortfolioTracker.fetch_bulk_prices(potential_holdings)
                 
-                # Calculate unrealized PnL
+                # Calculate unrealized PnL (losses)
                 total_unrealized_loss_sol = PortfolioTracker.calculate_unrealized_pnl(
                     sorted_trades,
                     current_prices,
                     sol_price
                 )
                 print(f"  [{address[:8]}] Unrealized PnL calculated: {total_unrealized_loss_sol}")
+                
+                # Calculate paper gains (unrealized profits)
+                total_unrealized_gain_sol = PortfolioTracker.calculate_paper_gains(
+                    sorted_trades,
+                    current_prices,
+                    sol_price
+                )
         except Exception as e:
             print(f"  [{address[:8]}] ERROR calculating unrealized PnL: {e}")
             logger.warning(f"Failed to calculate unrealized PnL for {address}: {e}")
@@ -1984,7 +2060,7 @@ class WalletAnalyzer:
         print(f"  [{address[:8]}] Creating WalletMetrics object...")
         # D5: Check if wallet is correlated with known scam addresses
         correlated_with_scam = False
-        if os.getenv("SCOUT_ENABLE_SCAM_CHECK", "false").lower() == "true":
+        if os.getenv("SCOUT_ENABLE_SCAM_CHECK", "true").lower() == "true":
             try:
                 if is_known_scam_address(address):
                     correlated_with_scam = True
@@ -2010,6 +2086,7 @@ class WalletAnalyzer:
             address=address,
             roi_7d=roi_7d,
             roi_30d=roi_30d,
+            roi_90d=roi_90d,
             trade_count_30d=len(close_trades_30d),
             win_rate=win_rate,
             max_drawdown_30d=max_drawdown,
@@ -2024,6 +2101,7 @@ class WalletAnalyzer:
             parse_rate=parse_rate,
             total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
             total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
+            total_unrealized_gain_sol=float(total_unrealized_gain_sol) if total_unrealized_gain_sol else None,
             dex_diversity_score=dex_diversity_score,
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
@@ -2125,11 +2203,7 @@ class WalletAnalyzer:
         avg_loss = decimal_to_float(safe_decimal_divide(sum_losses, Decimal(str(len(losses))))) if losses else None
 
         # Profit Factor Calculation (Robust + Rug Aware)
-        profit_factor = 0.0
-        if sum_losses == Decimal('0'):
-            profit_factor = 100.0 if sum_wins > Decimal('0') else 0.0
-        else:
-            profit_factor = decimal_to_float(safe_decimal_divide(sum_wins, sum_losses))
+        profit_factor = self._compute_base_profit_factor(sum_wins, sum_losses, len(wins))
 
         # Reduce profit_factor by 10% per held bag (capped at 50% reduction)
         if bag_count > 0:
@@ -2148,6 +2222,26 @@ class WalletAnalyzer:
             "realized_pnl_30d_sol": decimal_to_float(total_realized_pnl), # realized only
         }
     
+    @staticmethod
+    def _compute_base_profit_factor(
+        gross_profit: Decimal,
+        gross_loss: Decimal,
+        win_count: int,
+    ) -> float:
+        """
+        Shared profit factor computation used by both get_wallet_metrics
+        and compute_wallet_trade_stats.
+        
+        Caps PF at win_count * 2 when there are zero losses to prevent
+        infinite PF inflation for wallets with no losing trades.
+        """
+        if gross_loss == Decimal('0'):
+            if gross_profit > Decimal('0'):
+                capped = min(Decimal(str(win_count)) * Decimal('2.0'), Decimal('100.0'))
+                return decimal_to_float(capped)
+            return 0.0
+        return decimal_to_float(safe_decimal_divide(gross_profit, gross_loss))
+
     def _calculate_roi_from_trades(
         self,
         trades: List[HistoricalTrade],
@@ -2211,14 +2305,6 @@ class WalletAnalyzer:
         roi_decimal = safe_decimal_divide(total_pnl, total_cost) * Decimal('100.0')
         return decimal_to_float(roi_decimal)
     
-    def _estimate_roi(self, trades: List[HistoricalTrade]) -> float:
-        """
-        Estimate ROI from trades (legacy method - calls accurate calculation).
-        
-        Kept for backward compatibility.
-        """
-        return self._calculate_roi_from_trades(trades)
-    
     def _calculate_win_rate_from_trades(
         self,
         trades: List[HistoricalTrade],
@@ -2261,6 +2347,42 @@ class WalletAnalyzer:
         
         return wins / total
     
+    @staticmethod
+    def _calculate_alpha_decay(trades: List[HistoricalTrade]) -> Optional[float]:
+        """
+        Compute alpha decay: ratio of recent (last 10) win rate to all-time win rate.
+        
+        Returns a value in [0, infinity):
+        - 1.0 = stable win rate
+        - < 0.70 = significant decay (losing edge)
+        - > 1.0 = improving
+        
+        Returns None if fewer than 3 closing trades exist.
+        """
+        closing = sorted(
+            [t for t in trades if t.action == TradeAction.SELL and t.pnl_sol is not None],
+            key=lambda t: t.timestamp,
+        )
+        if len(closing) < 3:
+            return None
+        
+        all_wins = sum(1 for t in closing if t.pnl_sol > 0)
+        all_losses = sum(1 for t in closing if t.pnl_sol < 0)
+        all_total = all_wins + all_losses
+        if all_total == 0:
+            return None
+        all_time_win_rate = all_wins / all_total
+        
+        recent = closing[-10:]
+        recent_wins = sum(1 for t in recent if t.pnl_sol > 0)
+        recent_losses = sum(1 for t in recent if t.pnl_sol < 0)
+        recent_total = recent_wins + recent_losses
+        if recent_total == 0 or all_time_win_rate == 0:
+            return None
+        
+        recent_win_rate = recent_wins / recent_total
+        return recent_win_rate / all_time_win_rate
+    
     # Adding this methodology to where _detect_insider_patterns is or simply add a new helper method
     
     @staticmethod
@@ -2290,43 +2412,6 @@ class WalletAnalyzer:
         if sym.endswith("COIN") or sym.endswith("DOGE"):
             return "memecoin"
         return "other"
-    
-    def _is_smart_money_candidate(self, address: str, trades: List[HistoricalTrade]) -> bool:
-        """
-        Filter for 'Smart Money' / 'Whale' behavior.
-
-        Criteria:
-        1. Whale: Trades > 10 SOL regularly (>= 2 big trades)
-        2. Early adopter: Enters tokens early but avoids snipes (20s–5 min range)
-        """
-        if not trades:
-            return False
-
-        # 1. Whale Check: Regular large trades (>= 2 trades of > 10 SOL)
-        big_trades = [t for t in trades if (t.amount_sol or 0) > 10.0]
-        if len(big_trades) >= 2:
-            return True
-
-        # 2. Early Adopter Check: entry delays in 20-300 second window
-        # (early enough to catch launches, but avoids sniping micro-delays)
-        early_entries = 0
-        for t in trades:
-            if t.action == TradeAction.BUY:
-                # If we had entry delay data, check it here
-                # For now, assume this is validated via metrics if applicable
-                early_entries += 1
-
-        # If wallet has consistent entry patterns and good win rate, mark as smart money
-        # This is now more of a gate than a strong filter, letting WQS do the heavy lifting
-        return len(trades) >= 5
-    
-    def _estimate_win_rate(self, trades: List[HistoricalTrade]) -> float:
-        """
-        Estimate win rate from trades (legacy method - calls accurate calculation).
-        
-        Kept for backward compatibility.
-        """
-        return self._calculate_win_rate_from_trades(trades)
     
     def _calculate_drawdown_from_trades(
         self,

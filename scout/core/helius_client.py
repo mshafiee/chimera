@@ -1381,7 +1381,7 @@ class HeliusClient:
 
         # Cheap pre-validation: batch-check SOL balances to filter programs/vaults.
         # System accounts and programs won't have nonzero SOL balances.
-        validate_balances = os.getenv("SCOUT_VALIDATE_WALLET_BALANCE", "false").lower() == "true"
+        validate_balances = os.getenv("SCOUT_VALIDATE_WALLET_BALANCE", "true").lower() == "true"
         if validate_balances and candidate_wallets:
             print("[Helius] Validating wallet balances (batch)...")
             pre_filter_count = len(candidate_wallets)
@@ -1433,21 +1433,6 @@ class HeliusClient:
         
         return candidate_wallets
     
-    def _extract_wallet_from_transaction(self, tx: Dict[str, Any]) -> Optional[str]:
-        """
-        Extract wallet address from a transaction (legacy method for compatibility).
-        
-        Uses the enhanced _extract_wallets_from_transaction and returns first wallet.
-        
-        Args:
-            tx: Transaction dictionary from Helius API
-            
-        Returns:
-            Wallet address or None if not found
-        """
-        wallets = self._extract_wallets_from_transaction(tx)
-        return wallets[0] if wallets else None
-
     async def get_wallet_transactions(
         self,
         wallet_address: str,

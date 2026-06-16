@@ -47,10 +47,6 @@ def is_known_scam_address(address: Optional[str]) -> bool:
     return address in _KNOWN_SCAM_ADDRESSES or address in _KNOWN_SCAM_FUNDERS
 
 
-def get_scam_denylist_size() -> int:
-    """Return the number of entries in the denylist (for stats)."""
-    return len(_KNOWN_SCAM_ADDRESSES) + len(_KNOWN_SCAM_FUNDERS)
-
 
 async def check_wallet_correlation(
     wallet_address: str,

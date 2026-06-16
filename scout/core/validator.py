@@ -15,6 +15,7 @@ A wallet is promoted to ACTIVE only if ALL checks pass.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import List, Optional
 import logging
 
@@ -26,7 +27,7 @@ from .models import (
 )
 from .backtester import BacktestSimulator
 from .liquidity import LiquidityProvider
-from .wqs import WalletMetrics, calculate_wqs
+from .wqs import WalletMetrics, calculate_wqs, calculate_wqs_with_confidence
 
 # Import security client if available
 try:
@@ -138,17 +139,24 @@ class PrePromotionValidator:
         """
         logger.info(f"Validating wallet {wallet_address[:8]}... for promotion")
         
-        # Step 1: Check WQS score
-        wqs_score = calculate_wqs(metrics, strategy=strategy)
-        if wqs_score < self.criteria.min_wqs_score:
-            logger.info(f"Wallet failed WQS check: {wqs_score:.1f} < {self.criteria.min_wqs_score}")
+        # Step 1: Check WQS score (with confidence gating)
+        wqs_result = calculate_wqs_with_confidence(metrics, strategy=strategy)
+        wqs_score = wqs_result.score
+        wqs_confidence = wqs_result.confidence
+        if wqs_score < self.criteria.min_wqs_score or wqs_confidence < 0.70:
+            reason_parts = []
+            if wqs_score < self.criteria.min_wqs_score:
+                reason_parts.append(f"WQS {wqs_score:.1f} < {self.criteria.min_wqs_score}")
+            if wqs_confidence < 0.70:
+                reason_parts.append(f"confidence {wqs_confidence:.2f} < 0.70")
+            logger.info(f"Wallet failed WQS check: {'; '.join(reason_parts)}")
             return ValidationResult(
                 wallet_address=wallet_address,
                 status=ValidationStatus.FAILED_WQS,
                 passed=False,
-                reason=f"WQS score {wqs_score:.1f} below threshold {self.criteria.min_wqs_score}",
+                reason=f"WQS check failed: {'; '.join(reason_parts)}",
                 recommended_status="CANDIDATE",
-                notes=f"WQS: {wqs_score:.1f}",
+                notes=f"WQS: {wqs_score:.1f}, confidence: {wqs_confidence:.2f}",
             )
         
         # Step 2: Check minimum trades
@@ -430,6 +438,37 @@ class PrePromotionValidator:
                     recommended_status="CANDIDATE",
                     notes="Wallet has excessive drawdown relative to gains — too volatile to promote",
                 )
+
+        # 6d. Token concentration risk — reject wallets with >60% PnL from one token
+        # combined with low token diversity (< 5 unique tokens)
+        if trade_list:
+            token_pnl: Dict[str, Decimal] = {}
+            for st in trade_list:
+                ot = st.original_trade
+                if ot.pnl_sol:
+                    pnl_d = ot.pnl_sol if isinstance(ot.pnl_sol, Decimal) else Decimal(str(ot.pnl_sol))
+                    token_pnl[ot.token_address] = token_pnl.get(ot.token_address, Decimal('0')) + pnl_d
+            if token_pnl:
+                total_abs_pnl = sum(abs(v) for v in token_pnl.values())
+                if total_abs_pnl > Decimal('0'):
+                    max_pnl = max(abs(v) for v in token_pnl.values())
+                    concentration = float(max_pnl / total_abs_pnl) if total_abs_pnl > Decimal('0') else 0.0
+                    unique_tokens = len(token_pnl)
+                    if concentration > 0.60 and unique_tokens < 5:
+                        logger.info(
+                            f"Wallet failed token concentration check: "
+                            f"{concentration*100:.0f}% PnL from one token, only {unique_tokens} unique tokens"
+                        )
+                        return ValidationResult(
+                            wallet_address=wallet_address,
+                            status=ValidationStatus.FAILED_NEGATIVE_PNL,
+                            backtest_result=backtest_result,
+                            passed=False,
+                            reason=f"Token concentration risk: {concentration*100:.0f}% of PnL from one token "
+                                   f"with only {unique_tokens} unique tokens traded",
+                            recommended_status="CANDIDATE",
+                            notes="Wallet PnL is not diversified — likely one lucky trade",
+                        )
 
         # Check simulated PnL (Original Check)
         if self.criteria.require_positive_simulated_pnl:

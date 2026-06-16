@@ -35,7 +35,7 @@ async def test_validator_rejects_low_wqs():
 
     assert not result.passed
     assert result.status == ValidationStatus.FAILED_WQS
-    assert "wqs score" in result.reason.lower()
+    assert "wqs" in result.reason.lower()
 
 
 @pytest.mark.asyncio

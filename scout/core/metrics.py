@@ -217,7 +217,7 @@ def get_metrics() -> Optional[ScoutMetrics]:
         _metrics_instance = ScoutMetrics(port=port)
         
         # Auto-start if enabled
-        if os.getenv("SCOUT_METRICS_ENABLED", "false").lower() == "true":
+        if os.getenv("SCOUT_METRICS_ENABLED", "true").lower() == "true":
             _metrics_instance.start_server()
     
     return _metrics_instance

@@ -44,6 +44,7 @@ from core.metrics import get_metrics
 from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
 from core.correlation_reader import CorrelationReader
+from core.feature_store import FeatureStore
 
 # Import config module if available
 try:
@@ -307,8 +308,10 @@ async def analyze_wallets(
             
             print(f"[Scout] Computing WQS for {wallet_address[:8]}...")
             try:
-                wqs_score = calculate_wqs(metrics)
-                print(f"[Scout] WQS calculated: {wqs_score:.1f}")
+                wqs_result = calculate_wqs_with_confidence(metrics)
+                wqs_score = wqs_result.score
+                wqs_confidence = wqs_result.confidence
+                print(f"[Scout] WQS calculated: {wqs_score:.1f} (confidence={wqs_confidence:.2f})")
             except Exception as e:
                 print(f"[Scout] ✗ ERROR calculating WQS for {wallet_address[:8]}...: {e}")
                 import traceback
@@ -336,8 +339,8 @@ async def analyze_wallets(
             trajectory = _interpret_trajectory(metrics.roi_7d, metrics.roi_30d)
             wmi = _compute_wmi(metrics.roi_7d, metrics.roi_30d, metrics.trade_count_30d)
             
-            # Initial Status
-            if wqs_score >= min_wqs_active:
+            # Initial Status (with confidence gating for ACTIVE)
+            if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
                 initial_status = "ACTIVE"
             elif wqs_score >= min_wqs_candidate:
                 initial_status = "CANDIDATE"
@@ -350,6 +353,12 @@ async def analyze_wallets(
                 stats["trajectory_peak_blocks"] += 1
                 print(f"[Scout] {wallet_address[:8]}... PEAKED trajectory, "
                       f"blocking promotion (WQS={wqs_score:.1f})")
+            elif trajectory == "IMPROVING":
+                wqs_score += 5.0
+                if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
+                    initial_status = "ACTIVE"
+                print(f"[Scout] {wallet_address[:8]}... IMPROVING trajectory, "
+                      f"+5 WQS bonus (WQS={wqs_score:.1f})")
             elif trajectory == "DECLINING":
                 if initial_status == "ACTIVE":
                     initial_status = "CANDIDATE"
@@ -366,9 +375,20 @@ async def analyze_wallets(
                         "recommended_action": "EXIT_ALL",
                     })
             
+            # Step 3: Alpha decay detection — catch wallets losing their edge
+            # even when WQS and trajectory still look fine.
+            if initial_status == "ACTIVE":
+                alpha_decay = analyzer._calculate_alpha_decay(trades)
+                if alpha_decay is not None and alpha_decay < 0.70:
+                    initial_status = "CANDIDATE"
+                    print(f"[Scout] {wallet_address[:8]}... alpha decay detected "
+                          f"(recent/overall win rate ratio={alpha_decay:.2f}), "
+                          f"demoting to CANDIDATE")
+            
             # Performance degradation check: if an ACTIVE wallet shows signs of
             # decay, demote to CANDIDATE regardless of historical WQS.
-            if initial_status == "ACTIVE" and _check_performance_degradation(metrics):
+            # Skip for IMPROVING wallets — they're accelerating, not decaying.
+            if initial_status == "ACTIVE" and trajectory != "IMPROVING" and _check_performance_degradation(metrics):
                 initial_status = "CANDIDATE"
                 print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} but "
                       f"degradation detected (7d ROI={metrics.roi_7d}), demoting to CANDIDATE")
@@ -407,6 +427,7 @@ async def analyze_wallets(
                 "address": wallet_address,
                 "metrics": metrics,
                 "wqs": wqs_score,
+                "confidence": wqs_confidence,
                 "status": final_status,
                 "backtest": backtest_res,
                 "trades": trades,
@@ -509,6 +530,7 @@ async def analyze_wallets(
             address=wallet_addr,
             status=status,
             wqs_score=wqs,
+            wqs_confidence=res.get('confidence'),
             roi_7d=res['metrics'].roi_7d,
             roi_30d=res['metrics'].roi_30d,
             trade_count_30d=res['metrics'].trade_count_30d,
@@ -569,6 +591,27 @@ async def analyze_wallets(
                 print(f"[Scout] Cluster ensemble: adjusted {adjusted_count} wallet WQS scores")
         except Exception as e:
             print(f"[Scout] Cluster ensemble skipped ({e})")
+    
+    # Step 5c: Cross-wallet token correlation — demote wallets with >70%
+    # shared tokens to prevent correlated risk across the roster.
+    if os.getenv("SCOUT_CROSS_WALLET_CORRELATION", "true").lower() == "true":
+        try:
+            from core.clustering import apply_cross_wallet_token_correlation
+            wallet_tokens = {}
+            for res in results:
+                if not res:
+                    continue
+                addr = res.get("address")
+                trades = res.get("trades", [])
+                if addr and trades:
+                    wallet_tokens[addr] = {t.token_address for t in trades if hasattr(t, 'token_address')}
+            if wallet_tokens:
+                demoted = apply_cross_wallet_token_correlation(records, wallet_tokens)
+                if demoted > 0:
+                    stats_active = [r for r in records if r.status == "ACTIVE"]
+                    stats["active"] = len(stats_active)
+        except Exception as e:
+            print(f"[Scout] Cross-wallet correlation skipped ({e})")
     
     # Step 3c: Write correlation records for promoted ACTIVE wallets
     for res in results:
@@ -719,8 +762,9 @@ def _write_correlation_record(
 
 def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
     """
-    Write exit recommendations to data/exit_recommendations.json atomically.
-    The Operator reads this file to trigger exits for declining ACTIVE wallets.
+    Write exit recommendations to data/exit_recommendations.json atomically
+    AND to chimera.db exit_recommendations table.
+    The Operator reads the database table to trigger exits for declining ACTIVE wallets.
     """
     output_dir = os.getenv("SCOUT_DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "data"))
     os.makedirs(output_dir, exist_ok=True)
@@ -734,6 +778,32 @@ def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
         print(f"[Scout] Wrote {len(exit_recs)} exit recommendations to {final_path}")
     except Exception as e:
         print(f"[Scout] Failed to write exit recommendations: {e}")
+    
+    # Also write to chimera.db so the Operator can consume them directly
+    db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS exit_recommendations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                wallet_address TEXT NOT NULL,
+                reason TEXT,
+                recommended_action TEXT NOT NULL DEFAULT 'EXIT_ALL',
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                acknowledged INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        for rec in exit_recs:
+            conn.execute(
+                "INSERT INTO exit_recommendations (wallet_address, reason, recommended_action) VALUES (?, ?, ?)",
+                (rec.get("wallet"), rec.get("reason"), rec.get("recommended_action", "EXIT_ALL")),
+            )
+        conn.commit()
+        conn.close()
+        print(f"[Scout] Wrote {len(exit_recs)} exit recommendations to {db_path} (exit_recommendations table)")
+    except Exception as e:
+        print(f"[Scout] Failed to write exit recommendations to DB: {e}")
 
 
 async def main_async():
@@ -817,7 +887,7 @@ async def main_async():
                 priority_fee_sol_per_trade=args.priority_fee_sol,
                 jito_tip_sol_per_trade=args.jito_tip_sol,
                 enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",  # Default True for promotion safety
-                simulate_at_size_sol=Decimal(os.getenv("SCOUT_COPIER_SIZE_SOL", "0")) if os.getenv("SCOUT_COPIER_SIZE_SOL") else None,
+                simulate_at_size_sol=Decimal(os.getenv("SCOUT_COPIER_SIZE_SOL", "0.5")),
             )
 
             # Fetch dynamic fees from Helius if available (overrides static values)
@@ -921,6 +991,61 @@ async def main_async():
     except Exception as e:
         if args.verbose:
             print(f"[Scout] Adaptive weights skipped: {e}")
+
+    # Phase 6a: Write feature vectors to FeatureStore for downstream ML
+    if not args.dry_run:
+        try:
+            feature_store = FeatureStore()
+            feature_dicts = []
+            for res in results:
+                if not res:
+                    continue
+                m = res.get('metrics')
+                ws = res.get('wallet_stats', {})
+                if not m:
+                    continue
+                last_trade = m.last_trade_at
+                days_since = None
+                if last_trade:
+                    try:
+                        lt = datetime.fromisoformat(last_trade.replace("Z", "+00:00"))
+                        if lt.tzinfo is None:
+                            lt = lt.replace(tzinfo=timezone.utc)
+                        days_since = (datetime.now(timezone.utc) - lt).days
+                    except (ValueError, TypeError):
+                        pass
+                feature_dicts.append({
+                    "address": res.get("address"),
+                    "status": res.get("status"),
+                    "archetype": res.get("archetype"),
+                    "wqs_score": float(res.get("wqs", 0)),
+                    "roi_7d": m.roi_7d,
+                    "roi_30d": m.roi_30d,
+                    "trade_count_30d": m.trade_count_30d,
+                    "win_rate": m.win_rate,
+                    "max_drawdown_30d": m.max_drawdown_30d,
+                    "avg_trade_size_sol": m.avg_trade_size_sol,
+                    "profit_factor": ws.get("profit_factor"),
+                    "sortino_ratio": m.sortino_ratio,
+                    "avg_entry_delay_seconds": m.avg_entry_delay_seconds,
+                    "is_fresh_wallet": m.is_fresh_wallet,
+                    "dex_diversity_score": m.dex_diversity_score,
+                    "uses_limit_orders": m.uses_limit_orders,
+                    "uses_mev_protection": m.uses_mev_protection,
+                    "unique_token_categories": m.unique_token_categories,
+                    "mev_risk_score": m.mev_risk_score,
+                    "days_since_last_trade": days_since,
+                    "parse_rate": m.parse_rate,
+                })
+            if feature_dicts:
+                csv_path = feature_store.append_run(
+                    feature_dicts,
+                    wmi_scores={r.get("address"): r.get("wmi") for r in results if r},
+                )
+                print(f"[Scout] Feature store updated: {csv_path} ({len(feature_dicts)} wallets)")
+        except Exception as e:
+            if args.verbose:
+                print(f"[Scout] Feature store skipped: {e}")
 
     # Print parse health dashboard (always in verbose/dry-run, otherwise only if >0 failures)
     if args.verbose or args.dry_run or stats["total"] > 0:

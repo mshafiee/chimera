@@ -47,6 +47,7 @@ class WalletRecord:
     address: str
     status: str  # 'ACTIVE', 'CANDIDATE', 'REJECTED'
     wqs_score: Optional[float] = None
+    wqs_confidence: Optional[float] = None  # Sample confidence 0-1, unbundled from score
     roi_7d: Optional[float] = None
     roi_30d: Optional[float] = None
     trade_count_30d: Optional[int] = None
@@ -218,17 +219,18 @@ class RosterWriter:
                 cursor.execute(
                     """
                     INSERT OR REPLACE INTO wallets (
-                        address, status, wqs_score, roi_7d, roi_30d,
+                        address, status, wqs_score, wqs_confidence, roi_7d, roi_30d,
                         trade_count_30d, win_rate, max_drawdown_30d,
                         avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                         last_trade_at, promoted_at,
                         ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         wallet.address,
                         wallet.status,
                         wallet.wqs_score,
+                        wallet.wqs_confidence,
                         wallet.roi_7d,
                         wallet.roi_30d,
                         wallet.trade_count_30d,
