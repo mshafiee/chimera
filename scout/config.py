@@ -43,6 +43,11 @@ class ScoutConfig:
         return key
     
     @staticmethod
+    def get_helius_api_base_url() -> str:
+        """Get Helius REST API base URL (e.g. https://api.helius.xyz/v0 or https://beta.helius-rpc.com/v0)."""
+        return (os.getenv("SCOUT_HELIUS_API_BASE_URL") or "https://api.helius.xyz/v0").rstrip("/")
+    
+    @staticmethod
     def get_dexscreener_api_key() -> Optional[str]:
         """Get DexScreener API key from environment (optional)."""
         return os.getenv("DEXSCREENER_API_KEY")

@@ -1073,7 +1073,8 @@ impl Executor {
         use solana_system_interface::instruction as system_instruction;
         use std::str::FromStr;
 
-        let url = format!("https://api.helius.xyz/v0/send-bundle?api-key={}", api_key);
+        let base_url = crate::utils::helius_api_base_url();
+        let url = format!("{}/send-bundle?api-key={}", base_url, api_key);
 
         // Cap tip at 1 SOL before lamport conversion to avoid u64 overflow (same guard as execute_jito).
         let capped_tip_sol = tip_sol.min(Decimal::ONE);

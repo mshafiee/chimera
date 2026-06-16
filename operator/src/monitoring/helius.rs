@@ -102,7 +102,7 @@ impl HeliusClient {
         Ok(Self {
             api_key,
             client: Client::new(),
-            base_url: "https://api.helius.xyz/v0".to_string(),
+            base_url: crate::utils::helius_api_base_url(),
             token_age_cache: Arc::new(RwLock::new(HashMap::new())),
             token_age_cache_ttl: 3600, // 1 hour
         })

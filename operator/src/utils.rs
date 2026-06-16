@@ -1,5 +1,13 @@
 use rust_decimal::prelude::*;
 
+/// Helius API base URL from env var with fallback
+pub fn helius_api_base_url() -> String {
+    std::env::var("HELIUS_API_BASE_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://api.helius.xyz/v0".into())
+}
+
 /// Safely convert SOL (Decimal) to Lamports (u64) using Decimal to avoid precision loss
 pub fn sol_to_lamports(sol: Decimal) -> u64 {
     // 1 SOL = 1,000,000,000 Lamports

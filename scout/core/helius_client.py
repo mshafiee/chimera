@@ -70,7 +70,10 @@ class HeliusClient:
                 except Exception:
                     pass
 
-        self.base_url = "https://api.helius.xyz/v0"
+        if ScoutConfig:
+            self.base_url = ScoutConfig.get_helius_api_base_url()
+        else:
+            self.base_url = os.getenv("SCOUT_HELIUS_API_BASE_URL", "https://api.helius.xyz/v0")
         self.last_request_time = 0.0
         # Conservative rate limit: 10 calls/sec
         self.rate_limit_delay = 0.1
@@ -143,7 +146,9 @@ class HeliusClient:
             # Use RPC getSignaturesForAddress with pagination to find oldest signature
             # Note: This is expensive for wallets with many transactions
             # We limit to checking the last 1000 signatures for performance
-            rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
+            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
+            if not rpc_url:
+                rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
             
             payload = {
                 "jsonrpc": "2.0",

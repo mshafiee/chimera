@@ -1117,7 +1117,9 @@ class WalletAnalyzer:
                 import aiohttp
                 import base64
                 
-                url = f"https://mainnet.helius-rpc.com/?api-key={self.helius_client.api_key}"
+                url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
+                if not url:
+                    url = f"https://mainnet.helius-rpc.com/?api-key={self.helius_client.api_key}"
                 payload = {
                     "jsonrpc": "2.0", 
                     "id": "scout-honeypot", 
