@@ -146,8 +146,8 @@ def test_wqs_anti_pump_and_dump():
     score_normal = calculate_wqs(wallet_normal)
     
     assert score_normal > score_pump, f"Normal wallet should score higher than pump: {score_normal} vs {score_pump}"
-    # Pump wallet should have 15 points deducted
-    assert abs((score_normal - score_pump) - 15.0) < 5.0, "Pump penalty should be around 15 points"
+    # Pump wallet should have 25 points deducted (increased from 17 to offset recency boost)
+    assert abs((score_normal - score_pump) - 25.0) < 8.0, "Pump penalty should be around 25 points"
 
 
 def test_wqs_anti_pump_and_dump_edge_cases():

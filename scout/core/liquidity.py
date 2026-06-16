@@ -17,7 +17,7 @@ import json
 import math
 import os
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import random
 
@@ -340,6 +340,38 @@ class LiquidityProvider:
         historical = self.get_historical_liquidity(token_address, timestamp)
         if historical:
             return historical
+        
+        # Grace period: when historical liquidity is unavailable for a recent trade,
+        # use current liquidity with a 30% haircut instead of rejecting. This
+        # prevents Birdeye coverage gaps (tokens < 90d old) from killing backtests.
+        try:
+            from config import ScoutConfig
+            _grace_days = ScoutConfig.get_historical_liquidity_grace_period_days()
+        except ImportError:
+            _grace_days = int(os.getenv("SCOUT_HISTORICAL_LIQUIDITY_GRACE_PERIOD_DAYS", "14"))
+        
+        now = datetime.now(timezone.utc)
+        if timestamp.tzinfo:
+            trade_age = now - timestamp
+        else:
+            trade_age = now.replace(tzinfo=None) - timestamp
+        
+        if trade_age.days < _grace_days:
+            current = self.get_current_liquidity(token_address)
+            if current:
+                haircut_liquidity = current.liquidity_usd * 0.7
+                logger.info(
+                    f"Grace period fallback: Using current liquidity for {token_address[:8]}... "
+                    f"with 30%% haircut (${haircut_liquidity:,.0f}, trade is {trade_age.days}d old < {_grace_days}d)"
+                )
+                return LiquidityData(
+                    token_address=current.token_address,
+                    liquidity_usd=haircut_liquidity,
+                    price_usd=current.price_usd,
+                    volume_24h_usd=current.volume_24h_usd,
+                    timestamp=timestamp,
+                    source=f"{current.source}_grace_period_haircut",
+                )
         
         # Strict mode check (production recommended)
         try:

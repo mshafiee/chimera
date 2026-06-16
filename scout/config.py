@@ -84,6 +84,19 @@ class ScoutConfig:
         # Default to True for production safety
         return os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
     
+    @staticmethod
+    def get_historical_liquidity_grace_period_days() -> int:
+        """
+        Grace period (days) for historical liquidity fallback.
+        
+        When strict mode is enabled but historical liquidity is unavailable,
+        trades within this many days of the current date can use current
+        liquidity with a 30% haircut instead of being rejected outright.
+        
+        Default: 14 days
+        """
+        return int(os.getenv("SCOUT_HISTORICAL_LIQUIDITY_GRACE_PERIOD_DAYS", "14"))
+    
     # ========================================================================
     # WQS Thresholds (Rescaled 0-100 range)
     # ========================================================================
@@ -144,7 +157,39 @@ class ScoutConfig:
     @staticmethod
     def get_max_wallets() -> int:
         """Get maximum wallets to analyze per run."""
-        return int(os.getenv("SCOUT_MAX_WALLETS", "50"))
+        return int(os.getenv("SCOUT_MAX_WALLETS", "100"))
+    
+    @staticmethod
+    def get_discovery_profitability_filter() -> bool:
+        """
+        Get whether to pre-screen discovered wallets for profitability
+        before full analysis. When enabled, candidates are quick-checked
+        for positive net SOL flow before expensive metrics computation.
+        
+        Default: True
+        """
+        return os.getenv("SCOUT_DISCOVERY_PROFITABILITY_FILTER", "true").lower() == "true"
+    
+    @staticmethod
+    def get_wqs_recency_weight() -> bool:
+        """
+        Get whether to apply time-decayed weighting to WQS components.
+        When enabled, recent performance (0-7d) is weighted more heavily
+        than older performance (7-30d) in ROI and win rate scoring.
+        
+        Default: True
+        """
+        return os.getenv("SCOUT_WQS_RECENCY_WEIGHT", "true").lower() == "true"
+    
+    @staticmethod
+    def get_archetype_diversity_min_pct() -> float:
+        """
+        Minimum fraction of ACTIVE slots allocated to each trader archetype
+        (SCALPER, SWING, WHALE). Prevents a homogeneous roster.
+        
+        Default: 0.20 (20%)
+        """
+        return float(os.getenv("SCOUT_ARCHETYPE_DIVERSITY_MIN_PCT", "0.2"))
     
     @staticmethod
     def get_wallet_tx_limit() -> int:

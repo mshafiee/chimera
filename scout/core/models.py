@@ -247,8 +247,8 @@ class BacktestConfig:
     # These are intentionally simple knobs; if you want a more accurate model,
     # wire in tip estimation (percentile) + RPC/compute-budget fee estimation.
     # Realistic execution costs for backtesting (critical for hype tokens)
-    priority_fee_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0005'))
-    jito_tip_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0005'))
+    priority_fee_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.00005'))
+    jito_tip_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0001'))
 
     # Time-delay slippage: the 100-500ms operator latency + block inclusion delay
     # causes price movement between signal observation and trade execution.
@@ -283,6 +283,11 @@ class BacktestConfig:
     # Only fires when liquidity provider is in "real" mode, so offline/test
     # environments running in "simulated" mode are unaffected.
     enforce_current_liquidity: bool = True
+    
+    # Copier size override: when set, use this trade size (SOL) for slippage
+    # and cost estimation instead of the original trader's size. Keeps the
+    # original size for PnL ratio computation. Defaults to None (use original).
+    simulate_at_size_sol: Optional[Decimal] = None
     
     def __post_init__(self):
         """Coerce all Decimal fields so tests can pass plain floats/ints."""

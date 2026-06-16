@@ -310,6 +310,9 @@ class WalletAnalyzer:
                 "not_involved": 0,
                 "other": 0,
             },
+            "token_creation_fetched": 0,
+            "token_creation_success": 0,
+            "token_creation_fallback_helix": 0,
         }
         self._discovery_stats = {
             "infrastructure_filtered": 0,
@@ -396,16 +399,27 @@ class WalletAnalyzer:
                 hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
                 min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
                 
+                # When profitability pre-screen is enabled, discover 2x wallets
+                # so we can filter to the most profitable subset.
+                _profit_filter = os.getenv("SCOUT_DISCOVERY_PROFITABILITY_FILTER", "true").lower() == "true"
+                discover_max = self._max_wallets * 2 if _profit_filter else self._max_wallets
+                
                 # Call the async discovery method
                 discovered = await self.helius_client.discover_wallets_from_recent_swaps(
                     limit=1000,  # Max transactions to query (deprecated but kept for compatibility)
                     min_trade_count=min_trade_count,
-                    max_wallets=self._max_wallets,
+                    max_wallets=discover_max,
                     hours_back=hours_back,
                 )
                 
                 if discovered:
-                    self._candidate_wallets = discovered[:self._max_wallets]
+                    # Run profitability pre-screen if enabled
+                    if _profit_filter and len(discovered) > self._max_wallets:
+                        discovered = await self._profitability_pre_screen(discovered, self._max_wallets)
+                    else:
+                        discovered = discovered[:self._max_wallets]
+                    
+                    self._candidate_wallets = discovered
                     print(f"[Analyzer] Discovered {len(self._candidate_wallets)} candidate wallets")
                     return
                 else:
@@ -583,6 +597,46 @@ class WalletAnalyzer:
             trades_cache[wallet] = sorted(trades, key=lambda t: t.timestamp, reverse=True)
         
         return trades_cache
+    
+    async def _profitability_pre_screen(
+        self,
+        wallets: List[str],
+        max_wallets: int,
+    ) -> List[str]:
+        """
+        Quick profitability filter before full wallet analysis.
+        
+        Fetches SOL balances for discovered candidates and ranks them by
+        on-chain wealth as a proxy for profitability. This prevents Scout
+        from wasting analysis time on empty/dust wallets.
+        
+        Args:
+            wallets: Discovered wallet addresses (sorted by trade count)
+            max_wallets: Maximum wallets to retain after filtering
+            
+        Returns:
+            Filtered list of up to max_wallets, sorted by SOL balance desc
+        """
+        if not wallets:
+            return []
+        
+        print(f"[Analyzer] Profitability pre-screen: checking {len(wallets)} candidates...")
+        
+        try:
+            balances = await self.helius_client.get_wallet_sol_balances(wallets)
+            
+            non_zero = {w: b for w, b in balances.items() if b > 0.01}
+            print(f"[Analyzer] Pre-screen: {len(non_zero)}/{len(wallets)} wallets have > 0.01 SOL balance")
+            
+            scored = [(w, balances.get(w, 0.0)) for w in wallets]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            
+            result = [w for w, _ in scored[:max_wallets]]
+            print(f"[Analyzer] Pre-screen complete: retained {len(result)} candidates")
+            return result
+        except Exception as e:
+            print(f"[Analyzer] Pre-screen failed ({e}), falling through to all candidates")
+            return wallets[:max_wallets]
     
     def get_candidate_wallets(self) -> List[str]:
         """
@@ -1113,6 +1167,21 @@ class WalletAnalyzer:
             # Only log if verbose mode enabled
             if os.getenv("SCOUT_VERBOSE") == "true":
                 print(f"[Analyzer] Birdeye creation fetch failed for {token_address[:8]}: {e}")
+        
+        # Fallback: Helius signatures — use the oldest known tx on this mint
+        # as a lower-bound estimate of when the token began trading.
+        if timestamp is None and self.helius_client.api_key:
+            try:
+                fallback_ts = await self.helius_client.get_token_first_tx_timestamp(token_address)
+                if fallback_ts:
+                    timestamp = float(fallback_ts)
+                    self._parse_stats["token_creation_fallback_helix"] += 1
+            except Exception:
+                pass
+        
+        self._parse_stats["token_creation_fetched"] += 1
+        if timestamp is not None:
+            self._parse_stats["token_creation_success"] += 1
         
         # Cache the result (even if None) to avoid repeated API calls
         # Store in Redis for persistence across restarts
@@ -2365,6 +2434,21 @@ class WalletAnalyzer:
         print(f"  Balance checked:          {disc['balance_checked']}")
         print(f"  Balance filtered (0 SOL): {disc['balance_filtered']}")
         print(f"  Wallets with no trades:   {disc['wallets_with_no_trades']}")
+        
+        # Token creation time fetch success rate
+        tcf = stats.get("token_creation_fetched", 0)
+        tcs = stats.get("token_creation_success", 0)
+        tcfb = stats.get("token_creation_fallback_helix", 0)
+        if tcf > 0:
+            success_rate = tcs / max(1, tcf) * 100
+            fallback_rate = tcfb / max(1, tcf) * 100
+            print()
+            print("[Analyzer] Token Creation Time Quality")
+            print(f"  Fetched:               {tcf}")
+            print(f"  Successful:            {tcs}  ({success_rate:.1f}%)")
+            print(f"  Helius fallback used:  {tcfb}  ({fallback_rate:.1f}%)")
+            if success_rate < 20:
+                print("  ⚠ WARNING: Token creation fetch success < 20% — sniper detection degraded!")
         print("[Analyzer] ════════════════════════════════════════")
     
 

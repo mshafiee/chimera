@@ -251,6 +251,32 @@ class HeliusClient:
         except Exception as e:
             print(f"[Helius] Error fetching wallet funder: {e}")
             return None
+    
+    async def get_token_first_tx_timestamp(self, token_address: str) -> Optional[int]:
+        """
+        Estimate the earliest known transaction timestamp for a token mint.
+        
+        Uses getSignaturesForAddress to find the oldest signature on the mint,
+        which serves as a lower-bound estimate of when the token began trading.
+        Used as a fallback when Birdeye API is unavailable.
+        
+        Returns epoch seconds (int) or None if unavailable.
+        """
+        if not self.api_key or not token_address:
+            return None
+        
+        try:
+            endpoint = f"/v0/addresses/{token_address}/signatures"
+            params = {"limit": 50, "api-key": self.api_key}
+            
+            data = await self._make_request(endpoint, params, use_retry=False)
+            if not data or not isinstance(data, list) or not data:
+                return None
+            
+            oldest = data[-1]
+            return oldest.get("timestamp")
+        except Exception:
+            return None
 
     # Well-known DEX program (Jupiter v6 aggregator)
     JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"
@@ -864,6 +890,59 @@ class HeliusClient:
         self._discovery_stats["balance_checked"] = total_checked
         self._discovery_stats["balance_filtered"] = total_checked - len(valid_wallets)
         return valid_wallets
+
+    async def get_wallet_sol_balances(self, wallets: List[str]) -> Dict[str, float]:
+        """
+        Batch-fetch SOL balances for multiple wallets.
+        
+        Used by profitability pre-screen to rank candidates by on-chain wealth.
+        Returns {address: balance_in_sol}. Wallets whose balance cannot be
+        fetched default to 0.0 and are still included.
+        """
+        if not wallets:
+            return {}
+
+        batch_size = 20
+        rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
+        if not rpc_url:
+            return {w: 0.0 for w in wallets}
+
+        balances: Dict[str, float] = {}
+        session = await self._get_session()
+
+        for i in range(0, len(wallets), batch_size):
+            batch = wallets[i:i + batch_size]
+            payload = []
+            for j, addr in enumerate(batch):
+                payload.append({
+                    "jsonrpc": "2.0",
+                    "id": j,
+                    "method": "getBalance",
+                    "params": [addr]
+                })
+
+            try:
+                async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status == 200:
+                        results = await response.json()
+                        if isinstance(results, list):
+                            for result in results:
+                                if isinstance(result, dict) and "result" in result:
+                                    balance_lamports = result["result"].get("value", 0)
+                                    idx = result.get("id", -1)
+                                    if 0 <= idx < len(batch):
+                                        balances[batch[idx]] = balance_lamports / 1e9
+                        elif isinstance(results, dict) and "result" in results:
+                            if batch:
+                                balances[batch[0]] = results["result"].get("value", 0) / 1e9
+            except Exception:
+                for addr in batch:
+                    balances.setdefault(addr, 0.0)
+
+        for addr in wallets:
+            balances.setdefault(addr, 0.0)
+
+        return balances
 
     def get_discovery_stats(self) -> Dict[str, int]:
         """Return discovery quality statistics from the most recent run."""

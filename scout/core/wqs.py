@@ -16,6 +16,7 @@ WQS v2 improvements:
 from dataclasses import dataclass
 from typing import Optional
 from datetime import datetime, timezone
+import os
 
 
 @dataclass
@@ -63,15 +64,39 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     score = 0.0
 
     # 1) ROI Base Score (0-35 pts)
-    # Reward consistent positive ROI over 7d and 30d
+    # Reward consistent positive ROI over 7d and 30d.
+    # When recency weighting is enabled, 7d performance carries more weight.
     roi_7d = metrics.roi_7d or 0.0
     roi_30d = metrics.roi_30d or 0.0
 
-    if roi_30d > 0:
-        score += min(25.0, (roi_30d / 100.0) * 25.0)  # Cap at 100% ROI = 25 pts
+    # Check if recency-weighted scoring is enabled
+    try:
+        from config import ScoutConfig
+        _use_recency = ScoutConfig.get_wqs_recency_weight() if ScoutConfig else True
+    except ImportError:
+        _use_recency = os.environ.get("SCOUT_WQS_RECENCY_WEIGHT", "true").lower() == "true"
+
+    # Check for pump-and-dump pattern BEFORE applying recency weighting,
+    # so that pump wallets don't benefit from recent-performance boosts.
+    _is_pump_spike = roi_7d > max(abs(roi_30d) * 2.0, 5.0)
+
+    if _use_recency and not _is_pump_spike and roi_30d > 0 and roi_7d > 0:
+        # Standard 30d ROI contribution
+        base_30d = min(25.0, (roi_30d / 100.0) * 25.0)
+        # Time-weighted ROI: blends recent (7d) and full-month (30d)
+        weighted_roi = roi_7d * 0.5 + roi_30d * 0.5
+        recency_score = min(25.0, (weighted_roi / 100.0) * 25.0)
+        # Use the better of standard and recency-weighted, so recency only helps
+        score += max(base_30d, recency_score)
+        # Bonus for wallets where recent > monthly (upward momentum confirmed)
+        if roi_7d > roi_30d * 0.6:
+            score += 5.0
+    else:
+        if roi_30d > 0:
+            score += min(25.0, (roi_30d / 100.0) * 25.0)
 
     if roi_7d > 0:
-        score += min(10.0, (roi_7d / 100.0) * 10.0)  # Cap at 100% ROI = 10 pts (matches 30d scaling)
+        score += min(10.0, (roi_7d / 100.0) * 10.0)
 
     # Consistency Bonus: 7d is positive defined as > -5% (allow small pullback)
     # and 30d is solid.
@@ -79,15 +104,19 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
         score += 10.0
 
     # 2) Win Rate & Profit Factor (0-20 pts)
+    # Win-rate bonuses above +10 require sound profit factor to prevent
+    # Martingale wallets (high win rate, catastrophic losses) from passing.
     win_rate = metrics.win_rate or 0.0
+    profit_factor = metrics.profit_factor
 
     if win_rate >= 0.5:
         score += 5.0
     if win_rate >= 0.65:
         score += 5.0
-    if win_rate >= 0.80:
+    # Tiers above +10 require profit_factor >= 1.2 to gate Martingale risk
+    if win_rate >= 0.80 and (profit_factor is None or profit_factor >= 1.2):
         score += 5.0
-    if win_rate >= 0.90:
+    if win_rate >= 0.90 and (profit_factor is None or profit_factor >= 1.2):
         score += 5.0
         
             
@@ -117,8 +146,8 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # pump we cannot reliably replicate. Use abs(roi_30d) so the spike threshold
     # scales correctly even when the monthly trend is negative — a wallet with
     # -10% monthly but +50% weekly is a lucky spike, not a recovery trend.
-    if roi_7d > max(abs(roi_30d) * 2.0, 5.0):
-        score -= 17.0  # Anti pump-and-dump
+    if _is_pump_spike:
+        score -= 25.0  # Anti pump-and-dump (increased from 17 to offset recency boost)
         
     # 5) Scalability / Liquidity Safety (Implicit in avg_trade_size)
     if (metrics.avg_trade_size_sol or 0) < 0.05:
@@ -170,17 +199,35 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
         elif metrics.profit_factor < 1.2:
             # Martingale Zone: Profitable but barely. High risk of blowup.
             score -= 10.0
-    else:
-        # No closed-trade PnL data — the wallet is mid-position or unproven.
-        # Apply a modest penalty rather than treating as "Martingale zone".
-        # The is_unproven flag allows downstream code to distinguish "bad" from "unknown".
-        score -= 5.0
+    
+    # Unproven wallet penalty
+    # When < 30% of transactions parse successfully, the wallet's trading activity
+    # is too opaque to evaluate reliably. A few parseable trades may give a false
+    # impression of profitability — apply heavy penalty and cap confidence.
+    if metrics.is_unproven:
+        score -= 20.0
+
+    # Explicit Martingale Pattern Detection
+    # A wallet with win_rate > 0.7 AND profit_factor < 1.5 is playing a classic
+    # Martingale strategy: wins often but loses heavily, heading for eventual blow-up.
+    # This penalty is additional to any profit_factor penalty already applied above.
+    if profit_factor is not None and win_rate > 0.70 and profit_factor < 1.5:
+        score -= 15.0
+
     # 8) Sortino/Sharpe Proxy
-    if metrics.sortino_ratio:
-        if metrics.sortino_ratio >= 2.0:
-            score += 5.0
+    # Sortino ratio measures risk-adjusted return (downside deviation only).
+    # Higher weight than before: this is a powerful signal that was underutilized.
+    if metrics.sortino_ratio is not None:
+        if metrics.sortino_ratio >= 3.0:
+            score += 12.0
+        elif metrics.sortino_ratio >= 2.0:
+            score += 8.0
         elif metrics.sortino_ratio >= 1.0:
+            score += 4.0
+        elif metrics.sortino_ratio >= 0.5:
             score += 2.0
+        elif metrics.sortino_ratio < 0:
+            score -= 10.0  # Downside volatility exceeds return
     
     # 9) Insider / Fresh Wallet Penalty
     # Fresh wallets (created <24h before trading) are typically burners/insiders.
@@ -310,30 +357,46 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     """
     raw = _calculate_raw_score(metrics)
     trade_count = metrics.trade_count_30d or 0
-    confidence = _compute_confidence(trade_count)
+    confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics.is_unproven)
     return max(0.0, min(raw * confidence, 100.0))
 
 
-def _compute_confidence(trade_count: int) -> float:
+def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None, is_unproven: bool = False) -> float:
     """
     Statistical confidence based on trade count.
 
     Uses a three-region curve:
-    - Below 3 trades: linear 0→0.60 (very sparse data)
-    - 3-10 trades:     linear 0.60→0.85 (emerging pattern)
-    - 10-20 trades:    linear 0.85→1.0 (meaningful sample)
+    - Below 3 trades: linear 0→0.55 (very sparse data)
+    - 3-10 trades:     linear 0.55→0.90 (emerging pattern)
+    - 10-20 trades:    linear 0.90→1.0 (meaningful sample)
     - 20+ trades:      1.0 (full confidence)
 
-    This is softer than the prior two-region curve to admit more wallets
-    into the CANDIDATE tier for observation.
+    Includes a profit-factor override: if profit_factor > 2.0 AND trade_count >= 3,
+    confidence is raised to at least 0.80, since a wallet with high-quality trades
+    deserves more weight even with a small (but not trivial) sample. Single-trade
+    wallets are excluded because one winning trade gives infinite PF.
+
+    For unproven wallets (< 30% parse rate), confidence is capped at 0.70
+    regardless of trade count, since opaque trading activity cannot be
+    evaluated reliably.
     """
+    confidence = 0.0
     if trade_count >= 20:
-        return 1.0
-    if trade_count >= 10:
-        return 0.85 + 0.15 * (trade_count - 10) / 10.0
-    if trade_count >= 3:
-        return 0.60 + 0.25 * (trade_count - 3) / 7.0
-    return (trade_count / 3.0) * 0.60
+        confidence = 1.0
+    elif trade_count >= 10:
+        confidence = 0.90 + 0.10 * (trade_count - 10) / 10.0
+    elif trade_count >= 3:
+        confidence = 0.55 + 0.35 * (trade_count - 3) / 7.0
+    else:
+        confidence = (trade_count / 3.0) * 0.55
+
+    if profit_factor is not None and profit_factor > 2.0 and trade_count >= 3 and confidence < 0.80:
+        confidence = 0.80
+
+    if is_unproven and confidence > 0.70:
+        confidence = 0.70
+
+    return confidence
 
 
 def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
@@ -346,7 +409,7 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
     """
     raw_score = _calculate_raw_score(metrics)
     trade_count = metrics.trade_count_30d or 0
-    confidence = _compute_confidence(trade_count)
+    confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics.is_unproven)
     adjusted_score = max(0.0, min(raw_score * confidence, 100.0))
     return WqsResult(score=raw_score, confidence=confidence, adjusted_score=adjusted_score)
 

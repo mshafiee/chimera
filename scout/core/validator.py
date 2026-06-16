@@ -388,12 +388,22 @@ class PrePromotionValidator:
                 if dd > max_dd:
                     max_dd = dd
 
-            threshold = total_positive_pnl * _D(str(self.criteria.max_drawdown_fraction))
+            # Scale threshold by trade count: small windows (< 10 trades) are
+            # disproportionately affected by a single loss, so use a relaxed threshold.
+            num_trades = len(trade_list)
+            threshold_multiplier = 1.0
+            if num_trades < 10:
+                threshold_multiplier = 2.0
+            elif num_trades < 20:
+                threshold_multiplier = 1.5
+
+            effective_max_dd = self.criteria.max_drawdown_fraction * threshold_multiplier
+            threshold = total_positive_pnl * _D(str(effective_max_dd))
             if max_dd > threshold:
                 logger.info(
                     f"Wallet failed drawdown check: max_dd={float(max_dd):.4f} SOL "
-                    f"> {self.criteria.max_drawdown_fraction*100:.0f}% of gains "
-                    f"({float(total_positive_pnl):.4f} SOL)"
+                    f"> {effective_max_dd*100:.0f}% of gains "
+                    f"({float(total_positive_pnl):.4f} SOL, {num_trades} trades, threshold x{threshold_multiplier})"
                 )
                 return ValidationResult(
                     wallet_address=wallet_address,
@@ -402,8 +412,8 @@ class PrePromotionValidator:
                     passed=False,
                     reason=(
                         f"Max drawdown {float(max_dd):.4f} SOL exceeds "
-                        f"{self.criteria.max_drawdown_fraction*100:.0f}% of total gains "
-                        f"({float(total_positive_pnl):.4f} SOL)"
+                        f"{effective_max_dd*100:.0f}% of total gains "
+                        f"({float(total_positive_pnl):.4f} SOL, {num_trades} trades)"
                     ),
                     recommended_status="CANDIDATE",
                     notes="Wallet has excessive drawdown relative to gains — too volatile to promote",

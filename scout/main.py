@@ -21,7 +21,7 @@ merges this into the main database via SIGHUP or API call.
 import argparse
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 import asyncio
@@ -38,6 +38,7 @@ from core.liquidity import LiquidityProvider
 from core.auto_merge import auto_merge_roster
 from core.metrics import get_metrics
 from core.cost_estimator import CostEstimator
+from core.clustering import cluster_and_dedup
 
 # Import config module if available
 try:
@@ -218,8 +219,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-wallets",
         type=int,
-        default=int(os.getenv("SCOUT_MAX_WALLETS", "50")),
-        help="Max wallets to analyze (default: 50, or SCOUT_MAX_WALLETS env var; set to 200 for paid Helius plans)",
+        default=int(os.getenv("SCOUT_MAX_WALLETS", "100")),
+        help="Max wallets to analyze (default: 100, or SCOUT_MAX_WALLETS env var; set to 200-500 for paid Helius plans)",
     )
 
     parser.add_argument(
@@ -319,6 +320,13 @@ async def analyze_wallets(
                 initial_status = "CANDIDATE"
             else:
                 initial_status = "REJECTED"
+            
+            # Performance degradation check: if an ACTIVE wallet shows signs of
+            # decay, demote to CANDIDATE regardless of historical WQS.
+            if initial_status == "ACTIVE" and _check_performance_degradation(metrics):
+                initial_status = "CANDIDATE"
+                print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} but "
+                      f"degradation detected (7d ROI={metrics.roi_7d}), demoting to CANDIDATE")
             
             print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} Status={initial_status}")
             
@@ -474,8 +482,116 @@ async def analyze_wallets(
             avg_entry_delay_seconds=res['metrics'].avg_entry_delay_seconds,
         )
         records.append(record)
-            
+    
+    # Archetype diversification: ensure each trading style has minimum representation
+    # among ACTIVE wallets. Prevents a homogeneous roster (e.g., all scalpers).
+    _apply_archetype_diversification(records, min_wqs_active)
+    
+    # Wallet clustering/deduplication: group wallets by shared funder and keep
+    # only the top-WQS wallet per cluster to prevent correlated risk.
+    if os.getenv("SCOUT_CLUSTER_DEDUP", "true").lower() == "true":
+        try:
+            records = await cluster_and_dedup(records)
+        except Exception as e:
+            print(f"[Scout] Clustering dedup skipped ({e})")
+    
     return records, stats
+
+
+def _apply_archetype_diversification(records: List[WalletRecord], min_wqs_active: float) -> None:
+    """
+    Stratified selection: ensure each trader archetype (SCALPER, SWING, WHALE)
+    gets at least the configured minimum fraction of ACTIVE slots.
+    
+    Promotes the highest-WQS CANDIDATE wallets of underrepresented archetypes
+    to ACTIVE, up to the minimum quota. This prevents Scout from producing
+    a homogeneous roster that amplifies correlated risk.
+    
+    Modifies records in-place.
+    """
+    try:
+        from config import ScoutConfig
+        diversity_min_pct = ScoutConfig.get_archetype_diversity_min_pct()
+    except ImportError:
+        diversity_min_pct = float(os.getenv("SCOUT_ARCHETYPE_DIVERSITY_MIN_PCT", "0.2"))
+    
+    if diversity_min_pct <= 0:
+        return
+    
+    active_records = [r for r in records if r.status == "ACTIVE"]
+    if len(active_records) < 3 or len(active_records) > 100:
+        return
+    
+    candidate_records = [r for r in records if r.status == "CANDIDATE"]
+    
+    active_by_archetype: Dict[str, List[WalletRecord]] = {}
+    candidate_by_archetype: Dict[str, List[WalletRecord]] = {}
+    
+    for r in active_records:
+        arch = r.archetype or "UNKNOWN"
+        active_by_archetype.setdefault(arch, []).append(r)
+    
+    for r in candidate_records:
+        arch = r.archetype or "UNKNOWN"
+        candidate_by_archetype.setdefault(arch, []).append(r)
+    
+    total_active = len(active_records)
+    min_per_archetype = int(max(1, total_active * diversity_min_pct))
+    
+    target_archetypes = {"SCALPER", "SWING", "WHALE"}
+    promoted_count = 0
+    
+    for arch in target_archetypes:
+        current = len(active_by_archetype.get(arch, []))
+        if current >= min_per_archetype:
+            continue
+        
+        candidates = sorted(
+            candidate_by_archetype.get(arch, []),
+            key=lambda r: r.wqs_score or 0,
+            reverse=True,
+        )
+        
+        slots_needed = min_per_archetype - current
+        for c in candidates[:slots_needed]:
+            if (c.wqs_score or 0) >= min_wqs_active * 0.85:
+                c.status = "ACTIVE"
+                promoted_count += 1
+                active_by_archetype.setdefault(arch, []).append(c)
+    
+    if promoted_count > 0:
+        print(f"[Scout] Archetype diversification: promoted {promoted_count} CANDIDATE wallets to ACTIVE "
+              f"(min {diversity_min_pct*100:.0f}% per archetype, {min_per_archetype} slot(s) each)")
+
+
+def _check_performance_degradation(metrics) -> bool:
+    """
+    Detect when a previously-ACTIVE wallet's recent performance has degraded.
+    
+    Returns True if:
+    - 7d ROI is negative AND last trade was > 7 days ago (stale + negative trend)
+    - 7d ROI is significantly negative (< -15%) regardless of recency (sharp decline)
+    """
+    seven_d_roi = metrics.roi_7d
+    last_trade = metrics.last_trade_at
+
+    if seven_d_roi is not None and seven_d_roi < 0:
+        if last_trade:
+            try:
+                last_trade_dt = datetime.fromisoformat(last_trade.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                if last_trade_dt.tzinfo is None:
+                    now = now.replace(tzinfo=None)
+                days_since = (now - last_trade_dt).days
+                if days_since > 7:
+                    return True
+            except (ValueError, TypeError):
+                pass
+        
+        if seven_d_roi < -15.0:
+            return True
+
+    return False
 
 
 async def main_async():

@@ -19,15 +19,15 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 # Default fallback values (SOL)
-DEFAULT_PRIORITY_FEE_SOL = Decimal("0.0005")
-DEFAULT_JITO_TIP_SOL = Decimal("0.0005")
+DEFAULT_PRIORITY_FEE_SOL = Decimal("0.00005")
+DEFAULT_JITO_TIP_SOL = Decimal("0.0001")
 
 # Percentile to use per strategy
 SHIELD_FEE_PERCENTILE = 75
 SPEAR_FEE_PERCENTILE = 90
 
-# Cache TTL in seconds (10 seconds — fees change per block ~400ms)
-CACHE_TTL_SECONDS = 10.0
+# Cache TTL in seconds (default 300 = 5 min, covers a full Scout run)
+CACHE_TTL_SECONDS = float(os.getenv("SCOUT_FEE_CACHE_TTL_SECONDS", "300"))
 
 
 class CostEstimator:
