@@ -2835,12 +2835,17 @@ pub async fn upsert_exit_target(
     Ok(())
 }
 
+/// Row type for exit_targets table queries
+type ExitTargetRow = (f64, f64, f64, f64, String, i64, f64, f64);
+/// Public-facing exit target tuple (bool instead of i64 for trailing_stop_active)
+type ExitTargetResult = (f64, f64, f64, f64, String, bool, f64, f64);
+
 /// Load saved profit target state for a position
 pub async fn load_exit_target(
     pool: &DbPool,
     trade_uuid: &str,
-) -> AppResult<Option<(f64, f64, f64, f64, String, bool, f64, f64)>> {
-    let row: Option<(f64, f64, f64, f64, String, i64, f64, f64)> = sqlx::query_as(
+) -> AppResult<Option<ExitTargetResult>> {
+    let row: Option<ExitTargetRow> = sqlx::query_as(
         r#"
         SELECT entry_price, entry_amount_sol, peak_price, peak_profit_percent,
                COALESCE(targets_hit, '[]'), trailing_stop_active, COALESCE(trailing_stop_price, 0.0),

@@ -1,6 +1,7 @@
 """Tests for backtesting simulator."""
 
 from datetime import datetime, timedelta
+from decimal import Decimal as _D
 from scout.core.backtester import BacktestSimulator, BacktestConfig
 from scout.core.liquidity import LiquidityProvider, LiquidityData
 from scout.core.models import HistoricalTrade, TradeAction
@@ -649,8 +650,6 @@ def test_backtester_simulated_pnl_negative_for_known_losing_trades():
 
 # ── Category W: Walk-forward validation ──────────────────────────────────────
 
-from decimal import Decimal as _D
-
 # SOL price = $150. BUY 2.0 SOL at $100/token → qty = 2.0/(100/150) = 3.0 tokens.
 _ROUND_TRIP_TOKEN_QTY = _D("3.0")
 
@@ -705,7 +704,6 @@ def test_walk_forward_70_30_split_both_profitable():
     """W1: 30 profitable trades → train (21) and OOS (9) both pass → walk-forward passes."""
     simulator = _make_walk_forward_simulator()
     trades = []
-    base = datetime(2024, 1, 1, 12, 0, 0)
     for i in range(15):
         ts = datetime(2024, 1, i + 1, 12, 0, 0)
         trades.extend(_make_profitable_round_trip(f"token{i}", i, ts))

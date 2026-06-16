@@ -452,10 +452,8 @@ fn get_json_decimal(value: &serde_json::Value, key: &str) -> Option<Decimal> {
         Decimal::from_str(s).ok()
     } else if let Some(f) = val.as_f64() {
         Decimal::from_f64_retain(f)
-    } else if let Some(i) = val.as_i64() {
-        Some(Decimal::from(i))
     } else {
-        None
+        val.as_i64().map(Decimal::from)
     }
 }
 

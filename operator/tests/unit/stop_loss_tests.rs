@@ -79,6 +79,7 @@ async fn insert_consensus_signal(pool: &chimera_operator::db::DbPool, token: &st
 /// Insert a closed position to build up daily PnL.
 /// Also inserts a SELL exit trade with net_pnl_sol so the portfolio-stop query
 /// (which reads trades.net_pnl_sol for accuracy) returns the correct value.
+#[allow(dead_code)]
 async fn insert_closed_position(
     pool: &chimera_operator::db::DbPool,
     trade_uuid: &str,
@@ -133,6 +134,7 @@ async fn insert_closed_position(
 }
 
 /// Insert an active position so exposure is > 0.
+#[allow(dead_code)]
 async fn insert_active_position(
     pool: &chimera_operator::db::DbPool,
     trade_uuid: &str,

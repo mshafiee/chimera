@@ -10,6 +10,7 @@ Tests atomic write behavior and data integrity:
 import os
 import tempfile
 import sqlite3
+import threading
 import pytest
 from pathlib import Path
 
@@ -458,8 +459,6 @@ def test_temp_file_cleanup_on_failure():
 
 
 # ── Category C: Concurrency safety ───────────────────────────────────────────
-
-import threading
 
 
 def _write_wallet(db_path: Path, wallet_address: str, results: list, idx: int):

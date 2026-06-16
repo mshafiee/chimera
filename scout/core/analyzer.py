@@ -1366,7 +1366,7 @@ class WalletAnalyzer:
                 token_addr = t.token_address
                 # Add timeout to rugcheck
                 try:
-                    is_safe = await asyncio.wait_for(
+                    is_safe = await asyncio.wait_for(  # noqa: F823 — imported at module level
                         self.rugcheck_client.is_token_safe(token_addr),
                         timeout=5.0  # 5 second timeout per token
                     )

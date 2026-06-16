@@ -403,14 +403,20 @@ async def analyze_wallets(
         status = res['status']
         
         # Update counters
-        if status == "ACTIVE": stats["active"] += 1
-        elif status == "CANDIDATE": stats["candidate"] += 1
-        else: stats["rejected"] += 1
+        if status == "ACTIVE":
+            stats["active"] += 1
+        elif status == "CANDIDATE":
+            stats["candidate"] += 1
+        else:
+            stats["rejected"] += 1
         
         bt_status = res['backtest']['status']
-        if bt_status == "PASSED": stats["backtest_passed"] += 1
-        elif bt_status == "FAILED": stats["backtest_failed"] += 1
-        elif bt_status == "SKIPPED" and status == "ACTIVE": stats["backtest_skipped"] += 1
+        if bt_status == "PASSED":
+            stats["backtest_passed"] += 1
+        elif bt_status == "FAILED":
+            stats["backtest_failed"] += 1
+        elif bt_status == "SKIPPED" and status == "ACTIVE":
+            stats["backtest_skipped"] += 1
 
         # Console output
         print(f"  [{status}] {wallet_addr[:8]}... WQS: {wqs:.1f}")
