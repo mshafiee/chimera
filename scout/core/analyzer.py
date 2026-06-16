@@ -398,29 +398,97 @@ class WalletAnalyzer:
                 # Get configuration from environment variables
                 hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
                 min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
-                
+
+                # Phase 4a: Multi-timeframe discovery
+                _multi_timeframe = os.getenv("SCOUT_MULTI_TIMEFRAME_DISCOVERY", "false").lower() == "true"
+
+                if _multi_timeframe and CONFIG_AVAILABLE and ScoutConfig:
+                    deep_hours = ScoutConfig.get_discovery_deep_hours()
+                    fast_hours = ScoutConfig.get_discovery_fast_hours()
+                    trending_hours = ScoutConfig.get_discovery_trending_hours()
+                    tier1_max = ScoutConfig.get_max_wallets_tier1()
+                    tier2_max = ScoutConfig.get_max_wallets_tier2()
+
+                    print("[Analyzer] Multi-timeframe discovery enabled:")
+                    print(f"  Deep scan: {deep_hours}h (established wallets)")
+                    print(f"  Fast scan: {fast_hours}h (emerging wallets)")
+                    print(f"  Trending scan: {trending_hours}h (narrative wallets)")
+                    print(f"  Tier limits: {tier1_max} deep, {tier2_max} fast")
+                else:
+                    # Single-window mode
+                    deep_hours = hours_back
+                    fast_hours = 0
+                    trending_hours = 0
+                    tier1_max = self._max_wallets * 2
+                    tier2_max = 0
+                    _multi_timeframe = False
+
                 # When profitability pre-screen is enabled, discover 2x wallets
-                # so we can filter to the most profitable subset.
                 _profit_filter = os.getenv("SCOUT_DISCOVERY_PROFITABILITY_FILTER", "true").lower() == "true"
-                discover_max = self._max_wallets * 2 if _profit_filter else self._max_wallets
+
+                discovered_all: List[str] = []
+
+                # --- Deep scan: established wallets ---
+                if deep_hours > 0 or not _multi_timeframe:
+                    _discover_deep = self._max_wallets * 2 if _profit_filter and not _multi_timeframe else tier1_max * 2 if _profit_filter else tier1_max
+                    print(f"[Analyzer] Running deep scan ({deep_hours}h window, max={_discover_deep})...")
+                    deep_discovered = await self.helius_client.discover_wallets_from_recent_swaps(
+                        limit=1000,
+                        min_trade_count=min_trade_count + 2,  # Higher bar for deep — need more trades
+                        max_wallets=_discover_deep if _discover_deep else tier1_max,
+                        hours_back=deep_hours if deep_hours > 0 else hours_back,
+                    )
+                    if deep_discovered:
+                        print(f"[Analyzer] Deep scan found {len(deep_discovered)} wallets")
+                        discovered_all.extend(deep_discovered)
+
+                # --- Fast scan: emerging wallets ---
+                if _multi_timeframe and fast_hours > 0:
+                    _discover_fast = tier2_max * 2 if _profit_filter else tier2_max
+                    print(f"[Analyzer] Running fast scan ({fast_hours}h window, max={_discover_fast})...")
+                    fast_discovered = await self.helius_client.discover_wallets_from_recent_swaps(
+                        limit=1000,
+                        min_trade_count=min_trade_count,
+                        max_wallets=_discover_fast if _discover_fast else tier2_max,
+                        hours_back=fast_hours,
+                    )
+                    if fast_discovered:
+                        print(f"[Analyzer] Fast scan found {len(fast_discovered)} wallets")
+                        # Append new wallets not already in deep scan
+                        existing = set(discovered_all)
+                        new_fast = [w for w in fast_discovered if w not in existing]
+                        discovered_all.extend(new_fast)
+                        print(f"[Analyzer] Fast scan added {len(new_fast)} new wallets")
+
+                # --- Trending scan: narrative wallets ---
+                if _multi_timeframe and trending_hours > 0:
+                    _discover_trending = min(50, tier2_max)
+                    print(f"[Analyzer] Running trending scan ({trending_hours}h window, max={_discover_trending})...")
+                    trending_discovered = await self.helius_client.discover_wallets_from_recent_swaps(
+                        limit=500,
+                        min_trade_count=1,
+                        max_wallets=_discover_trending,
+                        hours_back=trending_hours,
+                    )
+                    if trending_discovered:
+                        print(f"[Analyzer] Trending scan found {len(trending_discovered)} wallets")
+                        existing = set(discovered_all)
+                        new_trending = [w for w in trending_discovered if w not in existing]
+                        discovered_all.extend(new_trending)
+                        print(f"[Analyzer] Trending scan added {len(new_trending)} new wallets")
                 
-                # Call the async discovery method
-                discovered = await self.helius_client.discover_wallets_from_recent_swaps(
-                    limit=1000,  # Max transactions to query (deprecated but kept for compatibility)
-                    min_trade_count=min_trade_count,
-                    max_wallets=discover_max,
-                    hours_back=hours_back,
-                )
-                
-                if discovered:
+                if discovered_all:
+                    # Deduplicate
+                    discovered = list(dict.fromkeys(discovered_all))  # Preserve order, dedup
                     # Run profitability pre-screen if enabled
                     if _profit_filter and len(discovered) > self._max_wallets:
                         discovered = await self._profitability_pre_screen(discovered, self._max_wallets)
                     else:
                         discovered = discovered[:self._max_wallets]
-                    
+
                     self._candidate_wallets = discovered
-                    print(f"[Analyzer] Discovered {len(self._candidate_wallets)} candidate wallets")
+                    print(f"[Analyzer] Discovered {len(self._candidate_wallets)} candidate wallets "
+                          f"(from {len(discovered_all)} total across all timeframes)")
                     return
                 else:
                     print("[Analyzer] No wallets discovered, falling back to database or sample data")
@@ -877,6 +945,34 @@ class WalletAnalyzer:
 
         print(f"  [{address[:8]}] Smart money: limit_orders={uses_limit_orders}, mev_protection={uses_mev_protection}")
 
+        # Phase 5b: MEV/Sandwich Risk Detection
+        # Analyze nativeTransfers for sandwich attack patterns.
+        # A sandwich attack typically has: frontrun buy → victim buy → backrun sell
+        # within the same block. We approximate by checking if the wallet's
+        # swap transactions appear in blocks with multiple swaps to the same token.
+        mev_risk_score: Optional[float] = None
+        try:
+            swap_txs = [
+                tx for tx in transactions
+                if tx.get("type") == "SWAP" and tx.get("tokenTransfers")
+            ]
+            if swap_txs:
+                # Group swap transactions by block timestamp (hour bucket as proxy)
+                sandwich_suspicious = 0
+                for tx in swap_txs:
+                    token_transfers = tx.get("tokenTransfers", [])
+                    native_transfers = tx.get("nativeTransfers", [])
+                    # Simple heuristic: if swap has >3 token transfers AND the wallet
+                    # is not the only participant, it may be in a sandwich
+                    if len(token_transfers) > 3 and any(
+                        nt.get("toUserAccount") in _jito_tip_accounts
+                        for nt in native_transfers
+                    ):
+                        sandwich_suspicious += 1
+                mev_risk_score = sandwich_suspicious / max(1, len(swap_txs))
+        except Exception:
+            pass
+
         print(f"  [{address[:8]}] Calculating metrics from {len(trades)} trades...")
         # Calculate metrics from trades
         metrics = await self._calculate_metrics_from_trades(
@@ -886,6 +982,7 @@ class WalletAnalyzer:
             uses_mev_protection=uses_mev_protection,
             is_unproven_from_parse=is_unproven_from_parse,
             parse_rate=parse_rate,
+            mev_risk_score=mev_risk_score,
         )
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
@@ -1543,7 +1640,7 @@ class WalletAnalyzer:
         self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None, mev_risk_score: Optional[float] = None) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -1899,6 +1996,15 @@ class WalletAnalyzer:
             except Exception:
                 pass
 
+        # Phase 2c: Token category concentration
+        token_symbols = set(t.token_symbol for t in trades if t.token_symbol and t.token_symbol != "UNKNOWN")
+        token_categories = set()
+        for sym in token_symbols:
+            cat = self._classify_token_category(sym)
+            if cat:
+                token_categories.add(cat)
+        unique_token_categories = len(token_categories) if token_categories else None
+
         # Convert Decimal values to float for WalletMetrics
         return WalletMetrics(
             address=address,
@@ -1922,6 +2028,8 @@ class WalletAnalyzer:
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
             correlated_with_scam=correlated_with_scam,
+            unique_token_categories=unique_token_categories,
+            mev_risk_score=mev_risk_score,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:
@@ -2154,6 +2262,34 @@ class WalletAnalyzer:
         return wins / total
     
     # Adding this methodology to where _detect_insider_patterns is or simply add a new helper method
+    
+    @staticmethod
+    def _classify_token_category(token_symbol: str) -> Optional[str]:
+        """Classify a token into a broad category based on symbol patterns."""
+        sym = token_symbol.upper().strip()
+        if not sym or sym == "UNKNOWN":
+            return None
+        memecoins = {"WIF", "BONK", "POPCAT", "MEW", "MYRO", "SAMO", "SLERF",
+                     "BOME", "MOG", "PENGU", "PEPE", "DOGE", "SHIB", "FLOKI",
+                     "MOODENG", "GOAT", "FWOG", "MICHI", "BRETT", "MOTHER"}
+        infra = {"SOL", "JUP", "JTO", "RAY", "ORCA", "PYTH", "W", "DRIFT",
+                 "PRCL", "ZEUS", "KMNO", "CLOUD", "TNSR"}
+        defi = {"MNDE", "MUX", "UXP", "HNT", "BORG", "MPLX"}
+        stable = {"USDC", "USDT", "USDS", "PYUSD", "EURC", "FDUSD"}
+        gaming = {"GALA", "PORTAL", "CROWN", "NYAN"}
+        if sym in memecoins:
+            return "memecoin"
+        if sym in infra:
+            return "infrastructure"
+        if sym in defi:
+            return "defi"
+        if sym in stable:
+            return "stablecoin"
+        if sym in gaming:
+            return "gaming"
+        if sym.endswith("COIN") or sym.endswith("DOGE"):
+            return "memecoin"
+        return "other"
     
     def _is_smart_money_candidate(self, address: str, trades: List[HistoricalTrade]) -> bool:
         """

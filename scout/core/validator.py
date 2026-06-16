@@ -139,7 +139,7 @@ class PrePromotionValidator:
         logger.info(f"Validating wallet {wallet_address[:8]}... for promotion")
         
         # Step 1: Check WQS score
-        wqs_score = calculate_wqs(metrics)
+        wqs_score = calculate_wqs(metrics, strategy=strategy)
         if wqs_score < self.criteria.min_wqs_score:
             logger.info(f"Wallet failed WQS check: {wqs_score:.1f} < {self.criteria.min_wqs_score}")
             return ValidationResult(

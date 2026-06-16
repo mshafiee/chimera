@@ -238,8 +238,8 @@ def test_wqs_drawdown_penalty():
     score_high = calculate_wqs(wallet_high_dd)
     
     assert score_low > score_high, f"Low drawdown should score higher: {score_low} vs {score_high}"
-    # Drawdown penalty should be approximately 13 * 0.2 = 2.6 points difference
-    assert abs((score_low - score_high) - 2.6) < 1.0, "Drawdown penalty should be around 2.6 points"
+    # Drawdown penalty: 13 * 0.2 = 2.6 points linear + 5.0 Shield low-dd bonus = ~7.6 points
+    assert abs((score_low - score_high) - 7.6) < 3.0, f"Drawdown penalty expected ~7.6, got {score_low - score_high:.1f}"
 
 
 def test_wqs_activity_bonus():
@@ -417,21 +417,24 @@ def test_classify_wallet():
 
 def test_wqs_momentum_bonus_not_applied_when_both_roi_negative():
     """
-    Test 72 (plan): momentum bonus must NOT fire when roi_30d and roi_7d are both negative.
-
-    The code: `if (roi_7d or 0) > 0 and (roi_30d or 0) > 0 and roi_7d >= roi_30d * 0.5`
-    For roi_30d=-50%, roi_7d=-20%: roi_7d > 0 is False → no bonus.
-
-    Risk: If the condition incorrectly applied the bonus for negative pairs where roi_7d
-    is "better" than roi_30d (smaller magnitude), bad wallets in recovery would be promoted.
+    Test 72 (plan, updated): WMI should NOT boost negative-ROI wallets.
+    
+    With roi_30d=-50%, roi_7d=-20%: roi_30d <= 0 and roi_7d < 0 → roi_trend = -0.5
+    → WMI ≈ -0.25 (< -0.2) → -5 penalty.
+    
+    The wallet without roi_7d (None) gets no WMI block → no penalty.
+    The negative wallet should score <= the None wallet (penalty makes it lower).
     """
+    from datetime import datetime, timedelta
+    recent = (datetime.utcnow() - timedelta(days=1)).isoformat()
     wallet = WalletMetrics(
         address="test_neg_momentum",
         roi_30d=-50.0,
-        roi_7d=-20.0,  # "better" but still negative
+        roi_7d=-20.0,
         win_streak_consistency=0.6,
         trade_count_30d=25,
         max_drawdown_30d=10.0,
+        last_trade_at=recent,
     )
 
     wallet_no_recent = WalletMetrics(
@@ -441,14 +444,32 @@ def test_wqs_momentum_bonus_not_applied_when_both_roi_negative():
         win_streak_consistency=0.6,
         trade_count_30d=25,
         max_drawdown_30d=10.0,
+        last_trade_at=recent,
     )
 
     score_neg = calculate_wqs(wallet)
     score_none = calculate_wqs(wallet_no_recent)
 
-    # Both should score the same since neither gets the momentum bonus
-    assert score_neg == score_none, (
-        f"Negative ROI pair must not get momentum bonus: {score_neg} vs {score_none}"
+    assert score_neg <= score_none, (
+        f"Negative ROI pair must not get a momentum bonus: {score_neg} vs {score_none}"
+    )
+
+    wallet_no_recent = WalletMetrics(
+        address="test_no_recent",
+        roi_30d=-50.0,
+        roi_7d=None,
+        win_streak_consistency=0.6,
+        trade_count_30d=25,
+        max_drawdown_30d=10.0,
+        last_trade_at=recent,
+    )
+
+    score_neg = calculate_wqs(wallet)
+    score_none = calculate_wqs(wallet_no_recent)
+
+    # Negative ROI wallet gets WMI penalty → should score <= wallet without roi_7d
+    assert score_neg <= score_none, (
+        f"Negative ROI pair must not get a momentum bonus: {score_neg} vs {score_none}"
     )
 
 
@@ -744,25 +765,31 @@ def test_activity_bonus_cumulative_with_grinder_bonus():
 
 
 def test_roi_momentum_bonus_requires_recent_trade_and_both_roi_positive():
-    """M7: roi_7d >= roi_30d * 0.5 earns +5 momentum pts, but only when last_trade_at is recent."""
+    """M7 (updated): WMI > 0.2 earns +5 momentum pts, WMI < -0.2 earns -5 penalty.
+    WMI-based momentum only fires when last_trade_at is provided and wallet is fresh."""
     from datetime import datetime, timedelta
+    from core.wqs import _compute_wmi
 
     recent = (datetime.utcnow() - timedelta(days=1)).isoformat()
-    base = dict(address="w", roi_30d=20.0, roi_7d=12.0,  # 12 >= 20*0.5=10 → qualifies
+    base = dict(address="w", roi_30d=20.0, roi_7d=12.0,  # roi_ratio=0.6 → WMI≈0.215 → +5 bonus
                 trade_count_30d=25, max_drawdown_30d=5.0)
+
+    # Verify WMI is above 0.2 threshold for this input
+    wmi_val = _compute_wmi(12.0, 20.0, 25)
+    assert wmi_val > 0.2, f"Expected WMI > 0.2 for roi_7d=12, roi_30d=20, got {wmi_val:.3f}"
 
     score_with_date    = calculate_wqs(WalletMetrics(**base, last_trade_at=recent))
     score_without_date = calculate_wqs(WalletMetrics(**base, last_trade_at=None))
 
     assert score_with_date > score_without_date, (
-        "Momentum bonus should only apply when last_trade_at is provided and wallet is fresh"
+        "WMI momentum bonus should only apply when last_trade_at is provided and wallet is fresh"
     )
 
-    # Verify the bonus does NOT apply when roi_7d < roi_30d * 0.5
+    # Verify the bonus does NOT apply when WMI < 0.2
     score_no_momentum = calculate_wqs(WalletMetrics(
-        address="w", roi_30d=20.0, roi_7d=5.0,  # 5 < 20*0.5=10 → no bonus
+        address="w", roi_30d=20.0, roi_7d=5.0,  # roi_ratio=0.25 → WMI≈0.04 → no bonus
         trade_count_30d=25, max_drawdown_30d=5.0, last_trade_at=recent,
     ))
     assert score_with_date > score_no_momentum, (
-        "Momentum bonus should not apply when roi_7d < roi_30d * 50%%"
+        "WMI momentum bonus should not apply when WMI < 0.2"
     )

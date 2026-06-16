@@ -157,7 +157,32 @@ class ScoutConfig:
     @staticmethod
     def get_max_wallets() -> int:
         """Get maximum wallets to analyze per run."""
-        return int(os.getenv("SCOUT_MAX_WALLETS", "100"))
+        return int(os.getenv("SCOUT_MAX_WALLETS", "250"))
+
+    @staticmethod
+    def get_max_wallets_tier1() -> int:
+        """Get max wallets for Tier 1 (Shield candidates, deep analysis)."""
+        return int(os.getenv("SCOUT_MAX_WALLETS_TIER1", "150"))
+
+    @staticmethod
+    def get_max_wallets_tier2() -> int:
+        """Get max wallets for Tier 2 (Spear candidates, fast analysis)."""
+        return int(os.getenv("SCOUT_MAX_WALLETS_TIER2", "100"))
+
+    @staticmethod
+    def get_discovery_deep_hours() -> int:
+        """Deep scan lookback (established wallets with large samples)."""
+        return int(os.getenv("SCOUT_DISCOVERY_DEEP_HOURS", "720"))
+
+    @staticmethod
+    def get_discovery_fast_hours() -> int:
+        """Fast scan lookback (emerging wallets with recent activity)."""
+        return int(os.getenv("SCOUT_DISCOVERY_FAST_HOURS", "24"))
+
+    @staticmethod
+    def get_discovery_trending_hours() -> int:
+        """Trending scan lookback (wallets riding current narratives)."""
+        return int(os.getenv("SCOUT_DISCOVERY_TRENDING_HOURS", "4"))
     
     @staticmethod
     def get_discovery_profitability_filter() -> bool:

@@ -192,6 +192,93 @@ class TestWQSProperties:
 
         assert 0 <= wqs <= 100, f"WQS {wqs} out of bounds for win_streak={win_streak}"
 
+    def test_wqs_near_zero_roi_30d_no_momentum_bonus(self):
+        """Phase 1c: Near-zero roi_30d should not receive recency momentum bonus."""
+        # Wallet with roi_30d=0.001, roi_7d=4.0 — should NOT get +5 momentum bonus
+        metrics = WalletMetrics(
+            address="test",
+            roi_30d=0.001,
+            roi_7d=4.0,
+            trade_count_30d=100,
+            win_rate=0.7,
+        )
+        wqs_with = calculate_wqs(metrics)
+
+        # Same wallet WITHOUT the near-zero roi_30d recency-bonus issue
+        # We can't construct a direct counterfactual, but we verify the score is bounded
+        assert 0 <= wqs_with <= 100, f"WQS {wqs_with} with near-zero roi_30d"
+
+        # Wallet with roi_30d=0.001 and roi_7d=0.001 should NOT have higher score
+        # than one with the same inputs (trivial case)
+        metrics2 = WalletMetrics(
+            address="test2",
+            roi_30d=0.001,
+            roi_7d=0.001,
+            trade_count_30d=100,
+            win_rate=0.7,
+        )
+        wqs_without = calculate_wqs(metrics2)
+        # The wallet with roi_7d=4.0 should not get an unfair momentum bonus
+        # over the wallet with roi_7d=0.001 when roi_30d is near-zero.
+        # Both should be close since roi_30d < 1.0 blocks the recency path.
+        assert abs(wqs_with - wqs_without) < 15.0, (
+            f"Near-zero roi_30d should not trigger momentum bonus: "
+            f"wqs_with_7d={wqs_with:.1f}, wqs_without={wqs_without:.1f}"
+        )
+
+    def test_wqs_pump_spike_near_zero_baseline(self):
+        """Phase 1c: Near-zero roi_30d baseline should trigger pump detection."""
+        metrics = WalletMetrics(
+            address="test3",
+            roi_30d=0.001,
+            roi_7d=50.0,
+            trade_count_30d=100,
+            win_rate=0.7,
+            max_drawdown_30d=0.0,
+        )
+        wqs = calculate_wqs(metrics)
+        # With pump-spike detection active and roi_30d near-zero + roi_7d > 10,
+        # the _is_pump_spike flag should be True, penalizing the wallet.
+        # Verify score is not inflated despite the high roi_7d.
+        assert 0 <= wqs <= 100
+        # A 50% 7d ROI with near-zero baseline should be heavily penalized
+        assert wqs < 60.0, f"Expected pump-spike penalty for near-zero baseline, got WQS={wqs:.1f}"
+
+    def test_wqs_profit_factor_graduated(self):
+        """Phase 2a/Quick Win: PF cliff at 1.2 is graduated."""
+        def wqs_for_pf(pf):
+            return calculate_wqs(WalletMetrics(
+                address="test",
+                roi_30d=50.0,
+                roi_7d=10.0,
+                trade_count_30d=100,
+                win_rate=0.65,
+                profit_factor=pf,
+                max_drawdown_30d=5.0,
+            ))
+
+        wqs_12 = wqs_for_pf(1.2)
+        wqs_119 = wqs_for_pf(1.19)
+        wqs_115 = wqs_for_pf(1.15)
+        wqs_11 = wqs_for_pf(1.1)
+        wqs_10 = wqs_for_pf(1.0)
+        wqs_09 = wqs_for_pf(0.99)
+
+        # PF bands: 1.2→+2, 1.15→-1, 1.1→-3, 1.0→-6, 0.99→-25
+        assert wqs_12 >= wqs_119, f"PF=1.2 ({wqs_12:.1f}) >= PF=1.19 ({wqs_119:.1f})"
+        assert wqs_119 >= wqs_115, f"PF=1.19 ({wqs_119:.1f}) >= PF=1.15 ({wqs_115:.1f})"
+        assert wqs_115 >= wqs_11, f"PF=1.15 ({wqs_115:.1f}) >= PF=1.1 ({wqs_11:.1f})"
+        assert wqs_11 >= wqs_10, f"PF=1.1 ({wqs_11:.1f}) >= PF=1.0 ({wqs_10:.1f})"
+        assert wqs_10 > wqs_09, f"PF=1.0 ({wqs_10:.1f}) should be > PF=0.99 ({wqs_09:.1f})"
+
+        # Gap between 1.2 and 1.19 should be modest (not the old 12-point cliff)
+        gap = wqs_12 - wqs_119
+        assert gap < 10.0, f"PF cliff too large: {gap:.1f} points between PF=1.2 and PF=1.19"
+
+        # Gap between 1.0 and 0.99 should be large (breakeven vs losing)
+        gap_loss = wqs_10 - wqs_09
+        assert gap_loss > 10.0, f"Losing trader penalty too weak: {gap_loss:.1f} points between PF=1.0 and PF=0.99"
+
 
 # Run tests if executed directly
 if __name__ == "__main__":

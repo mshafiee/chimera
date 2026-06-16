@@ -631,49 +631,66 @@ class LiquidityProvider:
         liquidity_usd: float,
         sol_price_usd: float = 150.0,
         volume_24h_usd: float = 0.0,
+        token_age_days: float = 365.0,
     ) -> float:
         """
         Estimate slippage for a trade based on trade size vs liquidity.
-        
+
         Uses a square root model: slippage increases with sqrt of trade size
-        relative to liquidity.
-        
+        relative to liquidity. Enhanced with:
+        - Volume/turnover volatility adjustment
+        - Order-book depth proxy (bid/ask spread from volume/liquidity ratio)
+        - Token age factor (newer tokens have wider spreads)
+
         Args:
             token_address: Token mint address
             amount_sol: Trade size in SOL
             liquidity_usd: Pool liquidity in USD
             sol_price_usd: SOL price in USD
-            volume_24h_usd: 24h Volume in USD (used for volatility adjustment)
-            
+            volume_24h_usd: 24h Volume in USD
+            token_age_days: Age of the token in days (default 365 = very mature)
+
         Returns:
             Estimated slippage as a decimal (0.01 = 1%)
         """
         if liquidity_usd <= 0:
             return 1.0  # 100% slippage (trade would fail)
-        
+
         trade_value_usd = amount_sol * sol_price_usd
-        
+
         # Base Slippage (AMM Constant Product Approximation)
-        # Slippage ~ Trade_Size / Liquidity
-        # We use a base constant of 0.1 for typical Solana DEX pools
         base_slippage = 0.1 * math.sqrt(trade_value_usd / liquidity_usd)
 
-        # --- NEW: Volatility/Turnover Penalty ---
-        # High Volume / Low Liquidity = Jito Wars / Extreme Volatility
-        volatility_multiplier = 1.0
-        if liquidity_usd > 0:
+        # Turnover factor: single multiplier from volume/liquidity ratio (saturating).
+        # Combines what was previously split into volatility + depth multipliers
+        # to avoid double-counting correlated inputs.
+        turnover_factor = 1.0
+        if liquidity_usd > 0 and volume_24h_usd > 0:
             turnover_ratio = volume_24h_usd / liquidity_usd
-            
-            if turnover_ratio > 10.0:
-                volatility_multiplier = 5.0 # Extreme Danger (New launch or rug)
+            if turnover_ratio > 20.0:
+                turnover_factor = 3.0
+            elif turnover_ratio > 10.0:
+                turnover_factor = 2.0
             elif turnover_ratio > 3.0:
-                volatility_multiplier = 2.5 # Very High Volatility
+                turnover_factor = 1.5
             elif turnover_ratio > 1.0:
-                volatility_multiplier = 1.5 # Active trading
+                turnover_factor = 1.2
 
-        final_slippage = base_slippage * volatility_multiplier
-        
-        # Add fixed base network variance (e.g. 0.5%)
+        # Phase 5c: Token age factor — additive term, not multiplicative,
+        # to avoid blowup when combined with high-turnover tokens.
+        age_additive = 0.0
+        if token_age_days < 365:
+            if token_age_days < 1:
+                age_additive = 0.03   # Up to +3% additional slippage for brand-new tokens
+            elif token_age_days < 7:
+                age_additive = 0.02   # Up to +2% for <1 week
+            elif token_age_days < 30:
+                age_additive = 0.01   # Up to +1% for <1 month
+            elif token_age_days < 90:
+                age_additive = 0.005  # Up to +0.5% for <3 months
+
+        final_slippage = base_slippage * turnover_factor + age_additive
+
         return min(final_slippage + 0.005, 1.0)
     
     async def get_sol_price_usd(self) -> float:

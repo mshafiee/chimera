@@ -159,6 +159,8 @@ class TestWQSBaseScore:
     def test_wqs_anti_pump_and_dump_penalty(self):
         """Test that recent massive spikes are penalized."""
         # Normal case: 7d ROI not > 2x 30d ROI
+        from datetime import datetime, timezone, timedelta
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
         metrics_normal = WalletMetrics(
             address="test",
             roi_7d=20.0,
@@ -167,13 +169,13 @@ class TestWQSBaseScore:
             win_rate=0.6,
             max_drawdown_30d=5.0,
             avg_trade_size_sol=0.5,
-            last_trade_at="2025-01-01T00:00:00",
+            last_trade_at=recent_ts,
             win_streak_consistency=0.5,
         )
         
         score_normal = calculate_wqs(metrics_normal)
         
-        # Pump case: 7d ROI > 2x 30d ROI (should be penalized -15)
+        # Pump case: 7d ROI > 2x 30d ROI (should be penalized -25)
         metrics_pump = WalletMetrics(
             address="test",
             roi_7d=100.0,  # > 2x 30d ROI
@@ -182,7 +184,7 @@ class TestWQSBaseScore:
             win_rate=0.6,
             max_drawdown_30d=5.0,
             avg_trade_size_sol=0.5,
-            last_trade_at="2025-01-01T00:00:00",
+            last_trade_at=recent_ts,
             win_streak_consistency=0.5,
         )
         

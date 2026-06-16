@@ -19,7 +19,9 @@ merges this into the main database via SIGHUP or API call.
 """
 
 import argparse
+import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -31,7 +33,8 @@ import asyncio
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.db_writer import WalletRecord, write_roster_atomic
-from core.wqs import calculate_wqs
+from core.wqs import calculate_wqs, calculate_wqs_with_confidence, \
+    _calculate_raw_score, _interpret_trajectory, _compute_wmi, RawScoreComponents
 from core.analyzer import WalletAnalyzer
 from core.models import BacktestConfig
 from core.validator import PrePromotionValidator, PromotionCriteria
@@ -40,6 +43,7 @@ from core.auto_merge import auto_merge_roster
 from core.metrics import get_metrics
 from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
+from core.correlation_reader import CorrelationReader
 
 # Import config module if available
 try:
@@ -220,8 +224,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-wallets",
         type=int,
-        default=int(os.getenv("SCOUT_MAX_WALLETS", "100")),
-        help="Max wallets to analyze (default: 100, or SCOUT_MAX_WALLETS env var; set to 200-500 for paid Helius plans)",
+        default=int(os.getenv("SCOUT_MAX_WALLETS", "250")),
+        help="Max wallets to analyze (default: 250, or SCOUT_MAX_WALLETS env var; set to 200-500 for paid Helius plans)",
     )
 
     parser.add_argument(
@@ -283,7 +287,9 @@ async def analyze_wallets(
     stats = {
         "total": 0, "active": 0, "candidate": 0, "rejected": 0,
         "backtest_passed": 0, "backtest_failed": 0, "backtest_skipped": 0,
+        "trajectory_demotions": 0, "trajectory_peak_blocks": 0,
     }
+    exit_recs: List[Dict[str, Any]] = []
     
     candidates = analyzer.get_candidate_wallets()
     stats["total"] = len(candidates)
@@ -313,6 +319,22 @@ async def analyze_wallets(
             # Get trades from cache (already fetched during metrics calculation)
             trades = analyzer._trades_cache.get(wallet_address, [])
             print(f"[Scout] Got {len(trades)} trades from cache")
+
+            # Phase 3c: Determine strategy from archetype
+            _archetype = None
+            try:
+                _archetype_enum = analyzer.determine_archetype(metrics, trades)
+                _archetype = _archetype_enum.value if _archetype_enum else None
+            except Exception:
+                _archetype = None
+            _strategy = "SPEAR" if _archetype in ("WHALE", "SWING") else "SHIELD"
+            
+            # Get raw components for correlation tracking
+            raw_components = _calculate_raw_score(metrics, strategy=_strategy)
+            
+            # Step 2: Multi-TF trajectory interpretation
+            trajectory = _interpret_trajectory(metrics.roi_7d, metrics.roi_30d)
+            wmi = _compute_wmi(metrics.roi_7d, metrics.roi_30d, metrics.trade_count_30d)
             
             # Initial Status
             if wqs_score >= min_wqs_active:
@@ -321,6 +343,28 @@ async def analyze_wallets(
                 initial_status = "CANDIDATE"
             else:
                 initial_status = "REJECTED"
+            
+            # Step 2: Trajectory-based status adjustments
+            if trajectory == "PEAKED" and initial_status in ("ACTIVE", "CANDIDATE"):
+                initial_status = "CANDIDATE"
+                stats["trajectory_peak_blocks"] += 1
+                print(f"[Scout] {wallet_address[:8]}... PEAKED trajectory, "
+                      f"blocking promotion (WQS={wqs_score:.1f})")
+            elif trajectory == "DECLINING":
+                if initial_status == "ACTIVE":
+                    initial_status = "CANDIDATE"
+                    stats["trajectory_demotions"] += 1
+                    print(f"[Scout] {wallet_address[:8]}... DECLINING trajectory, "
+                          f"demoting to CANDIDATE (WQS={wqs_score:.1f}, WMI={wmi:.2f})")
+                # Step 5: Exit recommendation for DECLINING wallets with high WQS
+                if wqs_score >= min_wqs_active:
+                    exit_recs.append({
+                        "wallet": wallet_address,
+                        "reason": f"WMI={wmi:.2f}, trajectory=DECLINING, "
+                                  f"roi_7d={metrics.roi_7d}, roi_30d={metrics.roi_30d}",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "recommended_action": "EXIT_ALL",
+                    })
             
             # Performance degradation check: if an ACTIVE wallet shows signs of
             # decay, demote to CANDIDATE regardless of historical WQS.
@@ -338,7 +382,7 @@ async def analyze_wallets(
             if initial_status == "ACTIVE" and not skip_backtest and validator:
                 if trades:
                     validation = await validator.validate_for_promotion(
-                        wallet_address, metrics, trades, strategy="SHIELD"
+                        wallet_address, metrics, trades, strategy=_strategy
                     )
                     if validation.passed:
                         backtest_res = {"status": "PASSED", "notes": validation.notes}
@@ -366,7 +410,12 @@ async def analyze_wallets(
                 "status": final_status,
                 "backtest": backtest_res,
                 "trades": trades,
-                "wallet_stats": wallet_stats
+                "wallet_stats": wallet_stats,
+                "components": raw_components,
+                "trajectory": trajectory,
+                "wmi": wmi,
+                "strategy": _strategy,
+                "archetype": _archetype,
             }
             
             # MEMORY FIX: Clear analyzer cache for this wallet immediately
@@ -454,14 +503,7 @@ async def analyze_wallets(
         notes_parts.append(f"Analyzed at {datetime.utcnow().isoformat()}")
 
         # Determine archetype
-        archetype = None
-        if res['trades']:
-            try:
-                archetype_enum = analyzer.determine_archetype(res['metrics'], res['trades'])
-                archetype = archetype_enum.value if archetype_enum else None
-            except Exception as e:
-                if verbose:
-                    print(f"  Warning: Failed to determine archetype for {wallet_addr[:8]}...: {e}")
+        archetype = res.get('archetype')
         
         record = WalletRecord(
             address=wallet_addr,
@@ -495,6 +537,55 @@ async def analyze_wallets(
             records = await cluster_and_dedup(records, helius_client=analyzer.helius_client)
         except Exception as e:
             print(f"[Scout] Clustering dedup skipped ({e})")
+    
+    # Step 4: Cluster ensemble scoring — penalize wallets in losing clusters
+    if os.getenv("SCOUT_CLUSTER_ENSEMBLE", "true").lower() == "true" and len([r for r in records if r.status == "ACTIVE"]) > 1:
+        try:
+            from core.cluster_ensemble import compute_cluster_scores, apply_cluster_adjustment
+            
+            cluster_data = {}
+            for r in records:
+                cid = getattr(r, 'cluster_id', None) or r.address
+                cluster_data[r.address] = {"cluster_id": cid}
+            
+            cluster_metrics = compute_cluster_scores(
+                [{"address": r.address, "wqs_score": r.wqs_score,
+                  "roi_30d": r.roi_30d, "profit_factor": r.profit_factor}
+                 for r in records],
+                cluster_data
+            )
+            
+            adjusted_count = 0
+            for r in records:
+                old_score = r.wqs_score
+                r.wqs_score = apply_cluster_adjustment(
+                    r.wqs_score, r.address,
+                    cluster_data=cluster_data,
+                    cluster_metrics=cluster_metrics,
+                )
+                if r.wqs_score != old_score:
+                    adjusted_count += 1
+            if adjusted_count > 0:
+                print(f"[Scout] Cluster ensemble: adjusted {adjusted_count} wallet WQS scores")
+        except Exception as e:
+            print(f"[Scout] Cluster ensemble skipped ({e})")
+    
+    # Step 3c: Write correlation records for promoted ACTIVE wallets
+    for res in results:
+        if not res or res.get('status') != "ACTIVE":
+            continue
+        wallet_addr = res['address']
+        components = res.get('components')
+        strategy = res.get('strategy', 'SHIELD')
+        if components:
+            _write_correlation_record(
+                wallet_addr, res['wqs'],
+                components.components_json, strategy
+            )
+    
+    # Step 5b: Write exit recommendations to JSON file
+    if exit_recs:
+        _write_exit_recommendations(exit_recs)
     
     return records, stats
 
@@ -593,6 +684,56 @@ def _check_performance_degradation(metrics) -> bool:
             return True
 
     return False
+
+
+def _write_correlation_record(
+    wallet_address: str,
+    wqs_score: float,
+    components_json_str: str,
+    strategy: str,
+) -> None:
+    """
+    INSERT OR REPLACE into wqs_pnl_correlation table in the MAIN database.
+    
+    Writes the fields the Scout owns: wallet_address, wqs_score_at_promotion,
+    wqs_components_json, promoted_at, strategy, last_updated_at.
+    Actual PnL fields (actual_copy_pnl_*) stay NULL until the Operator UPDATEs them.
+    """
+    db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        now = datetime.utcnow().isoformat()
+        conn.execute(
+            """INSERT OR REPLACE INTO wqs_pnl_correlation
+               (wallet_address, wqs_score_at_promotion, wqs_components_json,
+                promoted_at, strategy, last_updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (wallet_address, wqs_score, components_json_str, now, strategy, now),
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.OperationalError:
+        pass
+
+
+def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
+    """
+    Write exit recommendations to data/exit_recommendations.json atomically.
+    The Operator reads this file to trigger exits for declining ACTIVE wallets.
+    """
+    output_dir = os.getenv("SCOUT_DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "data"))
+    os.makedirs(output_dir, exist_ok=True)
+    final_path = os.path.join(output_dir, "exit_recommendations.json")
+    tmp_path = final_path + ".tmp"
+    
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(exit_recs, f, indent=2)
+        os.rename(tmp_path, final_path)
+        print(f"[Scout] Wrote {len(exit_recs)} exit recommendations to {final_path}")
+    except Exception as e:
+        print(f"[Scout] Failed to write exit recommendations: {e}")
 
 
 async def main_async():
@@ -761,6 +902,26 @@ async def main_async():
     if args.calibration_report or args.verbose or args.dry_run:
         _calibration_report(records, stats)
 
+    # Phase 3a: Print WQS-to-PnL correlation summary (if data exists)
+    try:
+        corr_reader = CorrelationReader()
+        if corr_reader.table_exists():
+            corr_reader.print_correlation_summary()
+    except Exception as e:
+        if args.verbose:
+            print(f"[Scout] Correlation reader skipped: {e}")
+
+    # Step 3d: Adaptive weights calibration
+    try:
+        from core.adaptive_weights import AdaptiveWeightCalibrator
+        calibrator = AdaptiveWeightCalibrator()
+        new_weights = calibrator.calibrate_if_needed()
+        if new_weights:
+            print(f"[Scout] Adaptive weights calibrated: {len(new_weights)} components updated")
+    except Exception as e:
+        if args.verbose:
+            print(f"[Scout] Adaptive weights skipped: {e}")
+
     # Print parse health dashboard (always in verbose/dry-run, otherwise only if >0 failures)
     if args.verbose or args.dry_run or stats["total"] > 0:
         analyzer.print_parse_health_dashboard()
@@ -771,6 +932,9 @@ async def main_async():
     print(f"  ACTIVE: {stats['active']}")
     print(f"  CANDIDATE: {stats['candidate']}")
     print(f"  REJECTED: {stats['rejected']}")
+    if stats.get('trajectory_demotions', 0) > 0 or stats.get('trajectory_peak_blocks', 0) > 0:
+        print(f"  Trajectory demotions: {stats['trajectory_demotions']}")
+        print(f"  Peak blocks: {stats['trajectory_peak_blocks']}")
     
     if not args.skip_backtest:
         print("\n[Scout] Backtest results:")

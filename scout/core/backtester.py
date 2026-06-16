@@ -575,12 +575,22 @@ class BacktestSimulator:
                     if sol_price_hour_cache is not None:
                         sol_price_hour_cache[hour_key] = derived_sol_price
         vol_24h = getattr(liquidity_data, 'volume_24h_usd', Decimal('0'))
+        # Phase 5c: Compute token age for slippage model
+        token_age_days = 365.0
+        token_creation = getattr(liquidity_data, 'token_creation_timestamp', None)
+        if token_creation is not None:
+            try:
+                age_seconds = (trade.timestamp - token_creation).total_seconds()
+                token_age_days = max(0.0, age_seconds / 86400.0)
+            except (TypeError, AttributeError):
+                pass
         slippage_float = self.liquidity.estimate_slippage(
             trade.token_address,
             decimal_to_float(cost_size_sol),
             decimal_to_float(historical_liquidity),
             trade_sol_price,
             volume_24h_usd=decimal_to_float(vol_24h),
+            token_age_days=token_age_days,
         )
         slippage = float_to_decimal(slippage_float)
         

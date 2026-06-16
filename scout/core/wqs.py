@@ -14,9 +14,91 @@ WQS v2 improvements:
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime, timezone
 import os
+
+
+class ScoreTracker:
+    """Tracks per-component score contributions for adaptive weight calibration."""
+    def __init__(self):
+        self.positive = 0.0
+        self.negative = 0.0
+        self.components: Dict[str, float] = {}
+
+    def add_pos(self, name: str, amount: float) -> None:
+        self.positive += amount
+        self.components[name] = self.components.get(name, 0.0) + amount
+
+    def add_neg(self, name: str, amount: float) -> None:
+        self.negative += amount
+        self.components[name] = self.components.get(name, 0.0) - amount
+
+    def to_components(self, is_instant_reject: bool = False) -> "RawScoreComponents":
+        return RawScoreComponents(
+            positive=self.positive,
+            negative=self.negative,
+            is_instant_reject=is_instant_reject,
+            components=dict(self.components),
+        )
+
+
+def _compute_wmi(roi_7d: Optional[float], roi_30d: Optional[float], trade_count_30d: Optional[int]) -> float:
+    """
+    Wallet Momentum Indicator — condensed from wmi.py core formula.
+    Returns a score in [-1, 1]:
+      +1.0 = strong positive momentum (accelerating)
+       0.0 = stable
+      -1.0 = strong negative momentum (actively degrading)
+    """
+    roi_trend = 0.0
+    activity_trend = 0.0
+
+    if roi_7d is not None and roi_30d is not None:
+        if roi_30d > 0:
+            roi_ratio = roi_7d / max(0.01, roi_30d)
+            if roi_ratio > 0.5:
+                roi_trend = min(1.0, (roi_ratio - 0.3) / 0.7)
+            elif roi_ratio > 0.2:
+                roi_trend = (roi_ratio - 0.2) / 0.3 * 0.5
+            else:
+                roi_trend = max(-1.0, roi_ratio - 0.7)
+        elif roi_7d < 0:
+            roi_trend = -0.5
+        else:
+            roi_trend = 0.0
+
+    if trade_count_30d is not None and trade_count_30d > 0:
+        activity_trend = 0.0
+
+    wqs_trend = roi_trend * 0.5 + activity_trend * 0.5
+    wmi = wqs_trend * 0.4 + roi_trend * 0.3 + activity_trend * 0.3
+    return max(-1.0, min(1.0, wmi))
+
+
+def _interpret_trajectory(roi_7d: Optional[float], roi_30d: Optional[float]) -> str:
+    """
+    Interpret multi-timeframe trajectory from ROI data.
+    Returns: "IMPROVING", "STABLE", "DECLINING", or "PEAKED"
+    """
+    if roi_7d is None or roi_30d is None:
+        return "STABLE"
+    if roi_30d > 10 and roi_7d < roi_30d * 0.2:
+        return "PEAKED"
+    if roi_30d > 0 and roi_7d < roi_30d * 0.3:
+        return "DECLINING"
+    if roi_7d > roi_30d * 0.6 and roi_30d > 5:
+        return "IMPROVING"
+    return "STABLE"
+
+
+def _get_current_weights() -> Dict[str, float]:
+    """Load adaptive WQS weights from cache file, falling back to defaults (all 1.0)."""
+    try:
+        from .adaptive_weights import get_effective_wqs_weights
+        return get_effective_wqs_weights()
+    except ImportError:
+        return {}
 
 
 @dataclass
@@ -51,6 +133,8 @@ class WalletMetrics:
     uses_limit_orders: bool = False  # Detected Jupiter Limit Order usage
     uses_mev_protection: bool = False  # Detected Jito bundle/MEV protection usage
     correlated_with_scam: bool = False  # Wallet or funder on known scam denylist
+    unique_token_categories: Optional[int] = None  # Count of unique token categories traded
+    mev_risk_score: Optional[float] = None  # Fraction of trades appearing in sandwich blocks (0.0-1.0)
 
 
 @dataclass
@@ -59,14 +143,25 @@ class RawScoreComponents:
     positive: float = 0.0
     negative: float = 0.0   # stored as absolute value (positive number)
     is_instant_reject: bool = False
+    components: Dict[str, float] = None  # type: ignore
+
+    def __post_init__(self):
+        if self.components is None:
+            self.components = {}
 
     @property
     def raw_score(self) -> float:
         """Traditional combined score (positive - negative), clamped to [0, 100]."""
         return max(0.0, min(self.positive - self.negative, 100.0))
 
+    @property
+    def components_json(self) -> str:
+        """Serialize components dict to JSON string for database storage."""
+        import json
+        return json.dumps(self.components)
 
-def _calculate_raw_score(metrics: WalletMetrics) -> RawScoreComponents:
+
+def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> RawScoreComponents:
     """
     Compute bonus and penalty components of the raw quality score (0-100).
 
@@ -74,11 +169,14 @@ def _calculate_raw_score(metrics: WalletMetrics) -> RawScoreComponents:
     so that the confidence multiplier can be applied to bonuses only,
     while penalties retain full weight regardless of sample size.
 
+    When strategy="SPEAR", weights are shifted toward upside capture
+    and away from drawdown conservatism, matching Spear's higher risk appetite.
+
     Returns RawScoreComponents with is_instant_reject=True for categorically
     uncopyable wallets (snipers) that bypass the normal scoring pipeline.
     """
-    positive = 0.0
-    negative = 0.0
+    _is_spear = strategy.upper() == "SPEAR"
+    tracker = ScoreTracker()
 
     # 1) ROI Base Score (0-35 pts)
     # Reward consistent positive ROI over 7d and 30d.
@@ -101,32 +199,35 @@ def _calculate_raw_score(metrics: WalletMetrics) -> RawScoreComponents:
     # the loss magnitude AND the absolute 7d return is >50%. This avoids false-flagging
     # genuine recoveries (e.g., -10% 30d → +20% 7d) as pump spikes.
     if roi_30d > 0:
-        _is_pump_spike = roi_7d > max(roi_30d * 2.0, 5.0)
+        if roi_30d < 1.0 and roi_7d > 10.0:
+            _is_pump_spike = True  # Near-zero baseline + any meaningful spike = suspicious
+        else:
+            _is_pump_spike = roi_7d > max(roi_30d * 2.0, 5.0)
     else:
         _is_pump_spike = roi_7d > max(abs(roi_30d) * 3.0, 15.0) and roi_7d > 50
 
-    if _use_recency and not _is_pump_spike and roi_30d > 0 and roi_7d > 0:
+    if _use_recency and not _is_pump_spike and roi_30d >= 1.0 and roi_7d > 0:
         # Standard 30d ROI contribution
         base_30d = min(25.0, (roi_30d / 100.0) * 25.0)
         # Time-weighted ROI: blends recent (7d) and full-month (30d)
         weighted_roi = roi_7d * 0.5 + roi_30d * 0.5
         recency_score = min(25.0, (weighted_roi / 100.0) * 25.0)
         # Use the better of standard and recency-weighted, so recency only helps
-        positive += max(base_30d, recency_score)
+        tracker.add_pos("roi_score", max(base_30d, recency_score))
         # Bonus for wallets where recent > monthly (upward momentum confirmed)
-        if roi_7d > roi_30d * 0.6:
-            positive += 5.0
+        if roi_30d >= 1.0 and roi_7d > roi_30d * 0.6:
+            tracker.add_pos("roi_score", 5.0)
     else:
         if roi_30d > 0:
-            positive += min(25.0, (roi_30d / 100.0) * 25.0)
+            tracker.add_pos("roi_score", min(25.0, (roi_30d / 100.0) * 25.0))
 
     if roi_7d > 0:
-        positive += min(10.0, (roi_7d / 100.0) * 10.0)
+        tracker.add_pos("roi_score", min(10.0, (roi_7d / 100.0) * 10.0))
 
     # Consistency Bonus: 7d is positive defined as > -5% (allow small pullback)
     # and 30d is solid.
     if roi_7d > -5.0 and roi_30d > 20.0:
-        positive += 10.0
+        tracker.add_pos("roi_score", 10.0)
 
     # 2) Win Rate & Profit Factor (0-20 pts)
     # Win-rate bonuses above +10 require sound profit factor to prevent
@@ -135,14 +236,14 @@ def _calculate_raw_score(metrics: WalletMetrics) -> RawScoreComponents:
     profit_factor = metrics.profit_factor
 
     if win_rate >= 0.5:
-        positive += 5.0
+        tracker.add_pos("win_rate_score", 5.0)
     if win_rate >= 0.65:
-        positive += 5.0
+        tracker.add_pos("win_rate_score", 5.0)
     # Tiers above +10 require profit_factor >= 1.2 to gate Martingale risk
     if win_rate >= 0.80 and (profit_factor is None or profit_factor >= 1.2):
-        positive += 5.0
+        tracker.add_pos("win_rate_score", 5.0)
     if win_rate >= 0.90 and (profit_factor is None or profit_factor >= 1.2):
-        positive += 5.0
+        tracker.add_pos("win_rate_score", 5.0)
         
             
     # 3) Activity Level (0-20 pts)
@@ -150,145 +251,140 @@ def _calculate_raw_score(metrics: WalletMetrics) -> RawScoreComponents:
     
     # Monotonic increase up to saturation
     if count >= 5:
-        positive += 2.0
+        tracker.add_pos("activity_score", 2.0)
     if count >= 10:
-        positive += 3.0
+        tracker.add_pos("activity_score", 3.0)
     if count >= 20:
-        positive += 5.0
+        tracker.add_pos("activity_score", 5.0)
     if count >= 50:
-        positive += 5.0
+        tracker.add_pos("activity_score", 5.0)
     if count >= 100:
-        positive += 5.0  # Grinder bonus
+        tracker.add_pos("activity_score", 5.0)
     
     # 4) Penalties (Drawdown & Pump-Dump)
     dd = metrics.max_drawdown_30d or 0.0
 
     # Linear drawdown penalty: -0.2 points per percent of drawdown
-    negative += dd * 0.2
+    tracker.add_neg("drawdown_penalty", dd * 0.2)
 
     # Anti-Pump-and-Dump / Lucky Shot Check
-    # If 7d ROI is unusually large relative to the 30d baseline, it's likely a lucky
-    # pump we cannot reliably replicate. Use abs(roi_30d) so the spike threshold
-    # scales correctly even when the monthly trend is negative — a wallet with
-    # -10% monthly but +50% weekly is a lucky spike, not a recovery trend.
     if _is_pump_spike:
-        negative += 25.0  # Anti pump-and-dump (increased from 17 to offset recency boost)
+        tracker.add_neg("pump_spike_penalty", 25.0)
         
     # 5) Scalability / Liquidity Safety (Implicit in avg_trade_size)
     if (metrics.avg_trade_size_sol or 0) < 0.05:
-        negative += 10.0  # Dust trader, hard to copy profitably due to fixed gas
+        tracker.add_neg("pump_spike_penalty", 10.0)
 
     # 6) Consistency (Win Streak)
     if metrics.win_streak_consistency and metrics.win_streak_consistency > 0.4:
-        positive += 5.0
+        tracker.add_pos("consistency_score", 5.0)
 
     # 7) Sniper / Bot Penalty (Critical for Copy Trading)
     if metrics.avg_entry_delay_seconds is not None:
-        # If they buy < 30s after launch on average, they are likely a bot/sniper.
-        # We cannot copy them profitably due to MEV/Latency.
         if metrics.avg_entry_delay_seconds < 30:
-            return RawScoreComponents(is_instant_reject=True)
+            return tracker.to_components(is_instant_reject=True)
         
-        # If they buy < 60s, moderately penalize
         elif metrics.avg_entry_delay_seconds < 60:
-            negative += 15.0
+            tracker.add_neg("sniper_penalty", 15.0)
             
-        # If they wait 2 mins - 1 hour, they are "Smart Money" (Human/Algo analysis)
-        # This is the "Sweet Spot" for copy trading.
         elif 120 < metrics.avg_entry_delay_seconds < 3600:
-            positive += 15.0
+            tracker.add_pos("entry_delay_score", 15.0)
 
     # ---------------------------------------------------------
     # IMPROVED: Profit Factor Logic (Martingale Risk Detection)
     # ---------------------------------------------------------
-    # Win rate is easily faked (sell winners, hold losers). 
-    # Profit Factor (Total Gains / Total Losses) exposes bag holders.
-    # 
-    # CRITICAL: High win rate but low profit factor = Martingale risk
-    # Example: Wins 90% of trades taking $1 profit, loses 10% taking $100 loss
-    # This trader will eventually blow up when they hit a losing streak.
     if metrics.profit_factor is not None:
         if metrics.profit_factor > 3.0:
-            positive += 15.0  # Elite trader
+            tracker.add_pos("pf_score", 15.0)
         elif metrics.profit_factor > 1.5:
-            positive += 5.0   # Profitable
+            tracker.add_pos("pf_score", 5.0)
         elif metrics.profit_factor >= 1.2:
-            positive += 2.0   # Marginally profitable
-        elif metrics.profit_factor < 1.0:
-            # Losing trader (Gross Loss > Gross Win)
-            # Graduated: harsher penalty for deeply negative PF, lighter for near-breakeven
-            if metrics.profit_factor < 0.5:
-                negative += 40.0
-            else:
-                negative += 25.0
-        elif metrics.profit_factor < 1.2:
-            # Martingale Zone: Profitable but barely. High risk of blowup.
-            negative += 10.0
+            tracker.add_pos("pf_score", 2.0)
+        elif metrics.profit_factor >= 1.15:
+            tracker.add_neg("pf_score", 1.0)
+        elif metrics.profit_factor >= 1.1:
+            tracker.add_neg("pf_score", 3.0)
+        elif metrics.profit_factor >= 1.0:
+            tracker.add_neg("pf_score", 6.0)
+        elif metrics.profit_factor >= 0.5:
+            tracker.add_neg("pf_score", 25.0)
+        else:
+            tracker.add_neg("pf_score", 40.0)
     
     # Unproven wallet penalty (continuous based on parse rate when available)
-    # When < 30% of transactions parse successfully, the wallet's trading activity
-    # is too opaque to evaluate reliably. The penalty scales with parse quality
-    # so a wallet with 28% parse rate gets a lighter penalty than one with 1%.
-    # Falls back to the binary -20 penalty when parse_rate is not available.
     if metrics.parse_rate is not None:
         if metrics.parse_rate < 0.60:
-            continuous_penalty = (0.60 - metrics.parse_rate) * 80.0  # 0% parse → -48, 58% parse → -1.6
-            negative += continuous_penalty
+            continuous_penalty = (0.60 - metrics.parse_rate) * 80.0
+            tracker.add_neg("martingale_penalty", continuous_penalty)
     elif metrics.is_unproven:
-        negative += 20.0
+        tracker.add_neg("martingale_penalty", 20.0)
 
     # Explicit Martingale Pattern Detection
-    # A wallet with win_rate > 0.7 AND profit_factor < 1.5 is playing a classic
-    # Martingale strategy: wins often but loses heavily, heading for eventual blow-up.
-    # This penalty is additional to any profit_factor penalty already applied above.
     if profit_factor is not None and win_rate > 0.70 and profit_factor < 1.5:
-        negative += 15.0
+        tracker.add_neg("martingale_penalty", 15.0)
 
-    # 8) Sortino/Sharpe Proxy
-    # Sortino ratio measures risk-adjusted return (downside deviation only).
-    # Higher weight than before: this is a powerful signal that was underutilized.
-    if metrics.sortino_ratio is not None:
-        if metrics.sortino_ratio >= 3.0:
-            positive += 12.0
-        elif metrics.sortino_ratio >= 2.0:
-            positive += 8.0
-        elif metrics.sortino_ratio >= 1.0:
-            positive += 4.0
-        elif metrics.sortino_ratio >= 0.5:
-            positive += 2.0
-        elif metrics.sortino_ratio < 0:
-            negative += 10.0  # Downside volatility exceeds return
+    # 2a: Profit-Factor-to-Win-Rate Ratio Signal
+    if win_rate > 0.70 and profit_factor is not None and profit_factor > 0:
+        pf_wr_ratio = profit_factor / win_rate
+        if pf_wr_ratio < 1.3:
+            tracker.add_neg("pf_wr_penalty", 20.0)
+
+    # 8) Composite Risk-Adjusted Return (Sortino + Drawdown)
+    sortino = metrics.sortino_ratio
+    if sortino is not None:
+        if sortino >= 3.0 and dd < 10.0:
+            tracker.add_pos("sortino_score", 20.0)
+        elif sortino >= 2.0 and dd < 20.0:
+            tracker.add_pos("sortino_score", 15.0)
+        elif sortino >= 1.0 and dd < 30.0:
+            tracker.add_pos("sortino_score", 10.0)
+        elif sortino < 0.5 and dd > 40.0:
+            tracker.add_neg("sortino_score", 15.0)
+        elif sortino < 0:
+            tracker.add_neg("sortino_score", 10.0)
+
+    # Phase 3c: Per-strategy weight adjustments
+    if _is_spear:
+        if sortino is not None and sortino >= 1.5:
+            tracker.add_pos("sortino_score", 5.0)
+    else:
+        if dd < 5.0:
+            tracker.add_pos("sortino_score", 5.0)
     
     # 9) Insider / Fresh Wallet Penalty
-    # Fresh wallets (created <24h before trading) are typically burners/insiders.
-    # We penalize them heavily to avoid copying ephemeral addresses.
     if metrics.is_fresh_wallet:
-        negative += 10.0
+        tracker.add_neg("insider_penalty", 10.0)
 
-    # D5: Scam correlation penalty — downgrade wallets linked to known rug/scam clusters.
-    # Even a wallet with strong metrics is risky if it's in the same ring as scammers.
+    # D5: Scam correlation penalty
     if metrics.correlated_with_scam:
-        negative += 20.0
+        tracker.add_neg("scam_penalty", 20.0)
+
+    # Phase 5b: MEV/Sandwich Risk Penalty
+    if metrics.mev_risk_score is not None and metrics.mev_risk_score > 0.05:
+        if metrics.mev_risk_score > 0.50:
+            tracker.add_neg("mev_risk_penalty", 25.0)
+        elif metrics.mev_risk_score > 0.25:
+            tracker.add_neg("mev_risk_penalty", 15.0)
+        elif metrics.mev_risk_score > 0.10:
+            tracker.add_neg("mev_risk_penalty", 8.0)
     
     # 10) Smart Money Bonuses
-    # DEX Diversity: Using multiple DEXs shows sophistication
     if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
-        positive += 5.0
+        tracker.add_pos("dex_diversity_score", 5.0)
 
-    # Limit Orders: Sophisticated trading strategy
     if metrics.uses_limit_orders:
-        positive += 10.0
+        tracker.add_pos("smart_money_score", 10.0)
 
-    # MEV Protection: Shows awareness of MEV risks
     if metrics.uses_mev_protection:
-        positive += 10.0
+        tracker.add_pos("smart_money_score", 10.0)
 
-    # Cap smart money bonuses to prevent inflating scores without profit proof.
-    # A wallet with mediocre trading performance can accumulate up to 25 points from
-    # tool usage alone (5 DEX + 10 limit + 10 MEV), potentially pushing a sub-60
-    # raw score above the ACTIVE threshold despite poor copy-trading viability.
-    # Only award smart money bonuses if the wallet has demonstrated positive ROI,
-    # ensuring tools are rewarded alongside results rather than as a substitute.
+    # Token Category Concentration (Phase 2c)
+    if metrics.unique_token_categories is not None:
+        if metrics.unique_token_categories >= 3:
+            tracker.add_pos("token_diversity_score", 5.0)
+        elif metrics.unique_token_categories == 1:
+            tracker.add_neg("token_diversity_score", 5.0)
+
     should_remove_bonuses = False
     if metrics.roi_30d is not None and metrics.roi_30d < -10:
         should_remove_bonuses = True
@@ -298,69 +394,71 @@ def _calculate_raw_score(metrics: WalletMetrics) -> RawScoreComponents:
         should_remove_bonuses = True
 
     if should_remove_bonuses:
-        # Remove bonuses added above by reducing the positive accumulator
         if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
-            positive -= 5.0
+            tracker.add_neg("smart_money_removal", 5.0)
         if metrics.uses_limit_orders:
-            positive -= 10.0
+            tracker.add_neg("smart_money_removal", 10.0)
         if metrics.uses_mev_protection:
-            positive -= 10.0
+            tracker.add_neg("smart_money_removal", 10.0)
     
     # 11) Bag Holder Penalty (The "Hidden Loser" Detector)
-    # If unrealized losses > 50% of realized gains, this is a bad trader
-    # They sell winners and hold losers, making them look profitable when they're not.
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
         if metrics.total_realized_profit_sol > 0:
             loss_ratio = metrics.total_unrealized_loss_sol / metrics.total_realized_profit_sol
-            if loss_ratio > 0.5:  # Losses > 50% of gains — severe bag holder
-                negative += 30.0
-            elif loss_ratio > 0.2:  # Losses > 20% of gains — moderate concern
-                negative += 10.0
-        elif metrics.total_unrealized_loss_sol > 0:  # Has unrealized losses but no realized profit
-            negative += 20.0
+            if loss_ratio > 0.5:
+                tracker.add_neg("martingale_penalty", 30.0)
+            elif loss_ratio > 0.2:
+                tracker.add_neg("martingale_penalty", 10.0)
+        elif metrics.total_unrealized_loss_sol > 0:
+            tracker.add_neg("martingale_penalty", 20.0)
     
     # 11) Recency Bias (Freshness)
-    # Determine if the wallet is active and winning recently
     if metrics.last_trade_at:
         try:
-            # Handle timestamps with Z or offset
             last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
             last_trade = datetime.fromisoformat(last_trade_str)
-            
-            # Ensure timezone-aware comparison
-            # best practice: use fromisoformat which handles offset if present.
-            # If naive, assume UTC.
             now = datetime.now(timezone.utc)
             if last_trade.tzinfo is None:
-                # If last_trade is naive, convert now to a naive UTC datetime
                 now = now.replace(tzinfo=None)
-                
             days_since_trade = (now - last_trade).days
             
             if days_since_trade <= 2:
-                positive += 10.0  # Very active/fresh
+                tracker.add_pos("recency_score", 10.0)
             elif days_since_trade <= 5:
-                positive += 5.0   # Active
+                tracker.add_pos("recency_score", 5.0)
             elif days_since_trade > 14:
-                negative += 10.0  # Stale wallet penalty
+                tracker.add_neg("recency_score", 10.0)
                 
-            # Momentum check: reward hot wallets, penalize cooling wallets.
-            # A wallet that earned 80% of its monthly ROI last week is actively good;
-            # one that peaked 3 weeks ago (7d << 30d) is drifting and warrants a penalty.
-            roi_7d = metrics.roi_7d or 0
-            roi_30d = metrics.roi_30d or 0
-            if roi_7d > 0 and roi_30d > 0:
-                if roi_7d >= (roi_30d * 0.5):
-                    positive += 5.0  # Hot wallet: recent outperformance
-            if roi_30d > 0 and roi_7d < (roi_30d * 0.3):
-                negative += 10.0  # Cooling wallet: peaked weeks ago, now underperforming
+            # Momentum: use WMI instead of hardcoded thresholds
+            wmi = _compute_wmi(roi_7d, roi_30d, count)
+            if wmi > 0.5:
+                tracker.add_pos("roi_score", 10.0)
+            elif wmi > 0.2:
+                tracker.add_pos("roi_score", 5.0)
+            elif wmi < -0.5:
+                tracker.add_neg("roi_score", 15.0)
+            elif wmi < -0.2:
+                tracker.add_neg("roi_score", 5.0)
         except (ValueError, TypeError):
             pass
 
-    return RawScoreComponents(positive=positive, negative=negative)
+    # Apply adaptive weights to component contributions
+    # When calibration has data, some components get weighted up/down.
+    # Default (all 1.0) means this is a no-op until PnL correlation data arrives.
+    try:
+        weights = _get_current_weights()
+        for name, multiplier in weights.items():
+            if name in tracker.components and multiplier != 1.0:
+                tracker.components[name] *= multiplier
+        tracker.positive = sum(v for v in tracker.components.values() if v > 0)
+        tracker.negative = abs(sum(v for v in tracker.components.values() if v < 0))
+    except Exception:
+        pass
+
+    return tracker.to_components()
 
 
-def calculate_wqs(metrics: WalletMetrics) -> float:
+def calculate_wqs(metrics: WalletMetrics, strategy: str = "SHIELD") -> float:
     """
     Calculate Wallet Quality Score (WQS) v2 (0-100).
 
@@ -368,12 +466,15 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
     core intent: favor repeatable profitability with low drawdowns, penalize
     recent ROI spikes, and discount low-sample wallets.
 
+    When strategy="SPEAR", weights shift toward upside capture and away from
+    drawdown conservatism, matching Spear's higher risk appetite.
+
     Scoring breakdown:
     - ROI performance: up to 25 points (capped at 100% ROI)
     - Consistency: up to 25 points (win_streak_consistency)
     - Win rate fallback: up to 25 points (if consistency unavailable)
     - Activity bonus: +5 points if trade_count_30d >= 50
-    - Anti-pump-and-dump: -15 points if 7d ROI > 2x 30d ROI (and 30d ROI > 0)
+    - Anti-pump-and-dump: -25 points if 7d ROI > 2x 30d ROI (and 30d ROI > 0)
     - Statistical significance: smooth confidence multiplier based on
       realized closes (`trade_count_30d`), reaching 1.0 at 20+
     - Drawdown penalty: -0.2 * drawdown_percent
@@ -385,17 +486,38 @@ def calculate_wqs(metrics: WalletMetrics) -> float:
 
     Args:
         metrics: WalletMetrics object with wallet data
+        strategy: "SHIELD" (conservative) or "SPEAR" (aggressive)
 
     Returns:
         WQS score from 0 to 100
     """
-    components = _calculate_raw_score(metrics)
+    components = _calculate_raw_score(metrics, strategy=strategy)
     if components.is_instant_reject:
         return 0.0
 
     trade_count = metrics.trade_count_30d or 0
     confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics, metrics.is_unproven)
     adjusted = max(0.0, components.positive * confidence - components.negative)
+
+    # Phase 2d: Time-decayed WQS — exponential decay based on days since last trade.
+    # Wallets that have stopped trading decay below thresholds automatically,
+    # preventing stale wallets from retaining ACTIVE status indefinitely.
+    # Grace period: first 14 days with no penalty (matching existing staleness check).
+    # Floor: 0.20 minimum multiplier to avoid zeroing ancient wallets entirely.
+    if metrics.last_trade_at:
+        try:
+            last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
+            last_trade = datetime.fromisoformat(last_trade_str)
+            now = datetime.now(timezone.utc)
+            if last_trade.tzinfo is None:
+                now = now.replace(tzinfo=None)
+            days_since = (now - last_trade).days
+            if days_since > 14:
+                decay = max(0.20, 0.97 ** (days_since - 14))
+                adjusted *= decay
+        except (ValueError, TypeError):
+            pass
+
     return max(0.0, min(adjusted, 100.0))
 
 
@@ -457,7 +579,7 @@ def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None,
     return max(0.0, min(confidence, 1.0))
 
 
-def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
+def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIELD") -> WqsResult:
     """
     Like calculate_wqs() but returns quality score and sample confidence separately.
 
@@ -465,13 +587,30 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:
     that is *unproven* — they both produce a low adjusted_score but for different
     reasons, and the Operator's position sizer handles them differently.
     """
-    components = _calculate_raw_score(metrics)
+    components = _calculate_raw_score(metrics, strategy=strategy)
     if components.is_instant_reject:
         return WqsResult(score=0.0, confidence=0.0, adjusted_score=0.0)
 
     trade_count = metrics.trade_count_30d or 0
     confidence = _compute_confidence(trade_count, metrics.profit_factor, metrics, metrics.is_unproven)
     adjusted_score = max(0.0, min(components.positive * confidence - components.negative, 100.0))
+
+    # Phase 2d: Time-decayed WQS
+    if metrics.last_trade_at:
+        try:
+            last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
+            last_trade = datetime.fromisoformat(last_trade_str)
+            now = datetime.now(timezone.utc)
+            if last_trade.tzinfo is None:
+                now = now.replace(tzinfo=None)
+            days_since = (now - last_trade).days
+            if days_since > 14:
+                decay = max(0.20, 0.97 ** (days_since - 14))
+                adjusted_score *= decay
+        except (ValueError, TypeError):
+            pass
+
+    adjusted_score = max(0.0, min(adjusted_score, 100.0))
     return WqsResult(score=components.raw_score, confidence=confidence, adjusted_score=adjusted_score)
 
 
