@@ -54,8 +54,7 @@ mod tests {
     fn test_consensus_boost() {
         // 2-wallet consensus should score higher than no consensus
         let with_consensus = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
-        let without_consensus =
-            SignalQuality::calculate(60.0, None, Decimal::from(10000u32), None);
+        let without_consensus = SignalQuality::calculate(60.0, None, Decimal::from(10000u32), None);
 
         assert!(with_consensus.score > without_consensus.score);
     }
@@ -63,9 +62,9 @@ mod tests {
     #[test]
     fn test_consensus_graduated() {
         // More wallets → higher quality score
-        let two   = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
+        let two = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
         let three = SignalQuality::calculate(60.0, Some(3), Decimal::from(10000u32), None);
-        let five  = SignalQuality::calculate(60.0, Some(5), Decimal::from(10000u32), None);
+        let five = SignalQuality::calculate(60.0, Some(5), Decimal::from(10000u32), None);
         assert!(two.score < three.score);
         assert!(three.score < five.score);
     }

@@ -6,30 +6,17 @@
 //! - Honeypot detection via sell simulation
 
 use crate::error::{AppError, AppResult};
-use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority, RequestWeight};
+use crate::monitoring::rate_limiter::RateLimiter;
 use crate::token::pools::PoolEnumerator;
-use bincode;
 use parking_lot::RwLock;
 use reqwest;
 use rust_decimal::Decimal;
-use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-/// Transaction simulation result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SimulationResult {
-    /// Error if simulation failed
-    err: Option<serde_json::Value>,
-    /// Transaction logs
-    logs: Vec<String>,
-    /// Compute units consumed
-    units_consumed: Option<u64>,
-}
 
 /// Token metadata from on-chain
 #[derive(Debug, Clone)]
@@ -62,9 +49,11 @@ pub struct TokenMetadataFetcher {
     last_fetched: RwLock<HashMap<String, Instant>>,
     /// TTL for cached metadata entries (default: 1 hour)
     cache_ttl: Duration,
-    /// Pool enumerator for DEX liquidity
+    /// Pool enumerator for DEX liquidity (reserved for future on-chain pool queries)
+    #[allow(dead_code)]
     pool_enumerator: Option<Arc<PoolEnumerator>>,
-    /// Optional rate limiter for RPC calls (simulation calls use higher weight)
+    /// Optional rate limiter for RPC calls (reserved for future simulation/heavy calls)
+    #[allow(dead_code)]
     rate_limiter: Option<Arc<RateLimiter>>,
     /// Jupiter API base URL (e.g., https://api.jup.ag/swap/v1 or https://lite-api.jup.ag/swap/v1)
     jupiter_api_url: String,
@@ -254,20 +243,14 @@ impl TokenMetadataFetcher {
             // data appended starting at byte 82. We scan for:
             //   TransferHook (type 25): arbitrary program called on every transfer — can block sells
             //   PermanentDelegate (type 27): grants a fixed address unlimited transfer authority
-            const TOKEN_2022_PROGRAM: &str =
-                "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
-            let is_token_2022 = account
-                .owner
-                .to_string()
-                .as_str()
-                == TOKEN_2022_PROGRAM;
+            const TOKEN_2022_PROGRAM: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+            let is_token_2022 = account.owner.to_string().as_str() == TOKEN_2022_PROGRAM;
 
-            let (has_transfer_hook, has_permanent_delegate) =
-                if is_token_2022 && data.len() > 82 {
-                    parse_token_2022_dangerous_extensions(&data[82..])
-                } else {
-                    (false, false)
-                };
+            let (has_transfer_hook, has_permanent_delegate) = if is_token_2022 && data.len() > 82 {
+                parse_token_2022_dangerous_extensions(&data[82..])
+            } else {
+                (false, false)
+            };
 
             Ok(TokenMetadata {
                 mint: address,
@@ -294,15 +277,18 @@ impl TokenMetadataFetcher {
     ///
     /// FIX 5: entire slow-check wrapped in a 10-second tokio timeout to prevent hangs
     pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<Decimal> {
-        tokio::time::timeout(Duration::from_secs(10), self.get_market_cap_fdv_inner(token_address))
-            .await
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    token = token_address,
-                    "get_market_cap_fdv timed out after 10s"
-                );
-                Err(AppError::Http("slow check timeout".to_string()))
-            })
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            self.get_market_cap_fdv_inner(token_address),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            tracing::warn!(
+                token = token_address,
+                "get_market_cap_fdv timed out after 10s"
+            );
+            Err(AppError::Http("slow check timeout".to_string()))
+        })
     }
 
     /// Inner implementation for get_market_cap_fdv (called under timeout)
@@ -473,85 +459,6 @@ impl TokenMetadataFetcher {
         Ok(Decimal::from_f64_retain(max_liq).unwrap_or(Decimal::ZERO))
     }
 
-    /// Fetch liquidity from Jupiter Price API
-    ///
-    /// Note: Jupiter's price endpoint does not return a liquidity field; this always
-    /// returns `Decimal::ZERO`. Superseded by `fetch_dexscreener_liquidity`.
-    #[allow(dead_code)]
-    async fn fetch_jupiter_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
-        let url = format!("https://price.jup.ag/v6/price?ids={}", token_address);
-
-        let response = reqwest::get(&url)
-            .await
-            .map_err(|e| AppError::Http(format!("Jupiter liquidity request failed: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(AppError::Http(format!(
-                "Jupiter API returned error: {}",
-                response.status()
-            )));
-        }
-
-        let data: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter response: {}", e)))?;
-
-        // Extract liquidity from response
-        // Jupiter Price API may include liquidity data in the response
-        // For now, we'll use a placeholder - Jupiter's actual liquidity endpoint may differ
-        // In production, check Jupiter's API documentation for liquidity fields
-
-        // Try to extract liquidity from response
-        if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
-            // Check for liquidity fields (may vary by API version)
-            if let Some(liq) = token_data.get("liquidity").and_then(|l| l.as_f64()) {
-                return Ok(Decimal::from_f64_retain(liq).unwrap_or(Decimal::ZERO));
-            }
-        }
-
-        // If no liquidity field found, return 0 (will be aggregated with other sources)
-        Ok(Decimal::ZERO)
-    }
-
-    /// Fetch liquidity from Raydium pools via RPC.
-    ///
-    /// On-chain pool parsing is not implemented. Delegates to `PoolEnumerator` which
-    /// returns an error; callers should use `fetch_dexscreener_liquidity` instead.
-    #[allow(dead_code)]
-    async fn fetch_raydium_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
-        if let Some(ref pool_enumerator) = self.pool_enumerator {
-            pool_enumerator
-                .get_raydium_liquidity(token_address)
-                .await
-                .map_err(|e| AppError::Http(format!("Raydium liquidity unavailable: {}", e)))
-        } else {
-            Err(AppError::Http(format!(
-                "Pool enumerator not available for Raydium liquidity ({}); use DexScreener",
-                token_address
-            )))
-        }
-    }
-
-    /// Fetch liquidity from Orca pools via RPC.
-    ///
-    /// On-chain pool parsing is not implemented. Delegates to `PoolEnumerator` which
-    /// returns an error; callers should use `fetch_dexscreener_liquidity` instead.
-    #[allow(dead_code)]
-    async fn fetch_orca_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
-        if let Some(ref pool_enumerator) = self.pool_enumerator {
-            pool_enumerator
-                .get_orca_liquidity(token_address)
-                .await
-                .map_err(|e| AppError::Http(format!("Orca liquidity unavailable: {}", e)))
-        } else {
-            Err(AppError::Http(format!(
-                "Pool enumerator not available for Orca liquidity ({}); use DexScreener",
-                token_address
-            )))
-        }
-    }
-
     /// Check whether a token can be sold by querying a Jupiter sell quote.
     ///
     /// Returns true if Jupiter can route TOKEN→SOL (token is sellable),
@@ -561,7 +468,10 @@ impl TokenMetadataFetcher {
     /// This replaces the old transaction-simulation approach which used a random
     /// dummy wallet (zero balance) and therefore always returned "inconclusive".
     pub async fn simulate_sell(&self, token_address: &str) -> AppResult<bool> {
-        tracing::debug!(token = token_address, "Checking sell route for honeypot detection");
+        tracing::debug!(
+            token = token_address,
+            "Checking sell route for honeypot detection"
+        );
 
         // Use 1_000_000 base units = 1 token for 6-decimal SPL tokens.
         // 1_000 base units (0.001 tokens) falls below DEX minimum order sizes and causes
@@ -574,15 +484,21 @@ impl TokenMetadataFetcher {
             self.jupiter_api_url, token_address, sol_mint, test_amount
         );
 
-        let response = self.http_client.get(&quote_url).send().await.map_err(|e| {
-            AppError::Http(format!("Jupiter sell-quote request failed: {}", e))
-        })?;
+        let response = self
+            .http_client
+            .get(&quote_url)
+            .send()
+            .await
+            .map_err(|e| AppError::Http(format!("Jupiter sell-quote request failed: {}", e)))?;
 
         let status = response.status();
 
         if status == reqwest::StatusCode::BAD_REQUEST {
             // Jupiter returns 400 when no route exists (can't sell this token)
-            tracing::warn!(token = token_address, "Honeypot: no Jupiter sell route (400)");
+            tracing::warn!(
+                token = token_address,
+                "Honeypot: no Jupiter sell route (400)"
+            );
             return Ok(false);
         }
 
@@ -593,9 +509,10 @@ impl TokenMetadataFetcher {
             )));
         }
 
-        let quote: serde_json::Value = response.json().await.map_err(|e| {
-            AppError::Parse(format!("Failed to parse Jupiter sell quote: {}", e))
-        })?;
+        let quote: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter sell quote: {}", e)))?;
 
         // Jupiter returns an "error" field or an empty/absent outAmount when no route exists
         if quote.get("error").is_some() {
@@ -614,7 +531,10 @@ impl TokenMetadataFetcher {
             .unwrap_or(0);
 
         if out_amount == 0 {
-            tracing::warn!(token = token_address, "Honeypot: sell quote returned zero output");
+            tracing::warn!(
+                token = token_address,
+                "Honeypot: sell quote returned zero output"
+            );
             return Ok(false);
         }
 
@@ -624,137 +544,6 @@ impl TokenMetadataFetcher {
             "Sell route confirmed — token appears sellable"
         );
         Ok(true)
-    }
-
-    /// Get a Jupiter swap transaction for simulation (minimal amount)
-    #[allow(dead_code)]
-    async fn get_jupiter_swap_transaction_for_simulation(
-        &self,
-        input_mint: Pubkey,
-        output_mint: Pubkey,
-        amount: u64,
-    ) -> AppResult<String> {
-        // First get a quote (using configured URL, migrated from deprecated v6)
-        let quote_url = format!(
-            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
-            self.jupiter_api_url, input_mint, output_mint, amount
-        );
-
-        let quote_response = reqwest::get(&quote_url)
-            .await
-            .map_err(|e| AppError::Http(format!("Jupiter quote request failed: {}", e)))?;
-
-        if !quote_response.status().is_success() {
-            return Err(AppError::Http(format!(
-                "Jupiter quote API returned error: {}",
-                quote_response.status()
-            )));
-        }
-
-        let quote: serde_json::Value = quote_response
-            .json()
-            .await
-            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter quote: {}", e)))?;
-
-        // Get swap transaction
-        // Note: For simulation, we don't need a real wallet - we can use a dummy pubkey
-        let dummy_wallet = Pubkey::new_unique();
-        let swap_url = format!("{}/swap", self.jupiter_api_url);
-        let payload = serde_json::json!({
-            "quoteResponse": quote,
-            "userPublicKey": dummy_wallet.to_string(),
-            "wrapAndUnwrapSol": true,
-            "dynamicComputeUnitLimit": true,
-            "prioritizationFeeLamports": "auto"
-        });
-
-        let client = reqwest::Client::new();
-        let swap_response = client
-            .post(swap_url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| AppError::Http(format!("Jupiter swap request failed: {}", e)))?;
-
-        if !swap_response.status().is_success() {
-            return Err(AppError::Http(format!(
-                "Jupiter swap API returned error: {}",
-                swap_response.status()
-            )));
-        }
-
-        let swap_data: serde_json::Value = swap_response
-            .json()
-            .await
-            .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter swap: {}", e)))?;
-
-        // Extract swap transaction (base64 encoded)
-        let swap_tx = swap_data
-            .get("swapTransaction")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AppError::Parse("No swapTransaction in Jupiter response".to_string()))?;
-
-        Ok(swap_tx.to_string())
-    }
-
-    /// Simulate a transaction via RPC
-    #[allow(dead_code)]
-    async fn simulate_transaction_rpc(
-        &self,
-        transaction_base64: &str,
-    ) -> AppResult<SimulationResult> {
-        // Rate limit simulation calls (they are heavier than standard RPC calls)
-        // Simulation calls typically count 5-10x more towards rate limits on Helius/RPC providers
-        if let Some(ref rate_limiter) = self.rate_limiter {
-            rate_limiter
-                .acquire(RequestPriority::Entry, RequestWeight::SIMULATION)
-                .await;
-        }
-
-        // Decode base64 transaction
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        let tx_bytes = BASE64
-            .decode(transaction_base64)
-            .map_err(|e| AppError::Parse(format!("Failed to decode transaction: {}", e)))?;
-
-        // Clone RPC client for blocking call
-        let rpc_client = self.rpc_client.clone();
-        let tx_bytes_clone = tx_bytes.clone();
-
-        // Run simulation in blocking task
-        let result = tokio::task::spawn_blocking(move || {
-            // Deserialize transaction
-            let transaction: solana_sdk::transaction::Transaction =
-                bincode::serde::decode_from_slice(&tx_bytes_clone, bincode::config::standard())
-                    .map_err(|e| {
-                        AppError::Parse(format!("Failed to deserialize transaction: {}", e))
-                    })?
-                    .0;
-
-            // Use Solana RPC client's simulate_transaction method
-            rpc_client
-                .simulate_transaction(&transaction)
-                .map_err(|e| AppError::Rpc(format!("Simulation failed: {}", e)))
-        })
-        .await
-        .map_err(|e| AppError::Internal(format!("Task join error: {}", e)))??;
-
-        // Parse simulation result
-        // Convert TransactionError to JSON Value if present
-        let err_value = result.value.err.as_ref().map(|e| {
-            // TransactionError doesn't implement Serialize, so convert to string representation
-            serde_json::json!({
-                "error": format!("{:?}", e)
-            })
-        });
-
-        let simulation_result = SimulationResult {
-            err: err_value,
-            logs: result.value.logs.unwrap_or_default(),
-            units_consumed: result.value.units_consumed,
-        };
-
-        Ok(simulation_result)
     }
 
     /// Clear the metadata cache and TTL timestamps
@@ -793,7 +582,7 @@ fn parse_optional_pubkey(data: &[u8]) -> Option<String> {
 /// Parse Token-2022 TLV extension data and return (has_transfer_hook, has_permanent_delegate).
 /// Extension TLV layout: [type: u16 LE][length: u16 LE][value: length bytes] ...
 fn parse_token_2022_dangerous_extensions(ext_data: &[u8]) -> (bool, bool) {
-    const TRANSFER_HOOK_TYPE: u16 = 25;    // ExtensionType::TransferHook
+    const TRANSFER_HOOK_TYPE: u16 = 25; // ExtensionType::TransferHook
     const PERMANENT_DELEGATE_TYPE: u16 = 27; // ExtensionType::PermanentDelegate
 
     let mut has_transfer_hook = false;

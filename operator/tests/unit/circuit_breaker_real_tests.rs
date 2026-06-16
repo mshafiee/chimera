@@ -189,9 +189,17 @@ async fn test_consecutive_losses_resets_at_intervening_win() {
         insert_closed_position_with_pnl(&pool, &uuid, -50.0).await;
         let offset = format!("-{} seconds", i + 1);
         sqlx::query("UPDATE trades    SET created_at = datetime('now', ?) WHERE trade_uuid = ?")
-            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
+            .bind(&offset)
+            .bind(&uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE positions SET closed_at  = datetime('now', ?) WHERE trade_uuid = ?")
-            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
+            .bind(&offset)
+            .bind(&uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
     insert_closed_position_with_pnl(&pool, "uuid-win", 10.0).await;
     sqlx::query("UPDATE trades    SET created_at = datetime('now', '-10 seconds') WHERE trade_uuid = 'uuid-win'")
@@ -203,9 +211,17 @@ async fn test_consecutive_losses_resets_at_intervening_win() {
         insert_closed_position_with_pnl(&pool, &uuid, -50.0).await;
         let offset = format!("-{} seconds", 20 + i);
         sqlx::query("UPDATE trades    SET created_at = datetime('now', ?) WHERE trade_uuid = ?")
-            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
+            .bind(&offset)
+            .bind(&uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
         sqlx::query("UPDATE positions SET closed_at  = datetime('now', ?) WHERE trade_uuid = ?")
-            .bind(&offset).bind(&uuid).execute(&pool).await.unwrap();
+            .bind(&offset)
+            .bind(&uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     cb.evaluate().await.unwrap();

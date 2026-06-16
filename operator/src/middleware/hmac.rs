@@ -574,22 +574,17 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "No valid HMAC secrets configured — refusing to start."
-    )]
+    #[should_panic(expected = "No valid HMAC secrets configured — refusing to start.")]
     fn test_hmac_state_empty_secrets() {
         // with_rotation must panic when the secrets list is empty
         let _ = HmacState::with_rotation(vec![], 60);
     }
 
     #[test]
-    #[should_panic(
-        expected = "No valid HMAC secrets configured — refusing to start."
-    )]
+    #[should_panic(expected = "No valid HMAC secrets configured — refusing to start.")]
     fn test_hmac_state_all_empty_strings() {
         // with_rotation must panic when all provided secrets are empty strings
-        let _ =
-            HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
+        let _ = HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
     }
 
     #[test]

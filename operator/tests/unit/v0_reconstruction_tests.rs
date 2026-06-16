@@ -1,4 +1,6 @@
-use chimera_operator::engine::v0_reconstruction::{extract_v0_components, reconstruct_v0_message_with_blockhash};
+use chimera_operator::engine::v0_reconstruction::{
+    extract_v0_components, reconstruct_v0_message_with_blockhash,
+};
 use solana_sdk::{
     hash::Hash,
     instruction::CompiledInstruction,
@@ -66,9 +68,11 @@ async fn test_reconstruct_legacy_fails() {
         message,
     };
     let new_blockhash = Hash::new_unique();
-    
+
     // We can pass a dummy RpcClient since it fails early on the Legacy check before doing RPC
-    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new("http://localhost:8899".to_string()));
+    let rpc_client = Arc::new(solana_client::nonblocking::rpc_client::RpcClient::new(
+        "http://localhost:8899".to_string(),
+    ));
 
     let res = reconstruct_v0_message_with_blockhash(&tx, new_blockhash, &rpc_client).await;
     assert!(res.is_err());

@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::db::{self, DbPool};
-use crate::engine::{EngineHandle, PositionSizer, SignalQuality};
 use crate::engine::position_sizer::SizingFactors;
+use crate::engine::{EngineHandle, PositionSizer, SignalQuality};
 use crate::error::AppError;
 use crate::middleware::TIMESTAMP_HEADER;
 use crate::models::{Signal, SignalPayload, Strategy};
@@ -270,11 +270,15 @@ pub async fn webhook_handler(
                         Json(WebhookResponse {
                             status: WebhookStatus::Rejected,
                             trade_uuid: signal.trade_uuid,
-                            reason: Some(format!("Wallet status is {}, only ACTIVE wallets may trigger buys", wallet.status)),
+                            reason: Some(format!(
+                                "Wallet status is {}, only ACTIVE wallets may trigger buys",
+                                wallet.status
+                            )),
                         }),
                     ));
                 }
-                let win_rate = wallet.win_rate
+                let win_rate = wallet
+                    .win_rate
                     .and_then(Decimal::from_f64_retain)
                     .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
                 Some((wallet.wqs_score.unwrap_or(50.0), wallet.wqs_score, win_rate))
@@ -484,7 +488,10 @@ pub async fn webhook_handler(
                 Some(&signal.trade_uuid),
                 &serde_json::to_string(&signal.payload).unwrap_or_default(),
                 "LIQUIDITY_BELOW_MINIMUM",
-                Some(&format!("Liquidity ${} < required ${}", liquidity_usd, min_liquidity)),
+                Some(&format!(
+                    "Liquidity ${} < required ${}",
+                    liquidity_usd, min_liquidity
+                )),
                 None,
             )
             .await;
@@ -502,8 +509,12 @@ pub async fn webhook_handler(
         }
 
         // Calculate signal quality — pass the wallet count for graduated consensus scoring
-        let quality =
-            SignalQuality::calculate(wallet_wqs, consensus_wallet_count, liquidity_usd, token_age_hours);
+        let quality = SignalQuality::calculate(
+            wallet_wqs,
+            consensus_wallet_count,
+            liquidity_usd,
+            token_age_hours,
+        );
 
         // Reject if quality too low (threshold from config.strategy.signal_quality_threshold)
         let quality_threshold = match signal.payload.strategy {
@@ -527,7 +538,10 @@ pub async fn webhook_handler(
                 Some(&signal.trade_uuid),
                 &serde_json::to_string(&signal.payload).unwrap_or_default(),
                 "SIGNAL_QUALITY_TOO_LOW",
-                Some(&format!("Quality score: {:.2} < {:.2}", quality.score, quality_threshold)),
+                Some(&format!(
+                    "Quality score: {:.2} < {:.2}",
+                    quality.score, quality_threshold
+                )),
                 None,
             )
             .await;
@@ -601,7 +615,9 @@ pub async fn webhook_handler(
                     Json(WebhookResponse {
                         status: WebhookStatus::Rejected,
                         trade_uuid: signal.trade_uuid,
-                        reason: Some("Position size zero: strategy_max below min_size_sol".to_string()),
+                        reason: Some(
+                            "Position size zero: strategy_max below min_size_sol".to_string(),
+                        ),
                     }),
                 ));
             }
@@ -618,10 +634,7 @@ pub async fn webhook_handler(
 
     // Check portfolio heat (if enabled)
     if let Some(ref portfolio_heat) = state.portfolio_heat {
-        match portfolio_heat
-            .can_open_position(trade_amount_sol)
-            .await
-        {
+        match portfolio_heat.can_open_position(trade_amount_sol).await {
             Ok(false) => {
                 tracing::warn!(
                     trade_uuid = %signal.trade_uuid,
@@ -684,7 +697,10 @@ pub async fn webhook_handler(
                             Json(WebhookResponse {
                                 status: WebhookStatus::Rejected,
                                 trade_uuid: signal.trade_uuid,
-                                reason: Some(format!("Strategy allocation limit reached for {:?}", signal.payload.strategy)),
+                                reason: Some(format!(
+                                    "Strategy allocation limit reached for {:?}",
+                                    signal.payload.strategy
+                                )),
                             }),
                         ));
                     }

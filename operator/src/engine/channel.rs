@@ -128,10 +128,8 @@ impl PriorityQueue {
                                 queue_depth = self.len(),
                                 "High-WQS SPEAR queue full and load shedding active, dropping signal"
                             );
-                            return Err(
-                                "Load shedding active: SPEAR signals temporarily rejected"
-                                    .to_string(),
-                            );
+                            return Err("Load shedding active: SPEAR signals temporarily rejected"
+                                .to_string());
                         }
                         // Fall through to regular SPEAR queue
                     }

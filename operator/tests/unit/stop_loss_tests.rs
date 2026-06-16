@@ -581,9 +581,6 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     );
 }
 
-
-
-
 // ─── Test 10 ─────────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -673,4 +670,3 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
         "-15% must trigger exit for medium-WQS wallet"
     );
 }
-

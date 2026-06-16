@@ -127,7 +127,10 @@ impl SignalQuality {
     /// to be rejected later by the slow-path check.
     ///
     /// Returns false (reject) if `liquidity_usd` is below the `min_liquidity` threshold.
-    pub fn passes_liquidity_floor(liquidity_usd: rust_decimal::Decimal, min_liquidity: rust_decimal::Decimal) -> bool {
+    pub fn passes_liquidity_floor(
+        liquidity_usd: rust_decimal::Decimal,
+        min_liquidity: rust_decimal::Decimal,
+    ) -> bool {
         liquidity_usd >= min_liquidity
     }
 
@@ -211,9 +214,9 @@ mod tests {
     #[test]
     fn test_consensus_graduated() {
         // More wallets → higher score
-        let two   = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
+        let two = SignalQuality::calculate(60.0, Some(2), Decimal::from(10000u32), None);
         let three = SignalQuality::calculate(60.0, Some(3), Decimal::from(10000u32), None);
-        let five  = SignalQuality::calculate(60.0, Some(5), Decimal::from(10000u32), None);
+        let five = SignalQuality::calculate(60.0, Some(5), Decimal::from(10000u32), None);
         assert!(two.score < three.score);
         assert!(three.score < five.score);
     }

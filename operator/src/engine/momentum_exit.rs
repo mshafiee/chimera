@@ -40,7 +40,6 @@ pub struct MomentumExit {
     wick_protection_secs: u64,
 }
 
-
 impl MomentumExit {
     /// Create a new momentum exit detector
     pub fn new(db: DbPool, price_cache: Arc<PriceCache>, wick_protection_secs: u64) -> Self {
@@ -66,7 +65,6 @@ impl MomentumExit {
             wick_protection_secs,
         }
     }
-
 
     /// Check for negative momentum and return action
     ///
@@ -116,7 +114,6 @@ impl MomentumExit {
             }
         };
 
-
         // Guard: corrupt position data — align with stop_loss.rs behavior
         if entry_price.is_zero() {
             tracing::error!(
@@ -159,12 +156,13 @@ impl MomentumExit {
             // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,
             // max +5 pts) so long-held positions aren't exited on normal intraday noise.
             let price_drop_threshold = {
-                let vol_bonus = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
-                    let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
-                    vol_dec * Decimal::from_str("0.2").unwrap_or(Decimal::ZERO)
-                } else {
-                    Decimal::ZERO
-                };
+                let vol_bonus =
+                    if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
+                        let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
+                        vol_dec * Decimal::from_str("0.2").unwrap_or(Decimal::ZERO)
+                    } else {
+                        Decimal::ZERO
+                    };
                 let age_bonus = if elapsed_minutes > 5 {
                     // Use f64 division to avoid the integer-division cliff where positions
                     // 5–59 minutes old get zero bonus but 60 minutes jumps to 0.5%.
@@ -196,7 +194,6 @@ impl MomentumExit {
                 "Momentum price-drop check suppressed: within wick-protection window"
             );
         }
-
 
         // Check 3: Volume drop (>65% from 24h average).
         // Gated to positions ≥5 minutes old: volume naturally dips 40–60% outside US trading
@@ -249,11 +246,11 @@ impl MomentumExit {
         let history = self.price_cache.price_history_read();
         let token_history = history.get(token_address)?;
 
-    // Sample up to 30 price points at 30-second intervals (~15 min total window)
-    // to allow the RSI EMA (Wilder's smoothing) to warm up properly.
-    // Use 30-second intervals to match the price cache update frequency (~5 sec)
-    // and avoid consecutive samples using the same price data point, which produces
-    // an artificially smooth RSI that under-reacts to actual price movements.
+        // Sample up to 30 price points at 30-second intervals (~15 min total window)
+        // to allow the RSI EMA (Wilder's smoothing) to warm up properly.
+        // Use 30-second intervals to match the price cache update frequency (~5 sec)
+        // and avoid consecutive samples using the same price data point, which produces
+        // an artificially smooth RSI that under-reacts to actual price movements.
         const RSI_SAMPLE_INTERVAL_SECS: i64 = 30;
         let mut prices = Vec::new();
         let mut last_sampled_time: Option<chrono::DateTime<chrono::Utc>> = None;
@@ -268,7 +265,8 @@ impl MomentumExit {
         // chronological change deltas. Both directions are intentional and must stay in sync.
         for (time, price) in sorted_history.iter().rev() {
             if let Some(last_time) = last_sampled_time {
-                if last_time.signed_duration_since(*time).num_seconds() >= RSI_SAMPLE_INTERVAL_SECS {
+                if last_time.signed_duration_since(*time).num_seconds() >= RSI_SAMPLE_INTERVAL_SECS
+                {
                     let price_f64 = price.to_f64().unwrap_or(0.0);
                     // If the Decimal price is non-zero but f64 is zero, precision was
                     // lost — RSI computed from garbage data is worse than no RSI at all.
@@ -377,7 +375,7 @@ fn compute_rsi_from_prices(prices: &[f64]) -> Option<(f64, f64)> {
         }
         avg_gain = (avg_gain * 13.0 + gain) / 14.0;
         avg_loss = (avg_loss * 13.0 + loss) / 14.0;
-        
+
         current_rsi = calc_rsi(avg_gain, avg_loss);
     }
 

@@ -198,16 +198,20 @@ impl RecoveryManager {
         // If there is no exit signature, the exit tx was never submitted — do NOT fall back to
         // the entry signature, which would confirm the BUY and mark the position CLOSED without
         // ever executing the sell. Instead revert to ACTIVE so stop_loss can manage the exit.
-        let exit_sig = position.exit_tx_signature.as_deref().filter(|s| !s.is_empty());
+        let exit_sig = position
+            .exit_tx_signature
+            .as_deref()
+            .filter(|s| !s.is_empty());
 
         if exit_sig.is_none() {
-            return self.revert_or_close_position(
-                position,
-                Some("NO_EXIT_SIG"),
-                "REVERTED_ACTIVE",
-                "Auto-recovery: no exit signature; reverted to ACTIVE for stop-loss management",
-            )
-            .await;
+            return self
+                .revert_or_close_position(
+                    position,
+                    Some("NO_EXIT_SIG"),
+                    "REVERTED_ACTIVE",
+                    "Auto-recovery: no exit signature; reverted to ACTIVE for stop-loss management",
+                )
+                .await;
         }
 
         let tx_signature = exit_sig.unwrap();
@@ -251,7 +255,8 @@ impl RecoveryManager {
                     on_chain_state,
                     stuck_duration.num_seconds()
                 );
-                self.revert_or_close_position(position, Some("MISSING"), "MISSING_TX", &note).await
+                self.revert_or_close_position(position, Some("MISSING"), "MISSING_TX", &note)
+                    .await
             }
             OnChainState::RpcError(ref rpc_err) => {
                 // Transient RPC error. If the position has been stuck long enough
@@ -296,7 +301,8 @@ impl RecoveryManager {
                         stuck_duration.num_seconds(),
                         rpc_err
                     );
-                    self.revert_or_close_position(position, None, "STATE_MISMATCH", &note).await
+                    self.revert_or_close_position(position, None, "STATE_MISMATCH", &note)
+                        .await
                 } else {
                     tracing::warn!(
                         trade_uuid = %position.trade_uuid,
@@ -330,7 +336,12 @@ impl RecoveryManager {
         let accounts = rpc
             .get_token_accounts_by_owner(&wallet_pubkey, TokenAccountsFilter::Mint(token_mint))
             .await
-            .map_err(|e| AppError::Rpc(format!("Failed to fetch token accounts for balance check: {}", e)))?;
+            .map_err(|e| {
+                AppError::Rpc(format!(
+                    "Failed to fetch token accounts for balance check: {}",
+                    e
+                ))
+            })?;
 
         let max_balance = accounts
             .iter()
@@ -449,10 +460,7 @@ impl RecoveryManager {
         };
 
         let rpc = self.get_active_rpc().await?;
-        match rpc
-            .get_transaction_with_config(&signature, config)
-            .await
-        {
+        match rpc.get_transaction_with_config(&signature, config).await {
             Ok(tx) => {
                 // Transaction found - check if it's confirmed
                 if let Some(meta) = tx.transaction.meta {

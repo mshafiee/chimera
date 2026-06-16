@@ -97,10 +97,7 @@ impl AuthState {
     }
 
     /// Create auth state with pre-configured API keys
-    pub fn with_auth_config(
-        api_keys: HashMap<String, Role>,
-        jwt_secret: String,
-    ) -> Self {
+    pub fn with_auth_config(api_keys: HashMap<String, Role>, jwt_secret: String) -> Self {
         Self {
             api_keys: Arc::new(RwLock::new(api_keys)),
             jwt_secret,

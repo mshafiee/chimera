@@ -167,15 +167,15 @@ impl KellySizer {
         // Hard-cap full_kelly at 0.5 (50%): even wallets with extreme edges must
         // never risk more than half the bankroll on a single trade. Copy-trading
         // edge estimates are inherently unreliable — full Kelly near 100% invites ruin.
-         let full_kelly = if !avg_win.is_zero() && !avg_loss.is_zero() {
-             let b = avg_win / avg_loss;
-             let p = win_rate;
-             let q = loss_rate;
-             let k = ((p * b) - q) / b;
-             k.max(Decimal::ZERO).min(dec!(0.5))
-         } else {
-             Decimal::ZERO
-         };
+        let full_kelly = if !avg_win.is_zero() && !avg_loss.is_zero() {
+            let b = avg_win / avg_loss;
+            let p = win_rate;
+            let q = loss_rate;
+            let k = ((p * b) - q) / b;
+            k.max(Decimal::ZERO).min(dec!(0.5))
+        } else {
+            Decimal::ZERO
+        };
 
         // Trade velocity confidence: a wallet with the same win rate is statistically
         // more reliable when it generates more trades per day because each outcome is
@@ -185,17 +185,26 @@ impl KellySizer {
         //   0.5–1 trades/day  → 1.00× (neutral)
         //   1–2  trades/day   → 1.15× (good statistical depth)
         //   ≥ 2  trades/day   → 1.25× (high frequency, tighter confidence interval)
-        let true_timespan_days = if let (Some(newest), Some(oldest)) = (trades.first(), trades.last()) {
+        let true_timespan_days = if let (Some(newest), Some(oldest)) =
+            (trades.first(), trades.last())
+        {
             let parse_time = |s: &str| -> Option<chrono::DateTime<chrono::Utc>> {
                 chrono::DateTime::parse_from_rfc3339(s)
                     .map(|d| d.with_timezone(&chrono::Utc))
                     .ok()
                     .or_else(|| {
-                        let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
-                        Some(chrono::DateTime::from_naive_utc_and_offset(naive, chrono::Utc))
+                        let naive =
+                            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok()?;
+                        Some(chrono::DateTime::from_naive_utc_and_offset(
+                            naive,
+                            chrono::Utc,
+                        ))
                     })
             };
-            if let (Some(newest_time), Some(oldest_time)) = (parse_time(&newest.created_at), parse_time(&oldest.created_at)) {
+            if let (Some(newest_time), Some(oldest_time)) = (
+                parse_time(&newest.created_at),
+                parse_time(&oldest.created_at),
+            ) {
                 let span = (newest_time - oldest_time).num_seconds() as f64 / 86400.0;
                 span.min(lookback_days as f64).max(1.0)
             } else {
@@ -257,7 +266,9 @@ impl KellySizer {
         total_capital_sol: Decimal,
         lookback_days: i64,
     ) -> Result<Decimal, String> {
-        let kelly = self.calculate_kelly(wallet_address, strategy, lookback_days).await?;
+        let kelly = self
+            .calculate_kelly(wallet_address, strategy, lookback_days)
+            .await?;
         // [T-H1] Do NOT divide by avg_loss here. conservative_kelly already incorporates
         // avg_loss through the Kelly formula: (win_rate*avg_win - loss_rate*avg_loss)/avg_win.
         // Dividing again by avg_loss double-penalises the position size, making it far too small.

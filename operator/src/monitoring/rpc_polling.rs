@@ -104,9 +104,7 @@ pub async fn poll_wallet_transactions(
     const PAGE_SIZE: usize = 10;
     const MAX_PAGES: usize = 5;
 
-    let pubkey = wallet_address
-        .parse()
-        .context("Invalid wallet address")?;
+    let pubkey = wallet_address.parse().context("Invalid wallet address")?;
 
     let mut new_signatures: Vec<String> = Vec::new();
     let mut anchor_found = false;

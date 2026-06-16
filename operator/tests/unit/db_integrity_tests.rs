@@ -11,8 +11,8 @@
 
 use chimera_operator::config::DatabaseConfig;
 use chimera_operator::db::{
-    close_position, init_pool, insert_trade, open_position, run_migrations, update_trade_costs,
-    update_trade_status, revert_position_exit,
+    close_position, init_pool, insert_trade, open_position, revert_position_exit, run_migrations,
+    update_trade_costs, update_trade_status,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -243,7 +243,18 @@ async fn test_close_position_zero_exit_price_records_full_loss() {
     .unwrap();
 
     // Close with exit_price = 0
-    let result = close_position(&pool, "token_z", "wallet_z", Decimal::ZERO, "sig_exit_z", uuid, None, Decimal::ONE, true).await;
+    let result = close_position(
+        &pool,
+        "token_z",
+        "wallet_z",
+        Decimal::ZERO,
+        "sig_exit_z",
+        uuid,
+        None,
+        Decimal::ONE,
+        true,
+    )
+    .await;
 
     // The function returns Ok regardless — documents no validation on exit_price=0
     assert!(
@@ -726,4 +737,3 @@ async fn test_revert_position_exit_restores_state_and_amount() {
 
     assert_eq!(exit_trade_status.0, "FAILED");
 }
-

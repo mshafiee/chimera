@@ -192,7 +192,8 @@ impl Vault {
         // An empty secret would allow HMAC verification to pass for any request.
         if secrets.webhook_secret.is_empty() {
             return Err(VaultError::InvalidKey(
-                "webhook_secret must not be empty — vault contains an invalid secrets bundle".to_string(),
+                "webhook_secret must not be empty — vault contains an invalid secrets bundle"
+                    .to_string(),
             ));
         }
 
@@ -288,8 +289,8 @@ fn rand_nonce() -> Result<[u8; 12], VaultError> {
 pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
     // Try vault file first
     let vault_key_set = std::env::var("CHIMERA_VAULT_KEY").is_ok();
-    let vault_path = std::env::var("CHIMERA_VAULT_PATH")
-        .unwrap_or_else(|_| "config/secrets.enc".to_string());
+    let vault_path =
+        std::env::var("CHIMERA_VAULT_PATH").unwrap_or_else(|_| "config/secrets.enc".to_string());
     let vault_file_exists = Path::new(&vault_path).exists();
 
     match Vault::from_env() {
@@ -345,7 +346,11 @@ pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
                 // a clear error for unsupported formats. The previous length filter silently
                 // dropped base58 keys (typically 88 chars) which caused the operator to
                 // start without a wallet and only fail on the first trade attempt.
-                if trimmed.is_empty() { None } else { Some(Secret::new(trimmed.to_string())) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(Secret::new(trimmed.to_string()))
+                }
             });
 
     Ok(VaultSecrets {

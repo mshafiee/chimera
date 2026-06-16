@@ -158,7 +158,13 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
         PriceSource::Jupiter,
     );
     let action_a = mgr
-        .check_stop_loss("uuid-dynamic-a", WALLET, Decimal::from_str("100.00").unwrap(), TOKEN, past_entry())
+        .check_stop_loss(
+            "uuid-dynamic-a",
+            WALLET,
+            Decimal::from_str("100.00").unwrap(),
+            TOKEN,
+            past_entry(),
+        )
         .await;
     assert_eq!(
         action_a,
@@ -173,7 +179,13 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
         PriceSource::Jupiter,
     );
     let action_b = mgr
-        .check_stop_loss("uuid-dynamic-b", WALLET, Decimal::from_str("100.00").unwrap(), TOKEN, past_entry())
+        .check_stop_loss(
+            "uuid-dynamic-b",
+            WALLET,
+            Decimal::from_str("100.00").unwrap(),
+            TOKEN,
+            past_entry(),
+        )
         .await;
     assert_eq!(
         action_b,

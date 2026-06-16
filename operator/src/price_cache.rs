@@ -175,7 +175,10 @@ impl PriceCache {
     pub fn is_tracked_price_stale(&self, token_address: &str) -> bool {
         // If we're not actively tracking this token, we have no expectation
         // of fresh data — don't report staleness.
-        let is_tracked = self.active_tokens.read().contains(&token_address.to_string());
+        let is_tracked = self
+            .active_tokens
+            .read()
+            .contains(&token_address.to_string());
         if !is_tracked {
             return false;
         }
@@ -198,7 +201,10 @@ impl PriceCache {
         );
 
         // Update price history for volatility calculation (keep last 24 hours)
-        let token_history = inner.price_history.entry(token_address.to_string()).or_default();
+        let token_history = inner
+            .price_history
+            .entry(token_address.to_string())
+            .or_default();
         token_history.push_back((now, price_usd));
 
         // Keep only last 24 hours (assuming updates every 5 seconds = ~17,280 entries max)
@@ -231,7 +237,10 @@ impl PriceCache {
             },
         );
 
-        let token_history = inner.price_history.entry(token_address.to_string()).or_default();
+        let token_history = inner
+            .price_history
+            .entry(token_address.to_string())
+            .or_default();
         token_history.push_back((time, price_usd));
 
         let cutoff = time - Duration::hours(24);
@@ -532,9 +541,7 @@ impl PriceCache {
     /// Used by engine modules that need read access to price history for volatility
     /// or momentum calculations. The returned guard holds the inner lock — callers
     /// must not call any other `&self` method while holding it (would deadlock).
-    pub fn price_history_read(
-        &self,
-    ) -> PriceHistoryReadGuard<'_> {
+    pub fn price_history_read(&self) -> PriceHistoryReadGuard<'_> {
         PriceHistoryReadGuard {
             guard: self.inner.read(),
         }

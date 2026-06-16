@@ -43,9 +43,7 @@ async fn persist_cb_state(
 }
 
 /// Load persisted circuit breaker state from the database
-async fn load_cb_state(
-    db: &DbPool,
-) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
+async fn load_cb_state(db: &DbPool) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
     let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
         "SELECT state, tripped_at, trip_reason FROM circuit_breaker_state WHERE id = 1",
     )
@@ -117,7 +115,10 @@ impl std::fmt::Display for TripReason {
                     drawdown, threshold
                 )
             }
-            Self::PortfolioStop24h { loss_pct, threshold } => {
+            Self::PortfolioStop24h {
+                loss_pct,
+                threshold,
+            } => {
                 write!(
                     f,
                     "24h realized SOL loss {:.2}% exceeded threshold {:.2}% (portfolio stop)",
@@ -226,13 +227,13 @@ impl CircuitBreaker {
                 self.evaluate().await?;
             }
             _ => {
-                tracing::debug!("Circuit breaker persisted state is Active or absent — no restore needed");
+                tracing::debug!(
+                    "Circuit breaker persisted state is Active or absent — no restore needed"
+                );
             }
         }
         Ok(())
     }
-
-
 
     /// Update total capital in SOL (called from the live balance refresh loop)
     pub fn update_capital(&self, new_capital: Decimal) {
@@ -334,14 +335,19 @@ impl CircuitBreaker {
             .await?;
             // Query 2: unrealized PnL from currently open positions (already fetched above)
             // unrealized_sol already holds SUM(unrealized_pnl_sol) WHERE state IN ('ACTIVE','EXITING')
-            let realized_pnl_sol = Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
+            let realized_pnl_sol =
+                Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
             let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = -self.config.portfolio_stop_loss_percent;
             if daily_loss_percent < loss_threshold {
                 self.trip(TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: self.config.portfolio_stop_loss_percent.to_f64().unwrap_or(0.0),
+                    threshold: self
+                        .config
+                        .portfolio_stop_loss_percent
+                        .to_f64()
+                        .unwrap_or(0.0),
                 })
                 .await?;
                 return Ok(());
@@ -398,7 +404,8 @@ impl CircuitBreaker {
                 // Add best-effort USD estimate for positions closed without price data
                 if null_price_pnl_sol_f64 != 0.0 {
                     let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
-                        .unwrap_or(Decimal::ZERO) * price;
+                        .unwrap_or(Decimal::ZERO)
+                        * price;
                     realized_usd += estimated;
                 }
 
@@ -406,7 +413,9 @@ impl CircuitBreaker {
                 let total_pnl_usd = realized_usd + unrealized_usd;
 
                 // Check 24h loss in USD (sum of realized USD + unrealized USD)
-                if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
+                if total_pnl_usd < Decimal::ZERO
+                    && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
+                {
                     self.trip(TripReason::MaxLoss24h {
                         loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
                         threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
@@ -415,10 +424,14 @@ impl CircuitBreaker {
                     return Ok(());
                 }
             } else {
-                tracing::warn!("SOL price from cache is zero — skipping USD loss check for this tick");
+                tracing::warn!(
+                    "SOL price from cache is zero — skipping USD loss check for this tick"
+                );
             }
         } else {
-            tracing::warn!("SOL price unavailable (stale cache) — skipping USD loss check for this tick");
+            tracing::warn!(
+                "SOL price unavailable (stale cache) — skipping USD loss check for this tick"
+            );
         }
 
         // Check consecutive losses
@@ -571,14 +584,19 @@ impl CircuitBreaker {
             .fetch_one(&self.db)
             .await?;
             // Query 2: unrealized PnL from open positions (already in unrealized_sol)
-            let realized_pnl_sol = Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
+            let realized_pnl_sol =
+                Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
             let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = -self.config.portfolio_stop_loss_percent;
             if daily_loss_percent < loss_threshold {
                 let trip_reason = TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: self.config.portfolio_stop_loss_percent.to_f64().unwrap_or(0.0),
+                    threshold: self
+                        .config
+                        .portfolio_stop_loss_percent
+                        .to_f64()
+                        .unwrap_or(0.0),
                 };
                 // FIX [R-M2]: Log re-trip event before calling trip().
                 tracing::warn!(
@@ -642,7 +660,8 @@ impl CircuitBreaker {
             // Add best-effort USD estimate for positions closed without price data
             if null_price_pnl_sol_f64 != 0.0 {
                 let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
-                    .unwrap_or(Decimal::ZERO) * price;
+                    .unwrap_or(Decimal::ZERO)
+                    * price;
                 realized_usd += estimated;
             }
             let unrealized_usd = unrealized_sol * price;
@@ -659,7 +678,8 @@ impl CircuitBreaker {
         };
 
         if let Some(total_pnl_usd) = usd_check_result {
-            if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd {
+            if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
+            {
                 // Loss still breaches threshold — re-trip rather than resume.
                 let trip_reason = TripReason::MaxLoss24h {
                     loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
@@ -708,7 +728,9 @@ impl CircuitBreaker {
                 "Circuit breaker re-tripped during cooldown exit — clock reset"
             );
             self.trip(trip_reason).await?;
-            tracing::warn!("Circuit breaker cooldown expired but drawdown still breached — re-tripped");
+            tracing::warn!(
+                "Circuit breaker cooldown expired but drawdown still breached — re-tripped"
+            );
             return Ok(());
         }
 

@@ -95,14 +95,16 @@ pub async fn check_memory_pressure() -> AppResult<f64> {
     tokio::task::spawn_blocking(|| {
         let mut sys = sysinfo::System::new();
         sys.refresh_memory();
-        
+
         let total = sys.total_memory();
         let available = sys.available_memory();
-        
+
         if total == 0 {
-            return Err(AppError::Internal("Could not determine total memory".to_string()));
+            return Err(AppError::Internal(
+                "Could not determine total memory".to_string(),
+            ));
         }
-        
+
         let used = total.saturating_sub(available);
         let usage_percent = (used as f64 / total as f64) * 100.0;
 

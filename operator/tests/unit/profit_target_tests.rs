@@ -440,7 +440,9 @@ async fn test_unknown_trade_uuid_returns_none() {
     );
     let mgr = ProfitTargetManager::new(pool, default_config(), price_cache);
 
-    let action = mgr.check_targets("uuid-not-registered", TOKEN, "SHIELD").await;
+    let action = mgr
+        .check_targets("uuid-not-registered", TOKEN, "SHIELD")
+        .await;
     assert!(
         matches!(action, ProfitTargetAction::None),
         "Unregistered trade must return None, not trigger a spurious exit"

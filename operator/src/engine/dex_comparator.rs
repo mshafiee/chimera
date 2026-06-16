@@ -124,7 +124,7 @@ impl DexComparator {
             let fee_sol = amount_sol * default_fee;
             let slippage_sol = amount_sol * default_slippage;
             let total_cost_sol = fee_sol + slippage_sol;
-            
+
             return Ok(DexComparisonResult {
                 selected_dex: "Jupiter".to_string(),
                 total_cost_sol,
@@ -190,10 +190,10 @@ impl DexComparator {
         })?;
 
         // Validate response is a real quote (not an error page)
-        if quote.get("outAmount").is_none() 
-            && quote.get("amountOut").is_none() 
-            && quote.get("expectedAmountOut").is_none() 
-            && quote.get("routes").is_none() 
+        if quote.get("outAmount").is_none()
+            && quote.get("amountOut").is_none()
+            && quote.get("expectedAmountOut").is_none()
+            && quote.get("routes").is_none()
         {
             return Err(crate::error::AppError::Internal(
                 "Invalid Jupiter response: missing output amount or routes".to_string(),
@@ -201,8 +201,8 @@ impl DexComparator {
         }
 
         // Extract fee and slippage from quote, convert to Decimal
-        let fee_percent = get_json_decimal(&quote, "fee")
-            .unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Default 0.3% fee
+        let fee_percent =
+            get_json_decimal(&quote, "fee").unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Default 0.3% fee
 
         let fee_sol = amount_sol * fee_percent;
 
@@ -262,10 +262,10 @@ impl DexComparator {
                 })?;
 
                 // Validate response is a real quote
-                if quote.get("outAmount").is_none() 
-                    && quote.get("amountOut").is_none() 
-                    && quote.get("expectedAmountOut").is_none() 
-                    && quote.get("routes").is_none() 
+                if quote.get("outAmount").is_none()
+                    && quote.get("amountOut").is_none()
+                    && quote.get("expectedAmountOut").is_none()
+                    && quote.get("routes").is_none()
                 {
                     return Err(crate::error::AppError::Internal(
                         "Invalid Raydium response: missing output amount or routes".to_string(),
@@ -330,10 +330,10 @@ impl DexComparator {
                 })?;
 
                 // Validate response is a real quote
-                if quote.get("outAmount").is_none() 
-                    && quote.get("amountOut").is_none() 
-                    && quote.get("expectedAmountOut").is_none() 
-                    && quote.get("routes").is_none() 
+                if quote.get("outAmount").is_none()
+                    && quote.get("amountOut").is_none()
+                    && quote.get("expectedAmountOut").is_none()
+                    && quote.get("routes").is_none()
                 {
                     return Err(crate::error::AppError::Internal(
                         "Invalid Orca response: missing output amount or routes".to_string(),
@@ -400,10 +400,10 @@ impl DexComparator {
                 })?;
 
                 // Validate response is a real quote
-                if quote.get("outAmount").is_none() 
-                    && quote.get("amountOut").is_none() 
-                    && quote.get("expectedAmountOut").is_none() 
-                    && quote.get("routes").is_none() 
+                if quote.get("outAmount").is_none()
+                    && quote.get("amountOut").is_none()
+                    && quote.get("expectedAmountOut").is_none()
+                    && quote.get("routes").is_none()
                 {
                     return Err(crate::error::AppError::Internal(
                         "Invalid Meteora response: missing output amount or routes".to_string(),

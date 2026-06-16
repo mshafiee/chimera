@@ -186,7 +186,14 @@ impl WalletPerformanceTracker {
                 &self.db,
                 wallet_address,
                 Some(adjusted_wqs),
-                None, None, None, None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .await
             {

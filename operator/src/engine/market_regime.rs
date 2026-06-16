@@ -146,7 +146,8 @@ impl MarketRegimeDetector {
         }
 
         // Calculate price change over last 24 hours using Decimal for precision
-        let prices: Vec<rust_decimal::Decimal> = token_history.iter().map(|(_, price)| *price).collect();
+        let prices: Vec<rust_decimal::Decimal> =
+            token_history.iter().map(|(_, price)| *price).collect();
         let first_price = prices.first().unwrap_or(&rust_decimal::Decimal::ZERO);
         let last_price = prices.last().unwrap_or(&rust_decimal::Decimal::ZERO);
 
@@ -185,7 +186,8 @@ impl MarketRegimeDetector {
 
         if global_regime == MarketRegime::Bear || token_regime == MarketRegime::Bear {
             MarketRegime::Bear
-        } else if global_regime == MarketRegime::Sideways || token_regime == MarketRegime::Sideways {
+        } else if global_regime == MarketRegime::Sideways || token_regime == MarketRegime::Sideways
+        {
             MarketRegime::Sideways
         } else {
             MarketRegime::Bull
@@ -198,9 +200,9 @@ impl MarketRegimeDetector {
     /// Sideways must be >= Bear: a flat market is less risky than an actively declining one.
     pub fn get_regime_multiplier(&self, token_address: &str) -> Decimal {
         let regime_mult = match self.detect_effective_regime(token_address) {
-            MarketRegime::Bull     => dec!(1.5),
+            MarketRegime::Bull => dec!(1.5),
             MarketRegime::Sideways => dec!(0.8),
-            MarketRegime::Bear     => dec!(0.5),
+            MarketRegime::Bear => dec!(0.5),
         };
         let volume_mult = self.get_volume_trend_multiplier();
         (regime_mult * volume_mult).max(dec!(0.5)).min(dec!(2.0))
@@ -283,8 +285,8 @@ impl MarketRegimeDetector {
         // - If volume drops 10-20%, reduce by 15%
         // - If volume increases >20%, increase by 10% (but cap at 1.2x)
         // - Otherwise, neutral (1.0)
-        let threshold_80  = dec!(0.8);
-        let threshold_90  = dec!(0.9);
+        let threshold_80 = dec!(0.8);
+        let threshold_90 = dec!(0.9);
         let threshold_120 = dec!(1.2);
 
         if volume_change_ratio < threshold_80 {
@@ -301,9 +303,6 @@ impl MarketRegimeDetector {
             Decimal::ONE
         }
     }
-
-
-
 }
 
 #[cfg(test)]
@@ -322,10 +321,20 @@ mod tests {
         let now = Utc::now();
 
         // Push 3 price points spanning only 1 hour (price went up 10%)
-        price_cache.set_price_with_time(sol_mint, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(1));
+        price_cache.set_price_with_time(
+            sol_mint,
+            Decimal::from(100),
+            PriceSource::Jupiter,
+            now - Duration::hours(1),
+        );
         detector.update_price_history().await;
-        
-        price_cache.set_price_with_time(sol_mint, Decimal::from(105), PriceSource::Jupiter, now - Duration::minutes(30));
+
+        price_cache.set_price_with_time(
+            sol_mint,
+            Decimal::from(105),
+            PriceSource::Jupiter,
+            now - Duration::minutes(30),
+        );
         detector.update_price_history().await;
 
         price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now);
@@ -343,10 +352,20 @@ mod tests {
         let now = Utc::now();
 
         // Push 3 price points spanning 13 hours (price went up 10%)
-        price_cache.set_price_with_time(sol_mint, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(13));
+        price_cache.set_price_with_time(
+            sol_mint,
+            Decimal::from(100),
+            PriceSource::Jupiter,
+            now - Duration::hours(13),
+        );
         detector.update_price_history().await;
 
-        price_cache.set_price_with_time(sol_mint, Decimal::from(105), PriceSource::Jupiter, now - Duration::hours(6));
+        price_cache.set_price_with_time(
+            sol_mint,
+            Decimal::from(105),
+            PriceSource::Jupiter,
+            now - Duration::hours(6),
+        );
         detector.update_price_history().await;
 
         price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now);
@@ -364,8 +383,18 @@ mod tests {
         let now = Utc::now();
 
         // Push 3 price points spanning only 1 hour (price went down 10%)
-        price_cache.set_price_with_time(token, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(1));
-        price_cache.set_price_with_time(token, Decimal::from(95), PriceSource::Jupiter, now - Duration::minutes(30));
+        price_cache.set_price_with_time(
+            token,
+            Decimal::from(100),
+            PriceSource::Jupiter,
+            now - Duration::hours(1),
+        );
+        price_cache.set_price_with_time(
+            token,
+            Decimal::from(95),
+            PriceSource::Jupiter,
+            now - Duration::minutes(30),
+        );
         price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now);
 
         // Even though price went down 10%, span is only 1 hour (< 2 hours required), so must default to Sideways
@@ -380,8 +409,18 @@ mod tests {
         let now = Utc::now();
 
         // Push 3 price points spanning 3 hours (price went down 10%)
-        price_cache.set_price_with_time(token, Decimal::from(100), PriceSource::Jupiter, now - Duration::hours(3));
-        price_cache.set_price_with_time(token, Decimal::from(95), PriceSource::Jupiter, now - Duration::hours(1));
+        price_cache.set_price_with_time(
+            token,
+            Decimal::from(100),
+            PriceSource::Jupiter,
+            now - Duration::hours(3),
+        );
+        price_cache.set_price_with_time(
+            token,
+            Decimal::from(95),
+            PriceSource::Jupiter,
+            now - Duration::hours(1),
+        );
         price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now);
 
         // Span is 3 hours (>= 2 hours) and price went down 10%, so it should detect Bear

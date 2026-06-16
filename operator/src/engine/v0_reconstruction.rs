@@ -176,15 +176,12 @@ pub async fn reconstruct_v0_message_with_blockhash(
             .ok_or_else(|| format!("ALT account {} not found", alt_lookup.account_key))?;
 
         for &idx in &alt_lookup.writable_indexes {
-            let addr = alt_account
-                .addresses
-                .get(idx as usize)
-                .ok_or_else(|| {
-                    format!(
-                        "Writable ALT index {} out of bounds for table {}",
-                        idx, alt_lookup.account_key
-                    )
-                })?;
+            let addr = alt_account.addresses.get(idx as usize).ok_or_else(|| {
+                format!(
+                    "Writable ALT index {} out of bounds for table {}",
+                    idx, alt_lookup.account_key
+                )
+            })?;
             writable_alt_keys.push(*addr);
         }
     }
@@ -200,15 +197,12 @@ pub async fn reconstruct_v0_message_with_blockhash(
             .ok_or_else(|| format!("ALT account {} not found", alt_lookup.account_key))?;
 
         for &idx in &alt_lookup.readonly_indexes {
-            let addr = alt_account
-                .addresses
-                .get(idx as usize)
-                .ok_or_else(|| {
-                    format!(
-                        "Readonly ALT index {} out of bounds for table {}",
-                        idx, alt_lookup.account_key
-                    )
-                })?;
+            let addr = alt_account.addresses.get(idx as usize).ok_or_else(|| {
+                format!(
+                    "Readonly ALT index {} out of bounds for table {}",
+                    idx, alt_lookup.account_key
+                )
+            })?;
             readonly_alt_keys.push(*addr);
         }
     }

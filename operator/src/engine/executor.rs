@@ -259,7 +259,10 @@ impl Executor {
             // Check market conditions for BUY signals only — exits must always be allowed
             // through regardless of crash or volatility so stop-losses can close positions.
             if signal.payload.action == crate::models::Action::Buy {
-                if let Err(e) = self.check_market_conditions(&signal.payload.action, Some(signal.token_address())).await {
+                if let Err(e) = self
+                    .check_market_conditions(&signal.payload.action, Some(signal.token_address()))
+                    .await
+                {
                     tracing::warn!(
                         trade_uuid = %signal.trade_uuid,
                         error = %e,
@@ -518,7 +521,11 @@ impl Executor {
 
     /// Check market conditions before executing trades
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
-    async fn check_market_conditions(&self, _action: &crate::models::Action, token_address: Option<&str>) -> Result<(), String> {
+    async fn check_market_conditions(
+        &self,
+        _action: &crate::models::Action,
+        token_address: Option<&str>,
+    ) -> Result<(), String> {
         // Check 1: SOL price crash (>10% drop in last hour)
         // This requires price history - check if we have sufficient data
         if let Some(ref price_cache) = self.price_cache {
@@ -591,7 +598,8 @@ impl Executor {
                         }
                     }
 
-                    if let (Some(old_price), Some(new_price)) = (price_15m_ago, current_token_price) {
+                    if let (Some(old_price), Some(new_price)) = (price_15m_ago, current_token_price)
+                    {
                         if old_price > Decimal::ZERO {
                             let drop_percent =
                                 ((old_price - new_price) / old_price) * Decimal::from(100);
@@ -695,7 +703,8 @@ impl Executor {
 
     /// Check health of primary RPC
     async fn check_primary_health(&self) -> Result<RpcHealth, ExecutorError> {
-        self.check_health_impl(&self.config.rpc.primary_url, false).await
+        self.check_health_impl(&self.config.rpc.primary_url, false)
+            .await
     }
 
     /// Check health of active RPC
@@ -706,7 +715,11 @@ impl Executor {
     }
 
     /// Internal health check implementation
-    async fn check_health_impl(&self, url: &str, update_cache: bool) -> Result<RpcHealth, ExecutorError> {
+    async fn check_health_impl(
+        &self,
+        url: &str,
+        update_cache: bool,
+    ) -> Result<RpcHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
         let health_check = async {
@@ -763,8 +776,7 @@ impl Executor {
 
                     match probe_result {
                         Ok(resp) if resp.status().is_success() => {
-                            let body: serde_json::Value =
-                                resp.json().await.unwrap_or_default();
+                            let body: serde_json::Value = resp.json().await.unwrap_or_default();
                             if body.get("result").is_none() {
                                 let health = RpcHealth {
                                     healthy: false,
@@ -775,7 +787,8 @@ impl Executor {
                                     *self.latest_rpc_health.write().await = Some(health);
                                 }
                                 let err = ExecutorError::Rpc(
-                                    "RPC functional probe returned error body despite getHealth ok".to_string(),
+                                    "RPC functional probe returned error body despite getHealth ok"
+                                        .to_string(),
                                 );
                                 tracing::warn!(error = %err, "RPC functional health probe failed");
                                 return Err(err);
@@ -791,7 +804,8 @@ impl Executor {
                                 *self.latest_rpc_health.write().await = Some(health);
                             }
                             let err = ExecutorError::Rpc(format!(
-                                "RPC functional probe returned HTTP {}", resp.status()
+                                "RPC functional probe returned HTTP {}",
+                                resp.status()
                             ));
                             tracing::warn!(error = %err, "RPC functional health probe failed");
                             return Err(err);
@@ -806,7 +820,8 @@ impl Executor {
                                 *self.latest_rpc_health.write().await = Some(health);
                             }
                             let err = ExecutorError::Rpc(format!(
-                                "RPC functional probe network error: {}", e
+                                "RPC functional probe network error: {}",
+                                e
                             ));
                             tracing::warn!(error = %err, "RPC functional health probe failed");
                             return Err(err);
@@ -914,7 +929,7 @@ impl Executor {
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
-        
+
         // Check total execution cost cap
         self.check_execution_costs(signal, built_tx.price_impact_pct(), tip)?;
 
@@ -974,7 +989,9 @@ impl Executor {
                     );
                     // Poll for confirmation; on definitive on-chain failure propagate error.
                     // On timeout (still pending) return the signature so recovery handles it.
-                    let confirmed = self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
+                    let confirmed = self
+                        .poll_signature_confirmation(&signature, &signal.trade_uuid)
+                        .await?;
                     return Ok((signature, confirmed));
                 }
                 Err(e) => {
@@ -1019,7 +1036,9 @@ impl Executor {
                             signature = %signature,
                             "Bundle submitted via Helius Sender API"
                         );
-                        let confirmed = self.poll_signature_confirmation(&signature, &signal.trade_uuid).await?;
+                        let confirmed = self
+                            .poll_signature_confirmation(&signature, &signal.trade_uuid)
+                            .await?;
                         return Ok((signature, confirmed));
                     }
                     Err(e) => {
@@ -1044,15 +1063,21 @@ impl Executor {
             crate::engine::transaction_builder::BuiltTransaction::Legacy {
                 transaction, ..
             } => {
-                let sig = self.submit_transaction(transaction, &wallet_keypair).await?;
+                let sig = self
+                    .submit_transaction(transaction, &wallet_keypair)
+                    .await?;
                 (sig, true)
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned {
                 transaction_bytes,
                 ..
             } => {
-                let sig = self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?;
-                let confirmed = self.poll_signature_confirmation(&sig, &signal.trade_uuid).await?;
+                let sig = self
+                    .submit_versioned_transaction(transaction_bytes, &wallet_keypair)
+                    .await?;
+                let confirmed = self
+                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                    .await?;
                 (sig, confirmed)
             }
         };
@@ -1090,22 +1115,20 @@ impl Executor {
             .unwrap_or(10_000_000u64);
 
         // Build proper tip transaction (SOL transfer to Jito tip account)
-        let jito_tip_account =
-            Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4").map_err(|e| {
+        let jito_tip_account = Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4")
+            .map_err(|e| {
                 ExecutorError::TransactionFailed(format!("Invalid Jito tip account: {}", e))
             })?;
         let recent_blockhash = self.rpc_client.get_latest_blockhash().await.map_err(|e| {
             ExecutorError::Rpc(format!("Failed to get blockhash for tip tx: {}", e))
         })?;
-        let tip_instruction = system_instruction::transfer(
-            &tip_keypair.pubkey(),
-            &jito_tip_account,
-            tip_lamports,
-        );
-        let mut tip_tx = Transaction::new_with_payer(&[tip_instruction], Some(&tip_keypair.pubkey()));
+        let tip_instruction =
+            system_instruction::transfer(&tip_keypair.pubkey(), &jito_tip_account, tip_lamports);
+        let mut tip_tx =
+            Transaction::new_with_payer(&[tip_instruction], Some(&tip_keypair.pubkey()));
         tip_tx.sign(&[tip_keypair], recent_blockhash);
-        let tip_tx_bytes =
-            bincode::serde::encode_to_vec(&tip_tx, bincode::config::legacy()).map_err(|e| {
+        let tip_tx_bytes = bincode::serde::encode_to_vec(&tip_tx, bincode::config::legacy())
+            .map_err(|e| {
                 ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e))
             })?;
         let tip_tx_base64 = BASE64.encode(&tip_tx_bytes);
@@ -1214,15 +1237,21 @@ impl Executor {
             crate::engine::transaction_builder::BuiltTransaction::Legacy {
                 transaction, ..
             } => {
-                let sig = self.submit_transaction(transaction, &wallet_keypair).await?;
+                let sig = self
+                    .submit_transaction(transaction, &wallet_keypair)
+                    .await?;
                 (sig, true)
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned {
                 transaction_bytes,
                 ..
             } => {
-                let sig = self.submit_versioned_transaction(transaction_bytes, &wallet_keypair).await?;
-                let confirmed = self.poll_signature_confirmation(&sig, &signal.trade_uuid).await?;
+                let sig = self
+                    .submit_versioned_transaction(transaction_bytes, &wallet_keypair)
+                    .await?;
+                let confirmed = self
+                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                    .await?;
                 (sig, confirmed)
             }
         };
@@ -1648,7 +1677,12 @@ impl Executor {
     }
 
     /// Check if the total execution costs (tip + fee + slippage) exceed the configured limit
-    fn check_execution_costs(&self, signal: &Signal, price_impact_pct: Option<Decimal>, tip: Decimal) -> Result<(), ExecutorError> {
+    fn check_execution_costs(
+        &self,
+        signal: &Signal,
+        price_impact_pct: Option<Decimal>,
+        tip: Decimal,
+    ) -> Result<(), ExecutorError> {
         let dex_fee = signal.payload.amount_sol * self.config.strategy.dex_fee_rate;
         let price_impact = price_impact_pct
             .map(|pct| pct / Decimal::from(100))
@@ -1660,7 +1694,7 @@ impl Executor {
         } else {
             Decimal::ZERO
         };
-        
+
         let mut limit = match signal.payload.strategy {
             Strategy::Shield => self.config.strategy.shield_max_total_cost_percent,
             Strategy::Spear => self.config.strategy.spear_max_total_cost_percent,
@@ -1820,7 +1854,9 @@ impl Executor {
 
     /// Get time spent in fallback mode
     pub fn fallback_duration(&self) -> Option<chrono::Duration> {
-        self.mutable.lock().fallback_since
+        self.mutable
+            .lock()
+            .fallback_since
             .map(|t| Utc::now().signed_duration_since(t))
     }
 

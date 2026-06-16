@@ -135,7 +135,9 @@ impl EngineHandle {
     }
 
     /// Get the active RPC client from the executor (async)
-    pub async fn active_rpc_client(&self) -> Option<Arc<solana_client::nonblocking::rpc_client::RpcClient>> {
+    pub async fn active_rpc_client(
+        &self,
+    ) -> Option<Arc<solana_client::nonblocking::rpc_client::RpcClient>> {
         if let Some(ref executor) = self.executor {
             Some(executor.read().await.active_rpc_client_pub())
         } else {
@@ -441,7 +443,10 @@ impl Engine {
                                 Some("OPEN"),
                                 "TRIPPED",
                                 "SYSTEM_PANIC",
-                                Some(&format!("Engine loop panic count {} exceeded threshold in 60s window", count)),
+                                Some(&format!(
+                                    "Engine loop panic count {} exceeded threshold in 60s window",
+                                    count
+                                )),
                             )
                             .await;
                             drop(executor);
@@ -630,13 +635,12 @@ impl Engine {
             let hour_utc = now_time.hour();
             let minute_utc = now_time.minute();
             let mins_since_midnight = (hour_utc * 60 + minute_utc) as i64;
-            const RAMP_DOWN_START: i64 = 60;      // 01:00 UTC
+            const RAMP_DOWN_START: i64 = 60; // 01:00 UTC
             const FULL_REDUCTION_START: i64 = 120; // 02:00 UTC
-            const FULL_REDUCTION_END: i64 = 300;   // 05:00 UTC
-            const RAMP_UP_END: i64 = 360;           // 06:00 UTC
+            const FULL_REDUCTION_END: i64 = 300; // 05:00 UTC
+            const RAMP_UP_END: i64 = 360; // 06:00 UTC
             let base_mult = self.config.position_sizing.off_hours_size_multiplier;
-            let off_hours_mult = if !(RAMP_DOWN_START..RAMP_UP_END).contains(&mins_since_midnight)
-            {
+            let off_hours_mult = if !(RAMP_DOWN_START..RAMP_UP_END).contains(&mins_since_midnight) {
                 rust_decimal::Decimal::ONE
             } else if mins_since_midnight < FULL_REDUCTION_START {
                 // linear ramp 1.0 → base_mult over 01:00–02:00
@@ -669,11 +673,17 @@ impl Engine {
             let portfolio_heat = if let Some(ref ph) = self.portfolio_heat {
                 Arc::clone(ph)
             } else {
-                Arc::new(PortfolioHeat::new(self.db.clone(), self.config.position_sizing.total_capital_sol))
+                Arc::new(PortfolioHeat::new(
+                    self.db.clone(),
+                    self.config.position_sizing.total_capital_sol,
+                ))
             };
 
             // 1. Portfolio Heat Check
-            match portfolio_heat.can_open_position(signal.payload.amount_sol).await {
+            match portfolio_heat
+                .can_open_position(signal.payload.amount_sol)
+                .await
+            {
                 Ok(false) => {
                     let reason = "Portfolio heat limit reached at execution time".to_string();
                     tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: portfolio heat limit reached");
@@ -684,7 +694,8 @@ impl Engine {
                         &trade_uuid,
                         &serde_json::to_string(&signal.payload).unwrap_or_default(),
                         &reason,
-                    ).await;
+                    )
+                    .await;
                     if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
@@ -702,14 +713,20 @@ impl Engine {
             }
 
             // 2. Strategy Allocation Check
-            match portfolio_heat.can_open_strategy_position(
-                signal.payload.strategy,
-                signal.payload.amount_sol,
-                self.config.strategy.shield_percent,
-                self.config.strategy.spear_percent,
-            ).await {
+            match portfolio_heat
+                .can_open_strategy_position(
+                    signal.payload.strategy,
+                    signal.payload.amount_sol,
+                    self.config.strategy.shield_percent,
+                    self.config.strategy.spear_percent,
+                )
+                .await
+            {
                 Ok(false) => {
-                    let reason = format!("Strategy allocation limit reached at execution time for {:?}", signal.payload.strategy);
+                    let reason = format!(
+                        "Strategy allocation limit reached at execution time for {:?}",
+                        signal.payload.strategy
+                    );
                     tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: strategy allocation limit reached");
 
                     // Reject trade and set status to DEAD_LETTER (atomic: status + DLQ in one tx)
@@ -718,7 +735,8 @@ impl Engine {
                         &trade_uuid,
                         &serde_json::to_string(&signal.payload).unwrap_or_default(),
                         &reason,
-                    ).await;
+                    )
+                    .await;
                     if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
@@ -765,14 +783,18 @@ impl Engine {
                 };
 
                 if existing > 0 {
-                    let reason = format!("Duplicate position rejected: already ACTIVE/EXITING in {}", token_address);
+                    let reason = format!(
+                        "Duplicate position rejected: already ACTIVE/EXITING in {}",
+                        token_address
+                    );
                     tracing::warn!(trade_uuid = %trade_uuid, token_address = %token_address, "Duplicate token position rejected");
                     let _ = crate::db::mark_dead_letter(
                         &self.db,
                         &trade_uuid,
                         &serde_json::to_string(&signal.payload).unwrap_or_default(),
                         &reason,
-                    ).await;
+                    )
+                    .await;
                     if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
@@ -882,7 +904,8 @@ impl Engine {
                         Err(e) => {
                             // [R-H1] Position row insert failed: DEAD_LETTER the trade so the operator
                             // can see it was executed on-chain but not tracked in the DB.
-                            let reason = format!("Position row insert failed after on-chain BUY: {}", e);
+                            let reason =
+                                format!("Position row insert failed after on-chain BUY: {}", e);
                             tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to activate trade and open position — DEAD_LETTER-ing (on-chain tx executed but no position row)");
                             let _ = crate::db::update_trade_status(
                                 &self.db,
@@ -1002,7 +1025,9 @@ impl Engine {
                     }
                 }
             }
-            Err(crate::engine::executor::ExecutorError::MarketConditionsUnfavorable(ref reason)) => {
+            Err(crate::engine::executor::ExecutorError::MarketConditionsUnfavorable(
+                ref reason,
+            )) => {
                 if signal.payload.action == Action::Buy {
                     // BUY deferred due to market conditions: revert to PENDING for retry.
                     tracing::warn!(
@@ -1044,7 +1069,12 @@ impl Engine {
                     }
                 }
             }
-            Err(crate::engine::executor::ExecutorError::ExecutionCostTooHigh { cost, cost_pct, limit_pct, strategy }) => {
+            Err(crate::engine::executor::ExecutorError::ExecutionCostTooHigh {
+                cost,
+                cost_pct,
+                limit_pct,
+                strategy,
+            }) => {
                 let reason = format!(
                     "Cost efficiency check failed: total cost {} SOL ({:.1}%) exceeds limit {:.1}% for strategy {:?}",
                     cost, cost_pct, limit_pct, strategy

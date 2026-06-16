@@ -236,20 +236,33 @@ mod tests {
         .await
         .unwrap();
 
-        let breaker = CircuitBreaker::new(config.circuit_breakers.clone(), db.clone(), config.position_sizing.total_capital_sol);
+        let breaker = CircuitBreaker::new(
+            config.circuit_breakers.clone(),
+            db.clone(),
+            config.position_sizing.total_capital_sol,
+        );
 
         // Starts in Active (un-tripped) state
-        assert!(breaker.is_trading_allowed(), "Circuit breaker must start un-tripped");
+        assert!(
+            breaker.is_trading_allowed(),
+            "Circuit breaker must start un-tripped"
+        );
         assert_eq!(breaker.current_state(), CircuitBreakerState::Active);
 
         // Trip manually to simulate a threshold breach (unit-testing evaluate() would
         // require inserting many DB loss records; manual_trip covers the state transition)
         breaker
-            .manual_trip("test-admin", "consecutive losses exceeded threshold".to_string())
+            .manual_trip(
+                "test-admin",
+                "consecutive losses exceeded threshold".to_string(),
+            )
             .await
             .unwrap();
 
-        assert!(!breaker.is_trading_allowed(), "Circuit breaker must block trading after trip");
+        assert!(
+            !breaker.is_trading_allowed(),
+            "Circuit breaker must block trading after trip"
+        );
         assert_ne!(breaker.current_state(), CircuitBreakerState::Active);
     }
 
@@ -292,7 +305,10 @@ mod tests {
         let spear_signal = Signal::new(spear_payload, 1_700_001_000_i64, None);
 
         let result = queue.push(spear_signal, Some(50.0)).await;
-        assert!(result.is_err(), "Spear signal must be shed when queue > 80%");
+        assert!(
+            result.is_err(),
+            "Spear signal must be shed when queue > 80%"
+        );
     }
 
     #[tokio::test]
@@ -542,10 +558,13 @@ mod tests {
         .unwrap();
 
         // get_stuck_positions uses a 60-second threshold by default
-        let stuck = chimera_operator::db::get_stuck_positions(&db, 60).await.unwrap();
+        let stuck = chimera_operator::db::get_stuck_positions(&db, 60)
+            .await
+            .unwrap();
 
         assert_eq!(
-            stuck.len(), 1,
+            stuck.len(),
+            1,
             "Exactly 1 stuck position expected (300s > 60s threshold); got {}",
             stuck.len()
         );
@@ -568,7 +587,8 @@ mod tests {
         assert!(
             drift_old > max_drift,
             "Old timestamp drift {} must exceed max_drift {}",
-            drift_old, max_drift
+            drift_old,
+            max_drift
         );
 
         let fresh_ts = now - 5;
@@ -576,7 +596,8 @@ mod tests {
         assert!(
             drift_fresh <= max_drift,
             "Fresh timestamp drift {} must be within max_drift {}",
-            drift_fresh, max_drift
+            drift_fresh,
+            max_drift
         );
     }
 
@@ -608,7 +629,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(count, n as i64, "Exactly {} rows must exist after concurrent inserts", n);
+        assert_eq!(
+            count, n as i64,
+            "Exactly {} rows must exist after concurrent inserts",
+            n
+        );
     }
 
     #[tokio::test]

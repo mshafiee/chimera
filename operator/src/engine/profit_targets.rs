@@ -12,10 +12,10 @@ use crate::engine::momentum_exit::MomentumExit;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use serde_json;
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
-use serde_json;
 
 /// Profit target state
 pub struct ProfitTargetManager {
@@ -156,13 +156,25 @@ impl ProfitTargetManager {
 
         // Try to restore state from DB (survives restarts)
         let state = match db::load_exit_target(&self.db, trade_uuid).await {
-            Ok(Some((_, _, db_peak, db_peak_pct, targets_hit_json, trailing_active, trailing_price, db_remaining_fraction))) => {
-                let peak = Decimal::from_f64_retain(db_peak).unwrap_or(current_price).max(current_price);
+            Ok(Some((
+                _,
+                _,
+                db_peak,
+                db_peak_pct,
+                targets_hit_json,
+                trailing_active,
+                trailing_price,
+                db_remaining_fraction,
+            ))) => {
+                let peak = Decimal::from_f64_retain(db_peak)
+                    .unwrap_or(current_price)
+                    .max(current_price);
                 let peak_pct = Decimal::from_f64_retain(db_peak_pct).unwrap_or(Decimal::ZERO);
-                let targets_hit: Vec<Decimal> = serde_json::from_str(&targets_hit_json)
-                    .unwrap_or_default();
+                let targets_hit: Vec<Decimal> =
+                    serde_json::from_str(&targets_hit_json).unwrap_or_default();
                 let t_price = Decimal::from_f64_retain(trailing_price).unwrap_or(Decimal::ZERO);
-                let remaining = Decimal::from_f64_retain(db_remaining_fraction).unwrap_or(Decimal::ONE);
+                let remaining =
+                    Decimal::from_f64_retain(db_remaining_fraction).unwrap_or(Decimal::ONE);
                 tracing::debug!(trade_uuid, %remaining, "Restored profit target state from DB");
                 ProfitTargetState {
                     trade_uuid: trade_uuid.to_string(),
@@ -196,7 +208,11 @@ impl ProfitTargetManager {
                 let ep = entry_price.to_f64().unwrap_or(0.0);
                 let ea = entry_amount_sol.to_f64().unwrap_or(0.0);
                 let pp = current_price.to_f64().unwrap_or(0.0);
-                if let Err(e) = db::upsert_exit_target(&self.db, trade_uuid, ep, ea, pp, 0.0, "[]", false, 0.0, 1.0).await {
+                if let Err(e) = db::upsert_exit_target(
+                    &self.db, trade_uuid, ep, ea, pp, 0.0, "[]", false, 0.0, 1.0,
+                )
+                .await
+                {
                     tracing::warn!(trade_uuid, error = %e, "Failed to persist initial profit target state");
                 }
                 state
@@ -210,7 +226,12 @@ impl ProfitTargetManager {
     ///
     /// `strategy` is the position's strategy string ("SHIELD" or "SPEAR") — used to
     /// differentiate time-exit thresholds and trailing-stop distance.
-    pub async fn check_targets(&self, trade_uuid: &str, token_address: &str, strategy: &str) -> ProfitTargetAction {
+    pub async fn check_targets(
+        &self,
+        trade_uuid: &str,
+        token_address: &str,
+        strategy: &str,
+    ) -> ProfitTargetAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
             None => return ProfitTargetAction::None,
@@ -247,7 +268,12 @@ impl ProfitTargetManager {
             Decimal::ONE
         };
         // Use a distinct name so we don't shadow the `guard` write-lock binding above.
-        let profit_level_targets: Vec<Decimal> = self.config.targets.iter().map(|t| *t * multiplier).collect();
+        let profit_level_targets: Vec<Decimal> = self
+            .config
+            .targets
+            .iter()
+            .map(|t| *t * multiplier)
+            .collect();
 
         // Track whether state changed so we can persist once at the end
         let mut state_changed = is_new_peak;
@@ -260,7 +286,7 @@ impl ProfitTargetManager {
         let mut tiered_action: Option<ProfitTargetAction> = None;
         {
             let mut new_targets_hit = 0;
-            
+
             for target in &profit_level_targets {
                 if profit_percent >= *target && !state.targets_hit.contains(target) {
                     state.targets_hit.push(*target);
@@ -268,19 +294,19 @@ impl ProfitTargetManager {
                     new_targets_hit += 1;
                 }
             }
-            
+
             if new_targets_hit > 0 {
                 // Calculate compounding exit percentage of the CURRENT position.
                 // Selling f% of the remaining balance k times leaves (1 - f)^k of the balance.
                 // The fraction of the current balance to sell in this tick is 1 - (1 - f)^k.
                 let exit_fraction_remaining = self.config.tiered_exit_percent / Decimal::from(100);
                 let retain_fraction = Decimal::ONE - exit_fraction_remaining;
-                
+
                 let mut current_retain = Decimal::ONE;
                 for _ in 0..new_targets_hit {
                     current_retain *= retain_fraction;
                 }
-                
+
                 let exit_fraction_current = Decimal::ONE - current_retain;
 
                 // Compute remaining BEFORE updating state.remaining_fraction so
@@ -331,18 +357,19 @@ impl ProfitTargetManager {
         } else {
             self.config.trailing_stop_distance
         };
-        let trailing_distance = if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
-            let vol_mult = if vol > 50.0 {
-                dec!(1.5)
-            } else if vol > 30.0 {
-                dec!(1.25)
+        let trailing_distance =
+            if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
+                let vol_mult = if vol > 50.0 {
+                    dec!(1.5)
+                } else if vol > 30.0 {
+                    dec!(1.25)
+                } else {
+                    Decimal::ONE
+                };
+                (base_trailing_distance * vol_mult).min(Decimal::from(40))
             } else {
-                Decimal::ONE
+                base_trailing_distance
             };
-            (base_trailing_distance * vol_mult).min(Decimal::from(40))
-        } else {
-            base_trailing_distance
-        };
         if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;
             let trailing_distance_ratio = trailing_distance / Decimal::from(100);
@@ -351,7 +378,8 @@ impl ProfitTargetManager {
         }
 
         // Check if trailing stop hit
-        let trailing_hit = state.trailing_stop_active && state.current_price <= state.trailing_stop_price;
+        let trailing_hit =
+            state.trailing_stop_active && state.current_price <= state.trailing_stop_price;
 
         // Ratchet trailing stop price on new high — use peak_price, not current_price,
         // so a stale price_cache read can't set the stop tighter than the actual peak.
@@ -359,7 +387,8 @@ impl ProfitTargetManager {
         // spike in volatility widening the trailing distance).
         if state.trailing_stop_active && is_new_peak {
             let trailing_distance_ratio = trailing_distance / Decimal::from(100);
-            let new_trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
+            let new_trailing_stop_price =
+                state.peak_price * (Decimal::ONE - trailing_distance_ratio);
             if new_trailing_stop_price > state.trailing_stop_price {
                 state.trailing_stop_price = new_trailing_stop_price;
                 state_changed = true;
@@ -372,7 +401,11 @@ impl ProfitTargetManager {
             let ea = state.entry_amount_sol.to_f64().unwrap_or(0.0);
             let pp = state.peak_price.to_f64().unwrap_or(0.0);
             let ppp = state.peak_profit_percent.to_f64().unwrap_or(0.0);
-            let th: Vec<f64> = state.targets_hit.iter().filter_map(|d| d.to_f64()).collect();
+            let th: Vec<f64> = state
+                .targets_hit
+                .iter()
+                .filter_map(|d| d.to_f64())
+                .collect();
             let th_json = serde_json::to_string(&th).unwrap_or_else(|_| "[]".to_string());
             let tsa = state.trailing_stop_active;
             let tsp = state.trailing_stop_price.to_f64().unwrap_or(0.0);
@@ -393,16 +426,22 @@ impl ProfitTargetManager {
                 elapsed_hours >= if is_spear { 24 } else { 48 }
             } else if profit_percent > dec!(10) {
                 // Medium-profit: Shield 24h, Spear 12h
-                elapsed_hours >= if is_spear { 12 } else { self.config.time_exit_hours }
+                elapsed_hours
+                    >= if is_spear {
+                        12
+                    } else {
+                        self.config.time_exit_hours
+                    }
             } else if profit_percent > Decimal::ZERO {
                 // Low-profit: use losing_time_exit_hours for the strategy so operators
                 // can control all near-breakeven/losing exit timing through one config knob
                 // per strategy, rather than discovering that time_exit_hours doesn't apply.
-                elapsed_hours >= if is_spear {
-                    self.config.losing_time_exit_hours_spear
-                } else {
-                    self.config.losing_time_exit_hours_shield
-                }
+                elapsed_hours
+                    >= if is_spear {
+                        self.config.losing_time_exit_hours_spear
+                    } else {
+                        self.config.losing_time_exit_hours_shield
+                    }
             } else {
                 // Losing: use configured time-exit hours for the strategy.
                 // losing_time_exit_threshold_percent (default -3%) determines whether the loss
@@ -430,8 +469,19 @@ impl ProfitTargetManager {
         if state_changed {
             let trade_uuid_owned = trade_uuid.to_string();
             if let Err(e) = db::upsert_exit_target(
-                &self.db, &trade_uuid_owned, db_ep, db_ea, db_pp, db_ppp, &db_th_json, db_tsa, db_tsp, db_rf,
-            ).await {
+                &self.db,
+                &trade_uuid_owned,
+                db_ep,
+                db_ea,
+                db_pp,
+                db_ppp,
+                &db_th_json,
+                db_tsa,
+                db_tsp,
+                db_rf,
+            )
+            .await
+            {
                 tracing::warn!(trade_uuid, error = %e, "Failed to persist profit target state");
             }
         }

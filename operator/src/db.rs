@@ -911,7 +911,7 @@ pub async fn activate_trade_and_open_position(
     // signals — both see count=0, both proceed. This inner check serializes
     // via the write lock from BEGIN IMMEDIATE.
     let dupe_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM positions WHERE token_address = ? AND state IN ('ACTIVE','EXITING')"
+        "SELECT COUNT(*) FROM positions WHERE token_address = ? AND state IN ('ACTIVE','EXITING')",
     )
     .bind(token_address)
     .fetch_one(&mut *tx)
@@ -1090,7 +1090,9 @@ pub async fn close_position(
 
     let is_full_close = exit_fraction >= Decimal::ONE;
 
-    for (id, entry_price_f64, entry_amount_sol_f64, entry_trade_uuid, entry_sol_price_usd) in active_positions.iter() {
+    for (id, entry_price_f64, entry_amount_sol_f64, entry_trade_uuid, entry_sol_price_usd) in
+        active_positions.iter()
+    {
         let entry_price_dec = Decimal::from_f64_retain(*entry_price_f64).unwrap_or(Decimal::ZERO);
         let entry_amount_dec =
             Decimal::from_f64_retain(*entry_amount_sol_f64).unwrap_or(Decimal::ZERO);
@@ -1100,11 +1102,17 @@ pub async fn close_position(
         let exited_amount = entry_amount_dec * exit_fraction;
 
         let pnl_sol = if !entry_price_dec.is_zero() {
-            if let (Some(entry_sol_price), Some(exit_sol_price)) = (entry_sol_price_dec, sol_price_usd) {
+            if let (Some(entry_sol_price), Some(exit_sol_price)) =
+                (entry_sol_price_dec, sol_price_usd)
+            {
                 if !exit_sol_price.is_zero() && !entry_sol_price.is_zero() {
                     // Path A: both SOL prices available — correct SOL-denominated PnL
-                    let exit_price_sol = exit_price.checked_div(exit_sol_price).unwrap_or(Decimal::ZERO);
-                    let entry_price_sol = entry_price_dec.checked_div(entry_sol_price).unwrap_or(Decimal::ZERO);
+                    let exit_price_sol = exit_price
+                        .checked_div(exit_sol_price)
+                        .unwrap_or(Decimal::ZERO);
+                    let entry_price_sol = entry_price_dec
+                        .checked_div(entry_sol_price)
+                        .unwrap_or(Decimal::ZERO);
                     if !entry_price_sol.is_zero() {
                         let diff = exit_price_sol - entry_price_sol;
                         let ratio = diff / entry_price_sol;
@@ -1177,13 +1185,16 @@ pub async fn close_position(
         };
 
         // Scale entry-leg costs relative to original trade size (from pre-fetched map)
-        if let Some(&(et, ed, es, orig_amount_f64)) = entry_costs_map.get(entry_trade_uuid.as_str()) {
+        if let Some(&(et, ed, es, orig_amount_f64)) = entry_costs_map.get(entry_trade_uuid.as_str())
+        {
             let orig_amount = Decimal::from_f64_retain(orig_amount_f64).unwrap_or(Decimal::ZERO);
             let total_entry_cost = Decimal::from_f64_retain(et).unwrap_or(Decimal::ZERO)
                 + Decimal::from_f64_retain(ed).unwrap_or(Decimal::ZERO)
                 + Decimal::from_f64_retain(es).unwrap_or(Decimal::ZERO);
             let exited_fraction_of_original = if !orig_amount.is_zero() {
-                exited_amount.checked_div(orig_amount).unwrap_or(exit_fraction)
+                exited_amount
+                    .checked_div(orig_amount)
+                    .unwrap_or(exit_fraction)
             } else {
                 exit_fraction
             };
@@ -1192,8 +1203,8 @@ pub async fn close_position(
         }
 
         // USD PnL is None when SOL price unavailable — stored as NULL in DB
-        let pnl_usd_opt: Option<f64> = sol_price_usd
-            .map(|sol_usd| (pnl_sol * sol_usd).to_f64().unwrap_or(0.0));
+        let pnl_usd_opt: Option<f64> =
+            sol_price_usd.map(|sol_usd| (pnl_sol * sol_usd).to_f64().unwrap_or(0.0));
 
         if is_full_close {
             // State guard: skip positions already CLOSED by a concurrent call
@@ -1221,7 +1232,10 @@ pub async fn close_position(
             .await?;
 
             if rows.rows_affected() == 0 {
-                tracing::warn!(position_id = id, "Position already closed by concurrent call — skipping");
+                tracing::warn!(
+                    position_id = id,
+                    "Position already closed by concurrent call — skipping"
+                );
                 continue;
             }
         } else {
@@ -1257,7 +1271,10 @@ pub async fn close_position(
             .await?;
 
             if rows.rows_affected() == 0 {
-                tracing::warn!(position_id = id, "Position already closed by concurrent call — skipping partial close");
+                tracing::warn!(
+                    position_id = id,
+                    "Position already closed by concurrent call — skipping partial close"
+                );
                 continue;
             }
         }
@@ -1268,11 +1285,13 @@ pub async fn close_position(
     // Accumulate net_pnl_sol rather than overwriting — each partial exit contributes its
     // portion so the trades row reflects the total realised PnL across all exit legs.
     let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
-    sqlx::query("UPDATE trades SET net_pnl_sol = COALESCE(net_pnl_sol, 0.0) + ? WHERE trade_uuid = ?")
-        .bind(net_pnl.to_f64().unwrap_or(0.0))
-        .bind(trade_uuid)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "UPDATE trades SET net_pnl_sol = COALESCE(net_pnl_sol, 0.0) + ? WHERE trade_uuid = ?",
+    )
+    .bind(net_pnl.to_f64().unwrap_or(0.0))
+    .bind(trade_uuid)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
 
@@ -1295,7 +1314,16 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
     .fetch_optional(&mut *tx)
     .await?;
 
-    if let Some((_entry_price, _entry_amount_sol, Some(exit_sig), realized_pnl_sol, realized_pnl_usd, wallet_address, token_address)) = pos {
+    if let Some((
+        _entry_price,
+        _entry_amount_sol,
+        Some(exit_sig),
+        realized_pnl_sol,
+        realized_pnl_usd,
+        wallet_address,
+        token_address,
+    )) = pos
+    {
         if !exit_sig.is_empty() {
             // Find the failed exit trade
             let exit_trade: Option<(String, f64)> = sqlx::query_as(
@@ -1308,12 +1336,11 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
             if let Some((exit_trade_uuid, _exit_amount)) = exit_trade {
                 // Get the original BUY signal amount (may differ from current position
                 // amount after partial exits — this is the pre-exit signal quantity)
-                let buy_signal_amount_sol: f64 = sqlx::query_scalar(
-                    "SELECT amount_sol FROM trades WHERE trade_uuid = ?"
-                )
-                .bind(position_trade_uuid)
-                .fetch_one(&mut *tx)
-                .await?;
+                let buy_signal_amount_sol: f64 =
+                    sqlx::query_scalar("SELECT amount_sol FROM trades WHERE trade_uuid = ?")
+                        .bind(position_trade_uuid)
+                        .fetch_one(&mut *tx)
+                        .await?;
 
                 // Get the sum of all confirmed exit trades (excluding this one)
                 let confirmed_exit_amount: f64 = sqlx::query_scalar(
@@ -1348,7 +1375,9 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
                         .fetch_one(&mut *tx)
                         .await?;
 
-                    let failed_gross = if let (Some(net), Some(tip), Some(dex), Some(slip)) = (failed_net, failed_tip, failed_dex, failed_slip) {
+                    let failed_gross = if let (Some(net), Some(tip), Some(dex), Some(slip)) =
+                        (failed_net, failed_tip, failed_dex, failed_slip)
+                    {
                         let net_dec = Decimal::from_f64_retain(net).unwrap_or(Decimal::ZERO);
                         let costs = Decimal::from_f64_retain(tip).unwrap_or(Decimal::ZERO)
                             + Decimal::from_f64_retain(dex).unwrap_or(Decimal::ZERO)
@@ -1358,7 +1387,9 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
                         Decimal::ZERO
                     };
 
-                    let current_pnl_sol = realized_pnl_sol.map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
+                    let current_pnl_sol = realized_pnl_sol
+                        .map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO))
+                        .unwrap_or(Decimal::ZERO);
                     let reverted_pnl_sol = current_pnl_sol - failed_gross;
                     new_realized_pnl_sol = Some(reverted_pnl_sol.to_f64().unwrap_or(0.0));
 
@@ -1388,7 +1419,7 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
                         closed_at = NULL,
                         last_updated = CURRENT_TIMESTAMP
                     WHERE trade_uuid = ?
-                    "#
+                    "#,
                 )
                 .bind(reverted_amount)
                 .bind(new_realized_pnl_sol)
@@ -1547,7 +1578,10 @@ pub async fn insert_reconciliation_log(
 /// Get maximum drawdown from peak (for circuit breaker).
 /// Includes unrealized losses from open/exiting positions so the circuit breaker
 /// trips before a large open loser is closed (not after).
-pub async fn get_max_drawdown_percent(pool: &DbPool, total_capital_sol: Decimal) -> AppResult<Decimal> {
+pub async fn get_max_drawdown_percent(
+    pool: &DbPool,
+    total_capital_sol: Decimal,
+) -> AppResult<Decimal> {
     let result: (Option<f64>,) = sqlx::query_as(
         r#"
         WITH cumulative_pnl AS (
@@ -1601,11 +1635,10 @@ pub async fn get_active_positions_count(pool: &DbPool) -> AppResult<u32> {
 /// Return trade UUIDs for all ACTIVE and EXITING positions.
 /// Used by the HWM sweep to prune stale entries from the momentum_exit map.
 pub async fn get_active_trade_uuids(pool: &DbPool) -> AppResult<Vec<String>> {
-    let uuids: Vec<String> = sqlx::query_scalar(
-        "SELECT trade_uuid FROM positions WHERE state IN ('ACTIVE', 'EXITING')",
-    )
-    .fetch_all(pool)
-    .await?;
+    let uuids: Vec<String> =
+        sqlx::query_scalar("SELECT trade_uuid FROM positions WHERE state IN ('ACTIVE', 'EXITING')")
+            .fetch_all(pool)
+            .await?;
     Ok(uuids)
 }
 
@@ -1873,13 +1906,15 @@ pub async fn get_active_position_tokens(pool: &DbPool) -> AppResult<Vec<ActivePo
 
     Ok(rows
         .into_iter()
-        .map(|(uuid, token, price, size, sol_price)| ActivePositionSummary {
-            trade_uuid: uuid,
-            token_address: token,
-            entry_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
-            entry_amount_sol: Decimal::from_f64_retain(size).unwrap_or(Decimal::ZERO),
-            entry_sol_price_usd: sol_price.and_then(Decimal::from_f64_retain),
-        })
+        .map(
+            |(uuid, token, price, size, sol_price)| ActivePositionSummary {
+                trade_uuid: uuid,
+                token_address: token,
+                entry_price: Decimal::from_f64_retain(price).unwrap_or(Decimal::ZERO),
+                entry_amount_sol: Decimal::from_f64_retain(size).unwrap_or(Decimal::ZERO),
+                entry_sol_price_usd: sol_price.and_then(Decimal::from_f64_retain),
+            },
+        )
         .collect())
 }
 

@@ -797,12 +797,7 @@ pub struct ProfitManagementConfig {
 }
 
 fn default_profit_targets() -> Vec<Decimal> {
-    vec![
-        dec!(25.0),
-        dec!(50.0),
-        dec!(100.0),
-        dec!(200.0),
-    ]
+    vec![dec!(25.0), dec!(50.0), dec!(100.0), dec!(200.0)]
 }
 
 fn default_tiered_exit_percent() -> Decimal {

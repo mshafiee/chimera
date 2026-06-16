@@ -11,7 +11,8 @@
 .PHONY: all build build-operator build-web test test-operator test-scout test-web \
         test-integration test-load test-chaos test-e2e test-all \
         lint lint-operator lint-scout lint-web clean deploy help \
-        dev dev-operator dev-web db-init db-migrate preflight
+        dev dev-operator dev-web db-init db-migrate preflight \
+        rollback backup-verify
 
 # Configuration
 CARGO := cargo
@@ -182,14 +183,17 @@ preflight: ## Run pre-deployment verification
 	@echo "$(YELLOW)Running preflight checks...$(NC)"
 	./$(OPS_DIR)/preflight-check.sh
 
-deploy: preflight build ## Deploy to production
-	@echo "$(YELLOW)Deploying to production...$(NC)"
-	@echo "$(RED)Manual deployment steps:$(NC)"
-	@echo "  1. Copy operator binary to server"
-	@echo "  2. Copy web/dist to server"
-	@echo "  3. Run: sudo systemctl restart chimera"
-	@echo ""
-	@echo "Or use: make deploy-rsync SERVER=user@host"
+rollback: ## Rollback database to a previous backup
+	@echo "$(YELLOW)Rolling back database...$(NC)"
+	./$(OPS_DIR)/rollback.sh $(if $(BACKUP),--backup=$(BACKUP))
+
+backup-verify: ## Verify integrity of all database backups
+	@echo "$(YELLOW)Verifying backups...$(NC)"
+	./$(OPS_DIR)/backup-verify.sh
+
+deploy: preflight build ## Build, verify, and deploy to production
+	@echo "$(YELLOW)Deploying...$(NC)"
+	./$(OPS_DIR)/deploy.sh $(if $(VERSION),--version=$(VERSION)) $(if $(SKIP_BACKUP),--skip-backup)
 
 deploy-rsync: ## Deploy via rsync (requires SERVER variable)
 ifndef SERVER

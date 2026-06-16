@@ -362,7 +362,8 @@ impl TokenParser {
             return Ok(TokenSafetyResult {
                 safe: false,
                 rejection_reason: Some(
-                    "FDV unavailable — cannot verify liquidity/FDV ratio (Ghost Chain risk)".to_string(),
+                    "FDV unavailable — cannot verify liquidity/FDV ratio (Ghost Chain risk)"
+                        .to_string(),
                 ),
                 honeypot_checked: false,
                 liquidity_checked: true,

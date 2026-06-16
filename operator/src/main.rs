@@ -102,13 +102,15 @@ async fn main() -> anyhow::Result<()> {
     price_cache.track_token("So11111111111111111111111111111111111111112");
 
     // Initialize circuit breaker
-    let circuit_breaker = Arc::new(CircuitBreaker::new_with_ws(
-        config.circuit_breakers.clone(),
-        db_pool.clone(),
-        Some(ws_state.clone()),
-        config.position_sizing.total_capital_sol,
-    )
-    .with_price_cache(price_cache.clone()));
+    let circuit_breaker = Arc::new(
+        CircuitBreaker::new_with_ws(
+            config.circuit_breakers.clone(),
+            db_pool.clone(),
+            Some(ws_state.clone()),
+            config.position_sizing.total_capital_sol,
+        )
+        .with_price_cache(price_cache.clone()),
+    );
 
     // FIX [R-C1]: Restore persisted circuit breaker state from DB before accepting connections.
     // This ensures that a trip persisted before last restart is re-applied and evaluate()
@@ -138,7 +140,10 @@ async fn main() -> anyhow::Result<()> {
         if is_active {
             tracing::warn!("Kill-switch was active before restart — re-tripping circuit breaker");
             let _ = circuit_breaker
-                .manual_trip("SYSTEM_RESTART_RESTORE", "Kill-switch was active before restart".to_string())
+                .manual_trip(
+                    "SYSTEM_RESTART_RESTORE",
+                    "Kill-switch was active before restart".to_string(),
+                )
                 .await;
         }
     }
@@ -282,7 +287,10 @@ async fn main() -> anyhow::Result<()> {
                 interval.tick().await;
                 match db::recover_executing_trades(&exec_cleanup_db).await {
                     Ok(0) => {}
-                    Ok(n) => tracing::warn!(count = n, "Periodic sweep: recovered stuck EXECUTING trades to FAILED"),
+                    Ok(n) => tracing::warn!(
+                        count = n,
+                        "Periodic sweep: recovered stuck EXECUTING trades to FAILED"
+                    ),
                     Err(e) => tracing::error!(error = %e, "Periodic EXECUTING cleanup failed"),
                 }
             }
@@ -309,7 +317,9 @@ async fn main() -> anyhow::Result<()> {
                                 // Get current SOL/USD price for converting USD prices to SOL terms
                                 let current_sol_price = pnl_pc.get_sol_price_usd();
                                 let pnl_sol = match (pos.entry_sol_price_usd, current_sol_price) {
-                                    (Some(entry_sol), Some(curr_sol)) if !entry_sol.is_zero() && !curr_sol.is_zero() => {
+                                    (Some(entry_sol), Some(curr_sol))
+                                        if !entry_sol.is_zero() && !curr_sol.is_zero() =>
+                                    {
                                         // Convert both entry and current USD prices to SOL-denominated terms
                                         let entry_price_sol = pos.entry_price / entry_sol;
                                         let current_price_sol = current_usd / curr_sol;
@@ -326,7 +336,9 @@ async fn main() -> anyhow::Result<()> {
                                                 Some(entry_sol) if !entry_sol.is_zero() => {
                                                     let pnl_fraction = usd_pnl / entry;
                                                     // Scale USD return to SOL terms
-                                                    pnl_fraction * pos.entry_amount_sol * (entry / entry_sol)
+                                                    pnl_fraction
+                                                        * pos.entry_amount_sol
+                                                        * (entry / entry_sol)
                                                 }
                                                 _ => {
                                                     // Last resort: USD difference (misleading but won't crash)
@@ -334,7 +346,8 @@ async fn main() -> anyhow::Result<()> {
                                                         token = %pos.token_address,
                                                         "SOL price unavailable for PnL calc — using approximate value"
                                                     );
-                                                    (current_usd - entry) / entry * pos.entry_amount_sol
+                                                    (current_usd - entry) / entry
+                                                        * pos.entry_amount_sol
                                                 }
                                             }
                                         } else {
@@ -681,7 +694,9 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(config.profit_management.clone()),
             price_cache.clone(),
         ));
-        stop_loss_mgr.set_signal_aggregator(signal_aggregator.clone()).await;
+        stop_loss_mgr
+            .set_signal_aggregator(signal_aggregator.clone())
+            .await;
         let volume_cache = Arc::new(VolumeCache::new());
         let momentum_exit = Arc::new(MomentumExit::with_volume_cache(
             db_pool.clone(),
@@ -727,7 +742,8 @@ async fn main() -> anyhow::Result<()> {
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            let mut last_checked: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+            let mut last_checked: std::collections::HashMap<String, std::time::Instant> =
+                std::collections::HashMap::new();
             let mut db_fail_count: u32 = 0;
             loop {
                 tokio::select! {
@@ -1068,7 +1084,6 @@ async fn main() -> anyhow::Result<()> {
     .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
     .ok();
 
-
     // Refresh total_capital_sol from the live wallet balance every 60 seconds so that
     // compounding gains and drawdown recovery propagate into heat capacity without restart.
     {
@@ -1087,8 +1102,7 @@ async fn main() -> anyhow::Result<()> {
                 let pubkey = keypair.pubkey();
                 tokio::spawn(async move {
                     let rpc = NonblockingRpcClient::new(rpc_url);
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                     loop {
                         interval.tick().await;
                         match rpc.get_balance(&pubkey).await {
@@ -1179,7 +1193,10 @@ async fn main() -> anyhow::Result<()> {
         db_pool.clone(),
         Arc::new(config.position_sizing.clone()),
     ));
-    tracing::info!("Position sizer initialized (Kelly sizing: {})", config.position_sizing.use_kelly_sizing);
+    tracing::info!(
+        "Position sizer initialized (Kelly sizing: {})",
+        config.position_sizing.use_kelly_sizing
+    );
 
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
@@ -1295,7 +1312,9 @@ async fn main() -> anyhow::Result<()> {
             db: db_pool.clone(),
             jwt_secret,
             // FIX 11: Initialize auth nonce store for replay protection
-            seen_auth_nonces: std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashMap::new())),
+            seen_auth_nonces: std::sync::Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }));
 
     // Build WebSocket routes — require bearer auth to prevent unauthenticated position data leaks
@@ -1450,9 +1469,8 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
     } else {
         pos.entry_amount_sol
     };
-    let amount = (base_amount * fraction).max(
-        rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO),
-    );
+    let amount = (base_amount * fraction)
+        .max(rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO));
     let payload = SignalPayload {
         strategy: Strategy::Exit,
         token: pos.token_symbol.clone(),
@@ -1472,11 +1490,13 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
 /// the prior `ExitPercent` was applied against the original entry instead of the remaining balance.
 /// The `exit_fraction` is computed as amount_sol / entry_amount_sol so the engine's
 /// `close_position` (which multiplies exit_fraction by entry_amount) produces the correct amount.
-fn build_exit_signal_amount(pos: &ActivePositionEntry, amount_sol: rust_decimal::Decimal) -> Signal {
+fn build_exit_signal_amount(
+    pos: &ActivePositionEntry,
+    amount_sol: rust_decimal::Decimal,
+) -> Signal {
     use rust_decimal::prelude::*;
-    let amount = amount_sol.max(
-        rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO),
-    );
+    let amount = amount_sol
+        .max(rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO));
     let base = if pos.entry_amount_sol.is_zero() {
         rust_decimal::Decimal::from_str("0.01").unwrap_or(rust_decimal::Decimal::ONE)
     } else {
@@ -1498,32 +1518,6 @@ fn build_exit_signal_amount(pos: &ActivePositionEntry, amount_sol: rust_decimal:
         exit_fraction: Some(fraction),
     };
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
-}
-
-/// Build list of HMAC secrets from vault and config
-#[allow(dead_code)]
-fn build_hmac_secrets(secrets: &vault::VaultSecrets, config: &AppConfig) -> Vec<String> {
-    let mut hmac_secrets = Vec::new();
-
-    // Primary secret from vault takes precedence
-    if !secrets.webhook_secret.is_empty() {
-        hmac_secrets.push(secrets.webhook_secret.clone());
-    } else if !config.security.webhook_secret.is_empty() {
-        hmac_secrets.push(config.security.webhook_secret.clone());
-    }
-
-    // Previous secret for rotation
-    if let Some(ref prev) = secrets.webhook_secret_previous {
-        if !prev.is_empty() {
-            hmac_secrets.push(prev.clone());
-        }
-    } else if let Some(ref prev) = config.security.webhook_secret_previous {
-        if !prev.is_empty() {
-            hmac_secrets.push(prev.clone());
-        }
-    }
-
-    hmac_secrets
 }
 
 /// Initialize tracing/logging

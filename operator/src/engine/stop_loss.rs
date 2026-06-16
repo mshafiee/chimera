@@ -208,7 +208,7 @@ impl StopLossManager {
         let adaptive_threshold = stop_loss_threshold;
 
         // Final clamp: never tighter than -5% or wider than the operator-configured maximum.
-        let widest_stop   = self.config.max_stop_loss_distance;
+        let widest_stop = self.config.max_stop_loss_distance;
         let tightest_stop = dec!(-5);
         stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
         // Absolute floor: never wider than -35% regardless of config.
@@ -231,7 +231,9 @@ impl StopLossManager {
         }
 
         if loss_percent <= stop_loss_threshold {
-            let elapsed_secs = chrono::Utc::now().signed_duration_since(entry_time).num_seconds();
+            let elapsed_secs = chrono::Utc::now()
+                .signed_duration_since(entry_time)
+                .num_seconds();
             if elapsed_secs < self.config.wick_protection_secs as i64 {
                 // Hard stop at -25% always bypasses wick protection — a 25%+ crash
                 // in the first seconds is never "normal entry slippage."
@@ -258,6 +260,4 @@ impl StopLossManager {
 
         StopLossAction::None
     }
-
-
 }

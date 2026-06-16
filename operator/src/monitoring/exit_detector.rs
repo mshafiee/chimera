@@ -74,7 +74,9 @@ impl ExitDetector {
 
         // Determine if this is a full or partial exit by comparing tokens sold
         // against the tracked position size.
-        let exit_type = self.classify_exit_type(wallet_address, &swap.token_in, swap.amount_in).await;
+        let exit_type = self
+            .classify_exit_type(wallet_address, &swap.token_in, swap.amount_in)
+            .await;
 
         // For SELL swaps, the exited token is token_in (what we're selling), not token_out (SOL)
         let exited_token = swap.token_in.clone();
@@ -120,7 +122,9 @@ impl ExitDetector {
         token_address: &str,
         amount_in: rust_decimal::Decimal,
     ) -> ExitType {
-        let Some(ref pool) = self.db else { return ExitType::Full };
+        let Some(ref pool) = self.db else {
+            return ExitType::Full;
+        };
 
         let row: Option<(f64, f64)> = sqlx::query_as(
             "SELECT entry_amount_sol, entry_price FROM positions \

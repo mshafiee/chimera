@@ -130,28 +130,6 @@ impl PoolEnumerator {
         None
     }
 
-    /// Cache a result (reserved for future on-chain liquidity implementations)
-    #[allow(dead_code)]
-    async fn cache_result(
-        &self,
-        token_address: &str,
-        liquidity_usd: Decimal,
-        pool_addresses: Vec<String>,
-    ) {
-        let mut cache = self.cache.write().await;
-        cache.put(
-            token_address.to_string(),
-            PoolCacheEntry {
-                data: PoolLiquidity {
-                    token_address: token_address.to_string(),
-                    liquidity_usd,
-                    pool_addresses,
-                },
-                cached_at: SystemTime::now(),
-            },
-        );
-    }
-
     /// Clear the cache
     pub async fn clear_cache(&self) {
         let mut cache = self.cache.write().await;
@@ -172,23 +150,5 @@ mod tests {
 
         // Test that it was created successfully
         assert_eq!(enumerator.cache_ttl.as_secs(), 300);
-    }
-
-    #[tokio::test]
-    async fn test_cache_operations() {
-        let rpc_client = Arc::new(RpcClient::new(
-            "https://api.mainnet-beta.solana.com".to_string(),
-        ));
-        let enumerator = PoolEnumerator::new(rpc_client, 10, 60);
-
-        // Test caching
-        enumerator
-            .cache_result("test_token", Decimal::from(1000), vec![])
-            .await;
-
-        // Should be able to retrieve from cache
-        let cached = enumerator.get_from_cache("test_token").await;
-        assert!(cached.is_some());
-        assert_eq!(cached.unwrap().liquidity_usd, Decimal::from(1000));
     }
 }

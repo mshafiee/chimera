@@ -55,15 +55,25 @@ pub enum BuiltTransaction {
 impl BuiltTransaction {
     pub fn price_impact_pct(&self) -> Option<Decimal> {
         match self {
-            BuiltTransaction::Legacy { price_impact_pct, .. } => *price_impact_pct,
-            BuiltTransaction::Versioned { price_impact_pct, .. } => *price_impact_pct,
+            BuiltTransaction::Legacy {
+                price_impact_pct, ..
+            } => *price_impact_pct,
+            BuiltTransaction::Versioned {
+                price_impact_pct, ..
+            } => *price_impact_pct,
         }
     }
 
     pub fn fill_price_lamports_per_base(&self) -> Option<Decimal> {
         match self {
-            BuiltTransaction::Legacy { fill_price_lamports_per_base, .. } => *fill_price_lamports_per_base,
-            BuiltTransaction::Versioned { fill_price_lamports_per_base, .. } => *fill_price_lamports_per_base,
+            BuiltTransaction::Legacy {
+                fill_price_lamports_per_base,
+                ..
+            } => *fill_price_lamports_per_base,
+            BuiltTransaction::Versioned {
+                fill_price_lamports_per_base,
+                ..
+            } => *fill_price_lamports_per_base,
         }
     }
 }
