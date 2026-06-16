@@ -212,6 +212,16 @@ class PrePromotionValidator:
             if len(wf_closes) < self.criteria.walk_forward_min_trades:
                 # If holdout too small, fall back to full set
                 wf_trades = trades
+                wf_notes = (
+                    f"Walk-forward skipped: holdout has {len(wf_closes)} closes "
+                    f"< {self.criteria.walk_forward_min_trades} required; "
+                    f"validated on full trade set ({len(trades)} trades)"
+                )
+                logger.warning(
+                    "Wallet %s: walk-forward holdout too small (%d closes < %d min), "
+                    "falling back to full-set validation — result may be overfit",
+                    wallet_address[:8], len(wf_closes), self.criteria.walk_forward_min_trades,
+                )
             else:
                 is_walk_forward = True
                 in_sample_trades = sorted_trades[:-holdout_n]

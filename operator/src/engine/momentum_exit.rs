@@ -194,7 +194,9 @@ impl MomentumExit {
         // Gated to positions ≥5 minutes old: volume naturally dips 40–60% outside US trading
         // hours, and a freshly-opened position should not be immediately dumped on a pre-existing
         // low-volume condition that entry logic already accepted.
-        let volume_check_ready = elapsed.as_secs() >= 300;
+        // Also gated behind wick protection: during the first wick_protection_secs after entry,
+        // volume and RSI are unreliable indicators of structural breakdown.
+        let volume_check_ready = elapsed.as_secs() >= 300 && !in_wick_window;
         if volume_check_ready {
             if let Some(ref volume_cache) = self.volume_cache {
                 if volume_cache.has_volume_drop(token_address, Decimal::from(65)) {
@@ -210,16 +212,20 @@ impl MomentumExit {
 
         // Check 4: RSI declining (RSI < 35 and declining).
         // 40 triggered on normal pullbacks; 35 indicates genuine momentum breakdown.
-        if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
-            if current_rsi < 35.0 && current_rsi < previous_rsi {
-                tracing::warn!(
-                    trade_uuid = %trade_uuid,
-                    token_address = token_address,
-                    current_rsi = current_rsi,
-                    previous_rsi = previous_rsi,
-                    "Negative momentum detected: RSI < 35 and declining"
-                );
-                return MomentumExitAction::Exit;
+        // Also gated behind wick protection: RSI < 35 within the first wick_protection_secs
+        // after entry may reflect normal post-entry price action, not genuine breakdown.
+        if !in_wick_window {
+            if let Some((current_rsi, previous_rsi)) = self.calculate_rsi(token_address).await {
+                if current_rsi < 35.0 && current_rsi < previous_rsi {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        current_rsi = current_rsi,
+                        previous_rsi = previous_rsi,
+                        "Negative momentum detected: RSI < 35 and declining"
+                    );
+                    return MomentumExitAction::Exit;
+                }
             }
         }
 

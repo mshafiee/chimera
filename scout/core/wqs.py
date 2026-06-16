@@ -185,14 +185,29 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # DEX Diversity: Using multiple DEXs shows sophistication
     if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
         score += 5.0
-    
+
     # Limit Orders: Sophisticated trading strategy
     if metrics.uses_limit_orders:
         score += 10.0
-    
+
     # MEV Protection: Shows awareness of MEV risks
     if metrics.uses_mev_protection:
         score += 10.0
+
+    # Cap smart money bonuses to prevent inflating scores without profit proof.
+    # A wallet with mediocre trading performance can accumulate up to 25 points from
+    # tool usage alone (5 DEX + 10 limit + 10 MEV), potentially pushing a sub-60
+    # raw score above the ACTIVE threshold despite poor copy-trading viability.
+    # Only award smart money bonuses if the wallet has demonstrated positive ROI,
+    # ensuring tools are rewarded alongside results rather than as a substitute.
+    if metrics.roi_30d is not None and metrics.roi_30d <= 0:
+        # Remove bonuses added above by zeroing them out
+        if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
+            score -= 5.0
+        if metrics.uses_limit_orders:
+            score -= 10.0
+        if metrics.uses_mev_protection:
+            score -= 10.0
     
     # 11) Bag Holder Penalty (The "Hidden Loser" Detector)
     # If unrealized losses > 50% of realized gains, this is a bad trader

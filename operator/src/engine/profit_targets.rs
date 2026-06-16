@@ -45,6 +45,10 @@ struct ProfitTargetState {
     trailing_stop_active: bool,
     trailing_stop_price: Decimal,
     entry_time: SystemTime,
+    /// Tracks the cumulative fraction of the original position still held after tiered exits.
+    /// Starts at 1.0 and is multiplied by (1 - tiered_exit_percent/100) for each tier hit.
+    /// Used by the dust check to compute actual remaining position, not entry_amount_sol.
+    remaining_fraction: Decimal,
 }
 
 /// Profit target action
@@ -168,6 +172,7 @@ impl ProfitTargetManager {
                     trailing_stop_active: trailing_active,
                     trailing_stop_price: t_price,
                     entry_time,
+                    remaining_fraction: Decimal::ONE,
                 }
             }
             _ => {
@@ -183,6 +188,7 @@ impl ProfitTargetManager {
                     trailing_stop_active: false,
                     trailing_stop_price: Decimal::ZERO,
                     entry_time,
+                    remaining_fraction: Decimal::ONE,
                 };
                 let ep = entry_price.to_f64().unwrap_or(0.0);
                 let ea = entry_amount_sol.to_f64().unwrap_or(0.0);
@@ -274,11 +280,16 @@ impl ProfitTargetManager {
                 
                 let exit_fraction_current = Decimal::ONE - current_retain;
 
+                // Update remaining_fraction: track how much of the original position is held
+                state.remaining_fraction *= current_retain;
+
                 // Dust check: if the remaining position after the tiered exit would be
                 // smaller than min_size_sol, perform a full exit instead of leaving an
                 // economically unviable dust position that costs more in gas to close
                 // than it is worth.
-                let remaining_after_exit = state.entry_amount_sol * current_retain;
+                // Use remaining_fraction * entry_amount_sol for the actual remaining size.
+                let actual_remaining = state.entry_amount_sol * state.remaining_fraction;
+                let remaining_after_exit = actual_remaining * current_retain;
                 if remaining_after_exit > Decimal::ZERO
                     && remaining_after_exit < self.config.min_size_sol
                 {
@@ -376,20 +387,16 @@ impl ProfitTargetManager {
                 // Low-profit: Shield 16h, Spear 8h — free capital before it goes flat
                 elapsed_hours >= if is_spear { 8 } else { 16 }
             } else {
-                // Losing: check if current loss is deeper than threshold (default: -3%)
-                if profit_percent <= self.config.losing_time_exit_threshold_percent {
-                    // Loss is significant — cut early to protect capital
-                    let exit_limit_hours = if is_spear {
-                        self.config.losing_time_exit_hours_spear
-                    } else {
-                        self.config.losing_time_exit_hours_shield
-                    };
-                    elapsed_hours >= exit_limit_hours
+                // Losing: use configured time-exit hours for the strategy.
+                // losing_time_exit_threshold_percent (default -3%) determines whether the loss
+                // is "significant" — but both significant and minor losses now use the
+                // configured losing_time_exit_hours_* values instead of hardcoded fallbacks.
+                let exit_limit_hours = if is_spear {
+                    self.config.losing_time_exit_hours_spear
                 } else {
-                    // Loss is minor (between 0% and -3%) — allow it to hold longer to recover
-                    let exit_limit_hours = if is_spear { 8 } else { 16 };
-                    elapsed_hours >= exit_limit_hours
-                }
+                    self.config.losing_time_exit_hours_shield
+                };
+                elapsed_hours >= exit_limit_hours
             }
         } else {
             false

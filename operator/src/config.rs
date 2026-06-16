@@ -314,7 +314,7 @@ fn default_shield_signal_quality_threshold() -> f64 {
 }
 
 fn default_spear_signal_quality_threshold() -> f64 {
-    0.35
+    0.55
 }
 
 fn default_spear_percent() -> u32 {
@@ -815,7 +815,7 @@ fn default_trailing_stop_activation() -> Decimal {
 }
 
 fn default_trailing_stop_distance() -> Decimal {
-    dec!(20.0)
+    dec!(15.0)
 }
 
 fn default_max_stop_loss_distance() -> Decimal {

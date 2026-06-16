@@ -109,6 +109,11 @@ impl KellySizer {
                     } else if pnl < Decimal::ZERO {
                         losses.push(pnl_pct.abs()); // Store as positive for calculation
                         valid_trades_count += 1;
+                    } else {
+                        // Break-even trade: include in valid_trades_count so wallets with
+                        // many break-even positions (e.g. grid/market-making strategies)
+                        // can still reach the minimum threshold for Kelly sizing.
+                        valid_trades_count += 1;
                     }
                 }
             }

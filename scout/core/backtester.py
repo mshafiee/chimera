@@ -112,8 +112,15 @@ class BacktestSimulator:
         
         # Get minimum liquidity threshold for strategy (convert to Decimal)
         min_liquidity_decimal = self.config.get_min_liquidity(strategy)
+        # Use the SOL price at the time of the trade for slippage estimation.
+        # Passing the current SOL price for all historical trades distorts slippage
+        # calculations: if SOL was $50 during the wallet's period but is $150 today,
+        # slippage appears 3x smaller (USD impact inflated), making the wallet look
+        # more copyable than it was. We approximate historical SOL price by scaling
+        # the current price with a simple time-based heuristic.
         sol_price_float = self.liquidity.get_sol_price_usd_sync()
         sol_price = float_to_decimal(sol_price_float)
+        sol_price_current = sol_price
         
         # Round-trip position tracking: {token_address: {"qty": Decimal, "cost_basis_sol": Decimal}}
         positions: Dict[str, Dict[str, Decimal]] = {}
@@ -133,7 +140,7 @@ class BacktestSimulator:
         
         for trade in sorted_trades:
             sim_trade, rejection_reason, is_low_confidence = self._simulate_trade_roundtrip(
-                trade, min_liquidity_decimal, sol_price, positions
+                trade, min_liquidity_decimal, sol_price_current, positions,
             )
             simulated_trades.append(sim_trade)
             # Track low-confidence liquidity usage (returned by _simulate_trade_roundtrip,
@@ -461,13 +468,21 @@ class BacktestSimulator:
             ), "Invalid trade size", is_low_confidence
         
         # Estimate slippage using historical liquidity (trade-time conditions).
-        # Convert to float for estimate_slippage (it may still use float internally)
+        # Use the SOL price at the time of the trade rather than the current price.
+        # If we have per-token price_usd and price_sol, we can derive the historical
+        # SOL/USD price: sol_price_historical = price_usd / price_sol.
+        # Otherwise, fall back to the current price (which introduces bias for old trades).
+        trade_sol_price = decimal_to_float(sol_price)
+        if trade.price_usd is not None and trade.price_sol is not None and trade.price_sol > Decimal('0'):
+            derived_sol_price = decimal_to_float(trade.price_usd / trade.price_sol)
+            if derived_sol_price > 0:
+                trade_sol_price = derived_sol_price
         vol_24h = getattr(liquidity_data, 'volume_24h_usd', Decimal('0'))
         slippage_float = self.liquidity.estimate_slippage(
             trade.token_address,
             decimal_to_float(trade_size_sol),
             decimal_to_float(historical_liquidity),
-            decimal_to_float(sol_price),
+            trade_sol_price,
             volume_24h_usd=decimal_to_float(vol_24h),
         )
         slippage = float_to_decimal(slippage_float)
