@@ -285,6 +285,7 @@ CREATE TABLE IF NOT EXISTS exit_targets (
     peak_price REAL,
     peak_profit_percent REAL,
     stop_loss_price REAL,
+    remaining_fraction REAL NOT NULL DEFAULT 1.0,
     entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid)

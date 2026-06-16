@@ -154,13 +154,14 @@ impl ProfitTargetManager {
 
         // Try to restore state from DB (survives restarts)
         let state = match db::load_exit_target(&self.db, trade_uuid).await {
-            Ok(Some((_, _, db_peak, db_peak_pct, targets_hit_json, trailing_active, trailing_price))) => {
+            Ok(Some((_, _, db_peak, db_peak_pct, targets_hit_json, trailing_active, trailing_price, db_remaining_fraction))) => {
                 let peak = Decimal::from_f64_retain(db_peak).unwrap_or(current_price).max(current_price);
                 let peak_pct = Decimal::from_f64_retain(db_peak_pct).unwrap_or(Decimal::ZERO);
                 let targets_hit: Vec<Decimal> = serde_json::from_str(&targets_hit_json)
                     .unwrap_or_default();
                 let t_price = Decimal::from_f64_retain(trailing_price).unwrap_or(Decimal::ZERO);
-                tracing::debug!(trade_uuid, "Restored profit target state from DB");
+                let remaining = Decimal::from_f64_retain(db_remaining_fraction).unwrap_or(Decimal::ONE);
+                tracing::debug!(trade_uuid, %remaining, "Restored profit target state from DB");
                 ProfitTargetState {
                     trade_uuid: trade_uuid.to_string(),
                     entry_price,
@@ -172,7 +173,7 @@ impl ProfitTargetManager {
                     trailing_stop_active: trailing_active,
                     trailing_stop_price: t_price,
                     entry_time,
-                    remaining_fraction: Decimal::ONE,
+                    remaining_fraction: remaining,
                 }
             }
             _ => {
@@ -193,7 +194,7 @@ impl ProfitTargetManager {
                 let ep = entry_price.to_f64().unwrap_or(0.0);
                 let ea = entry_amount_sol.to_f64().unwrap_or(0.0);
                 let pp = current_price.to_f64().unwrap_or(0.0);
-                if let Err(e) = db::upsert_exit_target(&self.db, trade_uuid, ep, ea, pp, 0.0, "[]", false, 0.0).await {
+                if let Err(e) = db::upsert_exit_target(&self.db, trade_uuid, ep, ea, pp, 0.0, "[]", false, 0.0, 1.0).await {
                     tracing::warn!(trade_uuid, error = %e, "Failed to persist initial profit target state");
                 }
                 state
@@ -357,7 +358,7 @@ impl ProfitTargetManager {
         }
 
         // Snapshot state for DB persistence (before releasing the lock)
-        let (db_ep, db_ea, db_pp, db_ppp, db_th_json, db_tsa, db_tsp) = if state_changed {
+        let (db_ep, db_ea, db_pp, db_ppp, db_th_json, db_tsa, db_tsp, db_rf) = if state_changed {
             let ep = state.entry_price.to_f64().unwrap_or(0.0);
             let ea = state.entry_amount_sol.to_f64().unwrap_or(0.0);
             let pp = state.peak_price.to_f64().unwrap_or(0.0);
@@ -366,9 +367,10 @@ impl ProfitTargetManager {
             let th_json = serde_json::to_string(&th).unwrap_or_else(|_| "[]".to_string());
             let tsa = state.trailing_stop_active;
             let tsp = state.trailing_stop_price.to_f64().unwrap_or(0.0);
-            (ep, ea, pp, ppp, th_json, tsa, tsp)
+            let rf = state.remaining_fraction.to_f64().unwrap_or(1.0);
+            (ep, ea, pp, ppp, th_json, tsa, tsp, rf)
         } else {
-            (0.0, 0.0, 0.0, 0.0, String::new(), false, 0.0)
+            (0.0, 0.0, 0.0, 0.0, String::new(), false, 0.0, 1.0)
         };
 
         // Determine final action before releasing the lock.
@@ -413,7 +415,7 @@ impl ProfitTargetManager {
         if state_changed {
             let trade_uuid_owned = trade_uuid.to_string();
             if let Err(e) = db::upsert_exit_target(
-                &self.db, &trade_uuid_owned, db_ep, db_ea, db_pp, db_ppp, &db_th_json, db_tsa, db_tsp,
+                &self.db, &trade_uuid_owned, db_ep, db_ea, db_pp, db_ppp, &db_th_json, db_tsa, db_tsp, db_rf,
             ).await {
                 tracing::warn!(trade_uuid, error = %e, "Failed to persist profit target state");
             }

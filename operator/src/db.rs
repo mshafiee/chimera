@@ -1150,16 +1150,27 @@ pub async fn close_position(
                     Decimal::ZERO
                 }
             } else {
-                // Path D: No SOL price data at all — cannot correctly compute
-                // SOL-denominated PnL from USD prices. A USD price ratio multiplied
-                // by a SOL amount is dimensionally wrong (USD²/SOL).
-                // Return zero and log so the operator is aware PnL is untracked.
+                // Path D: No SOL price data at all (neither entry nor current).
+                // Fall back to USD price ratio × exited_amount. This is dimensionally
+                // imprecise (USD²/SOL), but preserves PnL direction and approximate
+                // magnitude — far better than silently returning zero and losing all
+                // PnL tracking for this close.
+                // This is an extremely rare edge case: entry_sol_price_usd is stored
+                // on all positions created after it was added to the positions schema.
                 tracing::error!(
                     trade_uuid = %trade_uuid,
-                    "Cannot compute SOL PnL: no SOL/USD price data available \
-                     (neither entry nor current). PnL for this close will be understated."
+                    entry_price = %entry_price_dec,
+                    exit_price = %exit_price,
+                    "No SOL/USD price data available (neither entry nor current) — \
+                     falling back to USD price ratio for approximate PnL"
                 );
-                Decimal::ZERO
+                if !entry_price_dec.is_zero() {
+                    let diff = exit_price - entry_price_dec;
+                    let ratio = diff / entry_price_dec;
+                    ratio * exited_amount
+                } else {
+                    Decimal::ZERO
+                }
             }
         } else {
             Decimal::ZERO
@@ -1319,20 +1330,47 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
 
                 // Revert realized PnL
                 let mut new_realized_pnl_sol = None;
-                let mut new_realized_pnl_usd = None;
+                let mut new_realized_pnl_usd: Option<f64> = None;
 
                 if confirmed_exit_amount > 0.0 {
                     // There were other successful exits, so we adjust PnL instead of clearing it.
-                    // Use the entry price for the failed trade's PnL calculation since the
-                    // exit_price from a failed tx may be stale/unreliable. Using entry price
-                    // means the failed trade contributes zero PnL, which is the conservative
-                    // assumption when we can't trust the execution price.
+                    // The position's realized_pnl_sol already includes the failed exit's PnL
+                    // contribution (from COALESCE(realized_pnl_sol, 0.0) + ? in close_position).
+                    // We must subtract the failed exit's gross PnL to avoid inflating realized PnL.
+                    //
+                    // We reconstruct the failed exit's gross PnL from the trade's net_pnl_sol
+                    // plus exit costs, since net = gross - costs ⇒ gross = net + costs.
+                    let (failed_net, failed_tip, failed_dex, failed_slip): (Option<f64>, Option<f64>, Option<f64>, Option<f64>) =
+                        sqlx::query_as(
+                            "SELECT net_pnl_sol, jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?"
+                        )
+                        .bind(&exit_trade_uuid)
+                        .fetch_one(&mut *tx)
+                        .await?;
+
+                    let failed_gross = if let (Some(net), Some(tip), Some(dex), Some(slip)) = (failed_net, failed_tip, failed_dex, failed_slip) {
+                        let net_dec = Decimal::from_f64_retain(net).unwrap_or(Decimal::ZERO);
+                        let costs = Decimal::from_f64_retain(tip).unwrap_or(Decimal::ZERO)
+                            + Decimal::from_f64_retain(dex).unwrap_or(Decimal::ZERO)
+                            + Decimal::from_f64_retain(slip).unwrap_or(Decimal::ZERO);
+                        net_dec + costs
+                    } else {
+                        Decimal::ZERO
+                    };
+
                     let current_pnl_sol = realized_pnl_sol.map(|p| Decimal::from_f64_retain(p).unwrap_or(Decimal::ZERO)).unwrap_or(Decimal::ZERO);
-                    let reverted_pnl_sol = current_pnl_sol;
+                    let reverted_pnl_sol = current_pnl_sol - failed_gross;
                     new_realized_pnl_sol = Some(reverted_pnl_sol.to_f64().unwrap_or(0.0));
 
-                    if let Some(r_usd) = realized_pnl_usd {
-                        new_realized_pnl_usd = Some(r_usd);
+                    if realized_pnl_usd.is_some() {
+                        // Cannot accurately subtract the failed exit's USD PnL without the
+                        // SOL/USD price at exit time. Set to None (NULL) so downstream
+                        // consumers don't rely on a stale/inflated value.
+                        tracing::warn!(
+                            exit_trade_uuid = %exit_trade_uuid,
+                            "Reverting position with prior confirmed exits — setting realized_pnl_usd to NULL"
+                        );
+                        new_realized_pnl_usd = None;
                     }
                 }
 
@@ -2764,19 +2802,22 @@ pub async fn upsert_exit_target(
     targets_hit_json: &str,
     trailing_stop_active: bool,
     trailing_stop_price: f64,
+    remaining_fraction: f64,
 ) -> AppResult<()> {
     sqlx::query(
         r#"
         INSERT INTO exit_targets (
             trade_uuid, entry_price, entry_amount_sol, peak_price,
-            peak_profit_percent, targets_hit, trailing_stop_active, trailing_stop_price
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            peak_profit_percent, targets_hit, trailing_stop_active, trailing_stop_price,
+            remaining_fraction
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(trade_uuid) DO UPDATE SET
             peak_price = excluded.peak_price,
             peak_profit_percent = excluded.peak_profit_percent,
             targets_hit = excluded.targets_hit,
             trailing_stop_active = excluded.trailing_stop_active,
             trailing_stop_price = excluded.trailing_stop_price,
+            remaining_fraction = excluded.remaining_fraction,
             last_updated = CURRENT_TIMESTAMP
         "#,
     )
@@ -2788,6 +2829,7 @@ pub async fn upsert_exit_target(
     .bind(targets_hit_json)
     .bind(trailing_stop_active as i64)
     .bind(trailing_stop_price)
+    .bind(remaining_fraction)
     .execute(pool)
     .await?;
     Ok(())
@@ -2797,11 +2839,12 @@ pub async fn upsert_exit_target(
 pub async fn load_exit_target(
     pool: &DbPool,
     trade_uuid: &str,
-) -> AppResult<Option<(f64, f64, f64, f64, String, bool, f64)>> {
-    let row: Option<(f64, f64, f64, f64, String, i64, f64)> = sqlx::query_as(
+) -> AppResult<Option<(f64, f64, f64, f64, String, bool, f64, f64)>> {
+    let row: Option<(f64, f64, f64, f64, String, i64, f64, f64)> = sqlx::query_as(
         r#"
         SELECT entry_price, entry_amount_sol, peak_price, peak_profit_percent,
-               COALESCE(targets_hit, '[]'), trailing_stop_active, COALESCE(trailing_stop_price, 0.0)
+               COALESCE(targets_hit, '[]'), trailing_stop_active, COALESCE(trailing_stop_price, 0.0),
+               COALESCE(remaining_fraction, 1.0)
         FROM exit_targets
         WHERE trade_uuid = ?
         "#,
@@ -2810,7 +2853,7 @@ pub async fn load_exit_target(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(|(ep, ea, pp, ppp, th, tsa, tsp)| (ep, ea, pp, ppp, th, tsa != 0, tsp)))
+    Ok(row.map(|(ep, ea, pp, ppp, th, tsa, tsp, rf)| (ep, ea, pp, ppp, th, tsa != 0, tsp, rf)))
 }
 
 /// Delete profit target state for a closed position
