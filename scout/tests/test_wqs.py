@@ -485,8 +485,8 @@ def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
 
     # 1-trade wallet must be heavily discounted
     assert score_1 < score_25, "1-trade wallet must score much lower than 25-trade wallet"
-    assert score_1 < score_25 * 0.15, (
-        f"1-trade confidence penalty (5%) must reduce score to <15% of full-confidence score: "
+    assert score_1 < score_25 * 0.25, (
+        f"1-trade confidence penalty (20%) must reduce score to <25% of full-confidence score: "
         f"{score_1} vs {score_25}"
     )
 
@@ -555,14 +555,14 @@ def test_wqs_confidence_multiplier_applied_once_not_doubled():
     score_4 = calculate_wqs(wallet_4)
     score_20 = calculate_wqs(wallet_20)
 
-    # confidence(2) = 0.1, confidence(4) = 0.2, confidence(20) = 1.0
-    # Expected ratios: score_2/score_20 ≈ 0.1, score_4/score_20 ≈ 0.2
+    # confidence(2) = 0.40, confidence(4) ≈ 0.64, confidence(20) = 1.0
+    # Expected ratios: score_2/score_20 ≈ 0.40, score_4/score_20 ≈ 0.64
     if score_20 > 0:
         ratio_2 = score_2 / score_20
         ratio_4 = score_4 / score_20
         # Ratios should be close to confidence values (within activity bonus variance)
-        assert ratio_2 < 0.25, f"tc=2 ratio should be ~0.1, got {ratio_2}"
-        assert ratio_4 < 0.40, f"tc=4 ratio should be ~0.2, got {ratio_4}"
+        assert ratio_2 < 0.55, f"tc=2 ratio should be ~0.4, got {ratio_2}"
+        assert ratio_4 < 0.75, f"tc=4 ratio should be ~0.64, got {ratio_4}"
 
 
 def test_wqs_sniper_detection_not_applied_when_delay_is_none():

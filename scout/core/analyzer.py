@@ -297,6 +297,26 @@ class WalletAnalyzer:
         self._wallet_tx_limit = int(os.getenv("SCOUT_WALLET_TX_LIMIT", "500"))
         self._wallet_tx_limit = max(50, min(self._wallet_tx_limit, 5000))
 
+        # Diagnostics: aggregate parse health across the entire run
+        self._parse_stats = {
+            "transactions_fetched": 0,
+            "swaps_parsed": 0,
+            "trades_valid": 0,
+            "parse_failures_total": 0,
+            "parse_failures_by_reason": {
+                "no_primary_token": 0,
+                "direction_ambiguous": 0,
+                "not_involved": 0,
+                "other": 0,
+            },
+        }
+        self._discovery_stats = {
+            "infrastructure_filtered": 0,
+            "balance_checked": 0,
+            "balance_filtered": 0,
+            "wallets_with_no_trades": 0,
+        }
+
     @classmethod
     async def create(
         cls,
@@ -673,6 +693,7 @@ class WalletAnalyzer:
         trades = []
         parse_failures = 0
         trade_failures = 0
+        self._parse_stats["transactions_fetched"] += len(transactions)
         for i, tx in enumerate(transactions):
             if i % 25 == 0 and i > 0:
                 print(f"  [{address[:8]}] Progress: {i}/{len(transactions)} txs, {len(trades)} trades, {parse_failures} parse fails, {trade_failures} trade fails")
@@ -692,28 +713,35 @@ class WalletAnalyzer:
             
             swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
             if swap:
+                self._parse_stats["swaps_parsed"] += 1
                 # Convert to HistoricalTrade format
                 trade = await self._parse_swap_to_trade(swap, address)
                 if trade:
                     trades.append(trade)
+                    self._parse_stats["trades_valid"] += 1
                 else:
                     trade_failures += 1
             else:
                 parse_failures += 1
+                self._parse_stats["parse_failures_total"] += 1
+                reason = self._categorize_parse_failure(tx, address)
+                self._parse_stats["parse_failures_by_reason"][reason] += 1
                 # Log first few failures for debugging
                 if parse_failures <= 3:
                     tx_type = tx.get("type", "unknown")
                     tx_sig = tx.get("signature", "")[:8]
-                    print(f"  [{address[:8]}] Parse fail #{parse_failures}: type={tx_type}, sig={tx_sig}...")
+                    print(f"  [{address[:8]}] Parse fail #{parse_failures}: type={tx_type}, sig={tx_sig}..., reason={reason}")
                     # Log key fields
                     print(f"  [{address[:8]}]   - tokenTransfers: {len(tx.get('tokenTransfers', []))} items")
                     print(f"  [{address[:8]}]   - nativeTransfers: {len(tx.get('nativeTransfers', []))} items")
                     print(f"  [{address[:8]}]   - accountData: {len(tx.get('accountData', []))} items")
+                    print(f"  [{address[:8]}]   - events: {list(tx.get('events', {}).keys()) if tx.get('events') else 'none'}")
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
 
         if not trades:
             print(f"  [{address[:8]}] No valid trades found after parsing")
+            self._discovery_stats["wallets_with_no_trades"] += 1
             return None
 
         # Compute DEX diversity from raw Helius transactions (source field)
@@ -953,7 +981,7 @@ class WalletAnalyzer:
                     token_qty = safe_decimal_divide(sol_amt, t.price_at_trade)
                     t.token_amount = token_qty
 
-            if token_qty is None or token_qty <= Decimal('0') or sol_amt is None:
+            if token_qty is None or token_qty <= Decimal('0') or sol_amt is None or sol_amt <= Decimal('0'):
                 continue
 
             if t.action == TradeAction.BUY:
@@ -1632,6 +1660,7 @@ class WalletAnalyzer:
             avg_entry_delay_seconds=avg_entry_delay,
             profit_factor=profit_factor,
             is_fresh_wallet=is_fresh_wallet,
+            is_unproven=(profit_factor is None),
             sortino_ratio=sortino_ratio,
             total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
             total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
@@ -2145,6 +2174,72 @@ class WalletAnalyzer:
             }
             for t in trades
         ]
+
+    def _categorize_parse_failure(self, tx: Dict[str, Any], wallet_address: str) -> str:
+        """Categorize why parse_swap_transaction returned None for this transaction."""
+        # Wallet involvement check (delegates to shared _is_wallet_involved)
+        if not self.helius_client._is_wallet_involved(tx, wallet_address):
+            return "not_involved"
+
+        # Check for primary token availability
+        token_transfers = tx.get("tokenTransfers") or []
+        if not token_transfers:
+            return "no_primary_token"
+
+        # Check for direction logic
+        token_deltas = {}
+        for tr in token_transfers:
+            mint = tr.get("mint", "")
+            if not mint:
+                continue
+            amt = self.helius_client._parse_ui_token_amount(tr)
+            if tr.get("fromUserAccount") == wallet_address:
+                token_deltas[mint] = token_deltas.get(mint, 0.0) - amt
+            if tr.get("toUserAccount") == wallet_address:
+                token_deltas[mint] = token_deltas.get(mint, 0.0) + amt
+
+        has_non_sol = any(m != "So11111111111111111111111111111111111111112" for m in token_deltas)
+        if not has_non_sol:
+            return "no_primary_token"
+
+        return "direction_ambiguous"
+
+    def print_parse_health_dashboard(self) -> None:
+        """Print parse health diagnostics at end of run."""
+        # Pull discovery stats from HeliusClient
+        hstats = self.helius_client.get_discovery_stats()
+        self._discovery_stats["infrastructure_filtered"] = hstats.get("infrastructure_filtered", 0)
+        self._discovery_stats["balance_checked"] = hstats.get("balance_checked", 0)
+        self._discovery_stats["balance_filtered"] = hstats.get("balance_filtered", 0)
+
+        stats = self._parse_stats
+        disc = self._discovery_stats
+        total = stats["transactions_fetched"]
+        parsed = stats["swaps_parsed"]
+        valid = stats["trades_valid"]
+        failures = stats["parse_failures_total"]
+        by_reason = stats["parse_failures_by_reason"]
+
+        print("\n[Analyzer] ════════════════════════════════════════")
+        print("[Analyzer] Parse Health Dashboard")
+        print("[Analyzer] ════════════════════════════════════════")
+        print(f"  Transactions fetched:  {total}")
+        print(f"  Swaps parsed:          {parsed}  ({parsed / max(1, total) * 100:.1f}%)")
+        print(f"  Trades valid:          {valid}")
+        print(f"  Parse failures:        {failures}")
+        if failures > 0:
+            pct = failures / max(1, total) * 100
+            print(f"  Failure rate:          {pct:.1f}%")
+            print("  Failures by reason:")
+            for reason, count in sorted(by_reason.items(), key=lambda x: -x[1]):
+                print(f"    {reason:<22s}: {count}")
+        print()
+        print("[Analyzer] Discovery Quality")
+        print(f"  Infrastructure filtered:  {disc['infrastructure_filtered']}")
+        print(f"  Balance checked:          {disc['balance_checked']}")
+        print(f"  Balance filtered (0 SOL): {disc['balance_filtered']}")
+        print(f"  Wallets with no trades:   {disc['wallets_with_no_trades']}")
+        print("[Analyzer] ════════════════════════════════════════")
     
 
 

@@ -97,6 +97,13 @@ class HeliusClient:
         # Keep track of unique wallets found in this run
         self._discovered_this_run: Set[str] = set()
         
+        # Discovery quality stats
+        self._discovery_stats = {
+            "infrastructure_filtered": 0,
+            "balance_checked": 0,
+            "balance_filtered": 0,
+        }
+        
         # Async session management
         self._session = session
         self._own_session = False
@@ -247,6 +254,41 @@ class HeliusClient:
         # Known DEX programs will be added in __init__
         "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Whirlpool program
         "jitoNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN",  # common jito placeholder/program-like
+        # Metaplex / NFT programs
+        "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s",  # Metaplex Token Metadata
+        "cndy3Z4yapfJBmL3ShUp5exZKqR3z33ihTAA9Msz",     # Candy Machine v3
+        "cndyAnrLdpi3LRmZxQmUB6BhDKFmV5kuPKRk9GaGQhLo",  # Candy Machine v2
+        "CMCYUyenTCkPnvk5ZpPJchLkU3aDWAMYmXKqMpLUGPmz",  # Candy Machine Core
+        "BGUMAp9Gq7iTEuizy4pqaxsTyUCBK68MDfK752saRPUY",  # Bubblegum
+        "1BWutmTvYPwD4wG8oMAqkmBbi3NKYsLDkQwG6Ls9TqrD",  # Gummyroll
+        "CMAGAK4f8czi5FjtB9nEUtKPEmMy2oUQBj4a5i2hGq6F",  # TCM
+        "coUnmi3AKVDaCabi4qjgBppxnRTTK3rDjB4NcrPxeRm",   # Core
+        # Tensor NFT marketplace
+        "TSWAPaqyCSx2KABk68Shhefep5AtiDH9SBzZBAZDKjX",  # TensorSwap
+        "TCMPhJYjkYBeNZDjGQL2Gx8Nn5FHF7kSitVqWcJikHz",   # Tensor
+        # PumpFun
+        "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # PumpFun
+        # Additional known programs
+        "AdnT32DkjCs5h2rFLq9yCqHsSfARQDVgnSAfMd7wgTkz",  # Magic Eden
+        "M2mx93ekt1fmXSVxTrQ9Tj7fNP5qQoHWTCRZBgLaPUB",  # Magic Eden V2
+        "MEisE1HzehtrDyoAzSkVSNuMALwKWNkZ8tWYqYvw1hX",   # Magic Eden
+        # Additional DEX programs and routers (not always in dex_programs from config)
+        "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",   # Jupiter V4
+        "JUP3c2Uh3WA4Ng34oA4UGdXZMDK79qPEoJNhKz",        # Jupiter V3
+        "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS",   # Raydium Router
+        "Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb",   # Jito
+        "srmqPvymPx9SrHEZqFDvC3KVszRAHd9X7ddZy4j6Yb3",  # Serum
+        "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",  # Serum V3
+        "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # CAMM
+        "DFLoBWSFUNqgdmxjKzQb3Th5GJxDiRJSqFzofAV3e",     # DFlow
+        "FLUXubRgkFr2ipp89x3fRJ7LGYqCQko5iiMf3kJZZnws",    # FluxBeam
+        "PERPHjGBqRHAqJtEP2FPhkABRuXqLEbxR9kNq7kVqjBY",    # Perpetuals
+        "Driftp2LwvcEzuFfN5gLoLP2KKDhfziw1h5oMKCyxTwG",    # Drift V2
+        "dRiftyHA39mo4DgFUBhy7PJcehFdBH4SV3BGDg8UGs7",     # Drift
+        "Zo1ggzTUKMY5ZGYbLhS7YLFmHo6UqNTPYtJCG4GvRsH",     # Zeta Markets
+        "HyaB3W9q6TeAXoG4KJQmGv2hqxqVBn6e1LgGygwFHm6V",    # Saber Stable Swap
+        "SSwpkEEcbUqx4vtoEByFjSkhKdCT862DNVb52nZg1UZ",     # Saber
+        "CURVGoZn8zfcxMnMHRjLJz3EYnk5kQXtBCryFp4Fv4nV",    # Curve (Solana)
     }
 
     def _rate_limit(self):
@@ -486,11 +528,11 @@ class HeliusClient:
         - rawTokenAmount: { tokenAmount: "123", decimals: 6 }
         - tokenAmount: number (already UI amount)
         - tokenAmount: { uiAmount, uiAmountString, amount, decimals }
+        - raw numeric string (e.g. "1.5")
+        - scientific notation (e.g. "1e-6")
 
-        Raises:
-            ValueError: If no valid amount can be parsed from the transfer payload.
-                        Callers must catch this and skip/drop the transfer rather
-                        than proceeding with an implicit 0.0 amount.
+        Returns 0.0 with a warning when parsing fails, so a single malformed
+        transfer does not block delta accumulation for the rest of the batch.
         """
         # 1) rawTokenAmount is the most precise
         raw = transfer.get("rawTokenAmount")
@@ -529,9 +571,11 @@ class HeliusClient:
             except Exception:
                 pass
 
-        raise ValueError(
-            f"Could not parse ui_token_amount from transfer payload: {transfer!r}"
+        logging.getLogger(__name__).warning(
+            "Could not parse ui_token_amount from transfer payload, returning 0.0: %r",
+            transfer,
         )
+        return 0.0
     
     def _validate_wallet_address(self, address: str) -> bool:
         """Validate that an address is a valid Solana wallet address."""
@@ -549,6 +593,10 @@ class HeliusClient:
         # Check if it's a known DEX program
         if address in self.dex_programs:
             return False
+
+        # Check against expanded non-wallet set (programs, mints, infrastructure)
+        if address in self.NON_WALLET_ADDRESSES:
+            return False
             
         # NOTE: We intentionally do NOT filter out token mint addresses here.
         # Wallet discovery extracts many "user accounts" from transactions; some
@@ -558,11 +606,35 @@ class HeliusClient:
         if address.endswith("11111111111111111111111111111111"):
             return False
         
+        # Filter addresses that look like PDA seeds (common pattern: long runs of identical chars)
+        # Programs and vaults often have highly patterned addresses
+        if self._looks_like_program_address(address):
+            return False
+        
         # Basic base58 character check (simplified - Solana uses base58)
         # NOTE: We intentionally avoid strict base58 validation here because
         # some unit tests use synthetic addresses that may not be valid base58.
         
         return True
+
+    @staticmethod
+    def _looks_like_program_address(address: str) -> bool:
+        """Heuristic: detect addresses that are likely programs/PDA/vaults, not user wallets."""
+        if not address or len(address) < 32:
+            return False
+        # Known program/sysvar/account prefixes that are never user wallets
+        if address.startswith(("Sysvar", "Vote11111", "Stake1111", "Config111")):
+            return True
+        # Long runs of same character suggest PDA seed derivation
+        for i in range(len(address) - 8):
+            if address[i:i+8] == address[i] * 8:
+                return True
+            if address[i:i+8] == "1" * 8:
+                return True
+        # Ends with "1" * 8+ suggests program-derived
+        if address.endswith("11111111"):
+            return True
+        return False
 
     def _is_candidate_wallet_address(self, address: str) -> bool:
         """
@@ -623,49 +695,25 @@ class HeliusClient:
             # Skip low-value spam/dust transactions
             return []
 
-        # Known infrastructure addresses to EXCLUDE (program IDs, routers, etc.)
-        INFRASTRUCTURE_ADDRESSES = {
-            # Program IDs
-            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",  # Jupiter
-            "JUP4Fb2cqiRUcaTHdrPC8h2gNsA2ETXiPDD33WcGuJB",   # Jupiter V4
-            "JUP3c2Uh3WA4Ng34oA4UGdXZMDK79qPEoJNhKz",        # Jupiter V3
-            "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",  # Raydium
-            "routeUGWgWzqBWFcrCfv8tritsqukccJPu3q5GPP3xS",   # Raydium Router
-            "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",  # Orca
-            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",  # Whirlpool
-            "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",  # PumpFun
-            "Jito4APyf642JPZPx3hGc6WWJ8zPKtRbRs4P815Awbb",   # Jito
-            "jitonobu",                                         # Jito program
-            "srmqPvymPx9SrHEZqFDvC3KVszRAHd9X7ddZy4j6Yb3",  # Serum
-            "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",  # Serum V3
-            "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",  # CAMM
-            "DFLoBWSFUNqgdmxjKzQb3Th5GJxDiRJSqFzofAV3e",     # DFlow
-            # System accounts
-            "11111111111111111111111111111111",                # System Program
-            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",   # Token Program
-            "SysvarRent111111111111111111111111111111111",    # Rent Sysvar
-            "SysvarC1ock11111111111111111111111111111111",    # Clock Sysvar
-            "SysvarRecentB1ockHashes111111111111111111111",   # Recent Blockhashes
-        }
-
         # ONLY extract wallets from tokenTransfers (actual traders)
         traders: Set[str] = set()
-        
+        infra_filtered = 0
+
         # Extract from tokenTransfers ONLY
         if "tokenTransfers" in tx:
             for transfer in tx.get("tokenTransfers", []):
                 if isinstance(transfer, dict):
-                    # Only fromUserAccount and toUserAccount are actual traders
                     for key in ["fromUserAccount", "toUserAccount"]:
                         if key in transfer:
                             addr = transfer[key]
-                            # Validate address format and not in exclusion list
-                            if (addr and 
-                                self._validate_wallet_address(addr) and
-                                addr not in INFRASTRUCTURE_ADDRESSES and
-                                not addr.startswith("11111") and  # System addresses
-                                not addr.startswith("Sysvar")):   # Sysvar accounts
-                                traders.add(addr)
+                            if not addr:
+                                continue
+                            if not self._validate_wallet_address(addr):
+                                infra_filtered += 1
+                                continue
+                            traders.add(addr)
+
+        self._discovery_stats["infrastructure_filtered"] += infra_filtered
         
         # OPTIONAL: Also check if feePayer appears in the transfers
         # If feePayer paid for the tx AND appears in transfers, they're definitely a trader
@@ -699,6 +747,67 @@ class HeliusClient:
             return len(transactions) >= min_trades
         except Exception:
             return False  # If we can't validate, assume invalid
+
+    async def _filter_by_sol_balance(
+        self,
+        wallets: List[str],
+        min_balance_sol: float = 0.0,
+    ) -> List[str]:
+        """
+        Batch-check SOL balances to filter out programs, vaults, and system accounts.
+        Addresses with zero (or near-zero) SOL balance are almost certainly not user wallets.
+        """
+        if not wallets:
+            return []
+
+        batch_size = 20  # Batch RPC calls for efficiency
+        rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
+        if not rpc_url:
+            return wallets  # Can't validate without RPC
+
+        total_checked = 0
+        valid_wallets = []
+        session = await self._get_session()
+
+        for i in range(0, len(wallets), batch_size):
+            batch = wallets[i:i + batch_size]
+            total_checked += len(batch)
+            # Build batch RPC requests
+            payload = []
+            for j, addr in enumerate(batch):
+                payload.append({
+                    "jsonrpc": "2.0",
+                    "id": j,
+                    "method": "getBalance",
+                    "params": [addr]
+                })
+
+            try:
+                async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    if response.status == 200:
+                        results = await response.json()
+                        if isinstance(results, list):
+                            for result in results:
+                                if isinstance(result, dict) and "result" in result:
+                                    balance_lamports = result["result"].get("value", 0)
+                                    balance_sol = balance_lamports / 1e9
+                                    idx = result.get("id", -1)
+                                    if balance_sol > min_balance_sol and 0 <= idx < len(batch):
+                                        valid_wallets.append(batch[idx])
+                        elif isinstance(results, dict) and "result" in results:
+                            balance_lamports = results["result"].get("value", 0)
+                            if balance_lamports / 1e9 > min_balance_sol:
+                                valid_wallets.append(batch[0])
+            except Exception:
+                valid_wallets.extend(batch)
+
+        self._discovery_stats["balance_checked"] = total_checked
+        self._discovery_stats["balance_filtered"] = total_checked - len(valid_wallets)
+        return valid_wallets
+
+    def get_discovery_stats(self) -> Dict[str, int]:
+        """Return discovery quality statistics from the most recent run."""
+        return dict(self._discovery_stats)
     
     async def _query_token_transactions(
         self,
@@ -1129,7 +1238,21 @@ class HeliusClient:
             wallet for wallet, count in wallet_counts.items()
             if count >= min_trade_count and self._is_candidate_wallet_address(wallet)
         ]
-        
+
+        # Cheap pre-validation: batch-check SOL balances to filter programs/vaults.
+        # System accounts and programs won't have nonzero SOL balances.
+        validate_balances = os.getenv("SCOUT_VALIDATE_WALLET_BALANCE", "false").lower() == "true"
+        if validate_balances and candidate_wallets:
+            print("[Helius] Validating wallet balances (batch)...")
+            pre_filter_count = len(candidate_wallets)
+            try:
+                candidate_wallets = await self._filter_by_sol_balance(candidate_wallets, min_balance_sol=0.0)
+                filtered_out = pre_filter_count - len(candidate_wallets)
+                if filtered_out > 0:
+                    print(f"[Helius]   Filtered {filtered_out} zero-balance addresses (programs/vaults)")
+            except Exception as e:
+                print(f"[Helius]   Balance validation skipped (error: {e})")
+
         # Optional: Validate wallet activity (can be slow, so make it optional)
         validate_activity = os.getenv("SCOUT_VALIDATE_WALLET_ACTIVITY", "false").lower() == "true"
         if validate_activity:
@@ -1370,11 +1493,16 @@ class HeliusClient:
     ) -> Optional[Dict[str, Any]]:
         """
         Parse a SWAP transaction to extract trade details.
-        
+
+        Tries multiple strategies in sequence:
+        1. Wallet-relative token/sol deltas (primary)
+        2. Swap events (newer Helius enriched format)
+        3. Raw accountData balance changes (fallback)
+
         Args:
             tx: Transaction object from Helius
             wallet_address: Wallet address to filter for
-            
+
         Returns:
             Dictionary with swap details or None if not a valid swap
         """
@@ -1407,39 +1535,64 @@ class HeliusClient:
                         }
             return swap_info
 
-        # Robust behavior: compute wallet-relative deltas.
-        # FIRST: Check if wallet is actually involved in this transaction
-        if wallet_address:
-            wallet_involved = False
-            
-            # Check feePayer
-            if tx.get("feePayer") == wallet_address:
-                wallet_involved = True
-            
-            # Check tokenTransfers
-            if not wallet_involved:
-                for tr in tx.get("tokenTransfers", []) or []:
-                    if (tr.get("fromUserAccount") == wallet_address or 
-                        tr.get("toUserAccount") == wallet_address):
-                        wallet_involved = True
-                        break
-            
-            # Check accountData for balance changes (wallet might be program/vault)
-            if not wallet_involved:
-                for acc in tx.get("accountData", []) or []:
-                    if acc.get("account") == wallet_address:
-                        # Check if this account had any token balance changes
-                        if acc.get("tokenBalanceChanges"):
-                            wallet_involved = True
-                            break
-            
-            if not wallet_involved:
-                # Wallet not directly involved in this swap
-                return None
-            else:
-                # Debug: Wallet is involved, proceeding with parse
-                pass  # Continue parsing
-        
+        # Check wallet involvement (shared across all strategies)
+        if wallet_address and not self._is_wallet_involved(tx, wallet_address):
+            return None
+
+        # Strategy 1: wallet-relative deltas (primary)
+        result = self._parse_swap_from_deltas(tx, wallet_address)
+        if result:
+            return result
+
+        # Strategy 2: swap events (newer Helius enriched format)
+        result = self._parse_swap_from_events(tx, wallet_address)
+        if result:
+            return result
+
+        # Strategy 3: raw accountData balance changes (fallback)
+        result = self._parse_swap_from_account_data(tx, wallet_address)
+        if result:
+            return result
+
+        return None
+
+    def _is_wallet_involved(self, tx: Dict[str, Any], wallet_address: str) -> bool:
+        """Check if wallet is involved in this transaction via any transfer type."""
+        # Check feePayer
+        if tx.get("feePayer") == wallet_address:
+            return True
+
+        # Check tokenTransfers
+        for tr in tx.get("tokenTransfers", []) or []:
+            if (tr.get("fromUserAccount") == wallet_address or
+                tr.get("toUserAccount") == wallet_address):
+                return True
+
+        # Check nativeTransfers (SOL-only swaps)
+        for nt in tx.get("nativeTransfers", []) or []:
+            if (nt.get("fromUserAccount") == wallet_address or
+                nt.get("toUserAccount") == wallet_address):
+                return True
+
+        # Check accountData for balance changes
+        for acc in tx.get("accountData", []) or []:
+            if acc.get("account") == wallet_address:
+                if acc.get("tokenBalanceChanges"):
+                    return True
+
+        return False
+
+    def _parse_swap_from_deltas(
+        self,
+        tx: Dict[str, Any],
+        wallet_address: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Strategy 1: Parse swap from wallet-relative token and SOL deltas.
+        """
+        signature = tx.get("signature", "")
+        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+
         sol_mint = "So11111111111111111111111111111111111111112"
         usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         usdt_mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
@@ -1469,15 +1622,7 @@ class HeliusClient:
             mint = tr.get("mint", "")
             if not mint:
                 continue
-            try:
-                amt_ui = self._parse_ui_token_amount(tr)
-            except ValueError:
-                logging.getLogger(__name__).warning(
-                    "Skipping token transfer with unparseable amount (mint=%s): %r",
-                    mint,
-                    tr,
-                )
-                continue
+            amt_ui = self._parse_ui_token_amount(tr)
 
             from_acc = tr.get("fromUserAccount")
             to_acc = tr.get("toUserAccount")
@@ -1541,51 +1686,82 @@ class HeliusClient:
                     stable_mint_used = sm
                     break
 
-            if stable_mint_used is None:
-                return None  # Can't value without SOL or stable quote
+            if stable_mint_used is not None:
+                # Pick the primary non-stable token by abs delta
+                other_mint = None
+                other_delta = 0.0
+                for mint, delta in token_deltas.items():
+                    if mint in stable_mints or mint == sol_mint:
+                        continue
+                    if abs(delta) > abs(other_delta):
+                        other_delta = delta
+                        other_mint = mint
 
-            # Pick the primary non-stable token by abs delta
-            other_mint = None
-            other_delta = 0.0
+                if other_mint and abs(other_delta) >= 1e-12:
+                    usd_amount = abs(stable_delta)
+                    token_amount = abs(other_delta)
+                    price_usd = (usd_amount / token_amount) if token_amount > 0 else 0.0
+
+                    if stable_delta < 0 and other_delta > 0:
+                        direction = "BUY"
+                        net_token_delta = other_delta
+                    elif stable_delta > 0 and other_delta < 0:
+                        direction = "SELL"
+                        net_token_delta = other_delta
+                    else:
+                        return None
+
+                    return {
+                        "signature": signature,
+                        "timestamp": timestamp,
+                        "wallet": wallet_address,
+                        "token_mint": other_mint,
+                        "token_amount": token_amount,
+                        "sol_amount": None,
+                        "direction": direction,
+                        "price_sol": None,
+                        "price_usd": price_usd,
+                        "usd_amount": usd_amount,
+                        "quote_mint": stable_mint_used,
+                        "net_sol_delta": 0.0,
+                        "net_token_delta": net_token_delta,
+                    }
+
+            # No stablecoin leg — try pure token→token swap.
+            # Identify the two largest non-SOL token deltas (one inflow, one outflow).
+            inflow = (None, 0.0)   # (mint, delta) for delta > 0
+            outflow = (None, 0.0)  # (mint, delta) for delta < 0
             for mint, delta in token_deltas.items():
-                if mint in stable_mints or mint == sol_mint:
+                if mint == sol_mint:
                     continue
-                if abs(delta) > abs(other_delta):
-                    other_delta = delta
-                    other_mint = mint
+                if delta > 0 and delta > inflow[1]:
+                    inflow = (mint, delta)
+                elif delta < 0 and abs(delta) > abs(outflow[1]):
+                    outflow = (mint, delta)
 
-            if not other_mint or abs(other_delta) < 1e-12:
-                return None
-
-            usd_amount = abs(stable_delta)  # stablecoins treated as $1 per token UI unit
-            token_amount = abs(other_delta)
-            price_usd = (usd_amount / token_amount) if token_amount > 0 else 0.0
-
-            # Determine direction based on stable delta sign (spent stable -> BUY)
-            if stable_delta < 0 and other_delta > 0:
+            if inflow[0] and outflow[0]:
+                token_mint = inflow[0]  # token received is the primary
+                token_amount = abs(inflow[1])
                 direction = "BUY"
-                net_token_delta = other_delta
-            elif stable_delta > 0 and other_delta < 0:
-                direction = "SELL"
-                net_token_delta = other_delta
-            else:
-                return None
+                # USD valuation is unknown without price lookup; leave as None.
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": token_mint,
+                    "token_amount": token_amount,
+                    "sol_amount": None,
+                    "direction": direction,
+                    "price_sol": None,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": None,
+                    "net_sol_delta": 0.0,
+                    "net_token_delta": inflow[1],
+                }
 
-            return {
-                "signature": signature,
-                "timestamp": timestamp,
-                "wallet": wallet_address,
-                "token_mint": other_mint,
-                "token_amount": token_amount,
-                "sol_amount": None,  # derived later from USD quote
-                "direction": direction,
-                "price_sol": None,
-                "price_usd": price_usd,
-                "usd_amount": usd_amount,
-                "quote_mint": stable_mint_used,
-                "net_sol_delta": 0.0,
-                "net_token_delta": net_token_delta,
-            }
+            # Could not value without SOL, stable, or clear token pair
+            return None
 
         # IMPROVED: Direction Logic
         # Explicitly handle cases where SOL delta might be slightly noisy due to rent
@@ -1639,4 +1815,226 @@ class HeliusClient:
             "quote_mint": sol_mint,
             "net_sol_delta": sol_delta,
             "net_token_delta": primary_delta,
+        }
+
+    def _parse_swap_from_events(
+        self,
+        tx: Dict[str, Any],
+        wallet_address: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Strategy 2: Parse swap from Helius enriched swap events.
+        Newer Helius API versions include structured swap data in tx["events"]["swap"].
+        """
+        events = tx.get("events", {})
+        if not isinstance(events, dict):
+            return None
+
+        swap = events.get("swap", {})
+        if not isinstance(swap, dict) or not swap:
+            return None
+
+        signature = tx.get("signature", "")
+        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+
+        native_input = swap.get("nativeInput") or swap.get("nativeIn")
+        native_output = swap.get("nativeOutput") or swap.get("nativeOut")
+
+        token_inputs = swap.get("tokenInputs", []) or swap.get("tokenIn", [])
+        token_outputs = swap.get("tokenOutputs", []) or swap.get("tokenOut", [])
+
+        # Handle single dict vs list
+        if isinstance(token_inputs, dict):
+            token_inputs = [token_inputs]
+        if isinstance(token_outputs, dict):
+            token_outputs = [token_outputs]
+
+        sol_mint = "So11111111111111111111111111111111111111112"
+
+        if native_input is not None and native_output is not None:
+            # SOL-in token-out = BUY, SOL-out token-in = SELL
+            if isinstance(native_input, dict):
+                sol_in = float(native_input.get("amount", 0))
+            else:
+                sol_in = float(native_input) if native_input else 0.0
+            if isinstance(native_output, dict):
+                sol_out = float(native_output.get("amount", 0))
+            else:
+                sol_out = float(native_output) if native_output else 0.0
+
+            token_in_count = 0.0
+            token_in_mint = None
+            for ti in token_inputs:
+                if isinstance(ti, dict):
+                    token_in_mint = ti.get("mint") or token_in_mint
+                    token_in_count += float(ti.get("rawTokenAmount", 0))
+                else:
+                    token_in_count += float(ti) if ti else 0.0
+
+            token_out_count = 0.0
+            token_out_mint = None
+            for to in token_outputs:
+                if isinstance(to, dict):
+                    token_out_mint = to.get("mint") or token_out_mint
+                    token_out_count += float(to.get("rawTokenAmount", 0))
+                else:
+                    token_out_count += float(to) if to else 0.0
+
+            if sol_in > sol_out:
+                # Spent SOL, received token
+                if token_out_mint and token_out_count > 0:
+                    token_amount = token_out_count
+                    token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
+                    if token_decimals > 0:
+                        token_amount /= (10 ** token_decimals)
+                    return {
+                        "signature": signature,
+                        "timestamp": timestamp,
+                        "wallet": wallet_address,
+                        "token_mint": token_out_mint,
+                        "token_amount": token_amount,
+                        "sol_amount": sol_in - sol_out,
+                        "direction": "BUY",
+                        "price_sol": (sol_in - sol_out) / token_amount if token_amount > 0 else 0.0,
+                        "price_usd": None,
+                        "usd_amount": None,
+                        "quote_mint": sol_mint,
+                        "net_sol_delta": -(sol_in - sol_out),
+                        "net_token_delta": token_amount,
+                    }
+            elif sol_out > sol_in:
+                # Received SOL, spent token
+                if token_in_mint and token_in_count > 0:
+                    token_amount = token_in_count
+                    token_decimals = token_inputs[0].get("decimals", 0) if isinstance(token_inputs[0], dict) and token_inputs else 0
+                    if token_decimals > 0:
+                        token_amount /= (10 ** token_decimals)
+                    return {
+                        "signature": signature,
+                        "timestamp": timestamp,
+                        "wallet": wallet_address,
+                        "token_mint": token_in_mint,
+                        "token_amount": token_amount,
+                        "sol_amount": sol_out - sol_in,
+                        "direction": "SELL",
+                        "price_sol": (sol_out - sol_in) / token_amount if token_amount > 0 else 0.0,
+                        "price_usd": None,
+                        "usd_amount": None,
+                        "quote_mint": sol_mint,
+                        "net_sol_delta": sol_out - sol_in,
+                        "net_token_delta": -token_amount,
+                    }
+
+        # Token-to-token swap from events (no SOL leg)
+        if token_inputs and token_outputs:
+            token_in_mint = None
+            token_in_count = 0.0
+            for ti in token_inputs:
+                if isinstance(ti, dict):
+                    token_in_mint = ti.get("mint") or token_in_mint
+                    token_in_count += float(ti.get("rawTokenAmount", 0))
+            token_out_mint = None
+            token_out_count = 0.0
+            for to in token_outputs:
+                if isinstance(to, dict):
+                    token_out_mint = to.get("mint") or token_out_mint
+                    token_out_count += float(to.get("rawTokenAmount", 0))
+
+            if token_in_mint and token_out_mint and token_out_count > 0:
+                token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
+                if token_decimals > 0:
+                    token_out_count /= (10 ** token_decimals)
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": token_out_mint,
+                    "token_amount": token_out_count,
+                    "sol_amount": None,
+                    "direction": "BUY",
+                    "price_sol": None,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": None,
+                    "net_sol_delta": 0.0,
+                    "net_token_delta": token_out_count,
+                }
+
+        return None
+
+    def _parse_swap_from_account_data(
+        self,
+        tx: Dict[str, Any],
+        wallet_address: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Strategy 3: Parse swap from raw accountData balance changes (last-resort fallback).
+
+        Some Helius API responses omit structured tokenTransfers but include pre/post
+        token balance changes in accountData. This reconstructs a minimal trade from
+        the wallet's own balance deltas.
+        """
+        signature = tx.get("signature", "")
+        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+
+        wallet_data = None
+        for acc in tx.get("accountData", []) or []:
+            if acc.get("account") == wallet_address:
+                wallet_data = acc
+                break
+
+        if not wallet_data:
+            return None
+
+        token_balance_changes = wallet_data.get("tokenBalanceChanges") or []
+        if not token_balance_changes:
+            return None
+
+        # Find the largest token balance change (most significant movement)
+        best_change = None
+        best_delta = 0.0
+        for change in token_balance_changes:
+            mint = change.get("mint")
+            if not mint:
+                continue
+            raw_before = float(change.get("rawTokenAmountBefore", 0) or 0)
+            raw_after = float(change.get("rawTokenAmountAfter", 0) or 0)
+            delta = raw_after - raw_before
+            if abs(delta) > abs(best_delta):
+                best_delta = delta
+                best_change = change
+
+        if not best_change or abs(best_delta) < 1e-12:
+            return None
+
+        mint = best_change.get("mint", "")
+        token_decimals = int(best_change.get("decimals", 0) or 0)
+        token_amount = abs(best_delta)
+        if token_decimals > 0:
+            token_amount /= (10 ** token_decimals)
+
+        # Try to determine SOL delta from native balance changes
+        sol_delta = 0.0
+        native_before = float(wallet_data.get("nativeBalanceChange", {}).get("before", 0) or 0)
+        native_after = float(wallet_data.get("nativeBalanceChange", {}).get("after", 0) or 0)
+        if native_before or native_after:
+            sol_delta = (native_after - native_before) / 1e9
+
+        direction = "BUY" if best_delta > 0 else "SELL"
+        sol_amount = abs(sol_delta) if sol_delta != 0 else None
+
+        return {
+            "signature": signature,
+            "timestamp": timestamp,
+            "wallet": wallet_address,
+            "token_mint": mint,
+            "token_amount": token_amount,
+            "sol_amount": sol_amount,
+            "direction": direction,
+            "price_sol": (sol_amount / token_amount) if sol_amount and token_amount > 0 else None,
+            "price_usd": None,
+            "usd_amount": None,
+            "quote_mint": "So11111111111111111111111111111111111111112" if sol_amount else None,
+            "net_sol_delta": sol_delta,
+            "net_token_delta": best_delta,
         }

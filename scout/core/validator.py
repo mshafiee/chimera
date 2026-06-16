@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PromotionCriteria:
     """Criteria for wallet promotion."""
-    min_wqs_score: float = 70.0
+    min_wqs_score: float = 65.0
     # Minimum raw swap events (basic data sufficiency)
     min_trades: int = 5
     # Minimum ratio of realized closes (SELLs with PnL) to total trades required for promotion.

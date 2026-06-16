@@ -50,8 +50,8 @@ except ImportError:
 # Default configuration (tuned defaults; can be overridden by env/flags)
 # Note: WQS thresholds aligned with rescaled 0-100 range (see wqs.py)
 DEFAULT_OUTPUT_PATH = "../data/roster_new.db"
-DEFAULT_MIN_WQS_ACTIVE = 70.0  # Must match PromotionCriteria.min_wqs_score in validator.py
-DEFAULT_MIN_WQS_CANDIDATE = 20.0  # Lowered from 30.0 to capture more candidates during discovery
+DEFAULT_MIN_WQS_ACTIVE = 65.0  # Must match PromotionCriteria.min_wqs_score in validator.py; config module default is 60.0
+DEFAULT_MIN_WQS_CANDIDATE = 15.0  # Lowered from 20.0 to capture more emerging wallets during discovery
 DEFAULT_DISCOVERY_HOURS = 168
 DEFAULT_WALLET_TX_LIMIT = 500
 DEFAULT_WALLET_TX_MAX_PAGES = 20
@@ -606,7 +606,11 @@ async def main_async():
     
     if args.calibration_report or args.verbose or args.dry_run:
         _calibration_report(records, stats)
-    
+
+    # Print parse health dashboard (always in verbose/dry-run, otherwise only if >0 failures)
+    if args.verbose or args.dry_run or stats["total"] > 0:
+        analyzer.print_parse_health_dashboard()
+
     # Summary
     print("\n[Scout] Analysis complete:")
     print(f"  Total analyzed: {stats['total']}")

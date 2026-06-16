@@ -42,6 +42,7 @@ class WalletMetrics:
     profit_factor: Optional[float] = None
     sortino_ratio: Optional[float] = None
     is_fresh_wallet: bool = False  # Insider/Burner detection
+    is_unproven: bool = False  # No closed-trade PnL: mid-position or unknown track record
     total_unrealized_loss_sol: Optional[float] = None  # Unrealized PnL from bag holdings
     total_realized_profit_sol: Optional[float] = None  # Total realized profit for comparison
     dex_diversity_score: Optional[int] = None  # Count of unique DEXs used
@@ -165,10 +166,10 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
             # Martingale Zone: Profitable but barely. High risk of blowup.
             score -= 20.0
     else:
-        # No closed-trade PnL data — unproven, penalise at least as much as
-        # the "Martingale Zone" to avoid ranking above wallets that have a
-        # demonstrated (if modest) profit factor.
-        score -= 20.0
+        # No closed-trade PnL data — the wallet is mid-position or unproven.
+        # Apply a modest penalty rather than treating as "Martingale zone".
+        # The is_unproven flag allows downstream code to distinguish "bad" from "unknown".
+        score -= 5.0
     # 8) Sortino/Sharpe Proxy
     if metrics.sortino_ratio:
         if metrics.sortino_ratio >= 2.0:
@@ -300,21 +301,22 @@ def _compute_confidence(trade_count: int) -> float:
     """
     Statistical confidence based on trade count.
 
-    Uses a two-region curve:
-    - Below 5 trades: linear 0→0.70 (sparse data, aggressive penalty)
-    - 5-20 trades:    linear 0.70→1.0 (meaningful sample, gentle scaling)
-    - 20+ trades:     1.0 (full confidence)
+    Uses a three-region curve:
+    - Below 3 trades: linear 0→0.60 (very sparse data)
+    - 3-10 trades:     linear 0.60→0.85 (emerging pattern)
+    - 10-20 trades:    linear 0.85→1.0 (meaningful sample)
+    - 20+ trades:      1.0 (full confidence)
 
-    This prevents the prior formula (trade_count/20) from halving a 10-trade wallet's
-    score to 50%, which pushed legitimate wallets below the ACTIVE threshold.
+    This is softer than the prior two-region curve to admit more wallets
+    into the CANDIDATE tier for observation.
     """
     if trade_count >= 20:
         return 1.0
-    if trade_count >= 5:
-        # 5 trades → 0.70, 20 trades → 1.0
-        return 0.70 + 0.30 * (trade_count - 5) / 15.0
-    # 0 trades → 0.0, 5 trades → 0.70
-    return (trade_count / 5.0) * 0.70
+    if trade_count >= 10:
+        return 0.85 + 0.15 * (trade_count - 10) / 10.0
+    if trade_count >= 3:
+        return 0.60 + 0.25 * (trade_count - 3) / 7.0
+    return (trade_count / 3.0) * 0.60
 
 
 def calculate_wqs_with_confidence(metrics: WalletMetrics) -> WqsResult:

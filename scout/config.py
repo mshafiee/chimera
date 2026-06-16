@@ -91,7 +91,7 @@ class ScoutConfig:
     @staticmethod
     def get_min_wqs_candidate() -> float:
         """Get minimum WQS score for CANDIDATE status."""
-        return float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "30.0"))
+        return float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "15.0"))
     
     # ========================================================================
     # Backtest Configuration
@@ -100,7 +100,7 @@ class ScoutConfig:
     @staticmethod
     def get_min_closes_required() -> int:
         """Get minimum realized closes required for promotion."""
-        return int(os.getenv("SCOUT_MIN_CLOSES_REQUIRED", "10"))
+        return int(os.getenv("SCOUT_MIN_CLOSES_REQUIRED", "5"))
     
     @staticmethod
     def get_walk_forward_min_trades() -> int:
