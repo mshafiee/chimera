@@ -249,7 +249,21 @@ class BacktestConfig:
     # Realistic execution costs for backtesting (critical for hype tokens)
     priority_fee_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0005'))
     jito_tip_sol_per_trade: Decimal = field(default_factory=lambda: Decimal('0.0005'))
-    
+
+    # Time-delay slippage: the 100-500ms operator latency + block inclusion delay
+    # causes price movement between signal observation and trade execution.
+    # These percentages model the expected adverse price movement per leg.
+    entry_delay_slippage_pct: Decimal = field(default_factory=lambda: Decimal('0.005'))  # 0.5% Shield default
+    exit_delay_slippage_pct: Decimal = field(default_factory=lambda: Decimal('0.003'))   # 0.3% Shield default
+
+    # MEV/sandwich penalty applied to SELL trades to model sandwich attacks
+    # on copied exits. Derived from empirical sandwich attack rates on Solana.
+    mev_penalty_pct: Decimal = field(default_factory=lambda: Decimal('0.002'))  # 0.2% Shield default
+
+    # When True, dynamic priority fees are fetched from Helius at run time
+    # using getPriorityFeeEstimate; otherwise the static priority_fee_sol_per_trade is used.
+    use_dynamic_fees: bool = False
+
     # Slippage configuration
     max_slippage_percent: Decimal = field(default_factory=lambda: Decimal('0.05'))  # 5% max acceptable slippage
     
@@ -280,6 +294,9 @@ class BacktestConfig:
         self.max_slippage_percent = _d(self.max_slippage_percent)
         self.priority_fee_sol_per_trade = _d(self.priority_fee_sol_per_trade)
         self.jito_tip_sol_per_trade = _d(self.jito_tip_sol_per_trade)
+        self.entry_delay_slippage_pct = _d(self.entry_delay_slippage_pct)
+        self.exit_delay_slippage_pct = _d(self.exit_delay_slippage_pct)
+        self.mev_penalty_pct = _d(self.mev_penalty_pct)
         self.shield_multiplier = _d(self.shield_multiplier)
         self.spear_multiplier = _d(self.spear_multiplier)
 

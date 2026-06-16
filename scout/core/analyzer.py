@@ -14,7 +14,7 @@ import asyncio
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional, Dict, Any
@@ -24,6 +24,7 @@ from .models import HistoricalTrade, TradeAction, LiquidityData, TraderArchetype
 from .helius_client import HeliusClient
 from .liquidity import LiquidityProvider
 from .decimal_utils import float_to_decimal, decimal_to_float, safe_decimal_divide
+from .denylist import is_known_scam_address, check_wallet_correlation
 
 # Import config and security client
 try:
@@ -638,9 +639,27 @@ class WalletAnalyzer:
                     # Convert database row to WalletMetrics
                     wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, \
                     max_drawdown_30d, avg_trade_size_sol, last_trade_at = row
-                    
-                    # If we have some metrics, create WalletMetrics object
-                    if any(x is not None for x in [roi_7d, roi_30d, trade_count_30d, win_rate]):
+
+                    # Check recency: if DB's last_trade_at is > 30 days old,
+                    # force re-fetch from chain instead of using stale cached data.
+                    is_stale = False
+                    if last_trade_at:
+                        try:
+                            lt_str = str(last_trade_at).replace("Z", "+00:00")
+                            lt_dt = datetime.fromisoformat(lt_str)
+                            if lt_dt.tzinfo is None:
+                                lt_dt = lt_dt.replace(tzinfo=timezone.utc)
+                            age = datetime.now(timezone.utc) - lt_dt
+                            if age.days > 30:
+                                is_stale = True
+                                print(f"  [{address[:8]}] DB metrics stale (last trade {age.days}d ago), will re-fetch")
+                        except (ValueError, TypeError):
+                            pass
+
+                    if is_stale:
+                        pass  # Fall through to chain fetch below
+                    # If we have some metrics and they're fresh, create WalletMetrics object
+                    elif any(x is not None for x in [roi_7d, roi_30d, trade_count_30d, win_rate]):
                         metrics = WalletMetrics(
                             address=address,
                             roi_7d=roi_7d,
@@ -749,6 +768,14 @@ class WalletAnalyzer:
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
 
+        # Compute per-wallet parse rate
+        total_fetched = len(transactions)
+        total_parsed = len(trades)
+        parse_rate = total_parsed / max(1, total_fetched)
+        # Include partial-parse failures in the denominator — if 60%+ of transactions
+        # cannot be parsed, the wallet's activity is too opaque to evaluate reliably.
+        is_unproven_from_parse = (total_fetched > 0 and parse_rate < 0.30)
+
         if not trades:
             print(f"  [{address[:8]}] No valid trades found after parsing")
             self._discovery_stats["wallets_with_no_trades"] += 1
@@ -803,6 +830,7 @@ class WalletAnalyzer:
             dex_diversity_score=dex_diversity,
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
+            is_unproven_from_parse=is_unproven_from_parse,
         )
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
@@ -1319,12 +1347,15 @@ class WalletAnalyzer:
     
     async def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
         """
-        Detect insider behavior based on wallet age and funding.
+        Detect insider behavior based on wallet age, funding, and token creation proximity.
 
         Fresh wallets (created <24h before first trade) are typically:
         - Burner wallets for insider trading
         - Bot wallets for sniping
         - Ephemeral addresses to hide identity
+
+        Also checks token_creation_awareness: if >60% of BUYs happen within 5 min
+        of token creation AND the wallet enters quickly, classify as insider.
 
         Returns:
             Dict with insider metrics
@@ -1332,7 +1363,7 @@ class WalletAnalyzer:
         is_fresh_wallet = False
 
         if not trades:
-            return {"is_fresh_wallet": False, "suspicion_score": 0.0}
+            return {"is_fresh_wallet": False, "suspicion_score": 0.0, "token_creation_awareness_ratio": 0.0}
 
         # Get first trade timestamp
         first_trade_time = min(t.timestamp for t in trades)
@@ -1362,9 +1393,34 @@ class WalletAnalyzer:
             if wallet_age_days < 3:
                 is_fresh_wallet = True
 
+        # Token creation awareness: check how often the wallet buys within 5 min of
+        # token creation. A wallet that consistently enters right after launch is
+        # either a sniper or insider, regardless of wallet age.
+        # Uses token creation times already cached by the caller's pre-fetch.
+        buy_trades = [t for t in trades if t.action == TradeAction.BUY]
+        token_creation_awareness_ratio = 0.0
+        if buy_trades:
+            buys_near_creation = 0
+            for t in buy_trades:
+                creation_ts = self._token_creation_cache.get(t.token_address)
+                if creation_ts:
+                    delay_seconds = t.timestamp.timestamp() - creation_ts
+                    if 0 <= delay_seconds <= 300:  # Within 5 minutes
+                        buys_near_creation += 1
+            if len(buy_trades) > 0:
+                token_creation_awareness_ratio = buys_near_creation / len(buy_trades)
+
+        # If >60% of BUYs happen within 5 min of token creation AND the wallet
+        # enters quickly overall, classify as insider regardless of wallet age.
+        avg_entry = getattr(self, '_cached_avg_entry_delay', None)
+        if token_creation_awareness_ratio > 0.6:
+            if avg_entry is not None and avg_entry < 120:
+                is_fresh_wallet = True
+
         return {
             "is_fresh_wallet": is_fresh_wallet,
-            "suspicion_score": 100.0 if is_fresh_wallet else 0.0
+            "suspicion_score": 100.0 if is_fresh_wallet else 0.0,
+            "token_creation_awareness_ratio": token_creation_awareness_ratio,
         }
 
     async def _get_wallet_creation_time_cached(self, address: str) -> Optional[float]:
@@ -1390,7 +1446,7 @@ class WalletAnalyzer:
         self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -1415,22 +1471,30 @@ class WalletAnalyzer:
                     else:
                         risky_tokens.append(token_addr)
                 except asyncio.TimeoutError:
-                    print(f"  [{address[:8]}] RugCheck timeout for token {token_addr[:8]}, assuming safe")
-                    safe_trades.append(t)  # Assume safe on timeout
+                    print(f"  [{address[:8]}] RugCheck timeout for token {token_addr[:8]}, marking as risky")
+                    risky_tokens.append(token_addr)  # Assume unsafe on timeout
                 except Exception as e:
-                    print(f"  [{address[:8]}] RugCheck error for token {token_addr[:8]}: {e}, assuming safe")
-                    safe_trades.append(t)  # Assume safe on error
+                    print(f"  [{address[:8]}] RugCheck error for token {token_addr[:8]}: {e}, marking as risky")
+                    risky_tokens.append(token_addr)  # Assume unsafe on error
 
+            risky_ratio = len(risky_tokens) / max(1, len(trades)) if risky_tokens else 0.0
             if risky_tokens:
-                print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens")
-
-            # Use only safe trades for analysis
-            trades = safe_trades
-
-            # If all trades were filtered out, return None
-            if not trades:
-                print(f"  [{address[:8]}] All trades filtered as risky")
-                return None
+                if risky_ratio > 0.8:
+                    # Circuit breaker: RugCheck API is likely degraded — too many
+                    # tokens classified as risky. Fall back to safe-on-error behavior
+                    # to avoid draining the roster.
+                    logger.warning(
+                        "RugCheck degraded: %.0f%% tokens flagged risky (%d/%d). "
+                        "Falling back to assume-safe to prevent roster drain.",
+                        risky_ratio * 100, len(risky_tokens), len(trades),
+                    )
+                    print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — keeping all trades")
+                else:
+                    print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens")
+                    trades = safe_trades
+                    if not trades:
+                        print(f"  [{address[:8]}] All trades filtered as risky")
+                        return None
         else:
             print(f"  [{address[:8]}] RugCheck disabled, using all trades")
         
@@ -1539,11 +1603,15 @@ class WalletAnalyzer:
                 if len(recent_unique_tokens) == 5:
                     break
         unique_tokens = recent_unique_tokens
+
+        # Also prefetch ALL token creation times for insider detection (B4).
+        # The sniper check uses only the 5 most recent; insider detection uses all.
+        all_token_addresses = list(set(t.token_address for t in buy_trades))
         
-        # Pre-fetch creation times (this will cache them)
-        print(f"  [{address[:8]}] Fetching token creation times for {len(unique_tokens)} tokens...")
+        # Pre-fetch creation times (this will cache them) — sniper tokens first, then all remaining
+        print(f"  [{address[:8]}] Fetching token creation times for {len(all_token_addresses)} tokens...")
         import asyncio
-        tasks = [self._fetch_token_creation_time(token) for token in unique_tokens]
+        tasks = [self._fetch_token_creation_time(token) for token in all_token_addresses]
         await asyncio.gather(*tasks, return_exceptions=True)
         print(f"  [{address[:8]}] Token creation times fetched")
             
@@ -1560,6 +1628,9 @@ class WalletAnalyzer:
         
         if entry_delays:
             avg_entry_delay = sum(entry_delays) / len(entry_delays)
+
+        # Store on self so _detect_insider_patterns can access it for B4 token-awareness check
+        self._cached_avg_entry_delay = avg_entry_delay
         
         print(f"  [{address[:8]}] Detecting insider patterns...")
         # 3. Detect Insider Patterns (Fresh Wallet Check)
@@ -1658,6 +1729,20 @@ class WalletAnalyzer:
             print(f"  [{address[:8]}] Warning: Could not calculate Sortino ratio: {e}")
 
         print(f"  [{address[:8]}] Creating WalletMetrics object...")
+        # D5: Check if wallet is correlated with known scam addresses
+        correlated_with_scam = False
+        if os.getenv("SCOUT_ENABLE_SCAM_CHECK", "false").lower() == "true":
+            try:
+                if is_known_scam_address(address):
+                    correlated_with_scam = True
+                else:
+                    funder = await self.helius_client.get_wallet_funder(address)
+                    correlated_with_scam = not await check_wallet_correlation(
+                        address, funder=funder
+                    )
+            except Exception:
+                pass
+
         # Convert Decimal values to float for WalletMetrics
         return WalletMetrics(
             address=address,
@@ -1672,13 +1757,14 @@ class WalletAnalyzer:
             avg_entry_delay_seconds=avg_entry_delay,
             profit_factor=profit_factor,
             is_fresh_wallet=is_fresh_wallet,
-            is_unproven=(profit_factor is None),
+            is_unproven=(profit_factor is None or is_unproven_from_parse),
             sortino_ratio=sortino_ratio,
             total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
             total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
             dex_diversity_score=dex_diversity_score,
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
+            correlated_with_scam=correlated_with_scam,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:

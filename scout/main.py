@@ -37,6 +37,7 @@ from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
 from core.auto_merge import auto_merge_roster
 from core.metrics import get_metrics
+from core.cost_estimator import CostEstimator
 
 # Import config module if available
 try:
@@ -218,7 +219,7 @@ def parse_args() -> argparse.Namespace:
         "--max-wallets",
         type=int,
         default=int(os.getenv("SCOUT_MAX_WALLETS", "50")),
-        help="Max wallets to analyze (default: 50, or SCOUT_MAX_WALLETS env var)",
+        help="Max wallets to analyze (default: 50, or SCOUT_MAX_WALLETS env var; set to 200 for paid Helius plans)",
     )
 
     parser.add_argument(
@@ -384,9 +385,25 @@ async def analyze_wallets(
     
     # Process all wallets concurrently
     print(f"[Scout] Creating {len(candidates)} concurrent tasks...")
-    tasks = [process_with_semaphore(w) for w in candidates]
+    tasks = [asyncio.ensure_future(process_with_semaphore(w)) for w in candidates]
     print("[Scout] Waiting for all tasks to complete...")
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+    # Use explicit per-task exception handling instead of return_exceptions=True
+    # so that individual wallet failures don't silently drop exceptions.
+    for i, task in enumerate(tasks):
+        addr = candidates[i] if i < len(candidates) else "?"
+        task.add_done_callback(
+            lambda t, a=addr: print(
+                f"[Scout] ✗ Task crashed for {a[:8]}: {t.exception()}"
+            ) if t.exception() and not t.cancelled() else None
+        )
+    done, _ = await asyncio.wait(tasks)
+    results = []
+    for task in done:
+        try:
+            results.append(task.result())
+        except Exception as e:
+            print(f"[Scout] ✗ Wallet task failed: {e}")
+            results.append(None)
     print("[Scout] All tasks completed, processing results...")
     
     for res in results:
@@ -543,6 +560,25 @@ async def main_async():
                 jito_tip_sol_per_trade=args.jito_tip_sol,
                 enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",  # Default True for promotion safety
             )
+
+            # Fetch dynamic fees from Helius if available (overrides static values)
+            if helius_api_key and os.getenv("SCOUT_USE_DYNAMIC_FEES", "true").lower() == "true":
+                try:
+                    fee_estimator = CostEstimator(helius_api_key=helius_api_key)
+                    dyn_prio, dyn_jito = await fee_estimator.get_all_estimates(strategy="SHIELD")
+                    dyn_prio_float = float(dyn_prio)
+                    dyn_jito_float = float(dyn_jito)
+                    if dyn_prio_float > 0:
+                        backtest_config.priority_fee_sol_per_trade = dyn_prio
+                        print(f"[Scout] Dynamic priority fee (p75 Shield): {dyn_prio_float:.8f} SOL")
+                    if dyn_jito_float > 0:
+                        backtest_config.jito_tip_sol_per_trade = dyn_jito
+                        print(f"[Scout] Dynamic Jito tip: {dyn_jito_float:.8f} SOL")
+                    backtest_config.use_dynamic_fees = True
+                    print("[Scout] Dynamic fee estimation enabled (source: Helius getPriorityFeeEstimate)")
+                    await fee_estimator.close()
+                except Exception as e:
+                    print(f"[Scout] Warning: Dynamic fee fetch failed ({e}), using static fees")
             promotion_criteria = PromotionCriteria(
                 # Keep WQS threshold aligned with ACTIVE gate (validator only runs for ACTIVE candidates)
                 # Note: min_wqs_score should match min_wqs_active (rescaled 0-100 range)

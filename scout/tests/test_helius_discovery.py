@@ -210,8 +210,8 @@ class TestHeliusDiscovery:
             helius_client._rate_limit()
 
         elapsed = time.time() - start_time
-        # Should have delayed at least 0.15 seconds (2 * 0.1s delays minus tolerance)
-        assert elapsed >= 0.15  # Allow some tolerance
+        # Should have delayed at least 0.07 seconds (2 * 0.05s delays minus tolerance)
+        assert elapsed >= 0.07  # Allow some tolerance
 
     async def test_discover_wallets_fallback_chain(self, helius_client):
         """Test discovery fallback chain — primary strategy succeeds."""

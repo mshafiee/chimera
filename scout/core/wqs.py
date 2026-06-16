@@ -48,6 +48,7 @@ class WalletMetrics:
     dex_diversity_score: Optional[int] = None  # Count of unique DEXs used
     uses_limit_orders: bool = False  # Detected Jupiter Limit Order usage
     uses_mev_protection: bool = False  # Detected Jito bundle/MEV protection usage
+    correlated_with_scam: bool = False  # Wallet or funder on known scam denylist
 
 
 def _calculate_raw_score(metrics: WalletMetrics) -> float:
@@ -186,6 +187,11 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # We penalize them heavily to avoid copying ephemeral addresses.
     if metrics.is_fresh_wallet:
         score -= 10.0
+
+    # D5: Scam correlation penalty — downgrade wallets linked to known rug/scam clusters.
+    # Even a wallet with strong metrics is risky if it's in the same ring as scammers.
+    if metrics.correlated_with_scam:
+        score -= 20.0
     
     # 10) Smart Money Bonuses
     # DEX Diversity: Using multiple DEXs shows sophistication
@@ -206,7 +212,15 @@ def _calculate_raw_score(metrics: WalletMetrics) -> float:
     # raw score above the ACTIVE threshold despite poor copy-trading viability.
     # Only award smart money bonuses if the wallet has demonstrated positive ROI,
     # ensuring tools are rewarded alongside results rather than as a substitute.
+    should_remove_bonuses = False
     if metrics.roi_30d is not None and metrics.roi_30d < -10:
+        should_remove_bonuses = True
+    if metrics.profit_factor is not None and metrics.profit_factor < 1.2:
+        should_remove_bonuses = True
+    if metrics.win_rate is not None and metrics.win_rate < 0.45:
+        should_remove_bonuses = True
+
+    if should_remove_bonuses:
         # Remove bonuses added above by zeroing them out
         if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
             score -= 5.0

@@ -145,6 +145,10 @@ class BacktestSimulator:
         sol_price_float = self.liquidity.get_sol_price_usd_sync()
         sol_price = float_to_decimal(sol_price_float)
         sol_price_current = sol_price
+
+        # Cache derived SOL prices per hour bucket for consistency across trades
+        # within the same hour window.
+        _sol_price_hour_cache: Dict[int, float] = {}
         
         # Round-trip position tracking: {token_address: {"qty": Decimal, "cost_basis_sol": Decimal}}
         positions: Dict[str, Dict[str, Decimal]] = initial_positions
@@ -164,7 +168,7 @@ class BacktestSimulator:
         
         for trade in sorted_trades:
             sim_trade, rejection_reason, is_low_confidence = self._simulate_trade_roundtrip(
-                trade, min_liquidity_decimal, sol_price_current, positions,
+                trade, min_liquidity_decimal, sol_price_current, positions, _sol_price_hour_cache,
             )
             simulated_trades.append(sim_trade)
             # Track low-confidence liquidity usage (returned by _simulate_trade_roundtrip,
@@ -242,7 +246,7 @@ class BacktestSimulator:
         # Inflated PnL from mooned tokens or filtered rugged tokens is not a valid signal.
         if low_confidence_trades_count > 0:
             low_confidence_ratio = low_confidence_trades_count / len(sorted_trades)
-            if low_confidence_ratio > 0.3:  # More than 30% of trades
+            if low_confidence_ratio > 0.15:  # More than 15% of trades (tightened from 0.3)
                 logger.warning(
                     f"⚠️  SURVIVORSHIP BIAS RISK: {low_confidence_trades_count}/{len(sorted_trades)} "
                     f"({low_confidence_ratio*100:.0f}%) trades used fallback liquidity data. "
@@ -370,6 +374,7 @@ class BacktestSimulator:
         min_liquidity: Decimal,
         sol_price: Decimal,
         positions: Dict[str, Dict[str, Decimal]],
+        sol_price_hour_cache: Optional[Dict[int, float]] = None,
     ) -> Tuple[SimulatedTrade, Optional[str], bool]:
         """
         Simulate a single trade using round-trip cashflow model.
@@ -380,8 +385,9 @@ class BacktestSimulator:
         Args:
             trade: Historical trade to simulate
             min_liquidity: Minimum liquidity requirement (USD)
-            sol_price: Current SOL price in USD
+            sol_price: Current SOL price in USD (fallback)
             positions: Position ledger (mutated in-place)
+            sol_price_hour_cache: Optional per-hour cache for derived SOL prices
 
         Returns:
             Tuple of (SimulatedTrade, rejection_reason, is_low_confidence).
@@ -500,11 +506,19 @@ class BacktestSimulator:
         # If we have per-token price_usd and price_sol, we can derive the historical
         # SOL/USD price: sol_price_historical = price_usd / price_sol.
         # Otherwise, fall back to the current price (which introduces bias for old trades).
+        # Cache derived SOL prices per hour for consistency across trades within the same hour.
         trade_sol_price = decimal_to_float(sol_price)
         if trade.price_usd is not None and trade.price_sol is not None and trade.price_sol > Decimal('0'):
-            derived_sol_price = decimal_to_float(trade.price_usd / trade.price_sol)
-            if derived_sol_price > 0:
-                trade_sol_price = derived_sol_price
+            hour_bucket = trade.timestamp.replace(minute=0, second=0, microsecond=0)
+            hour_key = int(hour_bucket.timestamp())
+            if sol_price_hour_cache is not None and hour_key in sol_price_hour_cache:
+                trade_sol_price = sol_price_hour_cache[hour_key]
+            else:
+                derived_sol_price = decimal_to_float(trade.price_usd / trade.price_sol)
+                if derived_sol_price > 0:
+                    trade_sol_price = derived_sol_price
+                    if sol_price_hour_cache is not None:
+                        sol_price_hour_cache[hour_key] = derived_sol_price
         vol_24h = getattr(liquidity_data, 'volume_24h_usd', Decimal('0'))
         slippage_float = self.liquidity.estimate_slippage(
             trade.token_address,
@@ -535,7 +549,21 @@ class BacktestSimulator:
         priority_fee_cost = max(Decimal('0'), self.config.priority_fee_sol_per_trade)
         jito_tip_cost = max(Decimal('0'), self.config.jito_tip_sol_per_trade)
         execution_cost = priority_fee_cost + jito_tip_cost
-        total_cost = slippage_cost + fee_cost + execution_cost
+
+        # Time-delay slippage: model the 100-500ms operator latency + block
+        # inclusion delay. BUY leg = entry_delay_slippage_pct, SELL leg = exit.
+        delay_slippage = Decimal('0')
+        if trade.action == TradeAction.BUY:
+            delay_slippage = trade_size_sol * self.config.entry_delay_slippage_pct
+        elif trade.action == TradeAction.SELL:
+            delay_slippage = trade_size_sol * self.config.exit_delay_slippage_pct
+
+        # MEV/sandwich penalty on SELL trades (modeling sandwich attacks on copied exits)
+        mev_penalty = Decimal('0')
+        if trade.action == TradeAction.SELL:
+            mev_penalty = trade_size_sol * self.config.mev_penalty_pct
+
+        total_cost = slippage_cost + fee_cost + execution_cost + delay_slippage + mev_penalty
         
         # Round-trip position tracking using Decimal
         token = trade.token_address
@@ -641,7 +669,7 @@ class BacktestSimulator:
         # Use empty positions dict for legacy behavior (no position tracking).
         # Strip the third element (is_low_confidence) for backward compat.
         sim_trade, reason, _ = self._simulate_trade_roundtrip(
-            trade, min_liquidity_decimal, sol_price_decimal, {}
+            trade, min_liquidity_decimal, sol_price_decimal, {}, None
         )
         return sim_trade, reason
     

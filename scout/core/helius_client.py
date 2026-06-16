@@ -37,7 +37,7 @@ class HeliusClient:
     def __init__(self, api_key: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
         """
         Initialize the Helius client.
-        
+
         Args:
             api_key: Helius API key (optional, falls back to env var)
             session: Optional aiohttp session (for connection pooling)
@@ -52,7 +52,7 @@ class HeliusClient:
                 "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
                 "9W959DqEETiGZocYWCQPaJ6sBmUzgfxXfqGeTEdp3aQP",
             ]
-        
+
         # Update NON_WALLET_ADDRESSES
         self.NON_WALLET_ADDRESSES.update(self.dex_programs)
 
@@ -75,8 +75,10 @@ class HeliusClient:
         else:
             self.base_url = os.getenv("SCOUT_HELIUS_API_BASE_URL", "https://api.helius.xyz/v0")
         self.last_request_time = 0.0
-        # Conservative rate limit: 10 calls/sec
-        self.rate_limit_delay = 0.1
+        # Rate limit: configurable via SCOUT_HELIUS_RATE_LIMIT_MS (default 100ms = 10 req/s)
+        # Increase only for paid Helius plans (Business/Enterprise)
+        _rate_limit_ms = int(os.getenv("SCOUT_HELIUS_RATE_LIMIT_MS", "100"))
+        self.rate_limit_delay = max(0.025, _rate_limit_ms / 1000.0)
         self._lock = asyncio.Lock()  # Async lock for async rate limiting
         self._sync_lock = threading.Lock()  # Sync lock for _rate_limit()
 
@@ -130,51 +132,77 @@ class HeliusClient:
     async def get_wallet_first_transaction(self, wallet_address: str) -> Optional[float]:
         """
         Get the timestamp of the wallet's first transaction (creation time).
-        
+
         This is used for insider/fresh wallet detection.
-        
+        Checks up to 2000 signatures (2 pages) via `before` pagination.
+        For wallets with >2000 transactions, returns the oldest found + a note
+        that the true creation time may be earlier.
+
         Args:
             wallet_address: Wallet address to check
-            
+
         Returns:
             Unix timestamp of first transaction, or None if unavailable
         """
         if not self.api_key:
             return None
-        
+
         try:
-            # Use RPC getSignaturesForAddress with pagination to find oldest signature
-            # Note: This is expensive for wallets with many transactions
-            # We limit to checking the last 1000 signatures for performance
             rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
             if not rpc_url:
                 rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
-            
+
+            session = await self._get_session()
+
+            # Page 1: newest 1000 signatures
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getSignaturesForAddress",
                 "params": [
                     wallet_address,
-                    {
-                        "limit": 1000,  # Max allowed by Solana RPC
-                    }
-                ]
+                    {"limit": 1000},
+                ],
             }
-            
-            session = await self._get_session()
             async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if "result" in data and data["result"]:
-                        # Signatures are returned newest first
-                        # The last one in the list is the oldest
-                        oldest_sig = data["result"][-1]
-                        if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
-                            return float(oldest_sig["blockTime"])
+                if response.status != 200:
+                    return None
+                data = await response.json()
+                result = data.get("result")
+                if not result or not isinstance(result, list) or len(result) == 0:
+                    return None
+
+                if len(result) < 1000:
+                    # Fewer than 1000 txs — we have the full history
+                    oldest_sig = result[-1]
+                    if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
+                        return float(oldest_sig["blockTime"])
+
+            # Page 2: paginate backwards using `before` on the oldest signature
+            oldest_sig_page1 = data.get("result", [])[-1] if data.get("result") else None
+            if not oldest_sig_page1 or "signature" not in oldest_sig_page1:
+                return None
+
+            payload["params"][1]["before"] = oldest_sig_page1["signature"]
+            payload["id"] = 2
+            async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status != 200:
+                    return None
+                data2 = await response.json()
+                result2 = data2.get("result")
+                if result2 and isinstance(result2, list) and len(result2) > 0:
+                    oldest_sig = result2[-1]
+                    if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
+                        return float(oldest_sig["blockTime"])
+
+                # If page 2 is empty or exhausted, use page 1's oldest
+                if result and isinstance(result, list) and len(result) > 0:
+                    oldest_sig = result[-1]
+                    if "blockTime" in oldest_sig and oldest_sig["blockTime"]:
+                        return float(oldest_sig["blockTime"])
         except Exception:
             pass
-        
+
         return None
     
     async def get_wallet_funder(self, wallet_address: str) -> Optional[str]:

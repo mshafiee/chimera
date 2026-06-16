@@ -62,6 +62,15 @@ class PromotionCriteria:
     walk_forward_holdout_fraction: float = 0.3  # validate on most recent 30%
     walk_forward_min_trades: int = 5
 
+    # Penalty applied to effective WQS when walk-forward falls back to
+    # full-set validation due to insufficient holdout closes.
+    walk_forward_fallback_penalty: float = 15.0
+
+    # Minimum net realized PnL (SOL) required in the walk-forward OOS holdout
+    # period. Removes wallets that pass on full-set but fail on the most
+    # recent trades.
+    min_holdout_pnl_sol: float = 0.01
+
 
 class PrePromotionValidator:
     """
@@ -216,18 +225,35 @@ class PrePromotionValidator:
             wf_trades = sorted_trades[-holdout_n:]
             wf_closes = [t for t in wf_trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None]
             if len(wf_closes) < self.criteria.walk_forward_min_trades:
-                # If holdout too small, fall back to full set
+                # If holdout too small, fall back to full set WITH penalty
                 wf_trades = trades
+                is_walk_forward = False
                 wf_notes = (
                     f"Walk-forward skipped: holdout has {len(wf_closes)} closes "
                     f"< {self.criteria.walk_forward_min_trades} required; "
-                    f"validated on full trade set ({len(trades)} trades)"
+                    f"validated on full trade set ({len(trades)} trades) — "
+                    f"WQS threshold raised by {self.criteria.walk_forward_fallback_penalty} points"
                 )
                 logger.warning(
                     "Wallet %s: walk-forward holdout too small (%d closes < %d min), "
-                    "falling back to full-set validation — result may be overfit",
+                    "falling back to full-set validation with penalty — result may be overfit",
                     wallet_address[:8], len(wf_closes), self.criteria.walk_forward_min_trades,
                 )
+                # Apply penalty: require higher WQS when walk-forward is skipped
+                effective_min_wqs = self.criteria.min_wqs_score + self.criteria.walk_forward_fallback_penalty
+                if wqs_score < effective_min_wqs:
+                    logger.info(
+                        f"Wallet failed walk-forward fallback WQS check: "
+                        f"{wqs_score:.1f} < {effective_min_wqs:.1f} (min {self.criteria.min_wqs_score} + {self.criteria.walk_forward_fallback_penalty} penalty)"
+                    )
+                    return ValidationResult(
+                        wallet_address=wallet_address,
+                        status=ValidationStatus.FAILED_WQS,
+                        passed=False,
+                        reason=f"WQS {wqs_score:.1f} below adjusted threshold {effective_min_wqs:.1f} (walk-forward unavailable, {self.criteria.walk_forward_fallback_penalty}pt penalty applied)",
+                        recommended_status="CANDIDATE",
+                        notes=f"Walk-forward skipped; WQS must be >= {effective_min_wqs:.1f} without OOS validation",
+                    )
             else:
                 is_walk_forward = True
                 in_sample_trades = sorted_trades[:-holdout_n]
@@ -280,6 +306,26 @@ class PrePromotionValidator:
                 recommended_status="CANDIDATE",
                 notes=" | ".join([p for p in [wf_notes, self._format_backtest_notes(backtest_result)] if p]),
             )
+
+        # Step 5b: Minimum holdout PnL check (D3)
+        # The walk-forward OOS period must have net positive PnL of at least
+        # min_holdout_pnl_sol SOL to prove the wallet is profitable in the most
+        # recent window, not just historically.
+        if is_walk_forward and self.criteria.min_holdout_pnl_sol > 0:
+            holdout_pnl_sol = float(backtest_result.original_pnl_sol) if backtest_result.original_pnl_sol else 0.0
+            if holdout_pnl_sol < self.criteria.min_holdout_pnl_sol:
+                logger.info(
+                    f"Wallet failed holdout PnL check: {holdout_pnl_sol:.4f} SOL < {self.criteria.min_holdout_pnl_sol} SOL"
+                )
+                return ValidationResult(
+                    wallet_address=wallet_address,
+                    status=ValidationStatus.FAILED_NEGATIVE_PNL,
+                    backtest_result=backtest_result,
+                    passed=False,
+                    reason=f"Walk-forward holdout PnL {holdout_pnl_sol:.4f} SOL below minimum {self.criteria.min_holdout_pnl_sol} SOL",
+                    recommended_status="CANDIDATE",
+                    notes=f"OOS PnL: {holdout_pnl_sol:.4f} SOL",
+                )
         
         # Step 6: Additional checks on backtest results
         
