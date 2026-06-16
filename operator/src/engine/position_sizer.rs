@@ -62,9 +62,9 @@ impl PositionSizer {
 
     /// Calculate position size based on factors.
     ///
-    /// Multipliers applied (all multiplicative): confidence (1×–2×), performance (0.8×–1.1×),
+    /// Multipliers applied (all multiplicative): confidence (1×–1.5×), performance (0.8×–1.1×),
     /// token_age (0.5×–1×), slippage (0.7×–1×), quality (0.7×–1.3×), volatility (0.5×–1×),
-    /// regime (0.5×–2×). Total range: ~0.06× to ~5.15×. Min/max caps prevent extreme sizes.
+    /// regime (0.5×–2×). Total range: ~0.06× to ~4.4×. Min/max caps prevent extreme sizes.
     pub async fn calculate_size(&self, factors: SizingFactors) -> Decimal {
         // Kelly Criterion override: derive base size from historical win/loss ratio.
         // Falls back to WQS-scaled sizing when Kelly can't compute (< 10 trades).
@@ -87,15 +87,11 @@ impl PositionSizer {
             };
             match kelly_result {
                 Ok(result) => {
-                    // Apply strategy-specific Kelly fraction: Shield uses a larger fraction
-                    // (more conservative signal, wider stops) while Spear uses a smaller
-                    // fraction (higher variance, smaller size to bound risk).
-                    let kelly_fraction = match factors.strategy {
-                        crate::models::Strategy::Shield => self.config.kelly_fraction_shield,
-                        crate::models::Strategy::Spear => self.config.kelly_fraction_spear,
-                        // Exit signals don't open positions; use Shield default as a safe fallback
-                        crate::models::Strategy::Exit => self.config.kelly_fraction_shield,
-                    };
+                    // Uniform kelly_fraction (25%) for both strategies.
+                    // Spear risk is already bounded by spear_max_size_sol (0.5 SOL).
+                    // A per-strategy fraction caused modest-edge Spear signals to drop
+                    // below min_size_sol and silently reject, defeating the strategy.
+                    let kelly_fraction = self.config.kelly_fraction;
                     full_kelly_cap = Some(factors.total_capital_sol * result.full_kelly);
                     let kelly_pct = (result.full_kelly * kelly_fraction * result.velocity_multiplier)
                         .min(dec!(0.25));
@@ -163,11 +159,14 @@ impl PositionSizer {
         };
 
         // Confidence multiplier (using Decimal)
+        // Consensus adds 0.15 per excess wallet beyond the first, capped at 1.5×.
+        // Previously 0.25 per wallet capped at 2.0×, which combined with regime
+        // multiplier (up to 1.5×) created correlation concentration risk.
         let confidence_mult = if let Some(count) = factors.consensus_wallet_count {
             if count > 0 {
-                let excess = (count - 1).min(4) as i64;
-                (Decimal::ONE + Decimal::from_str("0.25").unwrap() * Decimal::from(excess))
-                    .min(Decimal::from(2))
+                let excess = (count - 1).min(3) as i64;
+                (Decimal::ONE + Decimal::from_str("0.15").unwrap() * Decimal::from(excess))
+                    .min(Decimal::from_str("1.5").unwrap())
             } else {
                 Decimal::ONE
             }

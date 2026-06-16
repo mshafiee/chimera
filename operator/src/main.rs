@@ -819,20 +819,15 @@ async fn main() -> anyhow::Result<()> {
                                     let _ = monitor_engine.queue_signal(signal, None).await;
                                     monitor_pt.remove_position(&pos.trade_uuid).await;
                                 }
-                                ProfitTargetAction::ExitPercent(pct) => {
-                                    // pct is 0-100; convert to 0.0-1.0 fraction
-                                    let fraction = (pct / rust_decimal::Decimal::from(100))
-                                        .max(rust_decimal::Decimal::ZERO)
-                                        .min(rust_decimal::Decimal::ONE);
+                                ProfitTargetAction::ExitAmount(amount_sol) => {
                                     tracing::info!(
                                         trade_uuid = %pos.trade_uuid,
                                         token = %pos.token_address,
-                                        fraction = %fraction,
+                                        amount_sol = %amount_sol,
                                         "Partial profit target reached, queuing partial EXIT signal"
                                     );
-                                    let signal = build_exit_signal(&pos, fraction);
+                                    let signal = build_exit_signal_amount(&pos, amount_sol);
                                     let _ = monitor_engine.queue_signal(signal, None).await;
-                                    // Don't remove from tracker — position remains open for remaining amount
                                 }
                                 ProfitTargetAction::None => {}
                             }
@@ -1202,6 +1197,8 @@ async fn main() -> anyhow::Result<()> {
         spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
         shield_percent: config.strategy.shield_percent,
         spear_percent: config.strategy.spear_percent,
+        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
     });
 
     // Create roster state
@@ -1456,6 +1453,40 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
     let amount = (base_amount * fraction).max(
         rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO),
     );
+    let payload = SignalPayload {
+        strategy: Strategy::Exit,
+        token: pos.token_symbol.clone(),
+        token_address: Some(pos.token_address.clone()),
+        action: Action::Sell,
+        amount_sol: amount,
+        wallet_address: pos.wallet_address.clone(),
+        trade_uuid: Some(pos.trade_uuid.clone()),
+        exit_fraction: Some(fraction),
+    };
+    Signal::new(payload, chrono::Utc::now().timestamp(), None)
+}
+
+/// Build an exit signal for an absolute SOL amount.
+/// Unlike `build_exit_signal` (which takes a fraction of the original position),
+/// this takes an explicit SOL amount — eliminating the oversell bug where
+/// the prior `ExitPercent` was applied against the original entry instead of the remaining balance.
+/// The `exit_fraction` is computed as amount_sol / entry_amount_sol so the engine's
+/// `close_position` (which multiplies exit_fraction by entry_amount) produces the correct amount.
+fn build_exit_signal_amount(pos: &ActivePositionEntry, amount_sol: rust_decimal::Decimal) -> Signal {
+    use rust_decimal::prelude::*;
+    let amount = amount_sol.max(
+        rust_decimal::Decimal::from_str("0.001").unwrap_or(rust_decimal::Decimal::ZERO),
+    );
+    let base = if pos.entry_amount_sol.is_zero() {
+        rust_decimal::Decimal::from_str("0.01").unwrap_or(rust_decimal::Decimal::ONE)
+    } else {
+        pos.entry_amount_sol
+    };
+    let fraction = if !base.is_zero() {
+        (amount / base).min(Decimal::ONE)
+    } else {
+        Decimal::ONE
+    };
     let payload = SignalPayload {
         strategy: Strategy::Exit,
         token: pos.token_symbol.clone(),

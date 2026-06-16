@@ -4,11 +4,10 @@ Comprehensive tests for Helius wallet discovery functionality.
 
 import pytest
 import time
-import asyncio
-from unittest.mock import Mock, patch, MagicMock, AsyncMock
+from unittest.mock import patch, AsyncMock
 from datetime import datetime, timedelta
 
-from core.helius_client import HeliusClient, DiscoveryStats
+from core.helius_client import HeliusClient
 
 
 class TestHeliusDiscovery:

@@ -6,7 +6,6 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import pytest
 from core.wqs import WalletMetrics, calculate_wqs, classify_wallet
 
 
@@ -37,6 +36,7 @@ def test_wqs_low_trade_count_penalty():
         roi_7d=10.0,
         trade_count_30d=2,  # Very low closes - should be heavily discounted
         max_drawdown_30d=5.0,
+        profit_factor=1.5,
     )
     
     wallet_high = WalletMetrics(
@@ -46,6 +46,7 @@ def test_wqs_low_trade_count_penalty():
         roi_7d=10.0,
         trade_count_30d=25,  # High count - near full confidence
         max_drawdown_30d=5.0,
+        profit_factor=1.5,
     )
     
     score_low = calculate_wqs(wallet_low)
@@ -96,6 +97,7 @@ def test_wqs_very_low_trade_count_curve():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        profit_factor=1.5,
     )
     base_score = calculate_wqs(base)
 
@@ -107,6 +109,7 @@ def test_wqs_very_low_trade_count_curve():
             roi_7d=10.0,
             trade_count_30d=tc,
             max_drawdown_30d=5.0,
+            profit_factor=1.5,
         )
         s = calculate_wqs(w)
         assert s > 0.0
@@ -144,7 +147,7 @@ def test_wqs_anti_pump_and_dump():
     
     assert score_normal > score_pump, f"Normal wallet should score higher than pump: {score_normal} vs {score_pump}"
     # Pump wallet should have 15 points deducted
-    assert abs((score_normal - score_pump) - 15.0) < 5.0, f"Pump penalty should be around 15 points"
+    assert abs((score_normal - score_pump) - 15.0) < 5.0, "Pump penalty should be around 15 points"
 
 
 def test_wqs_anti_pump_and_dump_edge_cases():
@@ -157,6 +160,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        profit_factor=1.5,
     )
     
     # Case 2: 7d ROI slightly above 2x (should trigger)
@@ -167,6 +171,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        profit_factor=1.5,
     )
     
     # Case 3: Negative 30d ROI with extreme 7d spike — SHOULD trigger penalty.
@@ -180,6 +185,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         trade_count_30d=25,
         max_drawdown_30d=5.0,
         avg_trade_size_sol=0.5,  # non-dust so penalty section 5 is not triggered
+        profit_factor=1.5,
     )
 
     # Case 4: Negative 30d ROI with modest 7d — should NOT trigger penalty.
@@ -191,6 +197,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         trade_count_30d=25,
         max_drawdown_30d=5.0,
         avg_trade_size_sol=0.5,
+        profit_factor=1.5,
     )
 
     score_exact = calculate_wqs(wallet_exact_2x)
@@ -230,7 +237,7 @@ def test_wqs_drawdown_penalty():
     
     assert score_low > score_high, f"Low drawdown should score higher: {score_low} vs {score_high}"
     # Drawdown penalty should be approximately 13 * 0.2 = 2.6 points difference
-    assert abs((score_low - score_high) - 2.6) < 1.0, f"Drawdown penalty should be around 2.6 points"
+    assert abs((score_low - score_high) - 2.6) < 1.0, "Drawdown penalty should be around 2.6 points"
 
 
 def test_wqs_activity_bonus():
@@ -257,7 +264,7 @@ def test_wqs_activity_bonus():
     score_inactive = calculate_wqs(wallet_inactive)
     
     assert score_active > score_inactive, f"Active wallet should score higher: {score_active} vs {score_inactive}"
-    assert abs((score_active - score_inactive) - 5.0) < 1.0, f"Activity bonus should be around 5 points"
+    assert abs((score_active - score_inactive) - 5.0) < 1.0, "Activity bonus should be around 5 points"
 
 
 def test_wqs_roi_capping():
@@ -286,7 +293,7 @@ def test_wqs_roi_capping():
     # High ROI should score higher, but not by 3x (should be capped)
     assert score_high > score_normal
     # Difference should be approximately 12.5 points (25 - 12.5)
-    assert abs((score_high - score_normal) - 12.5) < 2.0, f"ROI contribution should be capped"
+    assert abs((score_high - score_normal) - 12.5) < 2.0, "ROI contribution should be capped"
 
 
 def test_wqs_win_rate_fallback():

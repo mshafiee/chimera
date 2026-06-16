@@ -79,6 +79,10 @@ pub struct WebhookState {
     pub shield_percent: u32,
     /// Spear strategy allocation percentage
     pub spear_percent: u32,
+    /// Minimum liquidity in USD for Shield (hard floor — reject below this)
+    pub min_liquidity_shield_usd: rust_decimal::Decimal,
+    /// Minimum liquidity in USD for Spear (hard floor — reject below this)
+    pub min_liquidity_spear_usd: rust_decimal::Decimal,
 }
 
 /// Webhook handler
@@ -458,6 +462,44 @@ pub async fn webhook_handler(
         } else {
             None
         };
+
+        // Hard liquidity floor — reject signals for tokens below the strategy-specific
+        // minimum before computing the full quality score. Low-liquidity tokens can
+        // otherwise pass the quality gate if wallet WQS is high enough.
+        let min_liquidity = match signal.payload.strategy {
+            Strategy::Shield => state.min_liquidity_shield_usd,
+            Strategy::Spear => state.min_liquidity_spear_usd,
+            Strategy::Exit => rust_decimal::Decimal::ZERO,
+        };
+        if !SignalQuality::passes_liquidity_floor(liquidity_usd, min_liquidity) {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                strategy = ?signal.payload.strategy,
+                liquidity_usd = %liquidity_usd,
+                min_required = %min_liquidity,
+                "Signal rejected: liquidity below strategy minimum"
+            );
+            let _ = db::insert_dead_letter(
+                &state.db,
+                Some(&signal.trade_uuid),
+                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                "LIQUIDITY_BELOW_MINIMUM",
+                Some(&format!("Liquidity ${} < required ${}", liquidity_usd, min_liquidity)),
+                None,
+            )
+            .await;
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(WebhookResponse {
+                    status: WebhookStatus::Rejected,
+                    trade_uuid: signal.trade_uuid,
+                    reason: Some(format!(
+                        "Token liquidity ${} below strategy minimum ${}",
+                        liquidity_usd, min_liquidity
+                    )),
+                }),
+            ));
+        }
 
         // Calculate signal quality — pass the wallet count for graduated consensus scoring
         let quality =

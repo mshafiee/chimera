@@ -241,10 +241,10 @@ pub async fn update_trade_costs(
     let result = sqlx::query(
         r#"
         UPDATE trades
-        SET jito_tip_sol = COALESCE(jito_tip_sol, ?),
-            dex_fee_sol = COALESCE(dex_fee_sol, ?),
-            slippage_cost_sol = COALESCE(slippage_cost_sol, ?),
-            total_cost_sol = COALESCE(total_cost_sol, ?)
+        SET jito_tip_sol = jito_tip_sol + ?,
+            dex_fee_sol = dex_fee_sol + ?,
+            slippage_cost_sol = slippage_cost_sol + ?,
+            total_cost_sol = total_cost_sol + ?
         WHERE trade_uuid = ?
         "#,
     )

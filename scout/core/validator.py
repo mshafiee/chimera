@@ -47,8 +47,10 @@ class PromotionCriteria:
     min_wqs_score: float = 70.0
     # Minimum raw swap events (basic data sufficiency)
     min_trades: int = 5
-    # Minimum realized closes (SELLs with pnl) required for promotion
-    min_closes_required: int = 10
+    # Minimum ratio of realized closes (SELLs with PnL) to total trades required for promotion.
+    # Default 0.4 means at least 40% of trades must be SELLs with computed PnL.
+    # This replaces the old fixed min_closes_required (10) which contradicted min_trades (5).
+    min_close_ratio: float = 0.4
     max_rejection_rate: float = 0.5  # Max 50% of trades can be rejected
     require_positive_simulated_pnl: bool = True
     max_pnl_reduction_percent: float = 80.0  # Max 80% reduction allowed
@@ -183,18 +185,22 @@ class PrePromotionValidator:
                 trades = safe_trades
         
         # Step 2c: Check minimum realized closes (SELLs with computed PnL)
+        # Uses a ratio threshold rather than a fixed count — a wallet with 15 trades
+        # but only 8 SELLs is well-sampled and should not be rejected.
         close_trades = [
             t for t in trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None
         ]
-        if len(close_trades) < self.criteria.min_closes_required:
+        min_closes = max(3, int(len(trades) * self.criteria.min_close_ratio))
+        if len(close_trades) < min_closes:
             logger.info(
-                f"Wallet failed close count check: {len(close_trades)} < {self.criteria.min_closes_required}"
+                f"Wallet failed close count check: {len(close_trades)} < {min_closes} "
+                f"({self.criteria.min_close_ratio*100:.0f}% of {len(trades)} trades)"
             )
             return ValidationResult(
                 wallet_address=wallet_address,
                 status=ValidationStatus.FAILED_INSUFFICIENT_TRADES,
                 passed=False,
-                reason=f"Insufficient realized closes: {len(close_trades)} < {self.criteria.min_closes_required}",
+                reason=f"Insufficient realized closes: {len(close_trades)} < {min_closes} ({self.criteria.min_close_ratio*100:.0f}% of trades)",
                 recommended_status="CANDIDATE",
                 notes="Need more realized closes (SELLs) for reliable validation",
             )

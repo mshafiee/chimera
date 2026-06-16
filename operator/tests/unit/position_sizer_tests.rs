@@ -222,9 +222,12 @@ async fn test_new_token_age_penalty_halves_size() {
 async fn test_consensus_multiplier_increases_size() {
     // is_consensus=true applies the consensus_multiplier (default 1.5x).
     // Non-consensus position should be smaller.
+    // Use a base size large enough that both sides exceed min_size_sol so the
+    // multiplier's effect is visible (0 trades = confidence 0.05).
 
     let (pool, _tmp) = create_test_db().await;
-    let sizer = PositionSizer::new(pool, default_sizing_config());
+    let config = sizing_config_with_max("2.0", "5.0", "0.01", 5);
+    let sizer = PositionSizer::new(pool, config);
 
     let mut consensus = neutral_factors();
     consensus.is_consensus = true;

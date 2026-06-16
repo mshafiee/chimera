@@ -5,7 +5,6 @@ Uses Hypothesis to test that WQS properties hold for all valid inputs.
 """
 
 from hypothesis import given, strategies as st, example
-from datetime import datetime, timedelta
 from typing import Optional
 from scout.core.wqs import calculate_wqs, WalletMetrics
 

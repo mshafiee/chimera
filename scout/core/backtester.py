@@ -18,7 +18,7 @@ A wallet FAILS backtest if:
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple, NamedTuple
+from typing import Dict, List, Optional, Tuple
 import logging
 
 from .models import (
@@ -591,6 +591,14 @@ class BacktestSimulator:
             else:
                 # Calculate realized PnL
                 sell_qty = min(token_qty, position["qty"])
+                is_oversell = sell_qty < token_qty
+                if is_oversell:
+                    unmatched_qty = token_qty - sell_qty
+                    logger.warning(
+                        f"Partial sell for {token[:8]}...: {sell_qty} tracked vs {token_qty} sold "
+                        f"(unmatched {unmatched_qty}). Prior BUY tracking may be incomplete — "
+                        f"PnL on this trade may be overstated."
+                    )
                 avg_cost_per_token = safe_decimal_divide(position["cost_basis_sol"], position["qty"])
                 allocated_cost_basis = avg_cost_per_token * sell_qty
                 

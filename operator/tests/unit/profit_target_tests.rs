@@ -141,7 +141,8 @@ async fn test_peak_tracking_after_crash_and_recovery() {
 
 #[tokio::test]
 async fn test_first_target_fires_partial_exit_not_full() {
-    // Price reaches first target (+25%). Must return ExitPercent(25%) not FullExit.
+    // Price reaches first target (+25%). Must return ExitAmount not FullExit.
+    // entry_amount_sol = 4.0, exit fraction = 0.33, expected sell = 1.32 SOL
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
@@ -171,14 +172,14 @@ async fn test_first_target_fires_partial_exit_not_full() {
     let action = mgr.check_targets("uuid-tier", TOKEN, "SHIELD").await;
 
     match action {
-        ProfitTargetAction::ExitPercent(pct) => {
+        ProfitTargetAction::ExitAmount(amount) => {
             assert_eq!(
-                pct,
-                Decimal::from_str("33.0").unwrap(),
-                "Tiered exit must be 33% of remaining position (compound), not full exit"
+                amount,
+                Decimal::from_str("1.32").unwrap(),
+                "Tiered exit must sell 33% of remaining position (4.0 * 0.33 = 1.32 SOL), not full exit"
             );
         }
-        other => panic!("Expected ExitPercent(33%), got {:?}", other),
+        other => panic!("Expected ExitAmount(1.32), got {:?}", other),
     }
 }
 
@@ -328,9 +329,9 @@ async fn test_trailing_stop_distance_from_peak() {
     // At $1.29 (just above) → None. At $1.27 (just below) → FullExit.
     //
     // Uses empty `targets` to prevent tiered profit targets from returning
-    // ExitPercent before trailing stop activation code is reached.
+    // ExitAmount before trailing stop activation code is reached.
     // (With targets=[25%], the first check_targets at $1.60 (+60%) would return
-    // ExitPercent early, preventing trailing_stop_active from ever being set.)
+    // ExitAmount early, preventing trailing_stop_active from ever being set.)
 
     let (pool, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new());
@@ -446,7 +447,7 @@ async fn test_unknown_trade_uuid_returns_none() {
     );
 }
 
-// ─── Test: same target hit twice returns ExitPercent only once ────────────────
+// ─── Test: same target hit twice returns ExitAmount only once ────────────────
 
 #[tokio::test]
 async fn test_same_target_not_hit_twice() {
@@ -479,15 +480,15 @@ async fn test_same_target_not_hit_twice() {
     );
     let first = mgr.check_targets("uuid-dbl", TOKEN, "SHIELD").await;
     assert!(
-        matches!(first, ProfitTargetAction::ExitPercent(_)),
-        "First hit must fire ExitPercent"
+        matches!(first, ProfitTargetAction::ExitAmount(_)),
+        "First hit must fire ExitAmount"
     );
 
     // Second check at same price — target already registered as hit
     let second = mgr.check_targets("uuid-dbl", TOKEN, "SHIELD").await;
     assert!(
-        !matches!(second, ProfitTargetAction::ExitPercent(_)),
-        "Second check at same price must NOT fire ExitPercent again (already hit)"
+        !matches!(second, ProfitTargetAction::ExitAmount(_)),
+        "Second check at same price must NOT fire ExitAmount again (already hit)"
     );
 }
 

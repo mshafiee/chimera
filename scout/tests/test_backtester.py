@@ -1,6 +1,5 @@
 """Tests for backtesting simulator."""
 
-import pytest
 from datetime import datetime, timedelta
 from scout.core.backtester import BacktestSimulator, BacktestConfig
 from scout.core.liquidity import LiquidityProvider, LiquidityData

@@ -233,12 +233,13 @@ impl StopLossManager {
         if loss_percent <= stop_loss_threshold {
             let elapsed_secs = chrono::Utc::now().signed_duration_since(entry_time).num_seconds();
             if elapsed_secs < self.config.wick_protection_secs as i64 {
-                // If the drop is catastrophic (worse than the absolute hard floor of -35%), bypass wick protection
-                if loss_percent <= dec!(-35) {
+                // Hard stop at -25% always bypasses wick protection — a 25%+ crash
+                // in the first seconds is never "normal entry slippage."
+                if loss_percent <= dec!(-25) {
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
                         loss_percent = %loss_percent,
-                        "Catastrophic drop detected during wick protection window — bypassing grace period"
+                        "Hard stop at -25% triggered during wick protection window — catastrophic drop bypasses grace period"
                     );
                     return StopLossAction::Exit;
                 }

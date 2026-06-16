@@ -2,7 +2,7 @@
 
 import pytest
 from datetime import datetime, timedelta
-from unittest.mock import Mock, MagicMock
+from unittest.mock import Mock
 from scout.core.validator import PrePromotionValidator, ValidationStatus, PromotionCriteria
 from scout.core.wqs import WalletMetrics
 from scout.core.models import HistoricalTrade, TradeAction, SimulatedResult, BacktestConfig
@@ -89,7 +89,7 @@ async def test_validator_rejects_insufficient_closes():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
             min_trades=5,
-            min_closes_required=10,  # Need 10 SELLs with PnL
+            min_close_ratio=0.4,  # Need 40% of trades to be SELLs with PnL
         )
     )
     validator.rugcheck_client = None  # disable network call in tests
@@ -103,7 +103,7 @@ async def test_validator_rejects_insufficient_closes():
         profit_factor=2.0,
     )
 
-    # Create trades with only 5 SELLs (below min_closes_required=10)
+    # Create trades with only 5 SELLs (below min_close_ratio=0.4)
     trades = []
     for i in range(15):
         is_sell = i % 3 == 2  # Every 3rd trade is a SELL
@@ -153,7 +153,7 @@ async def test_validator_rejects_negative_simulated_pnl():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
             min_trades=5,
-            min_closes_required=5,
+            min_close_ratio=0.3,
         )
     )
     validator.simulator = mock_simulator
@@ -216,7 +216,7 @@ async def test_validator_rejects_high_rejection_rate():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
             min_trades=5,
-            min_closes_required=5,
+            min_close_ratio=0.3,
             max_rejection_rate=0.5,  # Max 50% rejection
         )
     )
@@ -280,7 +280,7 @@ async def test_validator_passes_good_wallet():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
             min_trades=5,
-            min_closes_required=5,
+            min_close_ratio=0.3,
         )
     )
     validator.simulator = mock_simulator
@@ -480,7 +480,7 @@ async def test_realistic_profitable_wallet_reaches_active():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=70.0,
             min_trades=20,
-            min_closes_required=10,
+            min_close_ratio=0.5,
             walk_forward_enabled=False,   # Use full set — no holdout split
         ),
     )
@@ -568,6 +568,7 @@ async def test_profit_factor_threshold_1_2_enforced():
         trade_count_30d=20,
         win_rate=0.70,
         avg_trade_size_sol=0.5,  # Avoid dust-trader penalty
+        profit_factor=1.5,  # +5 pts — needed to reach WQS > 30 threshold
     )
 
     # 30 base trades: even=BUY, odd=SELL with pnl_sol=0.1 (gives 15 SELLs → passes min_closes)
@@ -595,7 +596,7 @@ async def test_profit_factor_threshold_1_2_enforced():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
             min_trades=5,
-            min_closes_required=5,
+            min_close_ratio=0.3,
             walk_forward_enabled=False,
         )
     )
@@ -625,7 +626,7 @@ async def test_profit_factor_threshold_1_2_enforced():
         promotion_criteria=PromotionCriteria(
             min_wqs_score=30.0,
             min_trades=5,
-            min_closes_required=5,
+            min_close_ratio=0.3,
             walk_forward_enabled=False,
             max_drawdown_fraction=1.0,  # disable drawdown gate — this test is about profit-factor only
         )

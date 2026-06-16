@@ -4,6 +4,14 @@
 //! - Price drops 8%+ from entry within 5 minutes (base; widens for high-volatility tokens and older positions)
 //! - Volume drops >65% from 24h average
 //! - RSI < 35 and declining
+//!
+//! # Coverage note
+//! There is a known gap between wick_protection_secs (default 10s) and RSI readiness
+//! (requires ~12 samples at 30s intervals = ~6 minutes of price data after entry).
+//! During seconds 10-360 after entry, neither the wick grace period nor RSI momentum
+//! exit is active. The hard stop-loss at -25% (bypassing wick protection) and the
+//! primary stop-loss threshold provide coverage throughout this gap. RSI is a
+//! secondary, not primary, defense.
 
 use crate::db::DbPool;
 use crate::engine::volume_cache::VolumeCache;

@@ -121,6 +121,16 @@ impl SignalQuality {
         self.score >= min_quality
     }
 
+    /// Hard liquidity floor check — rejects signals for tokens with insufficient
+    /// liquidity regardless of WQS or consensus score. Low-liquidity tokens can
+    /// otherwise pass the quality gate if the wallet's WQS is high enough, only
+    /// to be rejected later by the slow-path check.
+    ///
+    /// Returns false (reject) if `liquidity_usd` is below the `min_liquidity` threshold.
+    pub fn passes_liquidity_floor(liquidity_usd: rust_decimal::Decimal, min_liquidity: rust_decimal::Decimal) -> bool {
+        liquidity_usd >= min_liquidity
+    }
+
     /// Get quality category
     pub fn category(&self) -> QualityCategory {
         if self.score >= 0.9 {

@@ -29,10 +29,10 @@ import asyncio
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.db_writer import RosterWriter, WalletRecord, write_roster_atomic
-from core.wqs import calculate_wqs, WalletMetrics
+from core.db_writer import WalletRecord, write_roster_atomic
+from core.wqs import calculate_wqs
 from core.analyzer import WalletAnalyzer
-from core.models import BacktestConfig, ValidationStatus
+from core.models import BacktestConfig
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
 from core.auto_merge import auto_merge_roster
@@ -342,7 +342,7 @@ async def analyze_wallets(
             print(f"[Scout] Computing wallet stats for {wallet_address[:8]}...")
             try:
                 wallet_stats = analyzer.compute_wallet_trade_stats(trades)
-                print(f"[Scout] Wallet stats computed")
+                print("[Scout] Wallet stats computed")
             except Exception as e:
                 print(f"[Scout] ✗ ERROR computing wallet stats for {wallet_address[:8]}...: {e}")
                 import traceback
@@ -385,9 +385,9 @@ async def analyze_wallets(
     # Process all wallets concurrently
     print(f"[Scout] Creating {len(candidates)} concurrent tasks...")
     tasks = [process_with_semaphore(w) for w in candidates]
-    print(f"[Scout] Waiting for all tasks to complete...")
+    print("[Scout] Waiting for all tasks to complete...")
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    print(f"[Scout] All tasks completed, processing results...")
+    print("[Scout] All tasks completed, processing results...")
     
     for res in results:
         if isinstance(res, Exception):
@@ -425,7 +425,6 @@ async def analyze_wallets(
         archetype = None
         if res['trades']:
             try:
-                from core.models import TraderArchetype
                 archetype_enum = analyzer.determine_archetype(res['metrics'], res['trades'])
                 archetype = archetype_enum.value if archetype_enum else None
             except Exception as e:
@@ -543,7 +542,7 @@ async def main_async():
                 # Note: min_wqs_score should match min_wqs_active (rescaled 0-100 range)
                 min_wqs_score=args.min_wqs_active,
                 min_trades=5,  # Minimum raw swap events
-                min_closes_required=args.min_closes_required,  # Minimum realized closes (SELLs with PnL)
+                min_close_ratio=0.4,  # At least 40% of trades must be SELLs with PnL
                 walk_forward_enabled=True,
                 walk_forward_holdout_fraction=0.3,
                 walk_forward_min_trades=args.walk_forward_min_trades,
@@ -553,10 +552,10 @@ async def main_async():
                 backtest_config=backtest_config,
                 promotion_criteria=promotion_criteria,
             )
-            print(f"[Scout] Backtest validation enabled")
+            print("[Scout] Backtest validation enabled")
             print(f"  Min liquidity (Shield): ${args.min_liquidity_shield:,.0f}")
             print(f"  Min liquidity (Spear): ${args.min_liquidity_spear:,.0f}")
-            print(f"  Min closes required: {args.min_closes_required}")
+            print("  Min close ratio: 0.4 (40% of trades must be SELLs with PnL)")
             print(f"  Walk-forward min closes: {args.walk_forward_min_trades}")
         except Exception as e:
             print(f"[Scout] WARNING: Failed to initialize validator: {e}")
@@ -570,7 +569,7 @@ async def main_async():
         metrics.start_server()
     
     # Analyze wallets
-    print(f"\n[Scout] Analyzing wallets...")
+    print("\n[Scout] Analyzing wallets...")
     print(f"  Min WQS for ACTIVE: {args.min_wqs_active}")
     print(f"  Min WQS for CANDIDATE: {args.min_wqs_candidate}")
     
@@ -603,21 +602,21 @@ async def main_async():
         _calibration_report(records, stats)
     
     # Summary
-    print(f"\n[Scout] Analysis complete:")
+    print("\n[Scout] Analysis complete:")
     print(f"  Total analyzed: {stats['total']}")
     print(f"  ACTIVE: {stats['active']}")
     print(f"  CANDIDATE: {stats['candidate']}")
     print(f"  REJECTED: {stats['rejected']}")
     
     if not args.skip_backtest:
-        print(f"\n[Scout] Backtest results:")
+        print("\n[Scout] Backtest results:")
         print(f"  Passed: {stats['backtest_passed']}")
         print(f"  Failed: {stats['backtest_failed']}")
         print(f"  Skipped: {stats['backtest_skipped']}")
     
     # Write output
     if args.dry_run:
-        print(f"\n[Scout] Dry run mode - not writing to database")
+        print("\n[Scout] Dry run mode - not writing to database")
     else:
         output_path = Path(args.output)
         
@@ -631,7 +630,7 @@ async def main_async():
             print(f"[Scout] Successfully wrote {len(records)} wallets")
             
             # Automatically merge roster into main database
-            print(f"\n[Scout] Automatically merging roster into main database...")
+            print("\n[Scout] Automatically merging roster into main database...")
             
             # NEW CODE: Wrap in try/except to prevent crash if Operator is down
             try:
@@ -647,10 +646,10 @@ async def main_async():
                     print(f"[Scout] ✓ {merge_message}")
                 else:
                     print(f"[Scout] ⚠ Automatic merge failed: {merge_message}")
-                    print(f"[Scout] Non-fatal error: Roster is saved on disk.")
+                    print("[Scout] Non-fatal error: Roster is saved on disk.")
             except Exception as merge_err:
                 print(f"[Scout] ⚠ Exception during auto-merge: {merge_err}")
-                print(f"[Scout] Non-fatal error: Roster is saved on disk.")
+                print("[Scout] Non-fatal error: Roster is saved on disk.")
         except Exception as e:
             print(f"[Scout] ERROR: Failed to write roster: {e}")
             sys.exit(1)

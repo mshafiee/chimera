@@ -56,8 +56,10 @@ struct ProfitTargetState {
 pub enum ProfitTargetAction {
     /// No action needed
     None,
-    /// Exit percentage of position (using Decimal for precision)
-    ExitPercent(Decimal),
+    /// Sell an absolute SOL amount of the current remaining position.
+    /// Using absolute SOL (not a percentage) eliminates ambiguity about whether
+    /// the percentage applies to the original or remaining position size.
+    ExitAmount(Decimal),
     /// Full exit
     FullExit,
 }
@@ -281,6 +283,10 @@ impl ProfitTargetManager {
                 
                 let exit_fraction_current = Decimal::ONE - current_retain;
 
+                // Compute remaining BEFORE updating state.remaining_fraction so
+                // we get the pre-sell actual_remaining, not the post-sell value.
+                let pre_sell_remaining = state.entry_amount_sol * state.remaining_fraction;
+
                 // Update remaining_fraction: track how much of the original position is held
                 state.remaining_fraction *= current_retain;
 
@@ -288,9 +294,7 @@ impl ProfitTargetManager {
                 // smaller than min_size_sol, perform a full exit instead of leaving an
                 // economically unviable dust position that costs more in gas to close
                 // than it is worth.
-                // Use remaining_fraction * entry_amount_sol for the actual remaining size.
-                let actual_remaining = state.entry_amount_sol * state.remaining_fraction;
-                let remaining_after_exit = actual_remaining * current_retain;
+                let remaining_after_exit = pre_sell_remaining * current_retain;
                 if remaining_after_exit > Decimal::ZERO
                     && remaining_after_exit < self.config.min_size_sol
                 {
@@ -302,7 +306,12 @@ impl ProfitTargetManager {
                     );
                     tiered_action = Some(ProfitTargetAction::FullExit);
                 } else {
-                    tiered_action = Some(ProfitTargetAction::ExitPercent(exit_fraction_current * Decimal::from(100)));
+                    // Emit an absolute SOL amount rather than a percentage of "the position."
+                    // This eliminates the oversell bug where the executor might apply
+                    // the percentage against the original entry_amount instead of the
+                    // current remaining balance after prior tiered exits.
+                    let sell_amount = exit_fraction_current * pre_sell_remaining;
+                    tiered_action = Some(ProfitTargetAction::ExitAmount(sell_amount));
                 }
             }
         }
@@ -386,8 +395,14 @@ impl ProfitTargetManager {
                 // Medium-profit: Shield 24h, Spear 12h
                 elapsed_hours >= if is_spear { 12 } else { self.config.time_exit_hours }
             } else if profit_percent > Decimal::ZERO {
-                // Low-profit: Shield 16h, Spear 8h — free capital before it goes flat
-                elapsed_hours >= if is_spear { 8 } else { 16 }
+                // Low-profit: use losing_time_exit_hours for the strategy so operators
+                // can control all near-breakeven/losing exit timing through one config knob
+                // per strategy, rather than discovering that time_exit_hours doesn't apply.
+                elapsed_hours >= if is_spear {
+                    self.config.losing_time_exit_hours_spear
+                } else {
+                    self.config.losing_time_exit_hours_shield
+                }
             } else {
                 // Losing: use configured time-exit hours for the strategy.
                 // losing_time_exit_threshold_percent (default -3%) determines whether the loss

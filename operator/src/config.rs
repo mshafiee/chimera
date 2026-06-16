@@ -777,7 +777,8 @@ pub struct ProfitManagementConfig {
     #[serde(default = "default_time_exit_hours")]
     pub time_exit_hours: u64,
     /// Grace period after entry before stop-loss is allowed to fire (wick protection).
-    /// Set longer on congested chains; 30s covers most Solana confirmation delays.
+    /// Set to 10s — covers most Solana confirmation delays without leaving positions
+    /// exposed to extended crashes. A hard -25% stop always bypasses this grace period.
     #[serde(default = "default_wick_protection_secs")]
     pub wick_protection_secs: u64,
     /// Losing time-based exit for Shield strategy (hours)
@@ -827,7 +828,7 @@ fn default_time_exit_hours() -> u64 {
 }
 
 fn default_wick_protection_secs() -> u64 {
-    30
+    10
 }
 
 fn default_losing_time_exit_hours_shield() -> u64 {
@@ -890,12 +891,10 @@ pub struct PositionSizingConfig {
     /// Total trading capital in SOL (used for Kelly sizing and portfolio heat)
     #[serde(default = "default_total_capital_sol")]
     pub total_capital_sol: Decimal,
-    /// Kelly fraction for Shield strategy (conservative; default 25% of full Kelly)
-    #[serde(default = "default_kelly_fraction_shield")]
-    pub kelly_fraction_shield: Decimal,
-    /// Kelly fraction for Spear strategy (more conservative than Shield to cap risk; default 15%)
-    #[serde(default = "default_kelly_fraction_spear")]
-    pub kelly_fraction_spear: Decimal,
+    /// Kelly fraction for both strategies (conservative; default 25% of full Kelly).
+    /// Spear positions are additionally bounded by spear_max_size_sol.
+    #[serde(default = "default_kelly_fraction")]
+    pub kelly_fraction: Decimal,
     /// Size multiplier applied during off-hours (02:00–06:00 UTC) to reduce exposure
     /// to low-liquidity windows. Set to 1.0 to disable the reduction.
     #[serde(default = "default_off_hours_size_multiplier")]
@@ -938,12 +937,8 @@ fn default_total_capital_sol() -> Decimal {
     dec!(10.0)
 }
 
-fn default_kelly_fraction_shield() -> Decimal {
-    dec!(0.25) // 25% of full Kelly for Shield (conservative)
-}
-
-fn default_kelly_fraction_spear() -> Decimal {
-    dec!(0.15) // 15% of full Kelly for Spear (higher risk = smaller fraction)
+fn default_kelly_fraction() -> Decimal {
+    dec!(0.25) // 25% of full Kelly (conservative)
 }
 
 fn default_off_hours_size_multiplier() -> Decimal {
@@ -962,8 +957,7 @@ impl Default for PositionSizingConfig {
             max_concurrent_positions: default_max_concurrent_positions(),
             use_kelly_sizing: default_use_kelly_sizing(),
             total_capital_sol: default_total_capital_sol(),
-            kelly_fraction_shield: default_kelly_fraction_shield(),
-            kelly_fraction_spear: default_kelly_fraction_spear(),
+            kelly_fraction: default_kelly_fraction(),
             off_hours_size_multiplier: default_off_hours_size_multiplier(),
         }
     }
@@ -1136,20 +1130,12 @@ impl AppConfig {
         }
 
         // FIX 6: Validate kelly_fraction bounds
-        if self.position_sizing.kelly_fraction_shield <= Decimal::ZERO
-            || self.position_sizing.kelly_fraction_shield > Decimal::ONE
+        if self.position_sizing.kelly_fraction <= Decimal::ZERO
+            || self.position_sizing.kelly_fraction > Decimal::ONE
         {
             return Err(ConfigError::Message(format!(
-                "position_sizing.kelly_fraction_shield must be in range (0, 1], got {}",
-                self.position_sizing.kelly_fraction_shield
-            )));
-        }
-        if self.position_sizing.kelly_fraction_spear <= Decimal::ZERO
-            || self.position_sizing.kelly_fraction_spear > Decimal::ONE
-        {
-            return Err(ConfigError::Message(format!(
-                "position_sizing.kelly_fraction_spear must be in range (0, 1], got {}",
-                self.position_sizing.kelly_fraction_spear
+                "position_sizing.kelly_fraction must be in range (0, 1], got {}",
+                self.position_sizing.kelly_fraction
             )));
         }
 

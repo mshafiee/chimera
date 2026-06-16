@@ -1,9 +1,11 @@
 //! Kelly Criterion Position Sizing
 //!
-//! Implements Kelly Criterion for optimal position sizing:
-//! kelly = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
+//! Implements Kelly Criterion for optimal position sizing using the standard
+//! edge/odds form: k = (p*b - q) / b  where b = avg_win / avg_loss.
 //!
-//! Uses conservative Kelly (25% of full Kelly) to reduce risk.
+//! Hard-caps full_kelly at 0.5 (50%) to prevent ruin-level allocations even
+//! for exceptionally high-edge wallets. Uses conservative fraction (default 25%)
+//! of full Kelly for actual sizing.
 
 use crate::db::{self, DbPool};
 use rust_decimal::prelude::*;
@@ -19,7 +21,7 @@ pub struct KellySizer {
 /// Kelly sizing result
 #[derive(Debug, Clone)]
 pub struct KellyResult {
-    /// Full Kelly percentage (can exceed 1.0 for highly profitable strategies, using Decimal for precision)
+    /// Full Kelly percentage (capped at 0.5 / 50%, using Decimal for precision)
     pub full_kelly: Decimal,
     /// Conservative Kelly percentage (25% of full, max 1.0, using Decimal for precision)
     pub conservative_kelly: Decimal,
@@ -158,13 +160,19 @@ impl KellySizer {
             (sum / Decimal::from(losses.len())).max(dec!(0.01))
         };
 
-        // Calculate Kelly Criterion using Decimal for precision
-        // The Kelly formula for position size (when returns are fractional, not 100% loss) is:
-        // kelly = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
-         let full_kelly = if !avg_win.is_zero() {
-             let numerator = (win_rate * avg_win) - (loss_rate * avg_loss);
-             let denominator = avg_win;
-             (numerator / denominator).max(Decimal::ZERO).min(Decimal::ONE)
+        // Calculate Kelly Criterion using the standard edge/odds form:
+        //   k = (p * b - q) / b   where b = avg_win / avg_loss (win/loss ratio)
+        // This is mathematically equivalent to the fractional-return form but
+        // makes the odds-ratio (b) and edge explicit for auditability.
+        // Hard-cap full_kelly at 0.5 (50%): even wallets with extreme edges must
+        // never risk more than half the bankroll on a single trade. Copy-trading
+        // edge estimates are inherently unreliable — full Kelly near 100% invites ruin.
+         let full_kelly = if !avg_win.is_zero() && !avg_loss.is_zero() {
+             let b = avg_win / avg_loss;
+             let p = win_rate;
+             let q = loss_rate;
+             let k = ((p * b) - q) / b;
+             k.max(Decimal::ZERO).min(dec!(0.5))
          } else {
              Decimal::ZERO
          };
@@ -264,8 +272,9 @@ mod tests {
     #[test]
     fn test_kelly_calculation() {
         // Example: 60% win rate, avg win = 10% (0.1), avg loss = 5% (0.05)
-        // kelly = (0.6 * 0.1 - 0.4 * 0.05) / 0.1
-        // kelly = (0.06 - 0.02) / 0.1 = 0.4
+        // b = avg_win / avg_loss = 0.1 / 0.05 = 2.0
+        // kelly = (p*b - q) / b = (0.6*2.0 - 0.4) / 2.0 = (1.2 - 0.4) / 2.0 = 0.4
+        // Hard-capped at 0.5 → 0.4 passes through
         // Conservative (25%) = 0.10 = 10% of capital
 
         // This would be tested with actual database in integration tests
