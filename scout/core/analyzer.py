@@ -16,7 +16,6 @@ import time
 import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
 from .wqs import WalletMetrics
@@ -336,6 +335,8 @@ class WalletAnalyzer:
         self._token_creation_cache: Dict[str, Optional[float]] = {}
         self._price_cache: Dict[str, float] = {}  # Cache for token prices
         self._sol_price_usd: Optional[float] = None  # Cached SOL price
+        self._safety_check_total: int = 0  # Cumulative token safety check count
+        self._safety_check_failures: int = 0  # Cumulative safety check failures
         
         # Initialize Redis client for persistent caching (if available)
         self._redis_client = None
@@ -1205,6 +1206,94 @@ class WalletAnalyzer:
 
         return None
 
+    @staticmethod
+    def _replay_positions(
+        trades: List[HistoricalTrade],
+    ) -> Tuple[Decimal, Decimal, Dict[str, Dict[str, Decimal]], Dict[int, Decimal]]:
+        """
+        Replay trades chronologically with FIFO cost basis tracking.
+
+        Returns:
+            total_cost_sold: Sum of cost basis of all SELL trades
+            realized_pnl: Sum of realized PnL from SELL trades
+            open_positions: Dict of token -> {qty, cost_sol}
+            per_trade_pnl: Dict of sorted index -> pnl_sol for each SELL trade
+        """
+        has_swap_fields = any(t.sol_amount is not None or t.token_amount is not None for t in trades)
+
+        EPSILON = Decimal('1e-9')
+        positions: Dict[str, Dict[str, Decimal]] = {}
+        total_cost_sold = Decimal('0')
+        realized_pnl_total = Decimal('0')
+        per_trade_pnl: Dict[int, Decimal] = {}
+
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+
+        for idx, t in enumerate(sorted_trades):
+            token = t.token_address
+
+            if has_swap_fields:
+                token_qty = t.token_amount
+                sol_amt = t.sol_amount if t.sol_amount is not None else t.amount_sol
+
+                if token_qty is None or token_qty <= Decimal('0'):
+                    if t.price_at_trade and t.price_at_trade > Decimal('0') and sol_amt and sol_amt > Decimal('0'):
+                        token_qty = safe_decimal_divide(sol_amt, t.price_at_trade)
+
+                if token_qty is None or token_qty <= Decimal('0') or sol_amt is None or sol_amt <= Decimal('0'):
+                    continue
+            else:
+                qty = float_to_decimal(t.amount_sol or Decimal('0'))
+                price = float_to_decimal(t.price_at_trade or Decimal('0'))
+                if qty <= EPSILON or price <= EPSILON:
+                    continue
+
+            if t.action == TradeAction.BUY:
+                pos = positions.setdefault(token, {"qty": Decimal('0'), "cost_sol": Decimal('0')})
+                if has_swap_fields:
+                    pos["qty"] += token_qty
+                    pos["cost_sol"] += sol_amt
+                else:
+                    pos["qty"] += qty
+                    pos["cost_sol"] += qty * price
+
+            elif t.action == TradeAction.SELL:
+                pos = positions.get(token)
+                if not pos or pos["qty"] < EPSILON:
+                    continue
+
+                if has_swap_fields:
+                    sell_qty = min(token_qty, pos["qty"])
+                    sell_val = sol_amt
+                else:
+                    sell_qty = min(qty, pos["qty"])
+                    sell_val = float_to_decimal(t.pnl_sol or Decimal('0'))
+
+                if sell_qty < EPSILON:
+                    continue
+
+                avg_cost = safe_decimal_divide(pos["cost_sol"], pos["qty"])
+                cost_basis = avg_cost * sell_qty
+
+                if has_swap_fields:
+                    pnl_val = sell_val - cost_basis
+                else:
+                    pnl_val = sell_val
+
+                total_cost_sold += cost_basis
+                realized_pnl_total += pnl_val
+                per_trade_pnl[idx] = pnl_val
+
+                pos["qty"] -= sell_qty
+                pos["cost_sol"] -= cost_basis
+
+                if pos["qty"] < EPSILON:
+                    positions.pop(token, None)
+                else:
+                    pos["cost_sol"] = max(Decimal('0'), pos["cost_sol"])
+
+        return total_cost_sold, realized_pnl_total, positions, per_trade_pnl
+
     def _enrich_trades_with_realized_pnl(self, trades: List[HistoricalTrade]) -> List[HistoricalTrade]:
         """
         Compute realized PnL (in SOL) for SELL trades using average cost basis.
@@ -1212,68 +1301,14 @@ class WalletAnalyzer:
         This makes metrics like win-rate and drawdown meaningful even when the
         raw swap payload doesn't directly include PnL.
         """
-        # If these trades are in the legacy "price_at_trade + pnl_sol" test format
-        # (no `token_amount` / `sol_amount`), don't try to overwrite/derive PnL.
         if all(t.token_amount is None and t.sol_amount is None and t.price_sol is None for t in trades):
             return trades
 
-        # Track per-token position: {token: (token_qty, cost_basis_sol)}
-        # Use Decimal for all financial values
-        positions: Dict[str, Dict[str, Decimal]] = {}
-        
-        EPSILON = Decimal('1e-9')  # Define constant as Decimal
+        _, _, _, per_trade_pnl = self._replay_positions(trades)
 
-        # Sort chronologically for cost-basis accounting
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
-
-        for t in sorted_trades:
-            token = t.token_address
-            token_qty = t.token_amount
-            sol_amt = t.sol_amount if t.sol_amount is not None else t.amount_sol
-
-            # If token_amount missing (legacy tests), infer from SOL and price if possible
-            if token_qty is None or token_qty <= Decimal('0'):
-                if t.price_at_trade and t.price_at_trade > Decimal('0') and sol_amt and sol_amt > Decimal('0'):
-                    token_qty = safe_decimal_divide(sol_amt, t.price_at_trade)
-                    t.token_amount = token_qty
-
-            if token_qty is None or token_qty <= Decimal('0') or sol_amt is None or sol_amt <= Decimal('0'):
-                continue
-
-            if t.action == TradeAction.BUY:
-                pos = positions.setdefault(token, {"qty": Decimal('0'), "cost_sol": Decimal('0')})
-                pos["qty"] += token_qty
-                pos["cost_sol"] += sol_amt
-
-            elif t.action == TradeAction.SELL:
-                pos = positions.get(token)
-                # Stricter check using EPSILON
-                if not pos or pos["qty"] < EPSILON:
-                    continue
-
-                # Don't sell more than we tracked
-                sell_qty = min(token_qty, pos["qty"])
-                
-                # Check for near-zero sell quantity to prevent division errors
-                if sell_qty < EPSILON:
-                    continue
-
-                avg_cost_per_token = safe_decimal_divide(pos["cost_sol"], pos["qty"])
-                cost_basis_sol = avg_cost_per_token * sell_qty
-                realized_pnl_sol = sol_amt - cost_basis_sol
-
-                t.pnl_sol = realized_pnl_sol
-
-                # Reduce position
-                pos["qty"] -= sell_qty
-                pos["cost_sol"] -= cost_basis_sol
-                
-                # Clean up dust immediately
-                if pos["qty"] < EPSILON:
-                    positions.pop(token, None)
-                else:
-                    # Sanity clamp to prevent negative cost on positive qty
-                    pos["cost_sol"] = max(Decimal('0'), pos["cost_sol"])
+        for idx, pnl in per_trade_pnl.items():
+            sorted_trades[idx].pnl_sol = pnl
 
         return trades
     
@@ -1382,13 +1417,18 @@ class WalletAnalyzer:
             if time.time() - cached_time < cache_ttl:
                 return cached_result
 
-        # Initialize cache if not present
         if not hasattr(self, '_token_safety_cache'):
             self._token_safety_cache: Dict[str, Tuple[bool, float]] = {}
+        if not hasattr(self, '_safety_check_total'):
+            self._safety_check_total = 0
+            self._safety_check_failures = 0
 
         result = await self._is_token_safe_uncached(token_address)
 
-        # Store in cache
+        self._safety_check_total += 1
+        if not result:
+            self._safety_check_failures += 1
+
         self._token_safety_cache[_cache_key] = (result, time.time())
         return result
 
@@ -1472,16 +1512,29 @@ class WalletAnalyzer:
                                     # rely on RugCheck for comprehensive mint authority analysis
                                     int.from_bytes(raw[0:4], 'little')
         except Exception as e:
-            # Log error but don't fail silently - conservative approach
             import traceback
-            import logging
-            logger = logging.getLogger(__name__)
             logger.warning(f"Token safety check failed for {token_address}: {e}\n{traceback.format_exc()}")
-            # Default to False (reject) if we can't verify - safer than accepting unknown tokens
+            # Check fail mode: "open" assumes safe on error, "closed" rejects
+            fail_mode = os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
+            if fail_mode == "open":
+                logger.info(f"Safety fail-mode=open: assuming {token_address[:8]}... is safe")
+                return True
             return False
 
         # Token passed basic safety checks
         return True
+
+    def log_safety_health_summary(self) -> None:
+        """Log a health warning if >20% of safety checks failed."""
+        total = getattr(self, '_safety_check_total', 0)
+        failures = getattr(self, '_safety_check_failures', 0)
+        if total > 0:
+            fail_rate = (failures / total) * 100
+            if fail_rate > 20.0:
+                logger.warning(
+                    f"Token safety health: {failures}/{total} checks failed ({fail_rate:.0f}%) "
+                    f"— RPC may be degraded"
+                )
 
     async def _get_sol_price_usd(self) -> float:
         """
@@ -2249,60 +2302,32 @@ class WalletAnalyzer:
     ) -> float:
         """
         Calculate accurate ROI from historical trades.
-        
-        Uses Decimal internally for all financial calculations to avoid floating-point errors.
-        Converts to float at the boundary for API compatibility.
-        
-        Tracks positions and calculates PnL from actual price changes.
-        
+
+        Uses FIFO position tracking via _replay_positions to compute
+        total_cost_sold (cost basis of sold tokens) and realized PnL.
+        This correctly handles DCA wallets where the denominator should
+        only count the cost basis of what was actually sold.
+
+        Uses Decimal internally for all financial calculations to avoid
+        floating-point errors. Converts to float at the boundary for API
+        compatibility.
+
         Args:
             trades: List of historical trades
             days: Time window for ROI calculation
-            
+
         Returns:
             ROI as percentage
         """
         if not trades:
             return 0.0
-        
-        # Two supported modes:
-        # 1) Robust swap-derived mode: use SOL cashflows + derived realized PnL (SOL)
-        # 2) Legacy/test mode: use amount_sol as "units", price_at_trade as price (USD),
-        #    and pnl_sol as profit/loss in same units as price (USD)
 
-        has_swap_fields = any(t.sol_amount is not None or t.token_amount is not None for t in trades)
+        total_cost_sold, realized_pnl, _, _ = self._replay_positions(trades)
 
-        if has_swap_fields:
-            total_spent_sol = Decimal('0')
-            realized_pnl_sol = Decimal('0')
-
-            for t in trades:
-                sol_amt = t.sol_amount if t.sol_amount is not None else t.amount_sol
-                if t.action == TradeAction.BUY and sol_amt:
-                    total_spent_sol += max(Decimal('0'), sol_amt)
-                elif t.action == TradeAction.SELL and t.pnl_sol is not None:
-                    realized_pnl_sol += t.pnl_sol
-
-            if total_spent_sol <= Decimal('0'):
-                return 0.0
-
-            roi_decimal = safe_decimal_divide(realized_pnl_sol, total_spent_sol) * Decimal('100.0')
-            return decimal_to_float(roi_decimal)
-
-        # Legacy/test mode
-        total_cost = Decimal('0')
-        total_pnl = Decimal('0')
-        for t in trades:
-            if t.action == TradeAction.BUY:
-                amount = float_to_decimal(t.amount_sol or Decimal('0'))
-                price = float_to_decimal(t.price_at_trade or Decimal('0'))
-                total_cost += amount * price
-            elif t.action == TradeAction.SELL and t.pnl_sol is not None:
-                total_pnl += float_to_decimal(t.pnl_sol)
-
-        if total_cost <= Decimal('0'):
+        if total_cost_sold <= Decimal('0'):
             return 0.0
-        roi_decimal = safe_decimal_divide(total_pnl, total_cost) * Decimal('100.0')
+
+        roi_decimal = safe_decimal_divide(realized_pnl, total_cost_sold) * Decimal('100.0')
         return decimal_to_float(roi_decimal)
     
     def _calculate_win_rate_from_trades(
@@ -2727,8 +2752,12 @@ class WalletAnalyzer:
         print("\n[Analyzer] ════════════════════════════════════════")
         print("[Analyzer] Parse Health Dashboard")
         print("[Analyzer] ════════════════════════════════════════")
+        overall_parse_pct = parsed / max(1, total) * 100
+        warn_pct = float(os.getenv("SCOUT_PARSE_HEALTH_WARN_PCT", "50"))
+        crit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_CRIT_PCT", "30"))
+
         print(f"  Transactions fetched:  {total}")
-        print(f"  Swaps parsed:          {parsed}  ({parsed / max(1, total) * 100:.1f}%)")
+        print(f"  Swaps parsed:          {parsed}  ({overall_parse_pct:.1f}%)")
         print(f"  Trades valid:          {valid}")
         print(f"  Parse failures:        {failures}")
         if failures > 0:
@@ -2737,6 +2766,12 @@ class WalletAnalyzer:
             print("  Failures by reason:")
             for reason, count in sorted(by_reason.items(), key=lambda x: -x[1]):
                 print(f"    {reason:<22s}: {count}")
+
+        # Configurable health warnings
+        if overall_parse_pct < crit_pct:
+            print(f"  🔴 CRITICAL: Overall parse rate {overall_parse_pct:.1f}% < {crit_pct:.0f}%")
+        elif overall_parse_pct < warn_pct:
+            print(f"  🟡 WARNING: Overall parse rate {overall_parse_pct:.1f}% < {warn_pct:.0f}%")
         print()
         print("[Analyzer] Discovery Quality")
         print(f"  Infrastructure filtered:  {disc['infrastructure_filtered']}")
@@ -2759,8 +2794,30 @@ class WalletAnalyzer:
             if success_rate < 20:
                 print("  ⚠ WARNING: Token creation fetch success < 20% — sniper detection degraded!")
         print("[Analyzer] ════════════════════════════════════════")
-    
 
+    def is_parse_rate_below_threshold(self) -> bool:
+        """Check if overall parse rate is below the exit-fail threshold.
+
+        Returns True when the scout should exit non-zero so cron can alert.
+        Threshold controlled by SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT (default 40).
+        """
+        stats = self._parse_stats
+        total = stats["transactions_fetched"]
+        parsed = stats["swaps_parsed"]
+        if total == 0:
+            return False
+        rate = parsed / max(1, total) * 100
+        exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
+        return rate < exit_pct
+
+    def get_overall_parse_rate(self) -> float:
+        """Return overall parse rate across all wallets (0.0-1.0)."""
+        stats = self._parse_stats
+        total = stats["transactions_fetched"]
+        parsed = stats["swaps_parsed"]
+        if total == 0:
+            return 1.0
+        return parsed / total
 
 # Example usage
 if __name__ == "__main__":

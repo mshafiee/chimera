@@ -33,8 +33,8 @@ import asyncio
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.db_writer import WalletRecord, write_roster_atomic
-from core.wqs import calculate_wqs, calculate_wqs_with_confidence, \
-    _calculate_raw_score, _interpret_trajectory, _compute_wmi, RawScoreComponents
+from core.wqs import calculate_wqs_with_confidence, \
+    _calculate_raw_score, _interpret_trajectory, _compute_wmi
 from core.analyzer import WalletAnalyzer
 from core.models import BacktestConfig
 from core.validator import PrePromotionValidator, PromotionCriteria
@@ -141,6 +141,20 @@ def _calibration_report(records: List[WalletRecord], stats: Dict[str, Any]) -> N
     suggested_holdout = 0.3
     if median_closes > 0 and median_closes * suggested_holdout < 5:
         suggested_holdout = max(0.15, min(0.3, 5.0 / max(1.0, p75_closes)))
+
+    # PnL accuracy metric (from wqs_pnl_correlation table)
+    try:
+        from core.correlation_reader import CorrelationReader
+        cr = CorrelationReader()
+        if cr.table_exists():
+            pnl_records = cr.get_all_records(min_trades=5)
+            profitable = sum(1 for r in pnl_records if r.actual_copy_pnl_30d_sol is not None and r.actual_copy_pnl_30d_sol > 0)
+            total_pnl = sum(1 for r in pnl_records if r.actual_copy_pnl_30d_sol is not None)
+            if total_pnl > 0:
+                accuracy_pct = (profitable / total_pnl) * 100
+                print(f"\n  PnL accuracy: {profitable}/{total_pnl} promoted wallets profitable ({accuracy_pct:.1f}%)")
+    except Exception:
+        pass
 
     print("\n  Suggested defaults (heuristics):")
     print(f"    min_wqs_candidate: {suggested_candidate:.1f}")
@@ -550,7 +564,42 @@ async def analyze_wallets(
     
     # Archetype diversification: ensure each trading style has minimum representation
     # among ACTIVE wallets. Prevents a homogeneous roster (e.g., all scalpers).
+    pre_diversion_active = {r.address for r in records if r.status == "ACTIVE"}
     _apply_archetype_diversification(records, min_wqs_active)
+
+    # Post-diversification backtest validation: run validator on each newly
+    # promoted wallet. Revert to CANDIDATE if validation fails.
+    if validator is not None:
+        promoted = [r for r in records if r.status == "ACTIVE" and r.address not in pre_diversion_active]
+        if promoted:
+            result_by_addr = {}
+            for res in results:
+                if res:
+                    result_by_addr[res.get("address")] = res
+            reverted_count = 0
+            for r in promoted:
+                res = result_by_addr.get(r.address)
+                if not res:
+                    continue
+                trades = res.get("trades", [])
+                metrics = res.get("metrics")
+                if not trades or not metrics:
+                    continue
+                try:
+                    vresult = await validator.validate_for_promotion(
+                        r.address, metrics, trades, strategy=res.get("strategy", "SHIELD"),
+                    )
+                    if not vresult.passed:
+                        r.status = "CANDIDATE"
+                        reverted_count += 1
+                        print(f"[Scout] Diversification validation: {r.address[:8]}... reverted to CANDIDATE "
+                              f"({vresult.reason})")
+                except Exception as val_err:
+                    print(f"[Scout] Diversification validation error for {r.address[:8]}...: {val_err}")
+                    r.status = "CANDIDATE"
+                    reverted_count += 1
+            if reverted_count > 0:
+                print(f"[Scout] Diversification validation: reverted {reverted_count}/{len(promoted)} promoted wallets")
     
     # Wallet clustering/deduplication: group wallets by shared funder and keep
     # only the top-WQS wallet per cluster to prevent correlated risk.
@@ -606,7 +655,14 @@ async def analyze_wallets(
                 if addr and trades:
                     wallet_tokens[addr] = {t.token_address for t in trades if hasattr(t, 'token_address')}
             if wallet_tokens:
-                demoted = apply_cross_wallet_token_correlation(records, wallet_tokens)
+                funder_map = {}
+                for r in records:
+                    cid = getattr(r, 'cluster_id', None)
+                    if cid and not cid.startswith("__singleton_"):
+                        funder_map[r.address] = cid
+                demoted = apply_cross_wallet_token_correlation(
+                    records, wallet_tokens, funder_map=funder_map or None,
+                )
                 if demoted > 0:
                     stats_active = [r for r in records if r.status == "ACTIVE"]
                     stats["active"] = len(stats_active)
@@ -992,6 +1048,38 @@ async def main_async():
         if args.verbose:
             print(f"[Scout] Adaptive weights skipped: {e}")
 
+    # Step 3e: WQS-to-PnL feedback loop — demote ACTIVE wallets with actual
+    # negative copy-trade PnL, and compute rolling accuracy metric.
+    try:
+        corr_reader = CorrelationReader()
+        if corr_reader.table_exists():
+            pnl_records = corr_reader.get_all_records(min_trades=5)
+            demoted_count = 0
+            profitable_count = 0
+            total_with_pnl = 0
+            for rec in pnl_records:
+                if rec.actual_copy_pnl_30d_sol is not None:
+                    total_with_pnl += 1
+                    if rec.actual_copy_pnl_30d_sol > 0:
+                        profitable_count += 1
+                    elif rec.actual_copy_pnl_30d_sol < 0:
+                        for r in records:
+                            if r.address == rec.wallet_address and r.status == "ACTIVE":
+                                r.status = "CANDIDATE"
+                                demoted_count += 1
+                                print(f"[Scout] PnL feedback: demoted {rec.wallet_address[:8]}... "
+                                      f"(actual 30d PnL={rec.actual_copy_pnl_30d_sol:.4f} SOL)")
+                                break
+            if total_with_pnl > 0:
+                accuracy_pct = (profitable_count / total_with_pnl) * 100
+                print(f"[Scout] PnL accuracy: {profitable_count}/{total_with_pnl} promoted wallets "
+                      f"profitable ({accuracy_pct:.1f}%)")
+                if demoted_count > 0:
+                    print(f"[Scout] PnL feedback: demoted {demoted_count} underperforming wallets")
+    except Exception as e:
+        if args.verbose:
+            print(f"[Scout] PnL feedback loop skipped: {e}")
+
     # Phase 6a: Write feature vectors to FeatureStore for downstream ML
     if not args.dry_run:
         try:
@@ -1050,6 +1138,13 @@ async def main_async():
     # Print parse health dashboard (always in verbose/dry-run, otherwise only if >0 failures)
     if args.verbose or args.dry_run or stats["total"] > 0:
         analyzer.print_parse_health_dashboard()
+
+    # If overall parse rate across ALL wallets is below threshold, exit non-zero
+    # so that cron can alert. Configurable via SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT.
+    if analyzer.is_parse_rate_below_threshold():
+        exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
+        print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
+        sys.exit(2)
 
     # Summary
     print("\n[Scout] Analysis complete:")

@@ -272,7 +272,17 @@ class ScoutConfig:
     def get_rugcheck_fail_mode() -> str:
         """Get RugCheck fail mode: 'open' (allow if API fails) or 'closed' (reject if API fails)."""
         return os.getenv("RUGCHECK_FAIL_MODE", "closed").lower()
-    
+
+    @staticmethod
+    def get_safety_fail_mode() -> str:
+        """Get token safety fail mode: 'open' (assume safe on RPC error) or 'closed' (reject on error).
+
+        When 'open', every RPC failure during token safety checks is logged but
+        the token is assumed safe. When 'closed' (default), any RPC failure
+        causes the token to be rejected.
+        """
+        return os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
+
     # ========================================================================
     # Redis Configuration
     # ========================================================================

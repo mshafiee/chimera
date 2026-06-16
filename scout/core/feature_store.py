@@ -22,7 +22,6 @@ Features (per wallet per run):
 """
 
 import csv
-import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any

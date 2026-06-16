@@ -263,7 +263,7 @@ def test_wqs_activity_bonus():
     score_inactive = calculate_wqs(wallet_inactive)
     
     assert score_active > score_inactive, f"Active wallet should score higher: {score_active} vs {score_inactive}"
-    assert abs((score_active - score_inactive) - 5.0) < 1.0, "Activity bonus should be around 5 points"
+    assert abs((score_active - score_inactive) - 3.5) < 1.5, f"Activity bonus should be ~3.5 points, got {score_active - score_inactive:.2f}"
 
 
 def test_wqs_roi_capping():
@@ -291,8 +291,8 @@ def test_wqs_roi_capping():
     
     # High ROI should score higher, but not by 3x (should be capped)
     assert score_high > score_normal
-    # Difference should be approximately 12.5 points (25 - 12.5)
-    assert abs((score_high - score_normal) - 12.5) < 2.0, "ROI contribution should be capped"
+    # With roi_score weight 1.5, capped ROI contribution diff is ~18.75 (25*1.5 - 12.5*1.5)
+    assert abs((score_high - score_normal) - 18.75) < 2.5, f"ROI contribution should be capped, got diff={score_high - score_normal:.2f}"
 
 
 def test_wqs_win_rate_fallback():
@@ -716,8 +716,8 @@ def test_mev_protection_adds_bonus_independently_of_sniper_penalty():
     score_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=True))
 
     assert score_mev > score_no_mev, "MEV protection flag should increase WQS"
-    assert abs((score_mev - score_no_mev) - 10.0) < 1.5, (
-        f"MEV protection adds ~10 pts, got diff={score_mev - score_no_mev:.2f}"
+    assert abs((score_mev - score_no_mev) - 12.0) < 2.0, (
+        f"MEV protection adds ~12 pts, got diff={score_mev - score_no_mev:.2f}"
     )
     # Both still have the sniper penalty (delay=50 < 60 → -30 pts), but neither returns 0
     assert score_no_mev > 0.0, "delay=50s should not return zero (only <30s does)"

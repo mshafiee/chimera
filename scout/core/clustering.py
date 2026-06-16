@@ -111,30 +111,35 @@ def apply_cross_wallet_token_correlation(
     records: List,
     wallet_tokens: Dict[str, set],
     max_overlap_ratio: float = 0.70,
+    funder_map: Optional[Dict[str, Optional[str]]] = None,
 ) -> int:
     """
     Detect ACTIVE wallets with >max_overlap_ratio shared tokens and demote
     the lower-WQS wallet to CANDIDATE. This prevents a roster of wallets
     all trading the same pool of tokens (correlated risk).
-    
+
+    When funder_map is provided (wallet_address -> funder_address), wallets
+    that share the same funder are demoted at a lower overlap threshold (50%)
+    because shared funding is an additional sybil signal.
+
     Args:
         records: List of WalletRecord objects
         wallet_tokens: Dict mapping wallet_address -> set of token_addresses
         max_overlap_ratio: Maximum allowed token overlap before demotion
-        
+        funder_map: Optional dict mapping wallet_address -> funder_address
+
     Returns:
         Number of wallets demoted
     """
     active = [r for r in records if r.status == "ACTIVE" and r.address in wallet_tokens]
     if len(active) < 2:
         return 0
-    
+
     demoted = 0
     demoted_addresses = set()
-    
-    # Sort by WQS descending: higher-WQS wallets survive when overlap is high
+
     active.sort(key=lambda r: r.wqs_score or 0, reverse=True)
-    
+
     for i, r1 in enumerate(active):
         if r1.address in demoted_addresses:
             continue
@@ -151,17 +156,30 @@ def apply_cross_wallet_token_correlation(
                 continue
             overlap = len(tokens1 & tokens2)
             min_size = min(len(tokens1), len(tokens2))
-            if min_size > 0 and overlap / min_size > max_overlap_ratio:
+            if min_size == 0:
+                continue
+            overlap_ratio = overlap / min_size
+
+            # Determine threshold: shared funder lowers the bar to 50%
+            share_funder = (
+                funder_map is not None
+                and funder_map.get(r1.address)
+                and funder_map.get(r1.address) == funder_map.get(r2.address)
+            )
+            threshold = 0.50 if share_funder else max_overlap_ratio
+
+            if overlap_ratio > threshold:
+                reason = "funder" if share_funder else "token"
                 r2.status = "CANDIDATE"
                 r2.notes = (r2.notes or "") + (
-                    f" | Demoted: >{max_overlap_ratio*100:.0f}% token overlap "
+                    f" | Demoted: >{threshold*100:.0f}% {reason} overlap "
                     f"({overlap}/{min_size}) with higher-WQS ACTIVE wallet {r1.address[:8]}..."
                 )
                 demoted_addresses.add(r2.address)
                 demoted += 1
-    
+
     if demoted > 0:
         print(f"[Clustering] Cross-wallet token correlation: demoted {demoted} "
               f"wallets with >{max_overlap_ratio*100:.0f}% token overlap")
-    
+
     return demoted

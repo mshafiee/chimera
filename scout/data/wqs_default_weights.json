@@ -1,0 +1,22 @@
+{
+  "roi_score": 1.5,
+  "win_rate_score": 1.2,
+  "pf_score": 1.3,
+  "sortino_score": 1.1,
+  "drawdown_penalty": 1.2,
+  "activity_score": 0.7,
+  "recency_score": 1.0,
+  "martingale_penalty": 1.5,
+  "smart_money_score": 1.2,
+  "entry_delay_score": 1.0,
+  "pf_wr_penalty": 1.0,
+  "token_diversity_score": 1.0,
+  "dex_diversity_score": 1.0,
+  "smart_money_removal": 1.0,
+  "pump_spike_penalty": 1.0,
+  "consistency_score": 1.0,
+  "sniper_penalty": 1.0,
+  "insider_penalty": 1.0,
+  "scam_penalty": 1.0,
+  "mev_risk_penalty": 1.0
+}

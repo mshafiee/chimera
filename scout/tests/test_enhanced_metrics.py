@@ -76,9 +76,11 @@ class TestROICalculation:
         ]
         
         roi = analyzer._calculate_roi_from_trades(trades)
-        
-        # Expected: (12 - 10) * 1.0 / (10 * 2.0) * 100 = 10%
-        assert abs(roi - 10.0) < 0.1
+
+        # With FIFO cost-basis tracking, the denominator is the cost basis
+        # of the SELL (1.0 * 10.0 = 10.0), not all BUYs (20.0).
+        # Expected: 2.0 / 10.0 * 100 = 20%
+        assert abs(roi - 20.0) < 0.1
     
     def test_roi_calculation_multiple_tokens(self, analyzer):
         """Test ROI calculation with multiple tokens."""

@@ -6,6 +6,11 @@ recalibrate WQS component weights. Components that correlate well with
 actual copy-trade profitability get higher weight; noise components
 get deweighted.
 
+Pre-seeded defaults are loaded from data/wqs_default_weights.json to
+avoid the cold-start problem (all-1.0 weights before any calibration
+records exist). On early calibration runs (< 10 records) a Bayesian
+prior blends 60% seeded + 40% regression to prevent noise-driven swings.
+
 Usage:
     calibrator = AdaptiveWeightCalibrator(db_path="data/chimera.db")
     new_weights = calibrator.calibrate()
@@ -18,31 +23,12 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .weight_seed import load_seeded_weights
+
 logger = logging.getLogger(__name__)
 
-# Default WQS component weights (multipliers applied to component scores)
-DEFAULT_WQS_WEIGHTS = {
-    "roi_score": 1.0,
-    "win_rate_score": 1.0,
-    "pf_score": 1.0,
-    "sortino_score": 1.0,
-    "drawdown_penalty": 1.0,
-    "activity_score": 1.0,
-    "recency_score": 1.0,
-    "martingale_penalty": 1.0,
-    "pf_wr_penalty": 1.0,
-    "token_diversity_score": 1.0,
-    "dex_diversity_score": 1.0,
-    "smart_money_score": 1.0,
-    "smart_money_removal": 1.0,
-    "entry_delay_score": 1.0,
-    "pump_spike_penalty": 1.0,
-    "consistency_score": 1.0,
-    "sniper_penalty": 1.0,
-    "insider_penalty": 1.0,
-    "scam_penalty": 1.0,
-    "mev_risk_penalty": 1.0,
-}
+# Default WQS component weights — loaded from pre-seeded file, not hardcoded
+DEFAULT_WQS_WEIGHTS = load_seeded_weights()
 
 
 class AdaptiveWeightCalibrator:
@@ -55,7 +41,8 @@ class AdaptiveWeightCalibrator:
 
     MIN_WEIGHT = 0.5
     MAX_WEIGHT = 2.0
-    MIN_SAMPLES = 10  # Minimum correlation records for calibration
+    MIN_SAMPLES = 5  # Pearson r with n=5 has ~3 df; Bayesian prior handles noise
+    BAYESIAN_THRESHOLD = 10  # Below this, blend with seeded prior
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
@@ -141,12 +128,26 @@ class AdaptiveWeightCalibrator:
         new_weights = dict(current_weights)
 
         for comp_name, corr in component_corrs.items():
-            # Map correlation [-1.0, 1.0] to weight [0.5, 2.0]
-            # corr=0 → weight=1.0, corr=0.3 → weight=1.3, corr=-0.3 → weight=0.7
             adjusted = 1.0 + corr
             new_weights[comp_name] = max(self.MIN_WEIGHT, min(self.MAX_WEIGHT, adjusted))
 
-        # Blend with current weights (EMA-style, 30% new, 70% old)
+        # Bayesian blend: on early runs (< BAYESIAN_THRESHOLD records),
+        # blend 60% seeded prior + 40% regression to prevent noise-driven swings.
+        n_records = len(records)
+        if n_records < self.BAYESIAN_THRESHOLD:
+            seeded = load_seeded_weights()
+            blended = {}
+            for key in set(list(current_weights.keys()) + list(new_weights.keys())):
+                seed_w = seeded.get(key, 1.0)
+                reg_w = new_weights.get(key, seed_w)
+                blended[key] = seed_w * 0.6 + reg_w * 0.4
+            logger.info(
+                "Bayesian blend applied (%d records < %d): 0.6*seeded + 0.4*regression",
+                n_records, self.BAYESIAN_THRESHOLD,
+            )
+            return blended
+
+        # Standard EMA blend (30% new, 70% old) for mature data
         blended = {}
         for key in set(list(current_weights.keys()) + list(new_weights.keys())):
             old_w = current_weights.get(key, 1.0)

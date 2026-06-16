@@ -4,10 +4,14 @@ Dynamic execution cost estimation for backtesting.
 Replaces static priority_fee_sol_per_trade / jito_tip_sol_per_trade with
 percentile-based fees queried from Helius getPriorityFeeEstimate so that
 the backtester's cost model matches current market conditions.
+
+Fee estimates are persisted to a JSON cache file so that on Helius-down
+restarts the last-known fees are used instead of static defaults.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -29,6 +33,15 @@ SPEAR_FEE_PERCENTILE = 90
 # Cache TTL in seconds (default 300 = 5 min, covers a full Scout run)
 CACHE_TTL_SECONDS = float(os.getenv("SCOUT_FEE_CACHE_TTL_SECONDS", "300"))
 
+# --- Fee cache file persistence ---
+_FEE_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+_FEE_CACHE_FILENAME = "fee_cache.json"
+DEFAULT_FEE_CACHE_PATH = os.path.join(_FEE_CACHE_DIR, _FEE_CACHE_FILENAME)
+
+# Stale threshold: how old (in days) a cached fee snapshot can be before we
+# fall through to static defaults. Env var SCOUT_FEE_CACHE_STALE_DAYS.
+FEE_CACHE_STALE_DAYS = int(os.getenv("SCOUT_FEE_CACHE_STALE_DAYS", "7"))
+
 
 class CostEstimator:
     """
@@ -41,8 +54,10 @@ class CostEstimator:
     def __init__(self, helius_api_key: Optional[str] = None):
         self._api_key = helius_api_key or os.getenv("HELIUS_API_KEY")
         self._rpc_url = self._build_rpc_url()
-        self._cache: Dict[str, Tuple[float, Tuple[float, ...]]] = {}  # (ts, cached_fee_levels_tuple)
+        self._cache: Dict[str, Tuple[float, Tuple[float, ...]]] = {}
         self._session: Optional[aiohttp.ClientSession] = None
+        self._fee_cache_path = os.getenv("SCOUT_FEE_CACHE_PATH", DEFAULT_FEE_CACHE_PATH)
+        self._load_fee_cache()
 
     def _build_rpc_url(self) -> Optional[str]:
         """Derive the Helius RPC URL from available configuration."""
@@ -112,6 +127,56 @@ class CostEstimator:
         return prio, jito
 
     # ------------------------------------------------------------------
+    # Fee cache persistence (JSON file, survives restarts)
+    # ------------------------------------------------------------------
+
+    def _fee_cache_path(self) -> str:
+        return os.getenv("SCOUT_FEE_CACHE_PATH", DEFAULT_FEE_CACHE_PATH)
+
+    def _load_fee_cache(self) -> None:
+        path = self._fee_cache_path
+        try:
+            if not os.path.exists(path):
+                return
+            with open(path) as f:
+                raw = json.load(f)
+            fee_levels = raw.get("fee_levels")
+            timestamp = raw.get("timestamp", 0.0)
+            if not isinstance(fee_levels, list) or not fee_levels:
+                return
+            stale_seconds = FEE_CACHE_STALE_DAYS * 86400
+            if time.time() - timestamp > stale_seconds:
+                logger.info("Fee cache at %s is stale (>%d days), ignoring", path, FEE_CACHE_STALE_DAYS)
+                return
+            levels_tuple = tuple(float(v) for v in fee_levels)
+            self._cache["raw_fees"] = (timestamp, levels_tuple)
+            logger.info("Loaded fee cache from %s (%d levels, %.1f hours old)",
+                        path, len(levels_tuple), (time.time() - timestamp) / 3600)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            logger.warning("Failed to load fee cache from %s: %s", path, exc)
+
+    def _persist_fee_cache(self) -> None:
+        cache_entry = self._cache.get("raw_fees")
+        if cache_entry is None:
+            return
+        timestamp, fee_levels = cache_entry
+        if not isinstance(fee_levels, (list, tuple)) or not fee_levels:
+            return
+        path = self._fee_cache_path
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            data = {
+                "timestamp": timestamp,
+                "fee_levels": [float(v) for v in fee_levels],
+                "stale_threshold_days": FEE_CACHE_STALE_DAYS,
+            }
+            with open(path, "w") as f:
+                json.dump(data, f, indent=2)
+            logger.debug("Fee cache persisted to %s (%d levels)", path, len(fee_levels))
+        except OSError as exc:
+            logger.warning("Failed to persist fee cache to %s: %s", path, exc)
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -154,8 +219,8 @@ class CostEstimator:
                 data = await resp.json()
                 levels = self._parse_fee_response(data)
                 if levels is not None:
-                    # Cache the full sorted list so percentiles can be computed from cache
                     self._cache[cache_key] = (now, tuple(levels))
+                    self._persist_fee_cache()
                 return levels
         except Exception as exc:
             logger.warning("getPriorityFeeEstimate failed: %s", self._redact(str(exc)))
