@@ -584,6 +584,46 @@ class ScoutConfig:
         return os.getenv("SCOUT_PREDICTION_TRACKING_ENABLED", "true").lower() == "true"
 
     @staticmethod
+    def get_prediction_logging_enabled() -> bool:
+        """Get whether prediction logging to database is enabled."""
+        return os.getenv("SCOUT_PREDICTION_LOGGING_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_validation_enabled() -> bool:
+        """Get whether model validation is enabled."""
+        return os.getenv("SCOUT_VALIDATION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_validation_time_window_days() -> int:
+        """Get primary time window for validation in days."""
+        return int(os.getenv("SCOUT_VALIDATION_TIME_WINDOW_DAYS", "7"))
+
+    @staticmethod
+    def get_alert_webhook_url() -> Optional[str]:
+        """Get webhook URL for validation alerts (Discord/Slack)."""
+        return os.getenv("SCOUT_ALERT_WEBHOOK_URL")
+
+    @staticmethod
+    def get_alert_high_error_threshold() -> float:
+        """Get high error rate threshold for alerts (SOL)."""
+        return float(os.getenv("SCOUT_ALERT_HIGH_ERROR_THRESHOLD", "0.5"))
+
+    @staticmethod
+    def get_alert_drift_threshold() -> float:
+        """Get drift threshold for alerts (0.0-1.0)."""
+        return float(os.getenv("SCOUT_ALERT_DRIFT_THRESHOLD", "0.15"))
+
+    @staticmethod
+    def get_alert_low_accuracy_threshold() -> float:
+        """Get low direction accuracy threshold for alerts (0.0-1.0)."""
+        return float(os.getenv("SCOUT_ALERT_LOW_ACCURACY_THRESHOLD", "0.5"))
+
+    @staticmethod
+    def get_alert_dir() -> str:
+        """Get directory for storing alert files."""
+        return os.getenv("SCOUT_ALERT_DIR", "data/alerts")
+
+    @staticmethod
     def get_drift_detection_enabled() -> bool:
         """Get whether model drift detection is enabled."""
         return os.getenv("SCOUT_DRIFT_DETECTION_ENABLED", "true").lower() == "true"

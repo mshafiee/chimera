@@ -119,6 +119,9 @@ MAILTO=""
 # Daily metrics update at 4:30 AM (after reconciliation)
 30 4 * * * $CHIMERA_USER $CHIMERA_HOME/ops/update-metrics.sh >> /var/log/chimera/metrics-update.log 2>&1
 
+# Daily ML model validation - 3:00 AM (automatic)
+0 3 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 -m scout.scripts.run_validation --db-path $CHIMERA_HOME/data/chimera.db --time-window 7d >> /var/log/chimera/validation.log 2>&1
+
 # Weekly Scout run (update wallet roster) - Sundays at 2:00 AM
 0 2 * * 0 $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1
 

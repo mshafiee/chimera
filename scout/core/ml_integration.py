@@ -60,6 +60,13 @@ except ImportError:
     MONITORING_AVAILABLE = False
     logger.warning("ModelMonitor not available")
 
+try:
+    from scout.core.prediction_logger import PredictionLogger, get_prediction_logger
+    PREDICTION_LOGGER_AVAILABLE = True
+except ImportError:
+    PREDICTION_LOGGER_AVAILABLE = False
+    logger.warning("PredictionLogger not available")
+
 
 class MLWQSEnhancer:
     """
@@ -87,6 +94,9 @@ class MLWQSEnhancer:
 
         # Monitor
         self.monitor = None
+
+        # Prediction Logger
+        self.prediction_logger = None
 
         # Initialize components if enabled
         if self.enabled:
@@ -116,6 +126,11 @@ class MLWQSEnhancer:
         if MONITORING_AVAILABLE and ScoutConfig.get_ml_monitoring_enabled():
             self.monitor = get_monitor()
             logger.info("Model monitoring initialized")
+
+        # Prediction Logger
+        if PREDICTION_LOGGER_AVAILABLE and ScoutConfig.get_prediction_logging_enabled():
+            self.prediction_logger = get_prediction_logger()
+            logger.info("Prediction logger initialized")
 
     def enhance_wqs(
         self,
@@ -169,6 +184,28 @@ class MLWQSEnhancer:
 
             # Log to monitor if available
             if self.monitor and 'predicted_pnl_sol' in predictions:
+                self.monitor.log_prediction(
+                    wallet_id=getattr(wallet_metrics, 'wallet_id', 'unknown'),
+                    predicted_pnl=predictions['predicted_pnl_sol'],
+                    features=features,
+                    model_type=predictions.get('model_type', 'ensemble'),
+                    confidence=predictions.get('confidence', 0.5),
+                    inference_time_ms=predictions.get('inference_time_ms', 0.0),
+                )
+
+            # Log to prediction logger for later validation
+            if self.prediction_logger and 'predicted_pnl_sol' in predictions:
+                self.prediction_logger.log_prediction(
+                    wallet_address=getattr(wallet_metrics, 'wallet_id', 'unknown'),
+                    predicted_pnl_sol=predictions['predicted_pnl_sol'],
+                    model_type=predictions.get('model_type', 'ensemble'),
+                    features=features,
+                    confidence=predictions.get('confidence', 0.5),
+                    strategy=strategy,
+                    wqs_score=wqs_result.adjusted_score if hasattr(wqs_result, 'adjusted_score') else 0.0,
+                    wqs_components=wqs_result.components if hasattr(wqs_result, 'components') else {},
+                    predicted_class=predictions.get('predicted_class')
+                )
                 self.monitor.log_prediction(
                     wallet_id=getattr(wallet_metrics, 'wallet_id', 'unknown'),
                     predicted_pnl=predictions['predicted_pnl_sol'],
