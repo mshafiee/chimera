@@ -248,6 +248,55 @@ class ScoutConfig:
         return int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", "20"))
     
     # ========================================================================
+    # Optimization Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_optimization_enabled() -> bool:
+        """Get whether optimization systems are enabled."""
+        return os.getenv("SCOUT_OPTIMIZATION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_credit_tracking_enabled() -> bool:
+        """Get whether Helius credit tracking is enabled."""
+        return os.getenv("SCOUT_CREDIT_TRACKING_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_ml_prediction_enabled() -> bool:
+        """Get whether ML profitability prediction is enabled."""
+        return os.getenv("SCOUT_ML_PREDICTION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_production_monitoring_enabled() -> bool:
+        """Get whether production monitoring is enabled."""
+        return os.getenv("SCOUT_PRODUCTION_MONITORING_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_growth_optimized() -> bool:
+        """Get whether growth optimization is enabled ($200 → $1000)."""
+        return os.getenv("SCOUT_GROWTH_OPTIMIZED", "true").lower() == "true"
+
+    @staticmethod
+    def get_current_capital() -> float:
+        """Get current capital for growth optimization."""
+        return float(os.getenv("SCOUT_CURRENT_CAPITAL", "200.0"))
+
+    @staticmethod
+    def get_target_capital() -> float:
+        """Get target capital for growth optimization."""
+        return float(os.getenv("SCOUT_TARGET_CAPITAL", "1000.0"))
+
+    @staticmethod
+    def get_monthly_credits() -> int:
+        """Get Helius monthly credit budget."""
+        return int(os.getenv("SCOUT_MONTHLY_CREDITS", "10000000"))
+
+    @staticmethod
+    def get_max_requests_per_second() -> int:
+        """Get Helius rate limit (requests per second)."""
+        return int(os.getenv("SCOUT_MAX_REQUESTS_PER_SECOND", "50"))
+
+    # ========================================================================
     # Database Configuration
     # ========================================================================
     
@@ -377,8 +426,20 @@ class ScoutConfig:
         print(f"Min Liquidity Shield: ${ScoutConfig.get_min_liquidity_shield():,.0f}")
         print(f"Min Liquidity Spear: ${ScoutConfig.get_min_liquidity_spear():,.0f}")
         print(f"Database Path: {ScoutConfig.get_db_path()}")
+
+        # Optimization Configuration
+        print(f"\nOptimization Settings:")
+        print(f"  Optimization Enabled: {ScoutConfig.get_optimization_enabled()}")
+        print(f"  Credit Tracking: {ScoutConfig.get_credit_tracking_enabled()}")
+        print(f"  ML Prediction: {ScoutConfig.get_ml_prediction_enabled()}")
+        print(f"  Production Monitoring: {ScoutConfig.get_production_monitoring_enabled()}")
+        print(f"  Growth Optimized: {Scout.get_growth_optimized()}")
+        print(f"  Current Capital: ${ScoutConfig.get_current_capital():,.0f}")
+        print(f"  Target Capital: ${ScoutConfig.get_target_capital():,.0f}")
+        print(f"  Monthly Credits: {ScoutConfig.get_monthly_credits():,}")
+        print(f"  Max Requests/sec: {ScoutConfig.get_max_requests_per_second()}")
         print("=" * 70)
-        
+
         is_valid, warnings = ScoutConfig.validate_config()
         if warnings:
             print("\nConfiguration Warnings:")
