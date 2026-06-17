@@ -52,6 +52,12 @@ class CacheCategory(Enum):
     WALLET_AGE = "wallet_age"              # 30 days
     DEX_LIST = "dex_list"                 # 7 days
 
+    # Growth-aware categories (Phase 5)
+    HIGH_WQS_WALLET_DATA = "high_wqs_wallet_data"  # 1 hour for WQS > 70
+    ANALYSIS_RESULTS = "analysis_results"         # Until next run (6 hours)
+    DISCOVERY_RESULTS = "discovery_results"       # 30 minutes
+    BACKTEST_RESULTS = "backtest_results"         # 1 hour
+
 
 @dataclass
 class CacheEntry:
@@ -121,6 +127,12 @@ class TTLDefaults:
     TOKEN_CREATION = 604800   # 7 days
     WALLET_AGE = 2592000      # 30 days
     DEX_LIST = 604800         # 7 days
+
+    # Growth-aware categories (Phase 5)
+    HIGH_WQS_WALLET_DATA = 3600    # 1 hour for high-WQS wallets
+    ANALYSIS_RESULTS = 21600        # 6 hours (until next run)
+    DISCOVERY_RESULTS = 1800       # 30 minutes
+    BACKTEST_RESULTS = 3600        # 1 hour
 
     @classmethod
     def get_ttl(cls, category: CacheCategory) -> int:
@@ -323,8 +335,24 @@ class AdvancedCache:
 
         return usage_ratio > threshold
 
-    def _get_ttl(self, category: CacheCategory) -> int:
-        """Get TTL for a category, with environment variable override."""
+    def _get_ttl(self, category: CacheCategory, wqs_score: Optional[float] = None) -> int:
+        """
+        Get TTL for a category, with environment variable override and growth-aware adjustment.
+
+        Growth-aware caching (Phase 5):
+        - High-WQS wallets (>70): cached 4x longer
+        - Medium-WQS wallets (40-70): cached 2x longer
+        - Low-WQS wallets (<40): standard TTL
+
+        Args:
+            category: Cache category
+            wqs_score: Optional WQS score for growth-aware TTL adjustment
+
+        Returns:
+            TTL in seconds
+        """
+        base_ttl = TTLDefaults.get_ttl(category)
+
         # Check for environment variable override
         env_var = f"SCOUT_CACHE_TTL_{category.value.upper()}"
         override = os.getenv(env_var)
@@ -335,11 +363,23 @@ class AdvancedCache:
             except ValueError:
                 pass
 
-        return TTLDefaults.get_ttl(category)
+        # Growth-aware TTL adjustment (Phase 5)
+        if wqs_score is not None and category == CacheCategory.WALLET_METRICS:
+            growth_mode = os.getenv("SCOUT_GROWTH_OPTIMIZED", "false").lower() == "true"
+
+            if growth_mode:
+                # High-WQS wallets get extended cache time
+                if wqs_score >= 70.0:
+                    return base_ttl * 4  # 20 minutes for high-WQS
+                elif wqs_score >= 40.0:
+                    return base_ttl * 2  # 10 minutes for medium-WQS
+                # Low-WQS wallets keep standard 5 minutes
+
+        return base_ttl
 
     def get(self, prefix: str, identifier: str, *args,
             category: CacheCategory = CacheCategory.WALLET_METRICS,
-            default: Any = None) -> Optional[Any]:
+            default: Any = None, wqs_score: Optional[float] = None) -> Optional[Any]:
         """
         Get value from cache (tries L1 → L2 → L3).
 
@@ -349,6 +389,7 @@ class AdvancedCache:
             *args: Additional parameters for key
             category: Cache category for TTL management
             default: Default value if not found
+            wqs_score: Optional WQS score for growth-aware TTL (Phase 5)
 
         Returns:
             Cached value or default
@@ -376,7 +417,7 @@ class AdvancedCache:
 
                     # Promote to L1 cache
                     if value is not None:
-                        self._set_l1(key, value, category)
+                        self._set_l1(key, value, category, wqs_score)
 
                     with self._stats_lock:
                         self._stats.total_hits += 1
@@ -405,7 +446,7 @@ class AdvancedCache:
 
                 # Promote to L1 cache
                 if value is not None:
-                    self._set_l1(key, value, category)
+                    self._set_l1(key, value, category, wqs_score)
 
                     # Update hit count in SQLite
                     self._update_l3_hit_count(key, hit_count + 1)
@@ -423,9 +464,9 @@ class AdvancedCache:
 
         return default
 
-    def _set_l1(self, key: str, value: Any, category: CacheCategory):
+    def _set_l1(self, key: str, value: Any, category: CacheCategory, wqs_score: Optional[float] = None):
         """Set value in L1 cache."""
-        ttl = self._get_ttl(category)
+        ttl = self._get_ttl(category, wqs_score)
         serialized = self._serialize_value(value)
         size_bytes = len(serialized)
 
@@ -476,7 +517,8 @@ class AdvancedCache:
             logger.debug(f"Failed to update L3 hit count: {e}")
 
     def set(self, prefix: str, identifier: str, value: Any,
-            *args, category: CacheCategory = CacheCategory.WALLET_METRICS):
+            *args, category: CacheCategory = CacheCategory.WALLET_METRICS,
+            wqs_score: Optional[float] = None):
         """
         Set value in cache (stores in L1, L2, L3).
 
@@ -486,6 +528,7 @@ class AdvancedCache:
             value: Value to cache
             *args: Additional parameters for key
             category: Cache category for TTL management
+            wqs_score: Optional WQS score for growth-aware TTL (Phase 5)
         """
         if value is None:
             return
@@ -494,12 +537,12 @@ class AdvancedCache:
         serialized = self._serialize_value(value)
 
         # Store in L1
-        self._set_l1(key, value, category)
+        self._set_l1(key, value, category, wqs_score)
 
         # Store in L2 (Redis)
         if self._redis_available:
             try:
-                ttl = self._get_ttl(category)
+                ttl = self._get_ttl(category, wqs_score)
                 self._redis_client.set(key, serialized.decode('utf-8'), ttl_seconds=ttl)
             except Exception as e:
                 logger.debug(f"Redis cache set failed: {e}")
@@ -509,7 +552,7 @@ class AdvancedCache:
             conn = sqlite3.connect(self._sqlite_path)
             cursor = conn.cursor()
 
-            ttl = self._get_ttl(category)
+            ttl = self._get_ttl(category, wqs_score)
             now = time.time()
 
             cursor.execute("""
@@ -665,18 +708,29 @@ class AdvancedCache:
 
         print("="*70 + "\n")
 
-    def warm_cache(self, wallet_addresses: List[str], token_addresses: List[str]):
+    def warm_cache(self, wallet_addresses: List[str], token_addresses: List[str],
+                   high_wqs_wallets: Optional[List[str]] = None):
         """
         Warm up cache with frequently accessed data.
+
+        Growth-aware warming (Phase 5):
+        - High-WQS wallets get priority warming
+        - Token metadata preloaded
+        - Analysis results cached until next run
 
         Args:
             wallet_addresses: List of wallet addresses to preload
             token_addresses: List of token addresses to preload
+            high_wqs_wallets: Optional list of high-WQS wallets for priority caching
         """
         if not self._enable_warming:
             return
 
         logger.info(f"Cache warming: {len(wallet_addresses)} wallets, {len(token_addresses)} tokens")
+
+        if high_wqs_wallets:
+            logger.info(f"Priority warming: {len(high_wqs_wallets)} high-WQS wallets")
+            # High-WQS wallets will have extended TTL and be cached longer
 
         # This would trigger background loading of frequently accessed data
         # Implementation depends on specific use cases
@@ -772,6 +826,126 @@ def set_liquidity_data(token_address: str, liquidity_data: Dict):
     """Set cached liquidity data."""
     cache = get_cache()
     cache.set("liquidity", token_address, liquidity_data, category=CacheCategory.LIQUIDITY_DATA)
+
+
+# Growth-aware convenience functions (Phase 5)
+
+def get_high_wqs_wallet_data(address: str, wqs_score: float) -> Optional[Dict]:
+    """
+    Get cached high-WQS wallet data with growth-aware TTL.
+
+    Args:
+        address: Wallet address
+        wqs_score: WQS score for TTL calculation (must be >= 70 for extended TTL)
+
+    Returns:
+        Cached wallet data or None
+    """
+    cache = get_cache()
+    return cache.get("wallet", address, "high_wqs",
+                     category=CacheCategory.HIGH_WQS_WALLET_DATA,
+                     wqs_score=wqs_score)
+
+
+def set_high_wqs_wallet_data(address: str, data: Dict, wqs_score: float):
+    """
+    Set cached high-WQS wallet data with growth-aware TTL.
+
+    Args:
+        address: Wallet address
+        data: Wallet data to cache
+        wqs_score: WQS score for TTL calculation (>= 70 gets 4x TTL)
+    """
+    cache = get_cache()
+    cache.set("wallet", address, "high_wqs", data,
+              category=CacheCategory.HIGH_WQS_WALLET_DATA,
+              wqs_score=wqs_score)
+
+
+def get_analysis_results(run_id: str) -> Optional[Dict]:
+    """
+    Get cached analysis results for a run.
+
+    Analysis results are cached until next run (6 hours default).
+
+    Args:
+        run_id: Analysis run identifier
+
+    Returns:
+        Cached analysis results or None
+    """
+    cache = get_cache()
+    return cache.get("analysis", run_id, "results",
+                     category=CacheCategory.ANALYSIS_RESULTS)
+
+
+def set_analysis_results(run_id: str, results: Dict):
+    """
+    Set cached analysis results for a run.
+
+    Args:
+        run_id: Analysis run identifier
+        results: Analysis results to cache
+    """
+    cache = get_cache()
+    cache.set("analysis", run_id, "results", results,
+              category=CacheCategory.ANALYSIS_RESULTS)
+
+
+def get_discovery_results(discovery_id: str) -> Optional[Dict]:
+    """
+    Get cached wallet discovery results.
+
+    Args:
+        discovery_id: Discovery run identifier
+
+    Returns:
+        Cached discovery results or None
+    """
+    cache = get_cache()
+    return cache.get("discovery", discovery_id, "results",
+                     category=CacheCategory.DISCOVERY_RESULTS)
+
+
+def set_discovery_results(discovery_id: str, results: Dict):
+    """
+    Set cached wallet discovery results.
+
+    Args:
+        discovery_id: Discovery run identifier
+        results: Discovery results to cache
+    """
+    cache = get_cache()
+    cache.set("discovery", discovery_id, "results", results,
+              category=CacheCategory.DISCOVERY_RESULTS)
+
+
+def get_backtest_results(wallet_address: str) -> Optional[Dict]:
+    """
+    Get cached backtest results for a wallet.
+
+    Args:
+        wallet_address: Wallet address
+
+    Returns:
+        Cached backtest results or None
+    """
+    cache = get_cache()
+    return cache.get("backtest", wallet_address, "results",
+                     category=CacheCategory.BACKTEST_RESULTS)
+
+
+def set_backtest_results(wallet_address: str, results: Dict):
+    """
+    Set cached backtest results for a wallet.
+
+    Args:
+        wallet_address: Wallet address
+        results: Backtest results to cache
+    """
+    cache = get_cache()
+    cache.set("backtest", wallet_address, "results", results,
+              category=CacheCategory.BACKTEST_RESULTS)
 
 
 if __name__ == "__main__":

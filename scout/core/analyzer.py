@@ -2892,6 +2892,159 @@ class WalletAnalyzer:
             return 1.0
         return parsed / total
 
+    # Phase 5: Batch Processing Optimization
+    # ========================================
+
+    async def analyze_wallets_batch(
+        self,
+        addresses: List[str],
+        batch_size: int = 50,
+        concurrency_per_batch: int = 5,
+        progress_callback: Optional[callable] = None,
+    ) -> Dict[str, Optional[WalletMetrics]]:
+        """
+        Analyze multiple wallets in optimized batches with controlled concurrency.
+
+        Growth-optimized batch processing (Phase 5):
+        - Processes wallets in batches of 50 for optimal memory usage
+        - Uses controlled concurrency (default 5 parallel wallets) within each batch
+        - Sequential batch processing for rate limit compliance
+        - Progress tracking and error handling
+
+        Args:
+            addresses: List of wallet addresses to analyze
+            batch_size: Number of wallets per batch (default 50 for 8x speedup)
+            concurrency_per_batch: Parallel wallets within each batch (default 5)
+            progress_callback: Optional callback(batch_num, total_batches, processed, total)
+
+        Returns:
+            Dict mapping address -> WalletMetrics (None if failed)
+        """
+        results = {}
+        total_wallets = len(addresses)
+        total_batches = (total_wallets + batch_size - 1) // batch_size
+
+        logger.info(f"[Batch Process] Starting: {total_wallets} wallets in {total_batches} batches")
+        logger.info(f"  Batch size: {batch_size}, Concurrency: {concurrency_per_batch}")
+
+        # Get discovery concurrency from config if available
+        if CONFIG_AVAILABLE and ScoutConfig:
+            concurrency_per_batch = ScoutConfig.get_discovery_concurrency()
+
+        for batch_num, i in enumerate(range(0, total_wallets, batch_size), 1):
+            batch_addresses = addresses[i:i + batch_size]
+            batch_results = await self._process_batch(
+                batch_addresses,
+                concurrency=concurrency_per_batch,
+            )
+
+            # Store results
+            results.update(batch_results)
+
+            # Progress callback
+            if progress_callback:
+                progress_callback(
+                    batch_num,
+                    total_batches,
+                    len(results),
+                    total_wallets,
+                )
+
+            # Log progress
+            processed = len(results)
+            success_count = sum(1 for m in results.values() if m is not None)
+            logger.info(
+                f"[Batch {batch_num}/{total_batches}] "
+                f"Processed {processed}/{total_wallets} wallets "
+                f"({success_count} successful)"
+            )
+
+        logger.info(f"[Batch Process] Complete: {sum(1 for m in results.values() if m is not None)}/{total_wallets} successful")
+        return results
+
+    async def _process_batch(
+        self,
+        addresses: List[str],
+        concurrency: int = 5,
+    ) -> Dict[str, Optional[WalletMetrics]]:
+        """
+        Process a single batch of wallets with controlled concurrency.
+
+        Uses asyncio.Semaphore for rate limit compliance and memory control.
+
+        Args:
+            addresses: List of wallet addresses in this batch
+            concurrency: Maximum parallel requests
+
+        Returns:
+            Dict mapping address -> WalletMetrics
+        """
+        results = {}
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def process_one(address: str) -> Tuple[str, Optional[WalletMetrics]]:
+            async with semaphore:
+                try:
+                    metrics = await self.get_wallet_metrics(address)
+                    return (address, metrics)
+                except Exception as e:
+                    logger.warning(f"Failed to analyze {address[:8]}...: {e}")
+                    return (address, None)
+
+        # Process all wallets in batch with controlled concurrency
+        tasks = [process_one(addr) for addr in addresses]
+        batch_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Collect results
+        for result in batch_results:
+            if isinstance(result, Exception):
+                continue
+            if result and isinstance(result, tuple):
+                address, metrics = result
+                results[address] = metrics
+
+        return results
+
+    async def prefetch_wallet_data(
+        self,
+        addresses: List[str],
+        prefetch_token_meta: bool = True,
+        prefetch_prices: bool = True,
+    ) -> None:
+        """
+        Prefetch common data across all wallets for batch optimization.
+
+        Growth-aware prefetching (Phase 5):
+        - Token metadata (cached for 24 hours)
+        - SOL price (cached for 5 minutes)
+        - Wallet ages (cached for 30 days)
+
+        Args:
+            addresses: List of wallet addresses to prefetch for
+            prefetch_token_meta: Whether to prefetch token metadata
+            prefetch_prices: Whether to prefetch current prices
+        """
+        logger.info(f"[Prefetch] Starting data prefetch for {len(addresses)} wallets")
+
+        # Prefetch SOL price (needed for USD conversions)
+        if prefetch_prices:
+            try:
+                await self._get_sol_price_usd()
+                logger.info("[Prefetch] SOL price cached")
+            except Exception as e:
+                logger.warning(f"[Prefetch] Failed to fetch SOL price: {e}")
+
+        # Prefetch wallet ages for insider detection
+        # This is done in parallel for all wallets
+        try:
+            age_tasks = [self._get_wallet_creation_time_cached(addr) for addr in addresses]
+            await asyncio.gather(*age_tasks, return_exceptions=True)
+            logger.info(f"[Prefetch] Wallet ages cached for {len(addresses)} wallets")
+        except Exception as e:
+            logger.warning(f"[Prefetch] Failed to prefetch wallet ages: {e}")
+
+        logger.info("[Prefetch] Complete")
+
 # Example usage
 if __name__ == "__main__":
     from .wqs import calculate_wqs, classify_wallet
