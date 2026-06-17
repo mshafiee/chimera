@@ -362,21 +362,318 @@ class ScoutConfig:
     # ========================================================================
     # RugCheck Security Configuration
     # ========================================================================
-    
+
     @staticmethod
     def get_rugcheck_enabled() -> bool:
         """Get whether RugCheck integration is enabled."""
         return os.getenv("RUGCHECK_ENABLED", "true").lower() == "true"
-    
+
     @staticmethod
     def get_rugcheck_api_key() -> Optional[str]:
         """Get RugCheck API key from environment (optional, uses public API if not set)."""
         return os.getenv("RUGCHECK_API_KEY")
-    
+
     @staticmethod
     def get_rugcheck_fail_mode() -> str:
         """Get RugCheck fail mode: 'open' (allow if API fails) or 'closed' (reject if API fails)."""
         return os.getenv("RUGCHECK_FAIL_MODE", "closed").lower()
+
+    # ========================================================================
+    # ML Model Configuration (Phase 1-5)
+    # ========================================================================
+
+    @staticmethod
+    def get_ml_enabled() -> bool:
+        """Get whether ML enhancements are enabled."""
+        return os.getenv("SCOUT_ML_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_ensemble_enabled() -> bool:
+        """Get whether ensemble methods (Phase 1) are enabled."""
+        return os.getenv("SCOUT_ENSEMBLE_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_xgboost_enabled() -> bool:
+        """Get whether XGBoost model is enabled."""
+        return os.getenv("SCOUT_XGBOOST_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_lightgbm_enabled() -> bool:
+        """Get whether LightGBM model is enabled."""
+        return os.getenv("SCOUT_LIGHTGBM_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_meta_learner_enabled() -> bool:
+        """Get whether meta-learner stacking is enabled."""
+        return os.getenv("SCOUT_META_LEARNER_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_time_series_features_enabled() -> bool:
+        """Get whether time-series features (Phase 2) are enabled."""
+        return os.getenv("SCOUT_TIME_SERIES_FEATURES_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_market_context_features_enabled() -> bool:
+        """Get whether market context features are enabled."""
+        return os.getenv("SCOUT_MARKET_CONTEXT_FEATURES_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_network_features_enabled() -> bool:
+        """Get whether network analysis features are enabled."""
+        return os.getenv("SCOUT_NETWORK_FEATURES_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_advanced_risk_features_enabled() -> bool:
+        """Get whether advanced risk features are enabled."""
+        return os.getenv("SCOUT_ADVANCED_RISK_FEATURES_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_online_learning_enabled() -> bool:
+        """Get whether online learning (Phase 3) is enabled."""
+        return os.getenv("SCOUT_ONLINE_LEARNING_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_regime_models_enabled() -> bool:
+        """Get whether regime-specific models are enabled."""
+        return os.getenv("SCOUT_REGIME_MODELS_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_torch_enabled() -> bool:
+        """Get whether PyTorch models (Phase 5) are enabled."""
+        return os.getenv("SCOUT_TORCH_ENABLED", "false").lower() == "true"
+
+    # ========================================================================
+    # ML Model Paths
+    # ========================================================================
+
+    @staticmethod
+    def get_model_dir() -> str:
+        """Get directory for storing trained models."""
+        return os.getenv("SCOUT_MODEL_DIR", "../models")
+
+    @staticmethod
+    def get_xgboost_model_path() -> str:
+        """Get path to XGBoost model file."""
+        return os.path.join(ScoutConfig.get_model_dir(), "xgboost_model.json")
+
+    @staticmethod
+    def get_lightgbm_model_path() -> str:
+        """Get path to LightGBM model file."""
+        return os.path.join(ScoutConfig.get_model_dir(), "lightgbm_model.txt")
+
+    @staticmethod
+    def get_meta_learner_model_path() -> str:
+        """Get path to meta-learner model file."""
+        return os.path.join(ScoutConfig.get_model_dir(), "meta_learner.pkl")
+
+    @staticmethod
+    def get_regime_model_path(regime: str) -> str:
+        """Get path to regime-specific model file."""
+        return os.path.join(ScoutConfig.get_model_dir(), f"regime_{regime.lower()}_model.json")
+
+    # ========================================================================
+    # ML Latency Configuration (Critical: <50ms Budget)
+    # ========================================================================
+
+    @staticmethod
+    def get_ml_latency_budget_ms() -> int:
+        """Get ML inference latency budget in milliseconds."""
+        return int(os.getenv("SCOUT_ML_LATENCY_BUDGET_MS", "50"))
+
+    @staticmethod
+    def get_ml_latency_warn_threshold_ms() -> int:
+        """Get warning threshold for ML latency (90% of budget)."""
+        return int(ScoutConfig.get_ml_latency_budget_ms() * 0.9)
+
+    @staticmethod
+    def get_ml_latency_critical_ms() -> int:
+        """Get critical threshold for ML latency (at budget)."""
+        return ScoutConfig.get_ml_latency_budget_ms()
+
+    @staticmethod
+    def get_model_pruning_enabled() -> bool:
+        """Get whether model pruning for latency optimization is enabled."""
+        return os.getenv("SCOUT_MODEL_PRUNING_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_model_quantization_enabled() -> bool:
+        """Get whether model quantization (float16) is enabled."""
+        return os.getenv("SCOUT_MODEL_QUANTIZATION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_batch_inference_enabled() -> bool:
+        """Get whether batch inference is enabled."""
+        return os.getenv("SCOUT_BATCH_INFERENCE_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_batch_inference_size() -> int:
+        """Get batch size for batch inference."""
+        return int(os.getenv("SCOUT_BATCH_INFERENCE_SIZE", "32"))
+
+    @staticmethod
+    def get_feature_cache_enabled() -> bool:
+        """Get whether feature caching is enabled."""
+        return os.getenv("SCOUT_FEATURE_CACHE_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_feature_cache_ttl_seconds() -> int:
+        """Get feature cache TTL in seconds."""
+        return int(os.getenv("SCOUT_FEATURE_CACHE_TTL_SECONDS", "3600"))
+
+    # ========================================================================
+    # ML Training Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_auto_retrain_enabled() -> bool:
+        """Get whether automatic model retraining is enabled."""
+        return os.getenv("SCOUT_AUTO_RETRAIN_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_retrain_interval_hours() -> int:
+        """Get interval for automatic retraining in hours."""
+        return int(os.getenv("SCOUT_RETRAIN_INTERVAL_HOURS", "24"))
+
+    @staticmethod
+    def get_min_samples_for_retrain() -> int:
+        """Get minimum samples required for retraining."""
+        return int(os.getenv("SCOUT_MIN_SAMPLES_FOR_RETRAIN", "100"))
+
+    @staticmethod
+    def get_concept_drift_threshold() -> float:
+        """Get threshold for concept drift detection (0.0-1.0)."""
+        return float(os.getenv("SCOUT_CONCEPT_DRIFT_THRESHOLD", "0.1"))
+
+    @staticmethod
+    def get_shap_enabled() -> bool:
+        """Get whether SHAP explainability is enabled."""
+        return os.getenv("SCOUT_SHAP_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_hyperopt_enabled() -> bool:
+        """Get whether hyperparameter optimization is enabled."""
+        return os.getenv("SCOUT_HYPEROPT_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_hyperopt_trials() -> int:
+        """Get number of hyperparameter optimization trials."""
+        return int(os.getenv("SCOUT_HYPEROPT_TRIALS", "50"))
+
+    @staticmethod
+    def get_ab_testing_enabled() -> bool:
+        """Get whether A/B testing for models is enabled."""
+        return os.getenv("SCOUT_AB_TESTING_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_ab_test_traffic_split() -> float:
+        """Get traffic split for A/B testing (0.0-1.0, e.g., 0.1 = 10% to model B)."""
+        return float(os.getenv("SCOUT_AB_TEST_TRAFFIC_SPLIT", "0.1"))
+
+    # ========================================================================
+    # ML Monitoring Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_ml_monitoring_enabled() -> bool:
+        """Get whether ML model monitoring is enabled."""
+        return os.getenv("SCOUT_ML_MONITORING_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_prediction_tracking_enabled() -> bool:
+        """Get whether prediction accuracy tracking is enabled."""
+        return os.getenv("SCOUT_PREDICTION_TRACKING_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_drift_detection_enabled() -> bool:
+        """Get whether model drift detection is enabled."""
+        return os.getenv("SCOUT_DRIFT_DETECTION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_feature_drift_threshold() -> float:
+        """Get threshold for feature distribution drift (KL divergence)."""
+        return float(os.getenv("SCOUT_FEATURE_DRIFT_THRESHOLD", "0.2"))
+
+    @staticmethod
+    def get_model_registry_enabled() -> bool:
+        """Get whether model registry (versioning) is enabled."""
+        return os.getenv("SCOUT_MODEL_REGISTRY_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_mlflow_tracking_enabled() -> bool:
+        """Get whether MLflow experiment tracking is enabled."""
+        return os.getenv("SCOUT_MLFLOW_TRACKING_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_mlflow_tracking_uri() -> str:
+        """Get MLflow tracking URI."""
+        return os.getenv("SCOUT_MLFLOW_TRACKING_URI", "mlruns")
+
+    # ========================================================================
+    # ML Model Hyperparameters (XGBoost/LightGBM defaults)
+    # ========================================================================
+
+    @staticmethod
+    def get_xgboost_n_estimators() -> int:
+        """Get XGBoost number of estimators."""
+        return int(os.getenv("SCOUT_XGBOOST_N_ESTIMATORS", "100"))
+
+    @staticmethod
+    def get_xgboost_max_depth() -> int:
+        """Get XGBoost maximum tree depth."""
+        return int(os.getenv("SCOUT_XGBOOST_MAX_DEPTH", "6"))
+
+    @staticmethod
+    def get_xgboost_learning_rate() -> float:
+        """Get XGBoost learning rate."""
+        return float(os.getenv("SCOUT_XGBOOST_LEARNING_RATE", "0.1"))
+
+    @staticmethod
+    def get_xgboost_subsample() -> float:
+        """Get XGBoost subsample ratio."""
+        return float(os.getenv("SCOUT_XGBOOST_SUBSAMPLE", "0.8"))
+
+    @staticmethod
+    def get_lightgbm_n_estimators() -> int:
+        """Get LightGBM number of estimators."""
+        return int(os.getenv("SCOUT_LIGHTGBM_N_ESTIMATORS", "100"))
+
+    @staticmethod
+    def get_lightgbm_max_depth() -> int:
+        """Get LightGBM maximum tree depth."""
+        return int(os.getenv("SCOUT_LIGHTGBM_MAX_DEPTH", "6"))
+
+    @staticmethod
+    def get_lightgbm_learning_rate() -> float:
+        """Get LightGBM learning rate."""
+        return float(os.getenv("SCOUT_LIGHTGBM_LEARNING_RATE", "0.1"))
+
+    @staticmethod
+    def get_lightgbm_num_leaves() -> int:
+        """Get LightGBM number of leaves."""
+        return int(os.getenv("SCOUT_LIGHTGBM_NUM_LEAVES", "31"))
+
+    # ========================================================================
+    # ML Feature Selection Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_feature_selection_enabled() -> bool:
+        """Get whether automatic feature selection is enabled."""
+        return os.getenv("SCOUT_FEATURE_SELECTION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_max_features() -> int:
+        """Get maximum number of features to use."""
+        return int(os.getenv("SCOUT_MAX_FEATURES", "50"))
+
+    @staticmethod
+    def get_feature_importance_threshold() -> float:
+        """Get threshold for feature importance (0.0-1.0)."""
+        return float(os.getenv("SCOUT_FEATURE_IMPORTANCE_THRESHOLD", "0.01"))
+
+    # ========================================================================
+    # Token Safety Fail Mode
+    # ========================================================================
 
     @staticmethod
     def get_safety_fail_mode() -> str:
@@ -472,6 +769,27 @@ class ScoutConfig:
         print(f"  Current Capital: ${ScoutConfig.get_current_capital():,.0f}")
         print(f"  Target Capital: ${ScoutConfig.get_target_capital():,.0f}")
         print(f"  Monthly Credits: {ScoutConfig.get_monthly_credits():,}")
+        print(f"\nML Model Settings:")
+        print(f"  ML Enabled: {ScoutConfig.get_ml_enabled()}")
+        print(f"  Ensemble Methods: {ScoutConfig.get_ensemble_enabled()}")
+        print(f"  XGBoost: {ScoutConfig.get_xgboost_enabled()}")
+        print(f"  LightGBM: {ScoutConfig.get_lightgbm_enabled()}")
+        print(f"  Meta-Learner: {ScoutConfig.get_meta_learner_enabled()}")
+        print(f"  Time-Series Features: {ScoutConfig.get_time_series_features_enabled()}")
+        print(f"  Market Context Features: {ScoutConfig.get_market_context_features_enabled()}")
+        print(f"  Advanced Risk Features: {ScoutConfig.get_advanced_risk_features_enabled()}")
+        print(f"  Regime-Specific Models: {ScoutConfig.get_regime_models_enabled()}")
+        print(f"  Online Learning: {ScoutConfig.get_online_learning_enabled()}")
+        print(f"  PyTorch Models: {ScoutConfig.get_torch_enabled()}")
+        print(f"  Latency Budget: {ScoutConfig.get_ml_latency_budget_ms()}ms")
+        print(f"  Model Pruning: {ScoutConfig.get_model_pruning_enabled()}")
+        print(f"  Quantization: {ScoutConfig.get_model_quantization_enabled()}")
+        print(f"  Batch Inference: {ScoutConfig.get_batch_inference_enabled()} (size: {ScoutConfig.get_batch_inference_size()})")
+        print(f"  Feature Cache: {ScoutConfig.get_feature_cache_enabled()} (TTL: {ScoutConfig.get_feature_cache_ttl_seconds()}s)")
+        print(f"  Auto-Retrain: {ScoutConfig.get_auto_retrain_enabled()} (interval: {ScoutConfig.get_retrain_interval_hours()}h)")
+        print(f"  SHAP Explainability: {ScoutConfig.get_shap_enabled()}")
+        print(f"  Hyperopt: {ScoutConfig.get_hyperopt_enabled()}")
+        print(f"  A/B Testing: {ScoutConfig.get_ab_testing_enabled()}")
         print(f"\nRate Limiting:")
         print(f"  Max Requests/sec: {ScoutConfig.get_max_requests_per_second()}")
         print(f"  Target RPS: {ScoutConfig.get_target_rps()}")
