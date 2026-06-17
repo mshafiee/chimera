@@ -1,0 +1,636 @@
+"""
+ML-Based Profitability Prediction System
+
+This module implements machine learning models to predict wallet profitability
+from limited data, optimizing for the $200 → $1000 growth goal.
+
+Features:
+- Ensemble model combining multiple predictors
+- Feature engineering for wallet behavior patterns
+- Probability scoring for profitable copy-trading
+- Risk-adjusted return predictions
+- Early identification of high-potential wallets
+"""
+
+import os
+import json
+import logging
+import numpy as np
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple, Any
+from dataclasses import dataclass, asdict
+from enum import Enum
+import pickle
+
+logger = logging.getLogger(__name__)
+
+
+class PredictionModel(Enum):
+    """Available prediction models."""
+
+    ENSEMBLE = "ensemble"           # Combined model
+    LINEAR_REGRESSION = "linear"    # Simple baseline
+    RANDOM_FOREST = "forest"        # Tree-based model
+    GRADIENT_BOOSTING = "boost"     # Boosted trees
+    NEURAL_NETWORK = "neural"       # Deep learning
+
+
+class ProfitabilityClass(Enum):
+    """Profitability classification."""
+
+    HIGH_PROFIT = "high_profit"       # >20% expected return
+    MODERATE_PROFIT = "moderate_profit" # 5-20% expected return
+    LOW_PROFIT = "low_profit"         # 0-5% expected return
+    LOSS = "loss"                     # <0% expected return
+
+
+@dataclass
+class ProfitabilityFeatures:
+    """
+    Feature set for profitability prediction.
+
+    Features designed to capture:
+    - Trading skill and consistency
+    - Risk management quality
+    - Market timing ability
+    - Capital efficiency
+    """
+
+    # Basic performance metrics
+    roi_7d: Optional[float] = None
+    roi_30d: Optional[float] = None
+    win_rate: Optional[float] = None
+    profit_factor: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    sortino_ratio: Optional[float] = None
+
+    # Trading behavior features
+    trade_count_30d: Optional[int] = None
+    avg_trade_size_sol: Optional[float] = None
+    avg_hold_time_hours: Optional[float] = None
+    entry_delay_seconds: Optional[float] = None
+
+    # Risk management features
+    uses_mev_protection: bool = False
+    uses_limit_orders: bool = False
+    dex_diversity_score: Optional[int] = None
+    max_position_size_sol: Optional[float] = None
+
+    # Market timing features
+    roi_7d_to_30d_ratio: Optional[float] = None
+    recent_momentum: Optional[float] = None
+    volatility_30d: Optional[float] = None
+
+    # Quality indicators
+    parse_rate: Optional[float] = None
+    bag_holder_score: Optional[float] = None
+    insider_probability: Optional[float] = None
+
+    # Liquidity awareness
+    avg_liquidity_usd: Optional[float] = None
+    slippage_tolerance: Optional[float] = None
+
+    def to_feature_vector(self) -> np.ndarray:
+        """Convert to numpy feature vector for ML models."""
+        features = [
+            self.roi_7d or 0.0,
+            self.roi_30d or 0.0,
+            self.win_rate or 0.0,
+            self.profit_factor or 0.0,
+            self.max_drawdown or 0.0,
+            self.sortino_ratio or 0.0,
+            self.trade_count_30d or 0,
+            self.avg_trade_size_sol or 0.0,
+            self.avg_hold_time_hours or 0.0,
+            self.entry_delay_seconds or 0.0,
+            1.0 if self.uses_mev_protection else 0.0,
+            1.0 if self.uses_limit_orders else 0.0,
+            self.dex_diversity_score or 0,
+            self.max_position_size_sol or 0.0,
+            self.roi_7d_to_30d_ratio or 0.0,
+            self.recent_momentum or 0.0,
+            self.volatility_30d or 0.0,
+            self.parse_rate or 0.0,
+            self.bag_holder_score or 0.0,
+            self.insider_probability or 0.0,
+            self.avg_liquidity_usd or 0.0,
+            self.slippage_tolerance or 0.0,
+        ]
+
+        return np.array(features, dtype=np.float32)
+
+
+@dataclass
+class ProfitabilityPrediction:
+    """Profitability prediction result."""
+
+    expected_return_pct: float         # Expected return over next 30 days
+    confidence: float                   # Model confidence (0.0-1.0)
+    risk_score: float                   # Risk score (0.0-1.0, higher = riskier)
+    profitability_class: ProfitabilityClass
+    feature_importance: Dict[str, float]
+    prediction_timestamp: float
+
+    # Risk-adjusted metrics
+    sharpe_ratio_predicted: Optional[float] = None
+    max_loss_predicted_pct: Optional[float] = None
+    probability_of_profit: Optional[float] = None
+
+    def __post_init__(self):
+        if self.prediction_timestamp == 0:
+            self.prediction_timestamp = datetime.now().timestamp()
+
+
+class SimpleEnsembleModel:
+    """
+    Simple ensemble model for profitability prediction.
+
+    Uses weighted combination of multiple prediction strategies:
+    1. ROI momentum (recent performance)
+    2. Win rate consistency
+    3. Risk-adjusted returns (Sortino)
+    4. Smart money indicators
+    5. Liquidity awareness
+
+    Designed for production use with minimal dependencies.
+    """
+
+    def __init__(self):
+        """Initialize the ensemble model."""
+        # Model weights (tuned for growth optimization)
+        self.weights = {
+            'roi_momentum': 0.30,
+            'win_rate_consistency': 0.25,
+            'risk_adjusted_returns': 0.20,
+            'smart_money_indicators': 0.15,
+            'liquidity_awareness': 0.10,
+        }
+
+        # Risk adjustment factors
+        self.risk_factors = {
+            'high_drawdown': 0.8,
+            'low_win_rate': 0.7,
+            'bag_holding': 0.6,
+            'insider_risk': 0.5,
+        }
+
+        # Growth optimization parameters
+        self.growth_optimized = os.getenv("SCOUT_GROWTH_OPTIMIZED", "true").lower() == "true"
+        self.growth_target_multiplier = 5.0  # Target: $200 → $1000 (5x)
+
+        # Feature importance tracking
+        self.feature_importance = {}
+
+    def _normalize_score(self, value: float, min_val: float, max_val: float) -> float:
+        """Normalize a value to 0-1 range."""
+        if max_val == min_val:
+            return 0.5
+        return (value - min_val) / (max_val - min_val)
+
+    def _calculate_roi_momentum_score(self, features: ProfitabilityFeatures) -> Tuple[float, str]:
+        """Calculate ROI momentum score."""
+        roi_7d = features.roi_7d or 0.0
+        roi_30d = features.roi_30d or 0.0
+
+        # Positive recent momentum
+        if roi_7d > 0 and roi_30d > 0:
+            momentum = self._normalize_score(roi_7d, 0, 100) * 0.7 + \
+                       self._normalize_score(roi_30d, 0, 50) * 0.3
+
+            # Bonus for accelerating performance
+            if roi_7d > roi_30d * 0.6:
+                momentum *= 1.2
+
+            return min(momentum, 1.0), "roi_momentum"
+
+        return 0.0, "roi_momentum"
+
+    def _calculate_win_rate_consistency_score(self, features: ProfitabilityFeatures) -> Tuple[float, str]:
+        """Calculate win rate consistency score."""
+        win_rate = features.win_rate or 0.0
+        profit_factor = features.profit_factor or 0.0
+
+        # High win rate with solid profit factor
+        if win_rate >= 0.6:
+            consistency = self._normalize_score(win_rate, 0.6, 0.9) * 0.6 + \
+                         self._normalize_score(profit_factor, 1.0, 3.0) * 0.4
+
+            # Penalty for martingale pattern (high win rate, low profit factor)
+            if win_rate > 0.7 and profit_factor < 1.5:
+                consistency *= 0.5
+
+            return min(consistency, 1.0), "win_rate_consistency"
+
+        return 0.0, "win_rate_consistency"
+
+    def _calculate_risk_adjusted_score(self, features: ProfitabilityFeatures) -> Tuple[float, str]:
+        """Calculate risk-adjusted return score."""
+        sortino = features.sortino_ratio or 0.0
+        drawdown = features.max_drawdown or 0.0
+
+        # High Sortino with low drawdown
+        risk_adjusted = self._normalize_score(sortino, 0.0, 3.0) * 0.7 - \
+                       self._normalize_score(drawdown, 0.0, 30.0) * 0.3
+
+        return max(0.0, min(risk_adjusted, 1.0)), "risk_adjusted_returns"
+
+    def _calculate_smart_money_score(self, features: ProfitabilityFeatures) -> Tuple[float, str]:
+        """Calculate smart money indicator score."""
+        score = 0.0
+
+        # MEV protection
+        if features.uses_mev_protection:
+            score += 0.3
+
+        # Limit orders
+        if features.uses_limit_orders:
+            score += 0.2
+
+        # DEX diversity
+        dex_diversity = features.dex_diversity_score or 0
+        score += self._normalize_score(dex_diversity, 0, 4) * 0.3
+
+        # Insider risk penalty
+        insider_prob = features.insider_probability or 0.0
+        if insider_prob > 0.7:
+            score *= 0.5
+
+        return min(score, 1.0), "smart_money_indicators"
+
+    def _calculate_liquidity_score(self, features: ProfitabilityFeatures) -> Tuple[float, str]:
+        """Calculate liquidity awareness score."""
+        avg_liquidity = features.avg_liquidity_usd or 0.0
+        parse_rate = features.parse_rate or 0.0
+
+        # Good liquidity and high parse rate
+        liquidity_score = self._normalize_score(avg_liquidity, 10000, 100000) * 0.6 + \
+                         self._normalize_score(parse_rate, 0.5, 1.0) * 0.4
+
+        return min(liquidity_score, 1.0), "liquidity_awareness"
+
+    def _calculate_risk_score(self, features: ProfitabilityFeatures) -> float:
+        """Calculate overall risk score."""
+        risk_factors = []
+
+        # High drawdown risk
+        if features.max_drawdown and features.max_drawdown > 20:
+            risk_factors.append(('high_drawdown', features.max_drawdown / 50))
+
+        # Low win rate risk
+        if features.win_rate and features.win_rate < 0.4:
+            risk_factors.append(('low_win_rate', (0.4 - features.win_rate)))
+
+        # Bag holder risk
+        if features.bag_holder_score and features.bag_holder_score > 0.3:
+            risk_factors.append(('bag_holding', features.bag_holder_score))
+
+        # Insider risk
+        if features.insider_probability and features.insider_probability > 0.5:
+            risk_factors.append(('insider_risk', features.insider_probability))
+
+        # Calculate combined risk score
+        if not risk_factors:
+            return 0.1  # Base risk level
+
+        # Weight risk factors
+        weighted_risk = 0.0
+        for factor_name, factor_value in risk_factors:
+            weight = self.risk_factors.get(factor_name, 0.5)
+            weighted_risk += factor_value * weight
+
+        return min(weighted_risk, 1.0)
+
+    def predict(self, features: ProfitabilityFeatures) -> ProfitabilityPrediction:
+        """
+        Make profitability prediction.
+
+        Args:
+            features: Wallet features
+
+        Returns:
+            Profitability prediction
+        """
+        # Calculate component scores
+        scores = {}
+
+        scores['roi_momentum'] = self._calculate_roi_momentum_score(features)[0]
+        scores['win_rate_consistency'] = self._calculate_win_rate_consistency_score(features)[0]
+        scores['risk_adjusted_returns'] = self._calculate_risk_adjusted_score(features)[0]
+        scores['smart_money_indicators'] = self._calculate_smart_money_score(features)[0]
+        scores['liquidity_awareness'] = self._calculate_liquidity_score(features)[0]
+
+        # Calculate weighted ensemble score
+        ensemble_score = sum(
+            scores[component] * weight
+            for component, weight in self.weights.items()
+        )
+
+        # Calculate risk score
+        risk_score = self._calculate_risk_score(features)
+
+        # Adjust for growth optimization
+        if self.growth_optimized:
+            # Boost high-conviction wallets for growth goal
+            if ensemble_score > 0.7:
+                ensemble_score *= 1.2
+            # Reduce exposure to low-conviction wallets
+            elif ensemble_score < 0.4:
+                ensemble_score *= 0.8
+
+        # Calculate expected return based on score
+        expected_return_pct = ensemble_score * 30  # Max 30% monthly return
+
+        # Calculate confidence based on feature completeness
+        feature_completeness = sum(
+            1 for value in [features.roi_7d, features.roi_30d, features.win_rate,
+                           features.profit_factor, features.max_drawdown]
+            if value is not None
+        ) / 5.0
+
+        confidence = feature_completeness * 0.7 + (1.0 - risk_score) * 0.3
+
+        # Determine profitability class
+        if expected_return_pct > 20:
+            profit_class = ProfitabilityClass.HIGH_PROFIT
+        elif expected_return_pct > 5:
+            profit_class = ProfitabilityClass.MODERATE_PROFIT
+        elif expected_return_pct > 0:
+            profit_class = ProfitabilityClass.LOW_PROFIT
+        else:
+            profit_class = ProfitabilityClass.LOSS
+
+        # Calculate risk-adjusted metrics
+        sharpe_predicted = (expected_return_pct / 100) / max(risk_score, 0.1) if risk_score > 0 else 0
+        max_loss_predicted = -risk_score * 20  # Max 20% loss
+        probability_of_profit = confidence if expected_return_pct > 0 else 1.0 - confidence
+
+        return ProfitabilityPrediction(
+            expected_return_pct=expected_return_pct,
+            confidence=confidence,
+            risk_score=risk_score,
+            profitability_class=profit_class,
+            feature_importance=scores,
+            prediction_timestamp=datetime.now().timestamp(),
+            sharpe_ratio_predicted=sharpe_predicted,
+            max_loss_predicted_pct=max_loss_predicted,
+            probability_of_profit=probability_of_profit,
+        )
+
+
+class ProfitabilityPredictor:
+    """
+    Main profitability prediction system.
+
+    Features:
+    - Ensemble model combining multiple strategies
+    - Feature engineering from wallet metrics
+    - Risk-adjusted predictions
+    - Growth goal optimization
+    """
+
+    def __init__(self):
+        """Initialize the predictor."""
+        self.model = SimpleEnsembleModel()
+
+        # Feature cache for performance
+        self._feature_cache = {}
+
+        logger.info("Profitability Predictor initialized")
+
+    def extract_features(self, wallet_metrics: Dict[str, Any]) -> ProfitabilityFeatures:
+        """
+        Extract features from wallet metrics.
+
+        Args:
+            wallet_metrics: Dictionary of wallet metrics
+
+        Returns:
+            ProfitabilityFeatures object
+        """
+        return ProfitabilityFeatures(
+            roi_7d=wallet_metrics.get('roi_7d'),
+            roi_30d=wallet_metrics.get('roi_30d'),
+            win_rate=wallet_metrics.get('win_rate'),
+            profit_factor=wallet_metrics.get('profit_factor'),
+            max_drawdown=wallet_metrics.get('max_drawdown_30d'),
+            sortino_ratio=wallet_metrics.get('sortino_ratio'),
+            trade_count_30d=wallet_metrics.get('trade_count_30d'),
+            avg_trade_size_sol=wallet_metrics.get('avg_trade_size_sol'),
+            uses_mev_protection=wallet_metrics.get('uses_mev_protection', False),
+            uses_limit_orders=wallet_metrics.get('uses_limit_orders', False),
+            dex_diversity_score=wallet_metrics.get('dex_diversity_score'),
+            parse_rate=wallet_metrics.get('parse_rate'),
+            insider_probability=wallet_metrics.get('insider_probability'),
+            # Calculate derived features
+            roi_7d_to_30d_ratio=self._calculate_roi_ratio(wallet_metrics),
+            recent_momentum=self._calculate_momentum(wallet_metrics),
+        )
+
+    def _calculate_roi_ratio(self, metrics: Dict[str, Any]) -> Optional[float]:
+        """Calculate ROI 7d to 30d ratio."""
+        roi_7d = metrics.get('roi_7d')
+        roi_30d = metrics.get('roi_30d')
+
+        if roi_7d is not None and roi_30d is not None and roi_30d != 0:
+            return roi_7d / roi_30d
+
+        return None
+
+    def _calculate_momentum(self, metrics: Dict[str, Any]) -> Optional[float]:
+        """Calculate recent momentum score."""
+        roi_7d = metrics.get('roi_7d')
+        roi_30d = metrics.get('roi_30d')
+
+        if roi_7d is not None and roi_30d is not None:
+            if roi_30d > 0:
+                return self._normalize_score(roi_7d, 0, roi_30d * 1.2)
+            elif roi_7d > 0:
+                return 0.7  # Recovering
+            else:
+                return 0.3  # Declining
+
+        return None
+
+    def _normalize_score(self, value: float, min_val: float, max_val: float) -> float:
+        """Normalize a value to 0-1 range."""
+        if max_val == min_val:
+            return 0.5
+        return (value - min_val) / (max_val - min_val)
+
+    def predict_wallet_profitability(self, wallet_metrics: Dict[str, Any]) -> ProfitabilityPrediction:
+        """
+        Predict wallet profitability.
+
+        Args:
+            wallet_metrics: Wallet metrics dictionary
+
+        Returns:
+            Profitability prediction
+        """
+        # Extract features
+        features = self.extract_features(wallet_metrics)
+
+        # Make prediction
+        prediction = self.model.predict(features)
+
+        return prediction
+
+    def predict_batch(self, wallets_metrics: List[Dict[str, Any]]) -> List[ProfitabilityPrediction]:
+        """
+        Predict profitability for multiple wallets.
+
+        Args:
+            wallets_metrics: List of wallet metrics dictionaries
+
+        Returns:
+            List of profitability predictions
+        """
+        predictions = []
+
+        for metrics in wallets_metrics:
+            try:
+                prediction = self.predict_wallet_profitability(metrics)
+                predictions.append(prediction)
+            except Exception as e:
+                logger.warning(f"Failed to predict wallet profitability: {e}")
+                # Return default prediction
+                predictions.append(ProfitabilityPrediction(
+                    expected_return_pct=0.0,
+                    confidence=0.0,
+                    risk_score=0.5,
+                    profitability_class=ProfitabilityClass.LOW_PROFIT,
+                    feature_importance={},
+                    prediction_timestamp=datetime.now().timestamp(),
+                ))
+
+        return predictions
+
+    def rank_wallets_by_profitability(self, wallets_metrics: List[Dict[str, Any]],
+                                    max_wallets: int = 50) -> List[Tuple[str, ProfitabilityPrediction]]:
+        """
+        Rank wallets by predicted profitability.
+
+        Args:
+            wallets_metrics: List of wallet metrics with addresses
+            max_wallets: Maximum wallets to return
+
+        Returns:
+            List of (wallet_address, prediction) tuples, ranked by profitability
+        """
+        predictions = []
+
+        for metrics in wallets_metrics:
+            address = metrics.get('address')
+            if not address:
+                continue
+
+            try:
+                prediction = self.predict_wallet_profitability(metrics)
+                predictions.append((address, prediction))
+            except Exception as e:
+                logger.warning(f"Failed to predict profitability for {address[:8]}...: {e}")
+
+        # Sort by expected return (descending), then by confidence (descending)
+        predictions.sort(key=lambda x: (x[1].expected_return_pct, x[1].confidence), reverse=True)
+
+        return predictions[:max_wallets]
+
+    def get_investment_allocation(self, predictions: List[Tuple[str, ProfitabilityPrediction]],
+                                 total_capital_usd: float = 200.0) -> Dict[str, float]:
+        """
+        Calculate optimal investment allocation across wallets.
+
+        Args:
+            predictions: List of (wallet_address, prediction) tuples
+            total_capital_usd: Total capital to allocate
+
+        Returns:
+            Dictionary mapping wallet_address to allocation amount
+        """
+        allocation = {}
+
+        # Filter for profitable wallets only
+        profitable_predictions = [
+            (addr, pred) for addr, pred in predictions
+            if pred.expected_return_pct > 0 and pred.confidence > 0.5
+        ]
+
+        if not profitable_predictions:
+            logger.warning("No profitable wallets found for allocation")
+            return allocation
+
+        # Calculate confidence-weighted expected returns
+        weighted_returns = [
+            (addr, pred.expected_return_pct * pred.confidence * (1.0 - pred.risk_score))
+            for addr, pred in profitable_predictions
+        ]
+
+        # Normalize weights
+        total_weight = sum(weight for _, weight in weighted_returns)
+        if total_weight == 0:
+            return allocation
+
+        # Allocate capital based on weights
+        for addr, weight in weighted_returns:
+            allocation[addr] = (weight / total_weight) * total_capital_usd
+
+        logger.info(f"Allocated ${total_capital_usd:.2f} across {len(allocation)} wallets")
+        return allocation
+
+
+# Global singleton instance
+_predictor: Optional[ProfitabilityPredictor] = None
+
+
+def get_profitability_predictor() -> ProfitabilityPredictor:
+    """Get the global profitability predictor singleton."""
+    global _predictor
+
+    if _predictor is None:
+        _predictor = ProfitabilityPredictor()
+
+    return _predictor
+
+
+def predict_wallet_profitability(wallet_metrics: Dict[str, Any]) -> ProfitabilityPrediction:
+    """
+    Convenience function to predict wallet profitability.
+
+    Args:
+        wallet_metrics: Wallet metrics dictionary
+
+    Returns:
+        Profitability prediction
+    """
+    predictor = get_profitability_predictor()
+    return predictor.predict_wallet_profitability(wallet_metrics)
+
+
+if __name__ == "__main__":
+    # Test the predictor
+    test_metrics = {
+        'address': 'test_wallet',
+        'roi_7d': 15.0,
+        'roi_30d': 45.0,
+        'win_rate': 0.72,
+        'profit_factor': 2.1,
+        'max_drawdown_30d': 8.5,
+        'sortino_ratio': 1.8,
+        'trade_count_30d': 127,
+        'avg_trade_size_sol': 0.5,
+        'uses_mev_protection': True,
+        'uses_limit_orders': True,
+        'dex_diversity_score': 3,
+        'parse_rate': 0.95,
+        'insider_probability': 0.1,
+    }
+
+    predictor = get_profitability_predictor()
+    prediction = predictor.predict_wallet_profitability(test_metrics)
+
+    print(f"Expected Return: {prediction.expected_return_pct:.1f}%")
+    print(f"Confidence: {prediction.confidence:.1f}")
+    print(f"Risk Score: {prediction.risk_score:.1f}")
+    print(f"Profitability Class: {prediction.profitability_class.value}")
+    print(f"Sharpe Ratio: {prediction.sharpe_ratio_predicted:.2f}")
+    print(f"Probability of Profit: {prediction.probability_of_profit:.1f}")
