@@ -153,6 +153,74 @@ class PerformanceMetrics:
         return asdict(self)
 
 
+@dataclass
+class GrowthMetrics:
+    """
+    Growth tracking metrics (Phase 6).
+
+    Tracks progress toward $200 → $1000 target with velocity and projections.
+    """
+
+    timestamp: float
+    current_capital: float
+    target_capital: float
+    starting_capital: float
+
+    # ROI metrics
+    roi_daily: float = 0.0
+    roi_weekly: float = 0.0
+    roi_monthly: float = 0.0
+
+    # Growth velocity
+    growth_rate_daily: float = 0.0  # Daily growth rate (%)
+    growth_rate_weekly: float = 0.0  # Weekly growth rate (%)
+    growth_rate_monthly: float = 0.0  # Monthly growth rate (%)
+
+    # Target projections
+    days_to_target: Optional[float] = None  # Estimated days to reach target
+    date_to_target: Optional[str] = None  # Estimated date to reach target
+
+    # Capital efficiency
+    capital_efficiency: float = 0.0  # ROI per day per dollar
+    compounding_effect: float = 0.0  # Bonus from compound growth
+
+    # Wallet performance
+    high_wqs_wallets: int = 0  # Count of WQS >= 70 wallets
+    avg_wallet_wqs: float = 0.0  # Average WQS across tracked wallets
+
+    # Credit efficiency (Helius)
+    credits_used: int = 0
+    credits_remaining: int = 0
+    credits_roi: float = 0.0  # Return per credit spent
+
+    def __post_init__(self):
+        if self.timestamp == 0:
+            self.timestamp = time.time()
+
+    @property
+    def progress_percentage(self) -> float:
+        """Progress toward target as percentage."""
+        if self.target_capital <= self.starting_capital:
+            return 100.0
+        progress = ((self.current_capital - self.starting_capital) /
+                   (self.target_capital - self.starting_capital)) * 100
+        return max(0.0, min(progress, 100.0))
+
+    @property
+    def capital_multiplier(self) -> float:
+        """Current capital multiplier from starting point."""
+        if self.starting_capital <= 0:
+            return 1.0
+        return self.current_capital / self.starting_capital
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        data = asdict(self)
+        data['progress_percentage'] = self.progress_percentage
+        data['capital_multiplier'] = self.capital_multiplier
+        return data
+
+
 class ProductionMonitor:
     """
     Production monitoring and alerting system.
@@ -763,8 +831,538 @@ class ProductionMonitor:
         logger.info("Production Monitor shut down")
 
 
-# Global singleton instance
+class GrowthTracker:
+    """
+    Growth tracking system for $200 → $1000 target (Phase 6).
+
+    Features:
+    - Growth velocity tracking (daily/weekly/monthly ROI)
+    - Days to target estimation
+    - Capital change alerts
+    - Growth trajectory dashboard
+    """
+
+    def __init__(
+        self,
+        starting_capital: float = 200.0,
+        target_capital: float = 1000.0,
+        db_path: Optional[str] = None,
+    ):
+        """
+        Initialize growth tracker.
+
+        Args:
+            starting_capital: Initial capital (default $200)
+            target_capital: Target capital (default $1000)
+            db_path: Path to growth tracking database
+        """
+        self.starting_capital = starting_capital
+        self.target_capital = target_capital
+        self.current_capital = starting_capital
+
+        # Database for growth tracking
+        self._db_path = db_path or os.getenv(
+            "SCOUT_GROWTH_DB_PATH", "/tmp/scout_growth.db"
+        )
+        self._init_database()
+
+        # Alert thresholds
+        self._alert_thresholds = {
+            'daily_roi_critical': -10.0,  # Alert if daily ROI < -10%
+            'daily_roi_target': 5.0,  # Target daily ROI
+            'weekly_roi_target': 25.0,  # Target weekly ROI
+            'monthly_roi_target': 40.0,  # Target monthly ROI
+        }
+
+        # Load latest capital from database
+        self._load_latest_state()
+
+        logger.info(f"Growth Tracker initialized: ${starting_capital} → ${target_capital}")
+
+    def _init_database(self):
+        """Initialize growth tracking database."""
+        try:
+            os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            # Create growth_history table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS growth_history (
+                    timestamp REAL PRIMARY KEY,
+                    current_capital REAL,
+                    roi_daily REAL,
+                    roi_weekly REAL,
+                    roi_monthly REAL,
+                    growth_rate_daily REAL,
+                    growth_rate_weekly REAL,
+                    growth_rate_monthly REAL,
+                    days_to_target REAL,
+                    high_wqs_wallets INTEGER,
+                    avg_wallet_wqs REAL,
+                    credits_used INTEGER,
+                    credits_remaining INTEGER,
+                    credits_roi REAL
+                )
+            """)
+
+            # Create capital_events table for significant changes
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS capital_events (
+                    id TEXT PRIMARY KEY,
+                    timestamp REAL,
+                    event_type TEXT,
+                    old_capital REAL,
+                    new_capital REAL,
+                    change_amount REAL,
+                    change_percent REAL,
+                    description TEXT,
+                    metadata TEXT
+                )
+            """)
+
+            # Create alerts table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS growth_alerts (
+                    id TEXT PRIMARY KEY,
+                    timestamp REAL,
+                    alert_type TEXT,
+                    severity TEXT,
+                    message TEXT,
+                    details TEXT
+                )
+            """)
+
+            conn.commit()
+            conn.close()
+
+            logger.debug(f"Growth database initialized: {self._db_path}")
+        except Exception as e:
+            logger.warning(f"Failed to initialize growth database: {e}")
+
+    def _load_latest_state(self):
+        """Load latest capital state from database."""
+        try:
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                SELECT current_capital FROM growth_history
+                ORDER BY timestamp DESC LIMIT 1
+            """)
+
+            row = cursor.fetchone()
+            if row:
+                self.current_capital = row[0]
+                logger.info(f"Loaded current capital: ${self.current_capital:.2f}")
+
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to load latest state: {e}")
+
+    def record_capital(
+        self,
+        new_capital: float,
+        event_type: str = "update",
+        description: str = "",
+        metadata: Dict[str, Any] = None,
+    ) -> GrowthMetrics:
+        """
+        Record a capital change and calculate growth metrics.
+
+        Args:
+            new_capital: New capital amount
+            event_type: Type of event (update, trade, deposit, withdrawal)
+            description: Event description
+            metadata: Additional event metadata
+
+        Returns:
+            GrowthMetrics snapshot
+        """
+        old_capital = self.current_capital
+        change_amount = new_capital - old_capital
+        change_percent = (change_amount / old_capital * 100) if old_capital > 0 else 0.0
+
+        self.current_capital = new_capital
+
+        # Calculate growth metrics
+        metrics = self._calculate_growth_metrics()
+
+        # Store in database
+        self._store_growth_snapshot(metrics)
+
+        # Record capital event if significant change
+        if abs(change_percent) >= 1.0:  # Record changes >= 1%
+            self._record_capital_event(
+                event_type, old_capital, new_capital, description, metadata
+            )
+
+        logger.info(
+            f"Capital recorded: ${old_capital:.2f} → ${new_capital:.2f} "
+            f"({change_percent:+.2f}%)"
+        )
+
+        return metrics
+
+    def _calculate_growth_metrics(self) -> GrowthMetrics:
+        """Calculate current growth metrics from history."""
+        now = time.time()
+        day_ago = now - 86400
+        week_ago = now - (7 * 86400)
+        month_ago = now - (30 * 86400)
+
+        try:
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            # Get capital at different time periods
+            cursor.execute("""
+                SELECT current_capital, timestamp FROM growth_history
+                WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+            """, (month_ago,))
+            month_row = cursor.fetchone()
+            capital_month_ago = month_row[0] if month_row else self.starting_capital
+
+            cursor.execute("""
+                SELECT current_capital, timestamp FROM growth_history
+                WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+            """, (week_ago,))
+            week_row = cursor.fetchone()
+            capital_week_ago = week_row[0] if week_row else self.starting_capital
+
+            cursor.execute("""
+                SELECT current_capital, timestamp FROM growth_history
+                WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+            """, (day_ago,))
+            day_row = cursor.fetchone()
+            capital_day_ago = day_row[0] if day_row else self.starting_capital
+
+            conn.close()
+
+            # Calculate ROI
+            roi_daily = ((self.current_capital - capital_day_ago) /
+                       capital_day_ago * 100) if capital_day_ago > 0 else 0.0
+            roi_weekly = ((self.current_capital - capital_week_ago) /
+                        capital_week_ago * 100) if capital_week_ago > 0 else 0.0
+            roi_monthly = ((self.current_capital - capital_month_ago) /
+                         capital_month_ago * 100) if capital_month_ago > 0 else 0.0
+
+            # Calculate growth rates (compound annual growth rate style)
+            growth_rate_daily = roi_daily  # Daily rate
+            growth_rate_weekly = roi_weekly / 7 if roi_weekly != 0 else 0.0  # Per day
+            growth_rate_monthly = roi_monthly / 30 if roi_monthly != 0 else 0.0  # Per day
+
+            # Estimate days to target
+            days_to_target = self._estimate_days_to_target(growth_rate_daily)
+
+            # Capital efficiency
+            capital_efficiency = (roi_daily / max(0.01, self.current_capital))
+            compounding_effect = roi_monthly - (roi_daily * 30)  # Bonus from compounding
+
+            return GrowthMetrics(
+                timestamp=now,
+                current_capital=self.current_capital,
+                target_capital=self.target_capital,
+                starting_capital=self.starting_capital,
+                roi_daily=roi_daily,
+                roi_weekly=roi_weekly,
+                roi_monthly=roi_monthly,
+                growth_rate_daily=growth_rate_daily,
+                growth_rate_weekly=growth_rate_weekly,
+                growth_rate_monthly=growth_rate_monthly,
+                days_to_target=days_to_target,
+                date_to_target=self._calculate_target_date(days_to_target),
+                capital_efficiency=capital_efficiency,
+                compounding_effect=compounding_effect,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to calculate growth metrics: {e}")
+            return GrowthMetrics(
+                timestamp=now,
+                current_capital=self.current_capital,
+                target_capital=self.target_capital,
+                starting_capital=self.starting_capital,
+            )
+
+    def _estimate_days_to_target(self, daily_growth_rate: float) -> Optional[float]:
+        """
+        Estimate days to reach target capital.
+
+        Uses compound growth formula: target = current * (1 + rate)^days
+
+        Args:
+            daily_growth_rate: Daily growth rate as decimal (e.g., 0.05 for 5%)
+
+        Returns:
+            Estimated days, or None if growth rate is non-positive
+        """
+        if daily_growth_rate <= 0.001:  # Less than 0.1% daily growth
+            return None
+
+        remaining_ratio = self.target_capital / self.current_capital
+
+        # days = log(remaining_ratio) / log(1 + daily_rate)
+        import math
+        try:
+            days = math.log(remaining_ratio) / math.log(1 + daily_growth_rate)
+            return max(0, days)
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    def _calculate_target_date(self, days_to_target: Optional[float]) -> Optional[str]:
+        """Calculate estimated date to reach target."""
+        if days_to_target is None:
+            return None
+
+        target_date = datetime.now() + timedelta(days=days_to_target)
+        return target_date.strftime("%Y-%m-%d")
+
+    def _store_growth_snapshot(self, metrics: GrowthMetrics):
+        """Store growth metrics snapshot in database."""
+        try:
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            cursor.execute("""
+                INSERT OR REPLACE INTO growth_history VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                metrics.timestamp,
+                metrics.current_capital,
+                metrics.roi_daily,
+                metrics.roi_weekly,
+                metrics.roi_monthly,
+                metrics.growth_rate_daily,
+                metrics.growth_rate_weekly,
+                metrics.growth_rate_monthly,
+                metrics.days_to_target,
+                metrics.high_wqs_wallets,
+                metrics.avg_wallet_wqs,
+                metrics.credits_used,
+                metrics.credits_remaining,
+                metrics.credits_roi,
+            ))
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.debug(f"Failed to store growth snapshot: {e}")
+
+    def _record_capital_event(
+        self,
+        event_type: str,
+        old_capital: float,
+        new_capital: float,
+        description: str,
+        metadata: Dict[str, Any] = None,
+    ):
+        """Record a significant capital event."""
+        try:
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            event_id = f"{event_type}_{int(time.time())}"
+            change_amount = new_capital - old_capital
+            change_percent = (change_amount / old_capital * 100) if old_capital > 0 else 0.0
+
+            cursor.execute("""
+                INSERT INTO capital_events VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                event_id,
+                time.time(),
+                event_type,
+                old_capital,
+                new_capital,
+                change_amount,
+                change_percent,
+                description,
+                json.dumps(metadata or {}),
+            ))
+
+            conn.commit()
+            conn.close()
+
+            # Check for alert conditions
+            self._check_capital_alerts(change_amount, change_percent)
+
+        except Exception as e:
+            logger.debug(f"Failed to record capital event: {e}")
+
+    def _check_capital_alerts(self, change_amount: float, change_percent: float):
+        """Check if capital change warrants an alert."""
+        alerts = []
+
+        # Significant loss alert (>10% drop)
+        if change_percent < -10.0:
+            alerts.append({
+                'type': 'significant_loss',
+                'severity': 'critical',
+                'message': f"Capital dropped {change_percent:.2f}% (-${abs(change_amount):.2f})"
+            })
+
+        # Significant gain alert (>10% gain)
+        elif change_percent > 10.0:
+            alerts.append({
+                'type': 'significant_gain',
+                'severity': 'info',
+                'message': f"Capital increased {change_percent:.2f}% (+${change_amount:.2f})"
+            })
+
+        # Target reached alert
+        if self.current_capital >= self.target_capital:
+            alerts.append({
+                'type': 'target_reached',
+                'severity': 'info',
+                'message': f"Target capital reached! ${self.current_capital:.2f}"
+            })
+
+        # Store alerts
+        for alert in alerts:
+            self._store_alert(alert['type'], alert['severity'], alert['message'])
+
+    def _store_alert(self, alert_type: str, severity: str, message: str):
+        """Store growth alert."""
+        try:
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            alert_id = f"{alert_type}_{int(time.time())}"
+
+            cursor.execute("""
+                INSERT INTO growth_alerts VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                alert_id,
+                time.time(),
+                alert_type,
+                severity,
+                message,
+                "{}",
+            ))
+
+            conn.commit()
+            conn.close()
+
+            logger.warning(f"[Growth Alert] {severity.upper()}: {message}")
+
+        except Exception as e:
+            logger.debug(f"Failed to store alert: {e}")
+
+    def get_current_metrics(self) -> GrowthMetrics:
+        """Get current growth metrics."""
+        return self._calculate_growth_metrics()
+
+    def get_growth_history(self, days: int = 30) -> List[GrowthMetrics]:
+        """
+        Get growth history for specified number of days.
+
+        Args:
+            days: Number of days of history to retrieve
+
+        Returns:
+            List of GrowthMetrics snapshots
+        """
+        try:
+            conn = sqlite3.connect(self._db_path)
+            cursor = conn.cursor()
+
+            cutoff_time = time.time() - (days * 86400)
+
+            cursor.execute("""
+                SELECT * FROM growth_history
+                WHERE timestamp >= ?
+                ORDER BY timestamp ASC
+            """, (cutoff_time,))
+
+            history = []
+            for row in cursor.fetchall():
+                history.append(GrowthMetrics(
+                    timestamp=row[0],
+                    current_capital=row[1],
+                    target_capital=self.target_capital,
+                    starting_capital=self.starting_capital,
+                    roi_daily=row[2],
+                    roi_weekly=row[3],
+                    roi_monthly=row[4],
+                    growth_rate_daily=row[5],
+                    growth_rate_weekly=row[6],
+                    growth_rate_monthly=row[7],
+                    days_to_target=row[8],
+                    high_wqs_wallets=row[9],
+                    avg_wallet_wqs=row[10],
+                    credits_used=row[11],
+                    credits_remaining=row[12],
+                    credits_roi=row[13],
+                ))
+
+            conn.close()
+            return history
+
+        except Exception as e:
+            logger.error(f"Failed to get growth history: {e}")
+            return []
+
+    def print_growth_dashboard(self):
+        """Print comprehensive growth dashboard."""
+        metrics = self.get_current_metrics()
+
+        print("\n" + "="*70)
+        print("GROWTH TRACKING - $200 → $1000 TARGET")
+        print("="*70)
+
+        print(f"\nCapital Status:")
+        print(f"  Current:   ${metrics.current_capital:.2f}")
+        print(f"  Target:    ${metrics.target_capital:.2f}")
+        print(f"  Progress:  {metrics.progress_percentage:.1f}%")
+        print(f"  Multiple:  {metrics.capital_multiplier:.2f}x")
+
+        print(f"\nROI Performance:")
+        print(f"  Daily:   {metrics.roi_daily:+.2f}%")
+        print(f"  Weekly:  {metrics.roi_weekly:+.2f}%")
+        print(f"  Monthly: {metrics.roi_monthly:+.2f}%")
+
+        print(f"\nGrowth Velocity:")
+        print(f"  Daily Rate:   {metrics.growth_rate_daily:.2f}%")
+        print(f"  Weekly Rate:  {metrics.growth_rate_weekly:.2f}%/day")
+        print(f"  Monthly Rate: {metrics.growth_rate_monthly:.2f}%/day")
+
+        if metrics.days_to_target:
+            print(f"\nTarget Projection:")
+            print(f"  Days to Target:  {metrics.days_to_target:.1f}")
+            if metrics.date_to_target:
+                print(f"  Target Date:     {metrics.date_to_target}")
+        else:
+            print(f"\nTarget Projection: Insufficient growth rate")
+
+        print(f"\nCapital Efficiency:")
+        print(f"  Efficiency:      {metrics.capital_efficiency:.4f}% per $/day")
+        print(f"  Compounding:     {metrics.compounding_effect:+.2f}%")
+
+        print("="*70 + "\n")
+
+    def get_growth_summary(self) -> Dict[str, Any]:
+        """Get growth summary for API responses."""
+        metrics = self.get_current_metrics()
+
+        return {
+            'current_capital': metrics.current_capital,
+            'target_capital': metrics.target_capital,
+            'starting_capital': metrics.starting_capital,
+            'progress_percentage': metrics.progress_percentage,
+            'capital_multiplier': metrics.capital_multiplier,
+            'roi_daily': metrics.roi_daily,
+            'roi_weekly': metrics.roi_weekly,
+            'roi_monthly': metrics.roi_monthly,
+            'days_to_target': metrics.days_to_target,
+            'date_to_target': metrics.date_to_target,
+        }
+
+
+# Global singleton instances
 _monitor: Optional[ProductionMonitor] = None
+_growth_tracker: Optional[GrowthTracker] = None
 
 
 def get_production_monitor() -> ProductionMonitor:
@@ -775,6 +1373,31 @@ def get_production_monitor() -> ProductionMonitor:
         _monitor = ProductionMonitor()
 
     return _monitor
+
+
+def get_growth_tracker(
+    starting_capital: float = 200.0,
+    target_capital: float = 1000.0,
+) -> GrowthTracker:
+    """
+    Get the global growth tracker singleton.
+
+    Args:
+        starting_capital: Initial capital (default $200)
+        target_capital: Target capital (default $1000)
+
+    Returns:
+        GrowthTracker instance
+    """
+    global _growth_tracker
+
+    if _growth_tracker is None:
+        _growth_tracker = GrowthTracker(
+            starting_capital=starting_capital,
+            target_capital=target_capital,
+        )
+
+    return _growth_tracker
 
 
 if __name__ == "__main__":
@@ -803,5 +1426,28 @@ if __name__ == "__main__":
         print("Issues:")
         for issue in issues:
             print(f"  - {issue}")
+
+    # Test growth tracker (Phase 6)
+    print("\n" + "="*70)
+    print("TESTING GROWTH TRACKER (Phase 6)")
+    print("="*70)
+
+    growth_tracker = get_growth_tracker(starting_capital=200.0, target_capital=1000.0)
+
+    # Simulate growth over time
+    print("\nSimulating capital growth:")
+    capitals = [200.0, 225.0, 260.0, 310.0, 380.0, 480.0, 620.0, 810.0, 1000.0]
+    for i, capital in enumerate(capitals, 1):
+        print(f"  Day {i}: ${capital:.2f}")
+        growth_tracker.record_capital(capital, event_type="simulation")
+
+    # Print growth dashboard
+    growth_tracker.print_growth_dashboard()
+
+    # Get growth summary
+    summary = growth_tracker.get_growth_summary()
+    print("\nGrowth Summary:")
+    for key, value in summary.items():
+        print(f"  {key}: {value}")
 
     monitor.shutdown()
