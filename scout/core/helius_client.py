@@ -10,6 +10,8 @@ import logging
 import random
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
+
+from .utils import utcnow
 from dataclasses import dataclass
 from pathlib import Path
 from collections import defaultdict
@@ -1243,7 +1245,7 @@ class HeliusClient:
             token_addresses = self._load_active_tokens()
         
         wallet_counts: Dict[str, int] = defaultdict(int)
-        cutoff_time = int((datetime.utcnow() - timedelta(hours=hours_back)).timestamp())
+        cutoff_time = int((utcnow() - timedelta(hours=hours_back)).timestamp())
         
         print(f"[Helius] Discovering from {len(token_addresses)} active tokens...")
 
@@ -1333,7 +1335,7 @@ class HeliusClient:
             Dictionary mapping wallet addresses to trade counts
         """
         wallet_counts: Dict[str, int] = defaultdict(int)
-        cutoff_time = int((datetime.utcnow() - timedelta(hours=hours_back)).timestamp())
+        cutoff_time = int((utcnow() - timedelta(hours=hours_back)).timestamp())
         
         print(f"[Helius] Discovering from {len(self.dex_programs)} DEX programs...")
         
@@ -1710,7 +1712,7 @@ class HeliusClient:
         # Calculate cutoff timestamp once
         cutoff_timestamp = 0
         if days > 0:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = utcnow() - timedelta(days=days)
             cutoff_timestamp = int(cutoff.timestamp())
 
         async def _paginate_with_type(tx_type: Optional[str]) -> List[Dict[str, Any]]:
@@ -1878,7 +1880,7 @@ class HeliusClient:
             return None
 
         signature = tx.get("signature", "")
-        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+        timestamp = tx.get("timestamp", int(utcnow().timestamp()))
 
         # Legacy behavior: return "first two transfers" (kept for compatibility)
         if not wallet_address:
@@ -1974,7 +1976,7 @@ class HeliusClient:
         Strategy 1: Parse swap from wallet-relative token and SOL deltas.
         """
         signature = tx.get("signature", "")
-        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+        timestamp = tx.get("timestamp", int(utcnow().timestamp()))
 
         sol_mint = "So11111111111111111111111111111111111111112"
         usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
@@ -2223,7 +2225,7 @@ class HeliusClient:
             return None
 
         signature = tx.get("signature", "")
-        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+        timestamp = tx.get("timestamp", int(utcnow().timestamp()))
 
         native_input = swap.get("nativeInput") or swap.get("nativeIn")
         native_output = swap.get("nativeOutput") or swap.get("nativeOut")
@@ -2363,7 +2365,7 @@ class HeliusClient:
         the wallet's own balance deltas.
         """
         signature = tx.get("signature", "")
-        timestamp = tx.get("timestamp", int(datetime.utcnow().timestamp()))
+        timestamp = tx.get("timestamp", int(utcnow().timestamp()))
 
         wallet_data = None
         for acc in tx.get("accountData", []) or []:

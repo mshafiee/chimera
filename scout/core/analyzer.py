@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import List, Optional, Dict, Any, Tuple
 
+from .utils import utcnow
+
 from .wqs import WalletMetrics
 from .models import HistoricalTrade, TradeAction, LiquidityData, TraderArchetype
 from .helius_client import HeliusClient
@@ -642,7 +644,7 @@ class WalletAnalyzer:
                 win_rate=0.72,
                 max_drawdown_30d=8.5,
                 avg_trade_size_sol=0.5,
-                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+                last_trade_at=(utcnow() - timedelta(hours=2)).isoformat(),
                 win_streak_consistency=0.68,
             ),
             "9mNpQrAbCdEfGhIjKlMnOpQrStUvWxYz1234567890": WalletMetrics(
@@ -653,7 +655,7 @@ class WalletAnalyzer:
                 win_rate=0.65,
                 max_drawdown_30d=12.1,
                 avg_trade_size_sol=0.3,
-                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
+                last_trade_at=(utcnow() - timedelta(hours=6)).isoformat(),
                 win_streak_consistency=0.55,
             ),
             "5kLmNoAbCdEfGhIjKlMnOpQrStUvWxYz0987654321": WalletMetrics(
@@ -664,7 +666,7 @@ class WalletAnalyzer:
                 win_rate=0.80,
                 max_drawdown_30d=5.0,
                 avg_trade_size_sol=1.2,
-                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+                last_trade_at=(utcnow() - timedelta(hours=1)).isoformat(),
                 win_streak_consistency=0.40,
             ),
             "3jHgFdAbCdEfGhIjKlMnOpQrStUvWxYz1122334455": WalletMetrics(
@@ -675,7 +677,7 @@ class WalletAnalyzer:
                 win_rate=0.35,
                 max_drawdown_30d=35.0,  # High drawdown
                 avg_trade_size_sol=0.8,
-                last_trade_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+                last_trade_at=(utcnow() - timedelta(days=3)).isoformat(),
                 win_streak_consistency=0.20,
             ),
             "8wQpRsAbCdEfGhIjKlMnOpQrStUvWxYz6677889900": WalletMetrics(
@@ -686,7 +688,7 @@ class WalletAnalyzer:
                 win_rate=0.58,
                 max_drawdown_30d=10.0,
                 avg_trade_size_sol=0.4,
-                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
+                last_trade_at=(utcnow() - timedelta(hours=12)).isoformat(),
                 win_streak_consistency=0.50,
             ),
         }
@@ -732,7 +734,7 @@ class WalletAnalyzer:
                     action=action,
                     amount_sol=Decimal(str(metrics.avg_trade_size_sol or 0.5)),
                     price_at_trade=Decimal(str(random.uniform(0.00001, 10.0))),
-                    timestamp=datetime.now(timezone.utc) - timedelta(days=days_ago, hours=random.randint(0, 23)),
+                    timestamp=utcnow() - timedelta(days=days_ago, hours=random.randint(0, 23)),
                     tx_signature=f"{wallet[:8]}_{i}",
                     pnl_sol=Decimal(str(pnl)) if action == TradeAction.SELL else Decimal('0'),
                     liquidity_at_trade_usd=Decimal(str(random.uniform(50000, 500000))),
@@ -848,7 +850,7 @@ class WalletAnalyzer:
                             lt_dt = datetime.fromisoformat(lt_str)
                             if lt_dt.tzinfo is None:
                                 lt_dt = lt_dt.replace(tzinfo=timezone.utc)
-                            age = datetime.now(timezone.utc) - lt_dt
+                            age = utcnow() - lt_dt
                             if age.days > 30:
                                 is_stale = True
                                 print(f"  [{address[:8]}] DB metrics stale (last trade {age.days}d ago), will re-fetch")
@@ -1096,7 +1098,7 @@ class WalletAnalyzer:
 
             action = TradeAction.BUY if direction == "BUY" else TradeAction.SELL
             timestamp = datetime.fromtimestamp(
-                swap.get("timestamp", int(datetime.now(timezone.utc).timestamp())),
+                swap.get("timestamp", int(utcnow().timestamp())),
                 tz=timezone.utc
             )
 
@@ -1870,7 +1872,7 @@ class WalletAnalyzer:
         
         print(f"  [{address[:8]}] Computing time windows...")
         # Calculate time windows
-        now = datetime.now(timezone.utc)
+        now = utcnow()
         cutoff_7d = now - timedelta(days=7)
         cutoff_30d = now - timedelta(days=30)
         cutoff_90d = now - timedelta(days=90)
@@ -2635,7 +2637,7 @@ class WalletAnalyzer:
         """
         # Check cache first
         if address in self._trades_cache:
-            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            cutoff = utcnow() - timedelta(days=days)
             return [t for t in self._trades_cache[address] if t.timestamp >= cutoff]
         
         # Fetch real data if Helius client is available
@@ -2650,7 +2652,7 @@ class WalletAnalyzer:
         
         # Fall back to cached sample data
         trades = self._trades_cache.get(address, [])
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        cutoff = utcnow() - timedelta(days=days)
         return [t for t in trades if t.timestamp >= cutoff]
     
     async def _fetch_real_historical_trades(self, address: str, days: int) -> List[HistoricalTrade]:
@@ -2692,7 +2694,7 @@ class WalletAnalyzer:
                                 liquidity_usd=current_liq.liquidity_usd,
                                 price_usd=current_liq.price_usd,
                                 volume_24h_usd=current_liq.volume_24h_usd,
-                                timestamp=datetime.now(timezone.utc),
+                                timestamp=utcnow(),
                                 source="analyzer_collection_current",
                             )
                             liquidity_snapshots.append(historical_snapshot)

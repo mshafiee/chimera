@@ -47,6 +47,10 @@ pub struct MetricsState {
     pub signal_quality_score: Histogram,
     /// Portfolio heat percentage (gauge)
     pub portfolio_heat_percent: prometheus::Gauge,
+    /// Rate limiter health for webhook processing (1 = healthy, 0 = degraded)
+    pub webhook_rate_limiter_health: IntGauge,
+    /// Rate limiter usage ratio (0-1, current credits / max credits)
+    pub webhook_rate_limiter_usage: prometheus::Gauge,
 }
 
 impl MetricsState {
@@ -208,6 +212,26 @@ impl MetricsState {
             .register(Box::new(portfolio_heat_percent.clone()))
             .map_err(|e| format!("Failed to register portfolio_heat_percent: {}", e))?;
 
+        // Rate limiter health gauge for webhook processing
+        let webhook_rate_limiter_health = IntGauge::with_opts(Opts::new(
+            "chimera_webhook_rate_limiter_health",
+            "Webhook rate limiter health (1 = healthy, 0 = degraded)",
+        ))
+        .map_err(|e| format!("Failed to create webhook_rate_limiter_health gauge: {}", e))?;
+        registry
+            .register(Box::new(webhook_rate_limiter_health.clone()))
+            .map_err(|e| format!("Failed to register webhook_rate_limiter_health: {}", e))?;
+
+        // Rate limiter usage ratio gauge
+        let webhook_rate_limiter_usage = Gauge::with_opts(Opts::new(
+            "chimera_webhook_rate_limiter_usage",
+            "Webhook rate limiter usage ratio (current credits / max credits, 0-1)",
+        ))
+        .map_err(|e| format!("Failed to create webhook_rate_limiter_usage gauge: {}", e))?;
+        registry
+            .register(Box::new(webhook_rate_limiter_usage.clone()))
+            .map_err(|e| format!("Failed to register webhook_rate_limiter_usage: {}", e))?;
+
         Ok(Self {
             registry,
             queue_depth,
@@ -225,6 +249,8 @@ impl MetricsState {
             cost_per_trade,
             signal_quality_score,
             portfolio_heat_percent,
+            webhook_rate_limiter_health,
+            webhook_rate_limiter_usage,
         })
     }
 

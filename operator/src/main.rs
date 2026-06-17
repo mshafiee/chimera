@@ -126,6 +126,30 @@ async fn main() -> anyhow::Result<()> {
     // Track SOL for volatility calculation
     price_cache.track_token("So11111111111111111111111111111111111111112");
 
+    // Validate webhook URL reachability if monitoring is enabled
+    if let Some(ref monitoring_config) = config.monitoring {
+        if monitoring_config.enabled {
+            if let Some(ref webhook_url) = monitoring_config.helius_webhook_url {
+                if !webhook_url.is_empty() {
+                    match chimera_operator::monitoring::helius::validate_webhook_reachability(webhook_url).await {
+                        Ok(_) => {
+                            tracing::info!("Webhook URL validated successfully: {}", webhook_url);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                webhook_url = %webhook_url,
+                                error = %e,
+                                "Webhook URL validation failed — monitoring may not work correctly"
+                            );
+                            // Don't fail startup on webhook validation issues - log a warning instead
+                            // The webhook may become available later, or monitoring may be optional
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Initialize circuit breaker
     let circuit_breaker = Arc::new(
         CircuitBreaker::new_with_ws(

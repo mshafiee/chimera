@@ -33,6 +33,8 @@ import asyncio
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from core.utils import utcnow
+
 from core.db_writer import WalletRecord, write_roster_atomic
 from core.wqs import calculate_wqs_with_confidence, \
     _calculate_raw_score, _interpret_trajectory, _compute_wmi
@@ -438,7 +440,7 @@ async def analyze_wallets(
                         "wallet": wallet_address,
                         "reason": f"WMI={wmi:.2f}, trajectory=DECLINING, "
                                   f"roi_7d={metrics.roi_7d}, roi_30d={metrics.roi_30d}",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": utcnow().isoformat(),
                         "recommended_action": "EXIT_ALL",
                     })
             
@@ -626,7 +628,7 @@ async def analyze_wallets(
         notes_parts = [f"WQS: {wqs:.1f}"]
         if res['backtest']['notes']:
             notes_parts.append(f"Backtest: {res['backtest']['notes']}")
-        notes_parts.append(f"Analyzed at {datetime.utcnow().isoformat()}")
+        notes_parts.append(f"Analyzed at {utcnow().isoformat()}")
 
         # Determine archetype
         archetype = res.get('archetype')
@@ -920,7 +922,7 @@ def _check_performance_degradation(metrics) -> bool:
         if last_trade:
             try:
                 last_trade_dt = datetime.fromisoformat(last_trade.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
+                now = utcnow()
                 if last_trade_dt.tzinfo is None:
                     now = now.replace(tzinfo=None)
                 days_since = (now - last_trade_dt).days
@@ -952,7 +954,7 @@ def _write_correlation_record(
     try:
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
-        now = datetime.utcnow().isoformat()
+        now = utcnow().isoformat()
         conn.execute(
             """INSERT OR REPLACE INTO wqs_pnl_correlation
                (wallet_address, wqs_score_at_promotion, wqs_components_json,
@@ -1003,7 +1005,7 @@ def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
             **rec,
             "confidence": confidence,
             "priority": priority,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": utcnow().isoformat(),
         }
         enhanced_recs.append(enhanced_rec)
 
@@ -1126,7 +1128,7 @@ async def main_async():
     
     print("=" * 70)
     print("Chimera Scout - Wallet Intelligence Layer")
-    print(f"Started at: {datetime.utcnow().isoformat()}")
+    print(f"Started at: {utcnow().isoformat()}")
     print("=" * 70)
     
     # Print configuration summary if config module available
@@ -1391,7 +1393,7 @@ async def main_async():
                         lt = datetime.fromisoformat(last_trade.replace("Z", "+00:00"))
                         if lt.tzinfo is None:
                             lt = lt.replace(tzinfo=timezone.utc)
-                        days_since = (datetime.now(timezone.utc) - lt).days
+                        days_since = (utcnow() - lt).days
                     except (ValueError, TypeError):
                         pass
                 feature_dicts.append({
@@ -1537,7 +1539,7 @@ def main():
         traceback.print_exc()
         sys.exit(1)
     
-    print(f"\n[Scout] Finished at: {datetime.utcnow().isoformat()}")
+    print(f"\n[Scout] Finished at: {utcnow().isoformat()}")
     print("=" * 70)
 
 

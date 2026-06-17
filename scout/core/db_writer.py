@@ -36,6 +36,9 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime
+
+from .utils import utcnow
+
 from pathlib import Path
 from typing import List, Optional
 
@@ -241,7 +244,7 @@ class RosterWriter:
             )
             
             # Insert wallets
-            now = datetime.utcnow().isoformat() + "Z"
+            now = utcnow().isoformat() + "Z"
             
             for wallet in wallets:
                 cursor.execute(

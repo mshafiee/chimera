@@ -1162,6 +1162,51 @@ impl AppConfig {
             )));
         }
 
+        // Validate webhook URL format if monitoring is enabled
+        if let Some(ref monitoring_config) = self.monitoring {
+            if monitoring_config.enabled {
+                // If monitoring is enabled, validate required API key
+                if monitoring_config.helius_api_key.as_ref().map(|k| k.is_empty()).unwrap_or(true) {
+                    return Err(ConfigError::Message(
+                        "Monitoring is enabled but helius_api_key is not set or empty".to_string(),
+                    ));
+                }
+
+                if let Some(ref webhook_url) = monitoring_config.helius_webhook_url {
+                    if !webhook_url.is_empty() {
+                        // Validate URL format
+                        if !webhook_url.starts_with("http://") && !webhook_url.starts_with("https://") {
+                            return Err(ConfigError::Message(format!(
+                                "Monitoring webhook URL must start with http:// or https://, got: {}",
+                                webhook_url
+                            )));
+                        }
+                        // Basic URL format validation
+                        if !webhook_url.contains("://") || webhook_url.len() < 10 {
+                            return Err(ConfigError::Message(format!(
+                                "Monitoring webhook URL format is invalid: {}",
+                                webhook_url
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate telegram notification configuration
+        if self.notifications.telegram.enabled {
+            if self.notifications.telegram.bot_token.is_empty() {
+                return Err(ConfigError::Message(
+                    "Telegram notifications are enabled but bot_token is not set (set TELEGRAM_BOT_TOKEN)".to_string(),
+                ));
+            }
+            if self.notifications.telegram.chat_id.is_empty() {
+                return Err(ConfigError::Message(
+                    "Telegram notifications are enabled but chat_id is not set (set TELEGRAM_CHAT_ID)".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 }

@@ -17,6 +17,9 @@ A wallet FAILS backtest if:
 """
 
 from datetime import datetime
+
+from .utils import utcnow
+
 from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 import logging
@@ -764,7 +767,7 @@ if __name__ == "__main__":
             action=TradeAction.BUY,
             amount_sol=0.5,
             price_at_trade=0.000012,
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             tx_signature="tx1",
             pnl_sol=0.15,
         ),
@@ -774,7 +777,7 @@ if __name__ == "__main__":
             action=TradeAction.BUY,
             amount_sol=0.3,
             price_at_trade=1.5,
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             tx_signature="tx2",
             pnl_sol=0.08,
         ),
@@ -788,7 +791,7 @@ if __name__ == "__main__":
             action=TradeAction.SELL,
             amount_sol=0.1,
             price_at_trade=0.000015,
-            timestamp=datetime.utcnow(),
+            timestamp=utcnow(),
             tx_signature=f"tx{i+3}",
             pnl_sol=0.02,
         ))

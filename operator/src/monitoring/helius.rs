@@ -417,6 +417,50 @@ impl HeliusClient {
     }
 }
 
+/// Validate webhook URL reachability with a health check request.
+///
+/// This function sends a lightweight GET request to the webhook URL to verify
+/// it is reachable and responding. This is useful for startup validation to
+/// fail-fast if the webhook endpoint is misconfigured.
+///
+/// # Arguments
+/// * `webhook_url` - The webhook URL to validate
+///
+/// # Returns
+/// * `Ok(())` if the URL is reachable
+/// * `Err(e)` if the URL is unreachable or returns an error
+///
+/// # Note
+/// This is a lightweight check that doesn't require authentication. For endpoints
+/// that require authentication, consider using the actual webhook endpoint handler
+/// for validation instead.
+pub async fn validate_webhook_reachability(webhook_url: &str) -> Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("Failed to build HTTP client for webhook validation")?;
+
+    // Send a lightweight GET request to the webhook endpoint
+    // Most webhook endpoints return 404 or 405 for GET requests, which
+    // indicates the server is reachable even if the endpoint doesn't support GET
+    let response = client
+        .get(webhook_url)
+        .send()
+        .await
+        .context("Failed to reach webhook URL")?;
+
+    // Any response (including 4xx) indicates the URL is reachable
+    tracing::info!(
+        "Webhook URL reachable, status: {}",
+        response.status()
+    );
+
+    // If we get any response, the URL is reachable
+    // We don't require a specific status code since webhook endpoints may
+    // return 404 or 405 for GET requests
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

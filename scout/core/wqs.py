@@ -16,6 +16,9 @@ WQS v2 improvements:
 from dataclasses import dataclass
 from typing import Optional, Dict
 from datetime import datetime, timezone
+
+from .utils import utcnow
+
 import os
 import logging
 
@@ -776,7 +779,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         try:
             last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
             last_trade = datetime.fromisoformat(last_trade_str)
-            now = datetime.now(timezone.utc)
+            now = utcnow()
             if last_trade.tzinfo is None:
                 now = now.replace(tzinfo=None)
             days_since_trade = (now - last_trade).days

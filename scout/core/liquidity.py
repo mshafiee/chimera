@@ -23,6 +23,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import random
 
+from .utils import utcnow
+
 from .models import LiquidityData
 
 # Import source clients
@@ -404,7 +406,7 @@ class LiquidityProvider:
             return historical
 
         # Calculate trade age and token age for confidence scoring
-        now = datetime.now(timezone.utc)
+        now = utcnow()
         if timestamp.tzinfo:
             trade_age = now - timestamp
         else:
@@ -815,7 +817,7 @@ class LiquidityProvider:
         # Cache for short period
         if self._sol_price_cache:
             price, cached_at = self._sol_price_cache
-            if (datetime.now(timezone.utc) - cached_at).total_seconds() < 60:
+            if (utcnow() - cached_at).total_seconds() < 60:
                 return price
 
         # Try Jupiter client first (if available)
@@ -824,7 +826,7 @@ class LiquidityProvider:
                 await self._rate_limit_async()
                 price = await self.jupiter_client.get_sol_price_usd()
                 if price and price > 0:
-                    self._sol_price_cache = (price, datetime.now(timezone.utc))
+                    self._sol_price_cache = (price, utcnow())
                     return price
             except Exception as e:
                 logger.debug(f"Jupiter SOL price failed: {e}")
@@ -845,7 +847,7 @@ class LiquidityProvider:
             if price is not None:
                 price_f = float(price)
                 if price_f > 0:
-                    self._sol_price_cache = (price_f, datetime.now(timezone.utc))
+                    self._sol_price_cache = (price_f, utcnow())
                     return price_f
         except Exception as e:
             logger.debug(f"Direct Jupiter API call failed: {e}")
@@ -863,7 +865,7 @@ class LiquidityProvider:
         """
         if self._sol_price_cache:
             price, cached_at = self._sol_price_cache
-            if (datetime.now(timezone.utc) - cached_at).total_seconds() < 300:
+            if (utcnow() - cached_at).total_seconds() < 300:
                 return price
         return 150.0  # Conservative fallback; corrected on next async refresh
 
@@ -891,7 +893,7 @@ class LiquidityProvider:
             liquidity_usd=liquidity,
             price_usd=price,
             volume_24h_usd=liquidity * random.uniform(0.1, 2.0),
-            timestamp=datetime.now(timezone.utc),
+            timestamp=utcnow(),
             source="simulated",
         )
     
@@ -927,7 +929,7 @@ class LiquidityProvider:
         # Fallback to in-memory cache
         if token_address in self._cache:
             data, cached_time = self._cache[token_address]
-            age = (datetime.now(timezone.utc) - cached_time).total_seconds()
+            age = (utcnow() - cached_time).total_seconds()
             if age < self.cache_ttl:
                 return data
             else:
@@ -962,7 +964,7 @@ class LiquidityProvider:
                 logger.debug(f"Redis cache set failed for {token_address[:8]}...: {e}")
 
         # Fallback to in-memory cache
-        self._cache[token_address] = (data, datetime.now(timezone.utc))
+        self._cache[token_address] = (data, utcnow())
     
     def clear_cache(self) -> None:
         """Clear the liquidity cache (Redis and in-memory)."""
@@ -987,7 +989,7 @@ if __name__ == "__main__":
     
     historical = provider.get_historical_liquidity(
         bonk_address,
-        datetime.now(timezone.utc) - timedelta(days=30)
+        utcnow() - timedelta(days=30)
     )
     if historical:
         print(f"BONK Historical Liquidity (30d ago): ${historical.liquidity_usd:,.0f}")

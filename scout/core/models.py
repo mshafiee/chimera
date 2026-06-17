@@ -7,6 +7,9 @@ for representing historical trades, simulation results, and validation outcomes.
 
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from .utils import utcnow
+
 from decimal import Decimal
 from enum import Enum
 from typing import Dict, List, Optional
@@ -58,7 +61,7 @@ class WalletRecord:
     realized_pnl_30d_sol: Optional[Decimal] = None
     last_trade_at: Optional[str] = None
     notes: Optional[str] = None
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: utcnow().isoformat())
     # New fields for detailed records
     avg_entry_delay_seconds: Optional[float] = None  # Time metric, float is acceptable
     archetype: Optional[str] = None  # TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
@@ -330,7 +333,7 @@ if __name__ == "__main__":
         action=TradeAction.BUY,
         amount_sol=Decimal('0.5'),
         price_at_trade=Decimal('0.000012'),
-        timestamp=datetime.utcnow(),
+        timestamp=utcnow(),
         tx_signature="5xyzABC123...",
         liquidity_at_trade_usd=Decimal('150000.0'),
     )
