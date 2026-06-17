@@ -207,6 +207,209 @@ def _interpret_trajectory(roi_7d: Optional[float], roi_30d: Optional[float]) -> 
     return "STABLE"
 
 
+def _detect_smart_accumulation(metrics) -> float:
+    """
+    Detect smart accumulation patterns (gradual position building).
+
+    Returns a score from 0.0 to 1.0 indicating how strongly the wallet
+    shows accumulation behavior vs. panic buying.
+
+    Patterns:
+    - Accumulation: Gradual position building with increasing size
+    - Pyramid up: Adding to winners (smart)
+    - Average down: Adding to losers (risky)
+    - FOMO: Large sudden positions (negative)
+    """
+    score = 0.0
+
+    # Check trade size progression (need trade history)
+    if not hasattr(metrics, 'trade_sizes') or not metrics.trade_sizes:
+        return 0.0  # Can't detect without trade history
+
+    trade_sizes = metrics.trade_sizes
+    if not trade_sizes or len(trade_sizes) < 3:
+        return 0.0
+
+    # Analyze trade size patterns
+    # Check if gradually increasing (smart accumulation)
+    recent_sizes = trade_sizes[-5:] if len(trade_sizes) >= 5 else trade_sizes
+    size_trend = 0.0
+
+    for i in range(1, len(recent_sizes)):
+        if recent_sizes[i] > recent_sizes[i-1]:
+            size_trend += 1
+        elif recent_sizes[i] < recent_sizes[i-1]:
+            size_trend -= 1
+
+    # Normalize to [-1, 1]
+    if len(recent_sizes) > 1:
+        size_trend /= (len(recent_sizes) - 1)
+
+    # Positive gradual increase = smart accumulation
+    if size_trend > 0.3 and size_trend < 0.8:
+        score += 0.4
+
+    # Check for pyramid-up behavior (adding to winners)
+    if hasattr(metrics, 'roi_7d') and metrics.roi_7d and metrics.roi_7d > 0:
+        if size_trend > 0.2:
+            score += 0.3
+
+    # Check for average-down behavior (adding to losers)
+    if hasattr(metrics, 'roi_7d') and metrics.roi_7d and metrics.roi_7d < 0:
+        if size_trend > 0.3:
+            score -= 0.2  # Penalty for averaging down
+
+    # Check for FOMO behavior (large sudden positions)
+    if len(recent_sizes) >= 2:
+        size_variance = max(recent_sizes) - min(recent_sizes)
+        avg_size = sum(recent_sizes) / len(recent_sizes)
+        if avg_size > 0:
+            cv = size_variance / avg_size  # Coefficient of variation
+            if cv > 2.0:  # High variance = impulsive trading
+                score -= 0.3
+
+    return max(0.0, min(1.0, score))
+
+
+def _detect_market_regime(metrics) -> str:
+    """
+    Detect market regime based on wallet performance patterns.
+
+    Returns: "BULL", "BEAR", "VOLATILE", or "NEUTRAL"
+    """
+    if not hasattr(metrics, 'roi_7d') or not hasattr(metrics, 'roi_30d'):
+        return "NEUTRAL"
+
+    roi_7d = metrics.roi_7d
+    roi_30d = metrics.roi_30d
+    volatility = getattr(metrics, 'volatility_30d', None)
+
+    # Bull market: Strong positive returns across timeframes
+    if roi_30d and roi_30d > 20 and roi_7d and roi_7d > 10:
+        if volatility and volatility < 30:
+            return "BULL"
+
+    # Bear market: Negative returns or weak performance
+    if roi_30d and roi_30d < -10:
+        return "BEAR"
+    if roi_7d and roi_7d < 0 and roi_30d and roi_30d < 5:
+        return "BEAR"
+
+    # Volatile: High volatility with mixed returns
+    if volatility and volatility > 50:
+        if roi_7d and abs(roi_7d) > 20:
+            return "VOLATILE"
+
+    # Check for regime switches
+    if roi_30d and roi_30d > 10 and roi_7d and roi_7d < roi_30d * 0.2:
+        return "VOLATILE"  # Momentum breakdown
+
+    if roi_30d and roi_30d < 0 and roi_7d and roi_7d > 10:
+        return "BULL"  # Recovery (early bull)
+
+    return "NEUTRAL"
+
+
+def _apply_archetype_adjustments(tracker: ScoreTracker, metrics, regime: str) -> None:
+    """
+    Apply archetype-specific adjustments based on trading patterns.
+
+    Different trading styles excel in different market conditions:
+    - Scalpers: Short-term trades, excel in volatile markets
+    - Swing traders: Medium-term holds, excel in trending markets
+    - Whales: Large positions, excel in stable markets
+    """
+    # Detect archetype from trade patterns
+    avg_hold_time = getattr(metrics, 'avg_hold_time_hours', 24) or 24
+    trade_freq = getattr(metrics, 'trade_count_30d', 30) or 30
+    avg_size = getattr(metrics, 'avg_trade_size_sol', 1.0) or 1.0
+
+    # Classify archetype
+    if avg_hold_time < 1 and trade_freq > 100:
+        archetype = "SCALPER"
+    elif avg_hold_time < 24 and trade_freq > 50:
+        archetype = "DAY_TRADER"
+    elif avg_hold_time < 168 and trade_freq > 20:
+        archetype = "SWING_TRADER"
+    elif avg_size > 10 and trade_freq < 20:
+        archetype = "WHALE"
+    else:
+        archetype = "GENERAL"
+
+    # Apply regime-specific adjustments
+    if regime == "VOLATILE":
+        if archetype in ["SCALPER", "DAY_TRADER"]:
+            tracker.add_pos("regime_adjustment", 5.0)
+        elif archetype == "SWING_TRADER":
+            tracker.add_pos("regime_adjustment", 3.0)
+        elif archetype == "WHALE":
+            tracker.add_neg("regime_adjustment", 3.0)  # Whales struggle in volatility
+
+    elif regime == "BULL":
+        if archetype == "SWING_TRADER":
+            tracker.add_pos("regime_adjustment", 5.0)
+        elif archetype == "WHALE":
+            tracker.add_pos("regime_adjustment", 3.0)
+        elif archetype in ["SCALPER", "DAY_TRADER"]:
+            tracker.add_neg("regime_adjustment", 2.0)  # May miss bigger moves
+
+    elif regime == "BEAR":
+        if archetype == "SCALPER":
+            tracker.add_pos("regime_adjustment", 5.0)  # Quick exits good in bear markets
+        elif archetype == "WHALE":
+            tracker.add_neg("regime_adjustment", 5.0)  # Large positions risky in bear
+        elif archetype == "SWING_TRADER":
+            tracker.add_neg("regime_adjustment", 3.0)
+
+
+def _calculate_enhanced_momentum_score(metrics) -> float:
+    """
+    Calculate enhanced momentum score with multiple indicators.
+
+    Returns: Score from 0.0 to 1.0
+    """
+    if not metrics.roi_7d or not metrics.roi_30d:
+        return 0.0
+
+    score = 0.0
+    roi_7d = metrics.roi_7d
+    roi_30d = metrics.roi_30d
+
+    # Base momentum: 7d vs 30d ratio
+    if roi_30d > 0:
+        momentum_ratio = roi_7d / roi_30d
+
+        # Strong acceleration
+        if momentum_ratio > 0.8:
+            score += 0.4
+        elif momentum_ratio > 0.6:
+            score += 0.3
+        elif momentum_ratio > 0.4:
+            score += 0.2
+
+        # Explosive growth (moonshot detection)
+        if roi_7d > 100:
+            score += 0.3
+        elif roi_7d > 50:
+            score += 0.2
+        elif roi_7d > 20:
+            score += 0.1
+
+        # Recent performance bonus
+        if roi_7d > roi_30d * 1.2:  # Recent significantly outperforming
+            score += 0.2
+
+    # Recovery bonus (turning around)
+    elif roi_30d < 0 and roi_7d > 10:
+        score += 0.3  # Recovery momentum
+
+    # Decline penalty
+    elif roi_7d < roi_30d * 0.3:
+        score -= 0.2
+
+    return max(0.0, min(1.0, score))
+
+
 def _get_current_weights() -> Dict[str, float]:
     """Load adaptive WQS weights from cache file, falling back to defaults (all 1.0)."""
     try:
@@ -254,6 +457,9 @@ class WalletMetrics:
     mev_risk_score: Optional[float] = None  # Fraction of trades appearing in sandwich blocks (0.0-1.0)
     archetype: Optional[str] = None  # Trader archetype (SCALPER, SWING, WHALE, SNIPER, INSIDER)
     trajectory: Optional[str] = None  # Multi-timeframe trajectory (IMPROVING, STABLE, DECLINING, PEAKED)
+    volatility_30d: Optional[float] = None  # Volatility measure over 30 days
+    trade_sizes: Optional[list] = None  # List of trade sizes for pattern detection
+    avg_hold_time_hours: Optional[float] = None  # Average position hold time in hours
 
 
 @dataclass
@@ -524,7 +730,42 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
             tracker.add_neg("smart_money_removal", 10.0)
         if metrics.uses_mev_protection:
             tracker.add_neg("smart_money_removal", 10.0)
-    
+
+    # Pattern Recognition: Smart Accumulation Detection
+    accumulation_score = _detect_smart_accumulation(metrics)
+    if accumulation_score > 0.6:
+        tracker.add_pos("smart_accumulation", 8.0)
+    elif accumulation_score > 0.4:
+        tracker.add_pos("smart_accumulation", 5.0)
+    elif accumulation_score < 0.2:
+        tracker.add_neg("smart_accumulation", 5.0)
+
+    # Pattern Recognition: Enhanced Momentum Detection
+    momentum_score = _calculate_enhanced_momentum_score(metrics)
+    if momentum_score > 0.7:
+        tracker.add_pos("enhanced_momentum", 10.0)
+    elif momentum_score > 0.5:
+        tracker.add_pos("enhanced_momentum", 7.0)
+    elif momentum_score > 0.3:
+        tracker.add_pos("enhanced_momentum", 5.0)
+    elif momentum_score < 0.1:
+        tracker.add_neg("enhanced_momentum", 3.0)
+
+    # Pattern Recognition: Market Regime Detection and Archetype Adjustments
+    market_regime = _detect_market_regime(metrics)
+    _apply_archetype_adjustments(tracker, metrics, market_regime)
+
+    # Regime-specific adjustments
+    if market_regime == "BULL":
+        tracker.add_pos("market_regime", 3.0)
+    elif market_regime == "BEAR":
+        tracker.add_neg("market_regime", 2.0)
+    elif market_regime == "VOLATILE":
+        # Neutral in volatile markets, but add bonus for adaptability
+        if metrics.volatility_30d and metrics.volatility_30d > 50:
+            if metrics.win_rate and metrics.win_rate > 0.5:
+                tracker.add_pos("adaptability", 5.0)
+
     # 11) Bag Holder Penalty (The "Hidden Loser" Detector)
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
         if metrics.total_realized_profit_sol > 0:
