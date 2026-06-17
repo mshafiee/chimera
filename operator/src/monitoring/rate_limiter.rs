@@ -235,12 +235,47 @@ impl RateLimiter {
 }
 
 /// Rate limit metrics for monitoring
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RateLimitMetrics {
     pub requests_per_second: f64,
     pub total_credits_used: u64,
-    pub rate_limit_hits: u64,
-    pub average_wait_time_ms: f64,
+    pub current_credits: u32,
+    pub max_credits: u32,
+}
+
+impl RateLimiter {
+    /// Get current rate limit metrics for monitoring and observability.
+    ///
+    /// Returns a snapshot of current rate limiter state including:
+    /// - requests_per_second: Current request rate
+    /// - total_credits_used: Total credits consumed since start/reset
+    /// - current_credits: Credits used in current sliding window
+    /// - max_credits: Maximum credits per window (configured limit)
+    pub fn get_metrics(&self) -> RateLimitMetrics {
+        // Ensure we have clean data
+        let now = Instant::now();
+        let window_start = now - Duration::from_secs(self.window_secs);
+
+        let mut requests = self.requests.lock();
+        let mut current_credits = self.current_credits.lock();
+
+        // Clean up old requests
+        while let Some(&(oldest_time, oldest_weight)) = requests.front() {
+            if oldest_time < window_start {
+                requests.pop_front();
+                *current_credits = current_credits.saturating_sub(oldest_weight);
+            } else {
+                break;
+            }
+        }
+
+        RateLimitMetrics {
+            requests_per_second: requests.len() as f64 / self.window_secs as f64,
+            total_credits_used: *self.credit_usage.lock(),
+            current_credits: *current_credits,
+            max_credits: self.max_credits,
+        }
+    }
 }
 
 #[cfg(test)]

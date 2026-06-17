@@ -152,11 +152,28 @@ class HeliusClient:
         return re.sub(r"(api-key=)[^&\s]+", r"\1REDACTED", s)
 
     async def _get_session(self) -> aiohttp.ClientSession:
-        """Get or create aiohttp session with default timeout."""
+        """Get or create aiohttp session with connection pooling and optimized timeout.
+
+        Configures persistent connection pooling following Helius best practices:
+        - Limit total connections to 100 for resource efficiency
+        - Limit per-host to 50 (matches Helius Developer Plan rate limits)
+        - 5-minute keep-alive for connection reuse
+        - Enable cleanup of closed connections
+        """
         if self._session is None:
+            # Configure connection pool for Helius endpoints
+            connector = aiohttp.TCPConnector(
+                limit=100,              # Total max connections
+                limit_per_host=50,      # Per-host limit (Helius Developer Plan: 50 RPS)
+                keepalive_timeout=300,  # 5 minutes keep-alive
+                enable_cleanup_closed=True,  # Cleanup closed connections
+            )
             # Set default timeout for all requests: 60s total, 30s connect
             timeout = aiohttp.ClientTimeout(total=60, connect=30, sock_read=30)
-            self._session = aiohttp.ClientSession(timeout=timeout)
+            self._session = aiohttp.ClientSession(
+                connector=connector,
+                timeout=timeout
+            )
             self._own_session = True
         return self._session
 
@@ -648,14 +665,16 @@ class HeliusClient:
                 # Handle rate limiting
                 if response.status == 429:
                     retry_after = int(response.headers.get("Retry-After", 5))
-                    print(f"[Helius] Rate limited, waiting {retry_after}s")
+                    print(f"[Helius] Rate limited, waiting {retry_after}s (per Retry-After header)")
                     await asyncio.sleep(retry_after)
-                    async with session.get(url, params=request_params, timeout=aiohttp.ClientTimeout(total=30)) as retry_response:
-                        retry_response.raise_for_status()
-                        self._api_calls_made += 1
-                        await self._record_success()
-                        await self._adjust_rate_limit()
-                        return await retry_response.json()
+                    # After honoring Retry-After, return None to trigger standard retry with backoff
+                    # This prevents immediate retry storms if the first retry after Retry-After also fails
+                    raise aiohttp.ClientResponseError(
+                        request_info=response.request_info,
+                        history=response.history,
+                        status=429,
+                        message=f"Rate limited - waited {retry_after}s per Retry-After"
+                    )
 
                 response.raise_for_status()
                 self._api_calls_made += 1
