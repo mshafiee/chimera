@@ -433,7 +433,7 @@ class ScoutConfig:
         print(f"  Credit Tracking: {ScoutConfig.get_credit_tracking_enabled()}")
         print(f"  ML Prediction: {ScoutConfig.get_ml_prediction_enabled()}")
         print(f"  Production Monitoring: {ScoutConfig.get_production_monitoring_enabled()}")
-        print(f"  Growth Optimized: {Scout.get_growth_optimized()}")
+        print(f"  Growth Optimized: {ScoutConfig.get_growth_optimized()}")
         print(f"  Current Capital: ${ScoutConfig.get_current_capital():,.0f}")
         print(f"  Target Capital: ${ScoutConfig.get_target_capital():,.0f}")
         print(f"  Monthly Credits: {ScoutConfig.get_monthly_credits():,}")

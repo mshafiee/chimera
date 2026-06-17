@@ -48,6 +48,15 @@ from core.correlation_reader import CorrelationReader
 from core.feature_store import FeatureStore
 from core.ml_predictor import ProfitabilityPredictor, predict_wallet_profitability
 
+# Import optimization modules
+try:
+    from core.scout_optimizer import get_scout_optimizer
+    from core.optimized_analyzer import OptimizedWalletAnalyzer
+    OPTIMIZATION_AVAILABLE = True
+except ImportError:
+    OPTIMIZATION_AVAILABLE = False
+    print("[Scout] Warning: Optimization modules not available")
+
 # Import config module if available
 try:
     from config import ScoutConfig
@@ -1087,13 +1096,47 @@ async def main_async():
         if liquidity_mode == "simulated":
             print("[Scout] WARNING: Running with simulated liquidity mode - results are non-deterministic!")
             print("[Scout] Set SCOUT_LIQUIDITY_MODE=real and provide BIRDEYE_API_KEY for production use")
-        
+
+        # Initialize optimization system
+        optimizer = None
+        if CONFIG_AVAILABLE and ScoutConfig and ScoutConfig.get_optimization_enabled():
+            if OPTIMIZATION_AVAILABLE:
+                try:
+                    optimizer = get_scout_optimizer()
+                    if optimizer.initialize():
+                        print("[Scout] ✓ Optimization system initialized")
+                        optimizer.start_monitoring()
+                        print("[Scout] ✓ Production monitoring started")
+
+                        # Check production readiness
+                        is_ready, readiness_issues = optimizer.is_production_ready()
+                        if not is_ready:
+                            print("[Scout] ⚠ Production readiness issues:")
+                            for issue in readiness_issues[:3]:
+                                print(f"  - {issue}")
+                    else:
+                        print("[Scout] ⚠ Optimization system initialization failed")
+                        optimizer = None
+                except Exception as e:
+                    print(f"[Scout] ⚠ Failed to initialize optimization: {e}")
+                    optimizer = None
+            else:
+                print("[Scout] Optimization modules not available, using base analyzer")
+
         # Use async factory for proper wallet discovery
-        analyzer = await WalletAnalyzer.create(
+        base_analyzer = await WalletAnalyzer.create(
             helius_api_key=helius_api_key,
             discover_wallets=True,  # Enable wallet discovery from on-chain data
             max_wallets=args.max_wallets,
         )
+
+        # Wrap with optimized analyzer if available
+        if optimizer and OPTIMIZATION_AVAILABLE:
+            analyzer = OptimizedWalletAnalyzer(base_analyzer, optimizer)
+            print("[Scout] ✓ Using optimized wallet analyzer")
+        else:
+            analyzer = base_analyzer
+            print("[Scout] Using base wallet analyzer")
     except Exception as e:
         print(f"[Scout] ERROR: Failed to initialize analyzer: {e}")
         import traceback
