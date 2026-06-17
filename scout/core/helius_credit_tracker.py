@@ -159,6 +159,19 @@ class HeliusCreditTracker:
         self._validation_spent = 0
         self._reserve_spent = 0
 
+        # Value-based tracking (ROI per credit spent)
+        self._category_roi = {
+            'discovery': {'credits': 0, 'value': 0.0},
+            'analysis': {'credits': 0, 'value': 0.0},
+            'validation': {'credits': 0, 'value': 0.0},
+            'reserve': {'credits': 0, 'value': 0.0},
+        }
+
+        # Dynamic budget rebalancing
+        self._last_rebalance_time = 0.0
+        self._rebalance_interval_hours = 24  # Rebalance daily
+        self._budget_adjustments = {}  # Track budget adjustments over time
+
         # Rate limiting
         self._request_times: List[float] = []
         self._rate_limit_window = 1.0  # 1 second window
@@ -530,6 +543,22 @@ class HeliusCreditTracker:
         print(f"  Validation: {self._validation_spent:,.0f} / {self._validation_budget:,.0f} credits")
         print(f"  Reserve: {self._reserve_spent:,.0f} / {self._reserve_budget:,.0f} credits")
 
+        # ROI tracking
+        print(f"\nROI Tracking (Value per Credit):")
+        for category in ['discovery', 'analysis', 'validation']:
+            roi = self.get_category_roi(category)
+            credits = (
+                self._discovery_spent if category == 'discovery' else
+                self._analysis_spent if category == 'analysis' else
+                self._validation_spent
+            )
+            print(f"  {category.capitalize():10} | Credits: {credits:8,.0f} | ROI: {roi:.4f}")
+
+        # Budget rebalancing info
+        if self._budget_adjustments:
+            last_rebalance = datetime.fromtimestamp(self._budget_adjustments['timestamp'])
+            print(f"\nLast Budget Rebalance: {last_rebalance.strftime('%Y-%m-%d %H:%M')}")
+
         print(f"\nProjections:")
         print(f"  Projected monthly: {snapshot.projected_monthly:,.0f} / {self._budget.MONTHLY_CREDITS:,.0f}")
 
@@ -546,6 +575,173 @@ class HeliusCreditTracker:
         """Cleanup and save final state."""
         self._save_state()
         logger.info("Helius Credit Tracker shut down")
+
+    def record_category_value(self, category: str, value: float):
+        """
+        Record value generated from credit spending in a category.
+
+        Args:
+            category: Category (discovery, analysis, validation, reserve)
+            value: Value generated (e.g., profitable wallets found, validation passes)
+        """
+        if category in self._category_roi:
+            self._category_roi[category]['value'] += value
+
+    def get_category_roi(self, category: str) -> float:
+        """
+        Get ROI (value per credit) for a category.
+
+        Args:
+            category: Category to calculate ROI for
+
+        Returns:
+            ROI value (value / credits spent)
+        """
+        if category not in self._category_roi:
+            return 0.0
+
+        data = self._category_roi[category]
+        credits = data['credits'] + (
+            self._discovery_spent if category == 'discovery' else
+            self._analysis_spent if category == 'analysis' else
+            self._validation_spent if category == 'validation' else
+            self._reserve_spent if category == 'reserve' else 0
+        )
+
+        if credits <= 0:
+            return 0.0
+
+        return data['value'] / credits
+
+    def should_rebalance_budget(self) -> bool:
+        """Check if it's time to rebalance the budget."""
+        now = time.time()
+        hours_since_rebalance = (now - self._last_rebalance_time) / 3600
+        return hours_since_rebalance >= self._rebalance_interval_hours
+
+    def rebalance_budget_based_on_roi(self) -> Dict[str, float]:
+        """
+        Rebalance budget allocation based on ROI performance.
+
+        Categories with higher ROI get more budget allocation.
+
+        Returns:
+            Dictionary of new budget percentages by category
+        """
+        if not self.should_rebalance_budget():
+            logger.debug("Not time to rebalance yet")
+            return {}
+
+        # Calculate ROI for each category
+        roi_by_category = {}
+        for category in ['discovery', 'analysis', 'validation']:
+            roi_by_category[category] = self.get_category_roi(category)
+
+        # Get current allocations
+        current_allocations = {
+            'discovery': self._budget.DISCOVERY_RATIO,
+            'analysis': self._budget.ANALYSIS_RATIO,
+            'validation': self._budget.VALIDATION_RATIO,
+        }
+
+        # Calculate total value-weighted allocation
+        total_roi = sum(roi_by_category.values()) or 1.0
+        new_allocations = {}
+
+        if total_roi > 0:
+            # Allocate based on ROI contribution
+            for category in current_allocations:
+                weight = roi_by_category.get(category, 0) / total_roi
+                # Blend 50/50 with original allocation to avoid extreme swings
+                new_allocations[category] = (
+                    0.5 * current_allocations[category] +
+                    0.5 * max(0.05, weight)  # Minimum 5% allocation
+                )
+        else:
+            # No ROI data yet, keep current allocations
+            new_allocations = current_allocations.copy()
+
+        # Normalize to ensure total = 0.9 (reserve 10%)
+        total_allocation = sum(new_allocations.values())
+        target_total = 0.9  # Keep 10% reserve
+        for category in new_allocations:
+            new_allocations[category] = (
+                new_allocations[category] / total_allocation * target_total
+            )
+
+        # Apply new allocations
+        self._discovery_budget = self._daily_budget * new_allocations['discovery']
+        self._analysis_budget = self._daily_budget * new_allocations['analysis']
+        self._validation_budget = self._daily_budget * new_allocations['validation']
+
+        # Track the adjustment
+        self._last_rebalance_time = time.time()
+        self._budget_adjustments = {
+            'timestamp': self._last_rebalance_time,
+            'old_allocations': current_allocations,
+            'new_allocations': new_allocations,
+            'roi_by_category': roi_by_category,
+        }
+
+        logger.info(f"Budget rebalanced based on ROI: {new_allocations}")
+        return new_allocations
+
+    def get_value_based_priority(self, wallet_wqs: Optional[float] = None,
+                               expected_value: float = 0.5) -> RequestPriority:
+        """
+        Determine request priority based on value and wallet quality.
+
+        Args:
+            wallet_wqs: WQS score of wallet
+            expected_value: Expected value of the request (0.0-1.0)
+
+        Returns:
+            Appropriate priority level
+        """
+        # High-conviction wallets get higher priority
+        if wallet_wqs and wallet_wqs >= 70:
+            if expected_value > 0.7:
+                return RequestPriority.CRITICAL
+            return RequestPriority.HIGH
+        elif wallet_wqs and wallet_wqs >= 60:
+            if expected_value > 0.8:
+                return RequestPriority.CRITICAL
+            return RequestPriority.HIGH
+        elif wallet_wqs and wallet_wqs >= 50:
+            return RequestPriority.MEDIUM
+        else:
+            # Low-conviction wallets get lower priority
+            return RequestPriority.LOW
+
+    def optimize_request_cost(self, base_cost: int, wallet_wqs: Optional[float] = None,
+                            operation: str = "analysis") -> int:
+        """
+        Optimize request cost based on wallet quality and operation type.
+
+        Args:
+            base_cost: Base credit cost
+            wallet_wqs: WQS score of wallet
+            operation: Operation type
+
+        Returns:
+            Optimized credit cost (may be reduced for low-value operations)
+        """
+        if not self._growth_optimized:
+            return base_cost
+
+        # Reduce cost for low-conviction wallets
+        if wallet_wqs and wallet_wqs < 50:
+            if operation == "enrichment":
+                return max(1, base_cost // 2)  # 50% reduction
+            elif operation == "metadata":
+                return max(1, base_cost // 4)  # 75% reduction
+
+        # Increase budget allocation for high-conviction wallets
+        if wallet_wqs and wallet_wqs >= 70:
+            if operation == "validation":
+                return int(base_cost * 1.5)  # 50% increase for critical validation
+
+        return base_cost
 
 
 # Global singleton instance
