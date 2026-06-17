@@ -12,7 +12,8 @@
         test-integration test-load test-chaos test-e2e test-all \
         lint lint-operator lint-scout lint-web clean deploy help \
         dev dev-operator dev-web db-init db-migrate preflight \
-        rollback backup-verify
+        rollback backup-verify validation validation-match validation-report \
+        test-prediction-validation
 
 # Configuration
 CARGO := cargo
@@ -156,6 +157,29 @@ db-backup: ## Create database backup
 
 db-shell: ## Open database shell
 	$(SQLITE) $(DB_PATH)
+
+# ============================================================================
+# ML VALIDATION
+# ============================================================================
+
+validation: ## Run full ML validation pipeline (match + metrics + report)
+	@echo "$(YELLOW)Running ML validation pipeline...$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) -m scout.scripts.run_validation --db-path ../$(DB_PATH) --time-window 7d
+	@echo "$(GREEN)Validation complete$(NC)"
+
+validation-match: ## Match predictions to actual results only
+	@echo "$(YELLOW)Matching predictions to actuals...$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) -m scout.scripts.run_validation --db-path ../$(DB_PATH) --match-only
+	@echo "$(GREEN)Matching complete$(NC)"
+
+validation-report: ## Generate validation report only
+	@echo "$(YELLOW)Generating validation report...$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) -m scout.scripts.run_validation --db-path ../$(DB_PATH) --report-only --output validation_report.json
+	@echo "$(GREEN)Report saved to validation_report.json$(NC)"
+
+test-prediction-validation: ## Run prediction validation unit tests
+	@echo "$(YELLOW)Running prediction validation tests...$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) -m pytest tests/test_prediction_validation.py -v
 
 # ============================================================================
 # DEVELOPMENT
