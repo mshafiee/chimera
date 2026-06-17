@@ -296,6 +296,41 @@ class ScoutConfig:
         """Get Helius rate limit (requests per second)."""
         return int(os.getenv("SCOUT_MAX_REQUESTS_PER_SECOND", "50"))
 
+    @staticmethod
+    def get_target_rps() -> int:
+        """Get target requests per second for adaptive rate limiting (safe operating target)."""
+        return int(os.getenv("SCOUT_TARGET_RPS", "45"))
+
+    @staticmethod
+    def get_rate_limit_adaptive() -> bool:
+        """Get whether adaptive rate limiting is enabled."""
+        return os.getenv("SCOUT_RATE_LIMIT_ADAPTIVE", "true").lower() == "true"
+
+    @staticmethod
+    def get_rate_limit_min_delay_ms() -> int:
+        """Get minimum rate limit delay in milliseconds (floor for adaptive control)."""
+        return int(os.getenv("SCOUT_RATE_LIMIT_MIN_DELAY_MS", "15"))
+
+    @staticmethod
+    def get_rate_limit_max_delay_ms() -> int:
+        """Get maximum rate limit delay in milliseconds (ceiling for adaptive control)."""
+        return int(os.getenv("SCOUT_RATE_LIMIT_MAX_DELAY_MS", "100"))
+
+    @staticmethod
+    def get_discovery_concurrency() -> int:
+        """Get maximum concurrent requests during wallet discovery."""
+        return int(os.getenv("SCOUT_DISCOVERY_CONCURRENCY", "50"))
+
+    @staticmethod
+    def get_circuit_breaker_threshold() -> int:
+        """Get circuit breaker failure threshold."""
+        return int(os.getenv("SCOUT_CIRCUIT_BREAKER_THRESHOLD", "5"))
+
+    @staticmethod
+    def get_circuit_breaker_reset_seconds() -> int:
+        """Get circuit breaker reset time in seconds."""
+        return int(os.getenv("SCOUT_CIRCUIT_BREAKER_RESET_SECONDS", "60"))
+
     # ========================================================================
     # Database Configuration
     # ========================================================================
@@ -437,7 +472,15 @@ class ScoutConfig:
         print(f"  Current Capital: ${ScoutConfig.get_current_capital():,.0f}")
         print(f"  Target Capital: ${ScoutConfig.get_target_capital():,.0f}")
         print(f"  Monthly Credits: {ScoutConfig.get_monthly_credits():,}")
+        print(f"\nRate Limiting:")
         print(f"  Max Requests/sec: {ScoutConfig.get_max_requests_per_second()}")
+        print(f"  Target RPS: {ScoutConfig.get_target_rps()}")
+        print(f"  Adaptive Rate Limiting: {ScoutConfig.get_rate_limit_adaptive()}")
+        if ScoutConfig.get_rate_limit_adaptive():
+            print(f"  Min Delay: {ScoutConfig.get_rate_limit_min_delay_ms()}ms")
+            print(f"  Max Delay: {ScoutConfig.get_rate_limit_max_delay_ms()}ms")
+            print(f"  Discovery Concurrency: {ScoutConfig.get_discovery_concurrency()}")
+        print(f"  Circuit Breaker Threshold: {ScoutConfig.get_circuit_breaker_threshold()}")
         print("=" * 70)
 
         is_valid, warnings = ScoutConfig.validate_config()

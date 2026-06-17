@@ -210,8 +210,15 @@ class TestHeliusDiscovery:
             helius_client._rate_limit()
 
         elapsed = time.time() - start_time
-        # Should have delayed at least 0.07 seconds (2 * 0.05s delays minus tolerance)
-        assert elapsed >= 0.07  # Allow some tolerance
+
+        # With adaptive rate limiting (45 RPS target), delay is ~22ms per request
+        # 3 requests should take at least 2 * delay (between requests)
+        # Old: 100ms delay (10 RPS) -> 0.07s minimum
+        # New: ~22ms delay (45 RPS) -> 0.04s minimum
+        min_delay = helius_client._current_delay if hasattr(helius_client, '_current_delay') else helius_client.rate_limit_delay
+        expected_min = 2 * min_delay * 0.8  # Allow 20% tolerance for timing variance
+
+        assert elapsed >= expected_min, f"Expected at least {expected_min:.3f}s, got {elapsed:.3f}s"
 
     async def test_discover_wallets_fallback_chain(self, helius_client):
         """Test discovery fallback chain — primary strategy succeeds."""
