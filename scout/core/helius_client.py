@@ -247,7 +247,7 @@ class HeliusClient:
             # Get earliest transaction signatures using Helius getSignaturesForAddress
             # This fetches transactions in reverse chronological order (newest first)
             # We'll iterate to find the oldest one
-            endpoint = f"/v0/addresses/{wallet_address}/signatures"
+            endpoint = f"/addresses/{wallet_address}/signatures"
             params = {"limit": 1000, "api-key": self.api_key}
 
             data = await self._make_request(endpoint, params, use_retry=True)
@@ -262,7 +262,7 @@ class HeliusClient:
 
                 # Fetch the full transaction to see who sent SOL
                 tx_data = await self._make_request(
-                    f"/v0/transactions/{oldest_sig}",
+                    f"/transactions/{oldest_sig}",
                     {"api-key": self.api_key},
                     use_retry=True
                 )
@@ -283,20 +283,20 @@ class HeliusClient:
     async def get_token_first_tx_timestamp(self, token_address: str) -> Optional[int]:
         """
         Estimate the earliest known transaction timestamp for a token mint.
-        
+
         Uses getSignaturesForAddress to find the oldest signature on the mint,
         which serves as a lower-bound estimate of when the token began trading.
         Used as a fallback when Birdeye API is unavailable.
-        
+
         Returns epoch seconds (int) or None if unavailable.
         """
         if not self.api_key or not token_address:
             return None
-        
+
         try:
-            endpoint = f"/v0/addresses/{token_address}/signatures"
+            endpoint = f"/addresses/{token_address}/signatures"
             params = {"limit": 50, "api-key": self.api_key}
-            
+
             data = await self._make_request(endpoint, params, use_retry=False)
             if not data or not isinstance(data, list) or not data:
                 return None
