@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
+use rand::Rng;
 
 /// Maximum transaction size in bytes (raw, before base64 encoding)
 /// Solana's limit is 1232 bytes for raw transaction size
@@ -187,6 +188,19 @@ impl Executor {
         self
     }
 
+    /// Calculate retry backoff with jitter following Helius best practices.
+    ///
+    /// Returns a Duration with:
+    /// - Base backoff: 2^attempt seconds (1s, 2s, 4s, 8s, 16s for attempts 0-4)
+    /// - ±25% random jitter to prevent synchronized retries
+    /// - Maximum capped at 30 seconds
+    fn calculate_retry_backoff(attempt: u32) -> Duration {
+        let base = 2u64.pow(attempt.min(4)); // Cap at 16s base (2^4)
+        let jitter = rand::thread_rng().gen_range(-0.25..0.25); // ±25%
+        let millis = ((base as f64) * (1.0 + jitter) * 1000.0) as u64;
+        Duration::from_millis(millis.min(30000)) // Cap at 30s
+    }
+
     /// Send notification if notifier is configured and rules allow it
     async fn notify(&self, event: NotificationEvent) {
         if let Some(ref notifier) = self.notifier {
@@ -302,18 +316,18 @@ impl Executor {
             // Handle retry for expired blockhash
             match &result {
                 Err(ExecutorError::BlockhashExpired) => {
-                    if attempts < 3 {
-                        // Exponential backoff: 200ms, 400ms, 800ms
-                        let backoff_ms = 200 * (1 << (attempts - 1));
+                    if attempts < 5 {
+                        // Helius-compliant retry: 1s, 2s, 4s, 8s, 16s with ±25% jitter
+                        let backoff = Self::calculate_retry_backoff(attempts);
                         tracing::warn!(
                             trade_uuid = %signal.trade_uuid,
                             attempt = attempts,
-                            backoff_ms = backoff_ms,
-                            "Blockhash expired/invalid. Re-requesting fresh quote and retrying with exponential backoff..."
+                            backoff_ms = backoff.as_millis(),
+                            "Blockhash expired/invalid. Re-requesting fresh quote and retrying with Helius-compliant backoff..."
                         );
                         // The loop will restart, causing TransactionBuilder to fetch a NEW quote
                         // from Jupiter with a FRESH blockhash.
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        tokio::time::sleep(backoff).await;
                         continue;
                     } else {
                         tracing::error!(
@@ -325,16 +339,16 @@ impl Executor {
                 }
                 Err(ExecutorError::V0ReconstructionFailed(e)) => {
                     // V0 reconstruction failed - try re-requesting from Jupiter
-                    if attempts < 3 {
-                        let backoff_ms = 200 * (1 << (attempts - 1));
+                    if attempts < 5 {
+                        let backoff = Self::calculate_retry_backoff(attempts);
                         tracing::warn!(
                             trade_uuid = %signal.trade_uuid,
                             attempt = attempts,
                             error = %e,
-                            backoff_ms = backoff_ms,
-                            "V0 reconstruction failed. Re-requesting fresh quote from Jupiter with exponential backoff..."
+                            backoff_ms = backoff.as_millis(),
+                            "V0 reconstruction failed. Re-requesting fresh quote from Jupiter with Helius-compliant backoff..."
                         );
-                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        tokio::time::sleep(backoff).await;
                         continue;
                     } else {
                         tracing::error!(

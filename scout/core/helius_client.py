@@ -7,6 +7,7 @@ import time
 import re
 import asyncio
 import logging
+import random
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 from dataclasses import dataclass
@@ -500,8 +501,14 @@ class HeliusClient:
                 "circuit_breaker_open": self._circuit_breaker_failures >= self._circuit_breaker_threshold,
             }
 
-    async def _retry_with_backoff(self, coro_factory, max_retries: int = 3):
-        """Retry an async callable with exponential backoff.
+    async def _retry_with_backoff(self, coro_factory, max_retries: int = 5):
+        """Retry an async callable with exponential backoff and jitter.
+
+        Follows Helius best practices:
+        - Start with 1s backoff, doubling each retry (2s, 4s, 8s, 16s)
+        - Add ±25% random jitter to prevent synchronized retries
+        - Maximum backoff capped at 30 seconds
+        - Default max retries: 5 attempts
 
         coro_factory must be a callable (sync or async) that is called fresh
         on each attempt so that a new coroutine is created every retry.
@@ -521,23 +528,84 @@ class HeliusClient:
                     logger.warning(f"Retry exhausted after {max_retries} attempts: {e}")
                     await self._record_failure()
                     raise
-                # Intermediate retry, log but don't fail yet
-                backoff_time = 2 ** attempt  # 1s, 2s, 4s
+
+                # Check if error is retryable following Helius best practices
+                status_code = None
+                if isinstance(e, aiohttp.ClientResponseError):
+                    status_code = e.status
+                elif isinstance(e, aiohttp.ClientError):
+                    # Network errors are retryable
+                    status_code = 503  # Treat network errors as service unavailable
+                elif isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+                    status_code = 408  # Request timeout
+
+                # Use error classification to determine if we should retry
+                if not self._is_retryable_error(status_code, e):
+                    # Non-retryable error, fail immediately
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Non-retryable error (status {status_code}): {e}")
+                    await self._record_failure()
+                    raise
+
+                # Calculate backoff with ±25% jitter (Helius best practice)
+                # Pattern: 1s, 2s, 4s, 8s, 16s with jitter, capped at 30s
+                base_backoff = 2 ** attempt  # 1, 2, 4, 8, 16 for attempts 0-4
+                jitter = random.uniform(-0.25, 0.25)  # ±25% random variation
+                backoff_time = min(30.0, base_backoff * (1 + jitter))  # Cap at 30s
+
                 logger = logging.getLogger(__name__)
-                logger.debug(f"Attempt {attempt + 1} failed (retry in {backoff_time}s): {e}")
+                logger.debug(f"Attempt {attempt + 1} failed (retry in {backoff_time:.2f}s): {e}")
                 await asyncio.sleep(backoff_time)
         return None
 
     async def _rate_limit_async(self):
-        """Async rate limiting with adaptive delay."""
+        """Async rate limiting with adaptive delay and jitter.
+
+        Adds ±10% jitter to the delay to prevent synchronized requests
+        across multiple instances following Helius best practices.
+        """
         current_time = time.time()
         async with self._lock:
             time_since_last = current_time - self.last_request_time
-            delay_to_use = self._current_delay if self._adaptive_enabled else self.rate_limit_delay
+            base_delay = self._current_delay if self._adaptive_enabled else self.rate_limit_delay
+
+            # Add ±10% jitter to avoid synchronized requests
+            jitter = random.uniform(-0.10, 0.10)
+            delay_to_use = base_delay * (1 + jitter)
 
             if time_since_last < delay_to_use:
                 await asyncio.sleep(delay_to_use - time_since_last)
             self.last_request_time = time.time()
+
+    def _is_retryable_error(self, status_code: int, error: Optional[Exception] = None) -> bool:
+        """Determine if an error is retryable following Helius best practices.
+
+        Per Helius documentation:
+        - Retryable: 408 (timeout), 429 (rate limit), 500, 502, 503, 504 (server errors), network errors
+        - Non-retryable: 400 (bad request), 401 (unauthorized), 403 (forbidden),
+                        404 (not found), 409 (conflict), 422 (validation error)
+
+        Args:
+            status_code: HTTP status code
+            error: Optional exception that occurred
+
+        Returns:
+            True if the error is retryable, False otherwise
+        """
+        # Non-retryable client errors (4xx except 408)
+        if status_code in (400, 401, 403, 404, 409, 422):
+            return False
+
+        # Retryable errors
+        if status_code in (408, 429, 500, 502, 503, 504):
+            return True
+
+        # Network errors are retryable
+        if error is not None:
+            if isinstance(error, (aiohttp.ClientError, asyncio.TimeoutError)):
+                return True
+
+        return False
 
     async def _make_request(self, endpoint: str, params: Optional[Dict[str, Any]] = None, use_retry: bool = True) -> Optional[Dict[str, Any]]:
         """
