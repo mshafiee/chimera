@@ -17,6 +17,9 @@ from dataclasses import dataclass
 from typing import Optional, Dict
 from datetime import datetime, timezone
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class ScoreTracker:
@@ -141,21 +144,6 @@ class ScoreTracker:
 
                     # Recalculate negative total
                     self.negative = abs(sum(v for v in self.components.values() if v < 0))
-
-    def _apply_penalty_decay(self) -> None:
-        """
-        Apply penalty decay for old offenses.
-
-        Penalties from old data are reduced in impact to avoid
-        permanently punishing wallets for past mistakes.
-        """
-        # Decay rate: penalties lose 10% of their value per day (not implemented here as
-        # this would require timestamp tracking for each penalty)
-        # For now, we'll implement a simple decay based on wallet age
-
-        # Get wallet age (estimate from trade count)
-        # This is a simplified version - a full implementation would track penalty timestamps
-        pass  # Placeholder for future implementation
 
 
 def _compute_wmi(roi_7d: Optional[float], roi_30d: Optional[float], trade_count_30d: Optional[int]) -> float:
@@ -870,9 +858,6 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         # Apply penalty confidence weighting
         # (uncertain penalties count less)
         tracker._apply_penalty_confidence()
-
-    # Apply penalty decay for old offenses
-    tracker._apply_penalty_decay()
 
     return tracker.to_components()
 

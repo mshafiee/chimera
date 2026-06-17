@@ -338,6 +338,9 @@ class WalletAnalyzer:
         self._safety_check_total: int = 0  # Cumulative token safety check count
         self._safety_check_failures: int = 0  # Cumulative safety check failures
 
+        # Lock for thread-safe token safety cache access
+        self._safety_cache_lock = asyncio.Lock()
+
         # Parse cache for improved reliability - cache successful parse results by tx signature
         self._parse_cache: Dict[str, Optional[Dict[str, Any]]] = {}
         self._parse_cache_hits = 0
@@ -639,7 +642,7 @@ class WalletAnalyzer:
                 win_rate=0.72,
                 max_drawdown_30d=8.5,
                 avg_trade_size_sol=0.5,
-                last_trade_at=(datetime.utcnow() - timedelta(hours=2)).isoformat(),
+                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
                 win_streak_consistency=0.68,
             ),
             "9mNpQrAbCdEfGhIjKlMnOpQrStUvWxYz1234567890": WalletMetrics(
@@ -650,7 +653,7 @@ class WalletAnalyzer:
                 win_rate=0.65,
                 max_drawdown_30d=12.1,
                 avg_trade_size_sol=0.3,
-                last_trade_at=(datetime.utcnow() - timedelta(hours=6)).isoformat(),
+                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
                 win_streak_consistency=0.55,
             ),
             "5kLmNoAbCdEfGhIjKlMnOpQrStUvWxYz0987654321": WalletMetrics(
@@ -661,7 +664,7 @@ class WalletAnalyzer:
                 win_rate=0.80,
                 max_drawdown_30d=5.0,
                 avg_trade_size_sol=1.2,
-                last_trade_at=(datetime.utcnow() - timedelta(hours=1)).isoformat(),
+                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
                 win_streak_consistency=0.40,
             ),
             "3jHgFdAbCdEfGhIjKlMnOpQrStUvWxYz1122334455": WalletMetrics(
@@ -672,7 +675,7 @@ class WalletAnalyzer:
                 win_rate=0.35,
                 max_drawdown_30d=35.0,  # High drawdown
                 avg_trade_size_sol=0.8,
-                last_trade_at=(datetime.utcnow() - timedelta(days=3)).isoformat(),
+                last_trade_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
                 win_streak_consistency=0.20,
             ),
             "8wQpRsAbCdEfGhIjKlMnOpQrStUvWxYz6677889900": WalletMetrics(
@@ -683,7 +686,7 @@ class WalletAnalyzer:
                 win_rate=0.58,
                 max_drawdown_30d=10.0,
                 avg_trade_size_sol=0.4,
-                last_trade_at=(datetime.utcnow() - timedelta(hours=12)).isoformat(),
+                last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=12)).isoformat(),
                 win_streak_consistency=0.50,
             ),
         }
@@ -729,7 +732,7 @@ class WalletAnalyzer:
                     action=action,
                     amount_sol=Decimal(str(metrics.avg_trade_size_sol or 0.5)),
                     price_at_trade=Decimal(str(random.uniform(0.00001, 10.0))),
-                    timestamp=datetime.utcnow() - timedelta(days=days_ago, hours=random.randint(0, 23)),
+                    timestamp=datetime.now(timezone.utc) - timedelta(days=days_ago, hours=random.randint(0, 23)),
                     tx_signature=f"{wallet[:8]}_{i}",
                     pnl_sol=Decimal(str(pnl)) if action == TradeAction.SELL else Decimal('0'),
                     liquidity_at_trade_usd=Decimal(str(random.uniform(50000, 500000))),
@@ -1092,8 +1095,9 @@ class WalletAnalyzer:
                 return None
 
             action = TradeAction.BUY if direction == "BUY" else TradeAction.SELL
-            timestamp = datetime.utcfromtimestamp(
-                swap.get("timestamp", int(datetime.utcnow().timestamp()))
+            timestamp = datetime.fromtimestamp(
+                swap.get("timestamp", int(datetime.now(timezone.utc).timestamp())),
+                tz=timezone.utc
             )
 
             token_mint = swap.get("token_mint", "") or swap.get("token_out", "")
@@ -1401,8 +1405,8 @@ class WalletAnalyzer:
                 if fallback_ts:
                     timestamp = float(fallback_ts)
                     self._parse_stats["token_creation_fallback_helix"] += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Fallback timestamp fetch failed for {token_address[:8]}: {e}")
         
         self._parse_stats["token_creation_fetched"] += 1
         if timestamp is not None:
@@ -1427,36 +1431,42 @@ class WalletAnalyzer:
     async def _is_token_safe(self, token_address: str) -> bool:
         """
         Check if a token is safe (not a honeypot, rug, or freeze risk).
-        
+
         CRITICAL: Honeypot Filter.
         Results are cached with a TTL to avoid redundant RPC calls
         for frequently-traded tokens across multiple wallets.
+        Uses asyncio.Lock() for thread-safe cache access in concurrent contexts.
         """
         if not token_address:
             return False
 
-        # Check in-memory cache first (TTL-based)
         _cache_key = token_address
-        if hasattr(self, '_token_safety_cache') and _cache_key in self._token_safety_cache:
-            cached_result, cached_time = self._token_safety_cache[_cache_key]
-            cache_ttl = 300  # 5-minute cache
-            if time.time() - cached_time < cache_ttl:
-                return cached_result
+        cache_ttl = 300  # 5-minute cache
 
-        if not hasattr(self, '_token_safety_cache'):
-            self._token_safety_cache: Dict[str, Tuple[bool, float]] = {}
-        if not hasattr(self, '_safety_check_total'):
-            self._safety_check_total = 0
-            self._safety_check_failures = 0
+        # Check cache with lock to prevent race conditions
+        async with self._safety_cache_lock:
+            if hasattr(self, '_token_safety_cache') and _cache_key in self._token_safety_cache:
+                cached_result, cached_time = self._token_safety_cache[_cache_key]
+                if time.time() - cached_time < cache_ttl:
+                    return cached_result
 
+        # Cache miss - perform expensive check outside the lock
         result = await self._is_token_safe_uncached(token_address)
 
-        self._safety_check_total += 1
-        if not result:
-            self._safety_check_failures += 1
+        # Write to cache with lock
+        async with self._safety_cache_lock:
+            if not hasattr(self, '_token_safety_cache'):
+                self._token_safety_cache: Dict[str, Tuple[bool, float]] = {}
+            if not hasattr(self, '_safety_check_total'):
+                self._safety_check_total = 0
+                self._safety_check_failures = 0
 
-        self._token_safety_cache[_cache_key] = (result, time.time())
-        return result
+            self._safety_check_total += 1
+            if not result:
+                self._safety_check_failures += 1
+
+            self._token_safety_cache[_cache_key] = (result, time.time())
+            return result
 
     async def _is_token_safe_uncached(self, token_address: str) -> bool:
         """
@@ -1860,7 +1870,7 @@ class WalletAnalyzer:
         
         print(f"  [{address[:8]}] Computing time windows...")
         # Calculate time windows
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         cutoff_7d = now - timedelta(days=7)
         cutoff_30d = now - timedelta(days=30)
         cutoff_90d = now - timedelta(days=90)
@@ -2624,7 +2634,7 @@ class WalletAnalyzer:
         """
         # Check cache first
         if address in self._trades_cache:
-            cutoff = datetime.utcnow() - timedelta(days=days)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             return [t for t in self._trades_cache[address] if t.timestamp >= cutoff]
         
         # Fetch real data if Helius client is available
@@ -2639,7 +2649,7 @@ class WalletAnalyzer:
         
         # Fall back to cached sample data
         trades = self._trades_cache.get(address, [])
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         return [t for t in trades if t.timestamp >= cutoff]
     
     async def _fetch_real_historical_trades(self, address: str, days: int) -> List[HistoricalTrade]:
@@ -2681,7 +2691,7 @@ class WalletAnalyzer:
                                 liquidity_usd=current_liq.liquidity_usd,
                                 price_usd=current_liq.price_usd,
                                 volume_24h_usd=current_liq.volume_24h_usd,
-                                timestamp=datetime.utcnow(),
+                                timestamp=datetime.now(timezone.utc),
                                 source="analyzer_collection_current",
                             )
                             liquidity_snapshots.append(historical_snapshot)
