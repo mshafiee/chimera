@@ -342,7 +342,49 @@ async def analyze_wallets(
                 import traceback
                 traceback.print_exc()
                 return None
-            
+
+            # ML-based profitability prediction for growth optimization
+            ml_boost = 0.0
+            if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_ml_prediction_enabled():
+                try:
+                    # Prepare wallet features for ML prediction
+                    wallet_features = {
+                        'roi_7d': metrics.roi_7d,
+                        'roi_30d': metrics.roi_30d,
+                        'win_rate': metrics.win_rate,
+                        'profit_factor': metrics.profit_factor,
+                        'sortino_ratio': metrics.sortino_ratio,
+                        'max_drawdown_30d': metrics.max_drawdown_30d,
+                        'trade_count_30d': metrics.trade_count_30d,
+                        'avg_trade_size_sol': metrics.avg_trade_size_sol,
+                    }
+
+                    # Get ML prediction
+                    prediction = optimizer.predict_profitability(wallet_features)
+
+                    print(f"[Scout] ML Prediction: {prediction.get('profitability_class', 'UNKNOWN')} "
+                          f"(expected: {prediction.get('expected_return_pct', 0):.1f}%, "
+                          f"confidence: {prediction.get('confidence', 0):.1f}, "
+                          f"risk: {prediction.get('risk_score', 0):.1f})")
+
+                    # Apply growth optimization WQS boost
+                    if ScoutConfig.get_growth_optimized():
+                        expected_return = prediction.get('expected_return_pct', 0)
+                        prediction_confidence = prediction.get('confidence', 0)
+
+                        # Boost for high expected returns with good confidence
+                        if expected_return > 15 and prediction_confidence > 0.6:
+                            ml_boost = min(8.0, expected_return / 4)  # Max 8 point boost
+                            wqs_score += ml_boost
+                            print(f"[Scout] Growth boost: +{ml_boost:.1f} WQS (optimized for $200→$1K goal)")
+                        elif expected_return > 10 and prediction_confidence > 0.5:
+                            ml_boost = min(4.0, expected_return / 6)  # Smaller boost
+                            wqs_score += ml_boost
+                            print(f"[Scout] Growth boost: +{ml_boost:.1f} WQS")
+
+                except Exception as e:
+                    print(f"[Scout] ML prediction failed: {e}")
+
             print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
             # Get trades from cache (already fetched during metrics calculation)
             trades = analyzer._trades_cache.get(wallet_address, [])
@@ -423,9 +465,25 @@ async def analyze_wallets(
             # Validation / Backtest logic
             final_status = initial_status
             backtest_res = {"status": "SKIPPED", "notes": None}
-            
+
             if initial_status == "ACTIVE" and not skip_backtest and validator:
-                if trades:
+                # Credit-aware backtest validation check
+                can_validate = True
+                validation_reason = None
+
+                if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_credit_tracking_enabled():
+                    try:
+                        can_validate, validation_reason = optimizer.can_validate_backtest()
+                        if not can_validate:
+                            print(f"[Scout] Credit budget limit reached: {validation_reason}")
+                            print(f"[Scout] Skipping backtest for {wallet_address[:8]}... (credit-aware)")
+                            stats["backtest_skipped"] += 1
+                            final_status = "CANDIDATE"
+                            backtest_res = {"status": "SKIPPED", "notes": f"Credit: {validation_reason}"}
+                    except Exception as e:
+                        print(f"[Scout] Credit check failed, proceeding with backtest: {e}")
+
+                if trades and can_validate:
                     validation = await validator.validate_for_promotion(
                         wallet_address, metrics, trades, strategy=_strategy
                     )
@@ -434,6 +492,9 @@ async def analyze_wallets(
                     else:
                         final_status = "CANDIDATE" # Demote
                         backtest_res = {"status": "FAILED", "notes": validation.reason}
+                elif not can_validate:
+                    # Already handled above by credit check
+                    pass
                 else:
                     final_status = "CANDIDATE"
                     backtest_res = {"status": "SKIPPED", "notes": "No trades"}
@@ -1432,6 +1493,35 @@ async def main_async():
         except Exception as e:
             print(f"[Scout] ERROR: Failed to write roster: {e}")
             sys.exit(1)
+
+    # Print optimization report if enabled
+    if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_optimization_enabled():
+        try:
+            print("\n" + "=" * 70)
+            print("SCOUT OPTIMIZATION REPORT")
+            print("=" * 70)
+
+            # Print comprehensive optimization status
+            optimizer.print_optimization_report()
+
+            # Get optimization suggestions
+            suggestions = optimizer.get_optimization_suggestions()
+            if suggestions:
+                print("\nOptimization Suggestions:")
+                for i, suggestion in enumerate(suggestions[:5], 1):
+                    print(f"  {i}. {suggestion}")
+
+            # Check production health
+            if ScoutConfig.get_production_monitoring_enabled():
+                health = optimizer.check_production_health()
+                print(f"\nProduction Health Status: {health.get('overall_status', 'UNKNOWN')}")
+                if health.get('overall_status') != 'healthy':
+                    print("  ⚠ Production issues detected - review monitoring data")
+
+            print("=" * 70)
+
+        except Exception as e:
+            print(f"[Scout] ⚠ Optimization report generation failed: {e}")
 
 
 def main():
