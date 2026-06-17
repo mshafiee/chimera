@@ -87,16 +87,21 @@ pub struct PriceCache {
 
 impl PriceCache {
     /// Build the shared reusable HTTP client
-    fn build_http_client() -> reqwest::Client {
+    ///
+    /// Returns an error if the client cannot be built (e.g., invalid timeout configuration).
+    /// This prevents silent fallback to a default client with incorrect settings.
+    fn build_http_client() -> Result<reqwest::Client, PriceCacheError> {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_default()
+            .map_err(|e| PriceCacheError::HttpError(format!("Failed to build HTTP client: {}", e)))
     }
 
     /// Create a new price cache with default TTL
-    pub fn new() -> Self {
-        Self {
+    ///
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn new() -> Result<Self, PriceCacheError> {
+        Ok(Self {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
@@ -105,13 +110,15 @@ impl PriceCache {
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             updater_running: Arc::new(RwLock::new(false)),
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
-            http_client: Self::build_http_client(),
-        }
+            http_client: Self::build_http_client()?,
+        })
     }
 
     /// Create with custom TTL
-    pub fn with_ttl(ttl_secs: i64) -> Self {
-        Self {
+    ///
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn with_ttl(ttl_secs: i64) -> Result<Self, PriceCacheError> {
+        Ok(Self {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
@@ -120,8 +127,8 @@ impl PriceCache {
             active_tokens: Arc::new(RwLock::new(Vec::new())),
             updater_running: Arc::new(RwLock::new(false)),
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
-            http_client: Self::build_http_client(),
-        }
+            http_client: Self::build_http_client()?,
+        })
     }
 
     /// Get price for a token
@@ -447,9 +454,25 @@ impl PriceCache {
         for token in tokens {
             if let Some(price_data) = data.data.get(token) {
                 // Jupiter returns price in USD as f64, convert to Decimal for precision
-                let price = Decimal::from_f64_retain(price_data.price).unwrap_or_else(|| {
-                    Decimal::from_str(&price_data.price.to_string()).unwrap_or(Decimal::ZERO)
-                });
+                // Try from_f64_retain first for best precision, fall back to string conversion
+                let price = match Decimal::from_f64_retain(price_data.price) {
+                    Some(decimal) => decimal,
+                    None => {
+                        // Fallback: string conversion handles edge cases where from_f64_retain fails
+                        match Decimal::from_str(&price_data.price.to_string()) {
+                            Ok(decimal) => decimal,
+                            Err(_) => {
+                                tracing::error!(
+                                    token = token,
+                                    price_f64 = price_data.price,
+                                    "Failed to convert Jupiter price to Decimal — both from_f64_retain and from_str failed"
+                                );
+                                // Skip this token rather than using a zero price
+                                continue;
+                            }
+                        }
+                    }
+                };
                 results.push((token.clone(), price));
             } else {
                 tracing::warn!(token = token, "Token not found in Jupiter price response");
@@ -562,7 +585,10 @@ impl<'a> std::ops::Deref for PriceHistoryReadGuard<'a> {
 
 impl Default for PriceCache {
     fn default() -> Self {
-        Self::new()
+        // For Default trait (used in tests and config defaults), we panic on failure
+        // to maintain the trait contract. Production code should use new() or with_ttl()
+        // and handle the Result properly.
+        Self::new().expect("Failed to create PriceCache - HTTP client initialization failed")
     }
 }
 
@@ -630,7 +656,7 @@ mod tests {
 
     #[test]
     fn test_price_cache_set_get() {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new().expect("Failed to create price cache for test");
         cache.set_price(
             "token1",
             Decimal::from_str("1.5").unwrap(),
@@ -644,13 +670,13 @@ mod tests {
 
     #[test]
     fn test_price_cache_miss() {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new().expect("Failed to create price cache for test");
         assert!(cache.get_price("nonexistent").is_none());
     }
 
     #[test]
     fn test_track_token() {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new().expect("Failed to create price cache for test");
         cache.track_token("token1");
         cache.track_token("token2");
 
@@ -661,7 +687,7 @@ mod tests {
 
     #[test]
     fn test_unrealized_pnl_calculation() {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new().expect("Failed to create price cache for test");
         cache.set_price(
             "token1",
             Decimal::from_str("2.0").unwrap(),
@@ -682,7 +708,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let cache = PriceCache::new();
+        let cache = PriceCache::new().expect("Failed to create price cache for test");
         cache.set_price(
             "token1",
             Decimal::from_str("1.0").unwrap(),

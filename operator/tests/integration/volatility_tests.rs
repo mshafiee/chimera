@@ -11,7 +11,7 @@ use tokio::time::sleep;
 
 #[tokio::test]
 async fn test_volatility_calculation() {
-    let cache = Arc::new(PriceCache::new());
+    let cache = Arc::new(PriceCache::new().unwrap());
     let sol_mint = "So11111111111111111111111111111111111111112";
 
     // Add price history with some volatility
@@ -44,7 +44,7 @@ async fn test_volatility_calculation() {
 
 #[tokio::test]
 async fn test_volatility_insufficient_data() {
-    let cache = Arc::new(PriceCache::new());
+    let cache = Arc::new(PriceCache::new().unwrap());
     let sol_mint = "So11111111111111111111111111111111111111112";
 
     // Add only one price point
@@ -60,7 +60,7 @@ async fn test_volatility_insufficient_data() {
 
 #[tokio::test]
 async fn test_volatility_24h_window() {
-    let cache = Arc::new(PriceCache::new());
+    let cache = Arc::new(PriceCache::new().unwrap());
     let sol_mint = "So11111111111111111111111111111111111111112";
 
     // Add prices within 24h window
@@ -79,7 +79,7 @@ async fn test_volatility_24h_window() {
 
 #[tokio::test]
 async fn test_get_sol_volatility() {
-    let cache = Arc::new(PriceCache::new());
+    let cache = Arc::new(PriceCache::new().unwrap());
     let sol_mint = "So11111111111111111111111111111111111111112";
 
     // Add some price history
@@ -101,7 +101,7 @@ async fn test_get_sol_volatility() {
 
 #[tokio::test]
 async fn test_volatility_high_volatility_detection() {
-    let cache = Arc::new(PriceCache::new());
+    let cache = Arc::new(PriceCache::new().unwrap());
     let sol_mint = "So11111111111111111111111111111111111111112";
 
     // Simulate high volatility (large price swings)

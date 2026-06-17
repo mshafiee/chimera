@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 #[tokio::test]
 #[ignore] // Requires network access - run with: cargo test -- --ignored
 async fn test_dex_comparison_jupiter() {
-    let comparator = DexComparator::new();
+    let comparator = DexComparator::new().expect("Failed to create DexComparator");
 
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -41,7 +41,7 @@ async fn test_dex_comparison_jupiter() {
 #[tokio::test]
 #[ignore]
 async fn test_dex_comparison_caching() {
-    let comparator = DexComparator::new();
+    let comparator = DexComparator::new().expect("Failed to create DexComparator");
 
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -67,7 +67,7 @@ async fn test_dex_comparison_caching() {
 #[tokio::test]
 #[ignore]
 async fn test_dex_comparison_multiple_dexs() {
-    let comparator = DexComparator::new();
+    let comparator = DexComparator::new().expect("Failed to create DexComparator");
 
     let sol_mint = "So11111111111111111111111111111111111111112";
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -100,7 +100,7 @@ async fn test_dex_comparison_multiple_dexs() {
 
 #[tokio::test]
 async fn test_dex_comparison_fallback() {
-    let comparator = DexComparator::new();
+    let comparator = DexComparator::new().expect("Failed to create DexComparator");
 
     // Use invalid token addresses to trigger fallback
     let invalid_token1 = "InvalidToken111111111111111111111111111111";

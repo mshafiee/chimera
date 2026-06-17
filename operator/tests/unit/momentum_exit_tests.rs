@@ -34,7 +34,7 @@ mod tests {
     async fn test_no_exit_when_price_stable() {
         // Price unchanged from entry: no momentum exit triggered.
         let (pool, _dir) = setup_test_db().await;
-        let price_cache = Arc::new(PriceCache::new());
+        let price_cache = Arc::new(PriceCache::new().unwrap());
 
         let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
         let entry_price = Decimal::from_str("1.0").unwrap();
@@ -60,7 +60,7 @@ mod tests {
         // so a 6% drop SHOULD trigger exit — tighter guard while RSI protection is absent.
         // Once the position is ≥16 min old, the base rises to 8%.
         let (pool, _dir) = setup_test_db().await;
-        let price_cache = Arc::new(PriceCache::new());
+        let price_cache = Arc::new(PriceCache::new().unwrap());
 
         let token = "So11111111111111111111111111111111111111112";
         let entry_price = Decimal::from_str("1.0").unwrap();
@@ -110,7 +110,7 @@ mod tests {
     async fn test_no_exit_when_no_price_data() {
         // If price cache has no data for the token, check_momentum should return None.
         let (pool, _dir) = setup_test_db().await;
-        let price_cache = Arc::new(PriceCache::new());
+        let price_cache = Arc::new(PriceCache::new().unwrap());
 
         // Do NOT set any price for this token
         let token = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";

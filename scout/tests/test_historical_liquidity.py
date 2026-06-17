@@ -184,7 +184,7 @@ class TestHistoricalLiquidity:
         """Test that historical liquidity is preferred over current."""
         token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
         timestamp = datetime.utcnow() - timedelta(days=5)
-        
+
         # Store historical liquidity
         liq_data = LiquidityData(
             token_address=token,
@@ -195,13 +195,14 @@ class TestHistoricalLiquidity:
             source="test_historical",
         )
         provider._store_in_database(liq_data)
-        
+
         # Should return historical, not current
         result = provider.get_historical_liquidity_or_current(token, timestamp)
-        
+
         assert result is not None
         assert result.liquidity_usd == 50000.0
-        assert result.source == "test_historical"
+        # Historical data gets confidence suffix added
+        assert result.source == "test_historical_confidence_1.0"
         assert "_fallback" not in result.source
 
 

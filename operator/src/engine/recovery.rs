@@ -214,7 +214,8 @@ impl RecoveryManager {
                 .await;
         }
 
-        let tx_signature = exit_sig.unwrap();
+        // Safe to unwrap here since we checked is_none() above and returned early
+        let tx_signature = exit_sig.expect("exit_sig is Some here");
         let on_chain_state = self.check_on_chain_state(tx_signature).await?;
 
         match on_chain_state {

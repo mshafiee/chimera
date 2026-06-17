@@ -178,7 +178,7 @@ async fn test_zero_entry_price_forces_immediate_exit() {
     // an immediate exit to recover capital rather than hold indefinitely.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     insert_wallet(&pool, "wallet_a", 50.0).await;
 
     const TOKEN: &str = "token_zero_entry";
@@ -213,7 +213,7 @@ async fn test_consensus_query_failure_no_stop_widening() {
     // hard-stop sign-convention bug (where hard_stop_loss=15.0 would fire on ALL losses).
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Insert wallet with WQS 80 → dynamic stop = -20%
     insert_wallet(&pool, "wallet_b", 80.0).await;
@@ -259,7 +259,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
     // bug in hard_stop_loss would otherwise fire for every negative loss_percent).
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     insert_wallet(&pool, "wallet_c", 80.0).await;
 
@@ -307,7 +307,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     insert_wallet(&pool, "wallet_vol", 75.0).await;
 
     const TOKEN: &str = "token_high_vol";
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Push enough price history to compute volatility > 30%.
     // Base price: $1.00.  Push 10 points alternating ±35% swings → high std dev.
@@ -395,7 +395,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     insert_wallet(&pool, "wallet_tight", 30.0).await;
 
     const TOKEN: &str = "token_low_vol";
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Push prices with very small variance to get volatility < 10%
     for _ in 0..5 {
@@ -473,7 +473,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     insert_wallet(&pool, "wallet_cv", 75.0).await;
 
     const TOKEN: &str = "token_cv";
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Build high volatility
     let prices = [1.0, 1.4, 0.85, 1.35, 0.88, 1.42_f64];
@@ -553,7 +553,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     insert_wallet(&pool, "wallet_hardstop", 75.0).await;
 
     const TOKEN: &str = "token_hardstop";
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     // -13% loss: entry $1.00, current $0.87
     price_cache.set_price(
         TOKEN,
@@ -590,7 +590,7 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
     // Documents that capital is unprotected when price data is unavailable.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // No price is set for the token
     insert_wallet(&pool, "wallet_nocache", 50.0).await;
@@ -624,7 +624,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     insert_wallet(&pool, "wallet_med", 55.0).await;
 
     const TOKEN: &str = "token_med_wqs";
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // -14%: entry $1.00, current $0.86 → None
     price_cache.set_price(

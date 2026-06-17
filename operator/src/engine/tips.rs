@@ -131,7 +131,7 @@ impl TipManager {
             Strategy::Spear => {
                 self.config.tip_floor_sol
                     * cold_start_multiplier()
-                    * Decimal::from_str("1.5").unwrap()
+                    * Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2))
             }
             Strategy::Exit => self.config.tip_ceiling_sol, // Max tip for exits
         }

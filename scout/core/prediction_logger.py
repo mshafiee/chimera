@@ -137,11 +137,20 @@ class PredictionLogger:
                 conn = self._get_connection()
                 cursor = conn.cursor()
 
-                # Execute schema
+                # Execute schema - split by semicolon and filter out comments
                 for statement in schema_sql.split(';'):
                     statement = statement.strip()
-                    if statement and not statement.startswith('--'):
-                        cursor.execute(statement)
+                    if statement:
+                        # Remove inline comments but keep SQL statements
+                        lines = []
+                        for line in statement.split('\n'):
+                            # Skip full-line comments but keep SQL lines
+                            stripped = line.strip()
+                            if stripped and not stripped.startswith('--'):
+                                lines.append(line)
+                        cleaned = '\n'.join(lines).strip()
+                        if cleaned:
+                            cursor.execute(cleaned)
 
                 conn.commit()
                 conn.close()

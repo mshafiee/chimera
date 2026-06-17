@@ -88,7 +88,7 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
     // It FAILS while the bug exists, and PASSES after the fix.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_hard_stop_fix";
     const WALLET: &str = "wallet_hard_stop_fix";
 
@@ -142,7 +142,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
     // Scenario B: -21% loss → -21% <= -20% → Exit   (dynamic stop fires correctly)
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_dynamic_stop_21";
     const WALLET: &str = "wallet_dynamic_stop_21";
 
@@ -212,7 +212,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
     // After fix: stop ratchets to $1.60 → $1.40 < $1.60 → Exit (correct capital protection)
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_ratchet_fix";
 
     let cfg = Arc::new(ProfitManagementConfig {

@@ -174,9 +174,9 @@ class TestHeliusDiscovery:
         # Initially closed
         assert helius_client._check_circuit_breaker()
 
-        # Record failures
+        # Record failures using sync wrapper for testing
         for _ in range(helius_client._circuit_breaker_threshold):
-            helius_client._record_failure()
+            helius_client._record_failure_sync()
 
         # Circuit should be open
         assert not helius_client._check_circuit_breaker()
@@ -193,7 +193,9 @@ class TestHeliusDiscovery:
             nonlocal call_count
             call_count += 1
             if call_count < 3:
-                raise Exception("Test error")
+                # Use a retryable error type (network error)
+                import aiohttp
+                raise aiohttp.ClientError("Test error")
             return "success"
 
         with patch('asyncio.sleep', new_callable=AsyncMock):

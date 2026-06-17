@@ -199,12 +199,13 @@ def test_sol_price_cache_freshness_threshold_is_300_seconds():
     catches it — a shorter TTL causes more $150 fallbacks; a longer TTL risks using
     a very stale price during high-volatility moves.
     """
+    from datetime import timezone
     provider = LiquidityProvider(mode="simulated")
 
     # Inject a "fresh" price by directly setting the internal cache
     # (simulates a recent async get_sol_price_usd() call)
     injected_price = 195.0
-    provider._sol_price_cache = (injected_price, datetime.utcnow())
+    provider._sol_price_cache = (injected_price, datetime.now(timezone.utc))
 
     fresh_price = provider.get_sol_price_usd_sync()
     assert fresh_price == injected_price, (
@@ -212,7 +213,7 @@ def test_sol_price_cache_freshness_threshold_is_300_seconds():
     )
 
     # Inject a stale price (> 300 seconds old)
-    stale_time = datetime.utcnow() - timedelta(seconds=301)
+    stale_time = datetime.now(timezone.utc) - timedelta(seconds=301)
     provider._sol_price_cache = (injected_price, stale_time)
 
     stale_price = provider.get_sol_price_usd_sync()

@@ -68,7 +68,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
     // When this bug is fixed: the final assertion must change to FullExit at $1.40.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_crash_recovery";
 
     let cfg = Arc::new(ProfitManagementConfig {
@@ -145,7 +145,7 @@ async fn test_first_target_fires_partial_exit_not_full() {
     // entry_amount_sol = 4.0, exit fraction = 0.33, expected sell = 1.32 SOL
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_first_target";
 
     price_cache.set_price(
@@ -197,7 +197,7 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
     //   5-10%: exit after `time_exit_hours` (default 24h) — this is the "else" branch
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_time_exit";
 
     price_cache.set_price(
@@ -240,7 +240,7 @@ async fn test_price_just_below_first_target_no_exit() {
     // Price at +24.9% — below first target of +25%. No action should fire.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_below_first";
 
     price_cache.set_price(
@@ -280,7 +280,7 @@ async fn test_trailing_stop_not_active_before_threshold() {
     // Even a 20% price drop from peak should not trigger FullExit.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_trailing_inactive";
 
     price_cache.set_price(
@@ -334,7 +334,7 @@ async fn test_trailing_stop_distance_from_peak() {
     // ExitAmount early, preventing trailing_stop_active from ever being set.)
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN_A: &str = "token_trail_a";
     const TOKEN_B: &str = "token_trail_b";
 
@@ -430,7 +430,7 @@ async fn test_unknown_trade_uuid_returns_none() {
     // This prevents ghost exits for already-closed positions.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_unknown";
 
     price_cache.set_price(
@@ -456,7 +456,7 @@ async fn test_same_target_not_hit_twice() {
     // Once a target is marked as hit, the same price level should not trigger another exit.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_double_hit";
 
     price_cache.set_price(
@@ -501,7 +501,7 @@ async fn test_no_price_in_cache_returns_none() {
     // If price cache has no entry for the token, check_targets early-returns None.
 
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_no_price";
 
     // Register position but set NO price

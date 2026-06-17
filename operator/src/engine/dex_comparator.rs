@@ -48,21 +48,21 @@ pub struct DexComparator {
 
 impl DexComparator {
     /// Create a new DEX comparator with default Jupiter API URL
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, String> {
         Self::with_jupiter_api_url("https://api.jup.ag/swap/v1".to_string())
     }
 
     /// Create a new DEX comparator with custom Jupiter API URL
-    pub fn with_jupiter_api_url(jupiter_api_url: String) -> Self {
-        Self {
+    pub fn with_jupiter_api_url(jupiter_api_url: String) -> Result<Self, String> {
+        Ok(Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: Duration::from_secs(5),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .build()
-                .expect("Failed to create HTTP client"),
+                .map_err(|e| format!("Failed to create HTTP client: {}", e))?,
             jupiter_api_url,
-        }
+        })
     }
 
     /// Compare DEXs and select the one with lowest cost
@@ -119,26 +119,40 @@ impl DexComparator {
         if results.is_empty() {
             // Graceful fallback to default Jupiter result as expected by tests and operators
             tracing::warn!("All DEX queries failed, falling back to default Jupiter result");
-            let default_fee = Decimal::from_str("0.003").unwrap();
-            let default_slippage = Decimal::from_str("0.005").unwrap();
+            let default_fee = Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000));
+            let default_slippage = Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000));
             let fee_sol = amount_sol * default_fee;
             let slippage_sol = amount_sol * default_slippage;
             let total_cost_sol = fee_sol + slippage_sol;
 
-            return Ok(DexComparisonResult {
+            let result = DexComparisonResult {
                 selected_dex: "Jupiter".to_string(),
                 total_cost_sol,
                 fee_sol,
                 slippage_sol,
                 dex_url: self.jupiter_api_url.clone(),
-            });
+            };
+
+            // Cache the result
+            {
+                let mut cache = self.cache.write();
+                cache.insert(
+                    cache_key,
+                    CachedResult {
+                        result: result.clone(),
+                        cached_at: SystemTime::now(),
+                    },
+                );
+            }
+
+            return Ok(result);
         }
 
         // Select DEX with lowest total cost
         let result = results
             .into_iter()
             .min_by(|a, b| a.total_cost_sol.cmp(&b.total_cost_sol))
-            .unwrap();
+            .expect("results is guaranteed to be non-empty here");
 
         // Cache the result
         {
@@ -202,7 +216,7 @@ impl DexComparator {
 
         // Extract fee and slippage from quote, convert to Decimal
         let fee_percent =
-            get_json_decimal(&quote, "fee").unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Default 0.3% fee
+            get_json_decimal(&quote, "fee").unwrap_or_else(|| Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))); // Default 0.3% fee
 
         let fee_sol = amount_sol * fee_percent;
 
@@ -211,7 +225,7 @@ impl DexComparator {
         // We must divide by 100 to convert to a fraction before multiplying with amount_sol
         let slippage_percent = get_json_decimal(&quote, "priceImpactPct")
             .map(|pct| pct / Decimal::from(100))
-            .unwrap_or_else(|| Decimal::from_str("0.005").unwrap()); // Default 0.5% slippage
+            .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))); // Default 0.5% slippage
 
         let slippage_sol = amount_sol * slippage_percent;
         let total_cost_sol = fee_sol + slippage_sol;
@@ -273,11 +287,11 @@ impl DexComparator {
                 }
 
                 let fee_percent = get_json_decimal(&quote, "fee")
-                    .unwrap_or_else(|| Decimal::from_str("0.0025").unwrap()); // Raydium default 0.25% fee
+                    .unwrap_or_else(|| Decimal::from_str("0.0025").unwrap_or(Decimal::from(25) / Decimal::from(10000))); // Raydium default 0.25% fee
 
                 let fee_sol = amount_sol * fee_percent;
                 let slippage_percent = get_json_decimal(&quote, "priceImpact")
-                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap());
+                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000)));
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -341,11 +355,11 @@ impl DexComparator {
                 }
 
                 let fee_percent = get_json_decimal(&quote, "fee")
-                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Orca default 0.3% fee
+                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))); // Orca default 0.3% fee
 
                 let fee_sol = amount_sol * fee_percent;
                 let slippage_percent = get_json_decimal(&quote, "priceImpact")
-                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap());
+                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000)));
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -411,11 +425,11 @@ impl DexComparator {
                 }
 
                 let fee_percent = get_json_decimal(&quote, "fee")
-                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap()); // Meteora default 0.3% fee
+                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))); // Meteora default 0.3% fee
 
                 let fee_sol = amount_sol * fee_percent;
                 let slippage_percent = get_json_decimal(&quote, "priceImpact")
-                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap());
+                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000)));
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -442,7 +456,8 @@ impl DexComparator {
 
 impl Default for DexComparator {
     fn default() -> Self {
-        Self::new()
+        // For Default trait (used in tests), panic on failure
+        Self::new().expect("Failed to create DexComparator - HTTP client initialization failed")
     }
 }
 
@@ -463,7 +478,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_dex_comparison_caching() {
-        let comparator = DexComparator::new();
+        let comparator = DexComparator::new().expect("Failed to create DexComparator for test");
 
         // First call should query API
         let _result1 = comparator

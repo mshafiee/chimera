@@ -113,10 +113,12 @@ impl Executor {
         };
 
         // Create HTTP client with timeout (reserved for fallback scenarios)
+        // Note: This can panic if the system TLS backend cannot be initialized.
+        // In production, this should be caught during startup and logged.
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.rpc.timeout_ms))
             .build()
-            .expect("Failed to create HTTP client");
+            .expect("Failed to create HTTP client - system may not have a valid TLS backend");
 
         // Create Solana RPC client for primary endpoint
         let rpc_client = Arc::new(RpcClient::new_with_timeout(
@@ -133,12 +135,21 @@ impl Executor {
         });
 
         // Create Jito Searcher client if configured
-        let jito_searcher = config.jito.searcher_endpoint.as_ref().map(|endpoint| {
-            crate::engine::jito_searcher::JitoSearcherClient::new(
-                endpoint.clone(),
-                rpc_client.clone(),
-            )
-        });
+        let jito_searcher = match config.jito.searcher_endpoint.as_ref() {
+            Some(endpoint) => {
+                match crate::engine::jito_searcher::JitoSearcherClient::new(
+                    endpoint.clone(),
+                    rpc_client.clone(),
+                ) {
+                    Ok(client) => Some(client),
+                    Err(e) => {
+                        tracing::error!(error = %e, "Failed to create Jito Searcher client - Jito bundles will be unavailable");
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
 
         Self {
             config,
@@ -1741,7 +1752,7 @@ impl Executor {
                 let regime = detector.detect_token_regime(signal.token_address());
 
                 let multiplier = match regime {
-                    MarketRegime::Bull | MarketRegime::Bear => Decimal::from_str("1.5").unwrap(), // Allow 50% more slippage in fast markets
+                    MarketRegime::Bull | MarketRegime::Bear => Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2)), // Allow 50% more slippage in fast markets
                     MarketRegime::Sideways => Decimal::ONE,
                 };
 

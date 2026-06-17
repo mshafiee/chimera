@@ -17,6 +17,10 @@ use tracing::{info, warn};
 /// Type alias for the SQLite connection pool
 pub type DbPool = Pool<Sqlite>;
 
+/// Type alias for position details query result
+/// (entry_price, entry_amount_sol, exit_tx_signature, realized_pnl_sol, realized_pnl_usd, wallet_address, token_address)
+type PositionDetails = (f64, f64, Option<String>, Option<f64>, Option<f64>, String, String);
+
 /// Initialize the database connection pool
 pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
     // Ensure data directory exists
@@ -425,13 +429,27 @@ pub async fn set_kill_switch_state(
 }
 
 /// Read the persisted kill-switch state. Returns `true` if ACTIVE.
+///
+/// Fail-safe behavior: if the DB query fails, returns `true` (ACTIVE) to prevent
+/// unintended trading when we can't verify the kill-switch state. Logs the error
+/// for investigation. This is a safety-critical function — we prefer false positives
+/// (tripping when we shouldn't) over false negatives (not tripping when we should).
 pub async fn is_kill_switch_active(pool: &DbPool) -> bool {
-    let row: Option<String> =
-        sqlx::query_scalar("SELECT state FROM kill_switch_state WHERE id = 1")
-            .fetch_optional(pool)
-            .await
-            .unwrap_or(None);
-    row.as_deref() == Some("ACTIVE")
+    match sqlx::query_scalar::<_, String>("SELECT state FROM kill_switch_state WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(state)) => state == "ACTIVE",
+        Ok(None) => {
+            // No row found — kill-switch has never been set, default to inactive
+            false
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to read kill-switch state from DB — assuming ACTIVE for safety");
+            // Fail-safe: return true (ACTIVE) on DB error to prevent unintended trading
+            true
+        }
+    }
 }
 
 // =============================================================================
@@ -1304,7 +1322,7 @@ pub async fn revert_position_exit(pool: &DbPool, position_trade_uuid: &str) -> A
     let mut tx = pool.begin().await?;
 
     // 1. Fetch the position details
-    let pos: Option<(f64, f64, Option<String>, Option<f64>, Option<f64>, String, String)> = sqlx::query_as(
+    let pos: Option<PositionDetails> = sqlx::query_as(
         r#"
         SELECT entry_price, entry_amount_sol, exit_tx_signature, realized_pnl_sol, realized_pnl_usd, wallet_address, token_address
         FROM positions WHERE trade_uuid = ?

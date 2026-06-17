@@ -86,8 +86,14 @@ impl MarketRegimeDetector {
         }
 
         // Enforce a minimum history span of 12 hours to avoid treating short-term noise as regime changes
-        let first_time = history.front().map(|(t, _)| *t).unwrap();
-        let last_time = history.back().map(|(t, _)| *t).unwrap();
+        let first_time = history.front().map(|(t, _)| *t).unwrap_or_else(|| {
+            tracing::error!("Empty price history despite len() check - should not happen");
+            chrono::Utc::now()
+        });
+        let last_time = history.back().map(|(t, _)| *t).unwrap_or_else(|| {
+            tracing::error!("Empty price history despite len() check - should not happen");
+            chrono::Utc::now()
+        });
         if last_time.signed_duration_since(first_time) < chrono::Duration::hours(12) {
             return MarketRegime::Sideways;
         }
@@ -139,8 +145,14 @@ impl MarketRegimeDetector {
         }
 
         // Enforce a minimum history span of 2 hours for token-specific trend detection
-        let first_time = token_history.front().map(|(t, _)| *t).unwrap();
-        let last_time = token_history.back().map(|(t, _)| *t).unwrap();
+        let first_time = token_history.front().map(|(t, _)| *t).unwrap_or_else(|| {
+            tracing::error!("Empty token price history despite len() check - should not happen");
+            chrono::Utc::now()
+        });
+        let last_time = token_history.back().map(|(t, _)| *t).unwrap_or_else(|| {
+            tracing::error!("Empty token price history despite len() check - should not happen");
+            chrono::Utc::now()
+        });
         if last_time.signed_duration_since(first_time) < chrono::Duration::hours(2) {
             return MarketRegime::Sideways;
         }
@@ -315,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regime_detection_insufficient_span() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let sol_mint = "So11111111111111111111111111111111111111112";
         let now = Utc::now();
@@ -346,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_regime_detection_sufficient_span_bull() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let sol_mint = "So11111111111111111111111111111111111111112";
         let now = Utc::now();
@@ -377,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_regime_detection_insufficient_span() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let token = "Token111111111111111111111111111111111111111";
         let now = Utc::now();
@@ -403,7 +415,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_regime_detection_sufficient_span_bear() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600));
+        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let token = "Token111111111111111111111111111111111111111";
         let now = Utc::now();

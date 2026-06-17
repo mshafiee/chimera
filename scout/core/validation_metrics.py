@@ -54,11 +54,6 @@ class ValidationMetrics:
     direction_positive_accuracy: float
     direction_negative_accuracy: float
 
-    # Classification metrics (if applicable)
-    precision: Optional[float] = None
-    recall: Optional[float] = None
-    f1_score: Optional[float] = None
-
     # Profit metrics
     profitable_prediction_rate: float
     mean_predicted_profit: float
@@ -71,7 +66,12 @@ class ValidationMetrics:
     # Data quality
     missing_actual_rate: float
 
-    # Error distribution
+    # Classification metrics (if applicable) - moved to end with defaults
+    precision: Optional[float] = None
+    recall: Optional[float] = None
+    f1_score: Optional[float] = None
+
+    # Error distribution - moved to end with defaults
     error_skewness: float = 0.0
     error_kurtosis: float = 0.0
     percentile_90_error: float = 0.0

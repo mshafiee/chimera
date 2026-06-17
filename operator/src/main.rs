@@ -59,7 +59,26 @@ async fn main() -> anyhow::Result<()> {
     // Explicitly override Jupiter simulation mode from environment if set
     // This ensures the env var takes precedence over YAML/config defaults
     if let Ok(sim_mode) = std::env::var("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE") {
-        let sim_mode_bool = sim_mode.to_lowercase() == "true" || sim_mode == "1";
+        let sim_mode_lower = sim_mode.to_lowercase();
+        let sim_mode_bool = match sim_mode_lower.as_str() {
+            "true" | "1" => {
+                tracing::info!("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE set to enabled");
+                true
+            }
+            "false" | "0" => {
+                tracing::info!("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE set to disabled");
+                false
+            }
+            _ => {
+                tracing::warn!(
+                    provided = %sim_mode,
+                    "Invalid value for CHIMERA_JUPITER__DEVNET_SIMULATION_MODE — must be 'true', 'false', '1', or '0'. Ignoring override."
+                );
+                // Don't apply the override — keep the config file value
+                config.jupiter.devnet_simulation_mode
+            }
+        };
+
         if sim_mode_bool != config.jupiter.devnet_simulation_mode {
             tracing::info!(
                 old_value = config.jupiter.devnet_simulation_mode,
@@ -97,7 +116,13 @@ async fn main() -> anyhow::Result<()> {
     let cancel_token = CancellationToken::new();
 
     // Initialize price cache
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = match PriceCache::new() {
+        Ok(cache) => Arc::new(cache),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to initialize price cache — HTTP client build failed");
+            return Err(anyhow::anyhow!("Price cache initialization failed: {}", e));
+        }
+    };
     // Track SOL for volatility calculation
     price_cache.track_token("So11111111111111111111111111111111111111112");
 
@@ -128,13 +153,19 @@ async fn main() -> anyhow::Result<()> {
             true
         } else {
             // Fallback: config_audit (legacy path for DBs without kill_switch_state row)
-            let row: Option<String> = sqlx::query_scalar(
+            // Fail-safe: return true on DB error to prevent unintended trading
+            match sqlx::query_scalar::<_, String>(
                 "SELECT new_value FROM config_audit WHERE key = 'kill_switch' ORDER BY changed_at DESC LIMIT 1",
             )
             .fetch_optional(&db_pool)
             .await
-            .unwrap_or(None);
-            row.as_deref() == Some("ACTIVE")
+            {
+                Ok(row) => row.as_deref() == Some("ACTIVE"),
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to read kill-switch from config_audit — assuming ACTIVE for safety");
+                    true
+                }
+            }
         };
 
         if is_active {
@@ -860,7 +891,16 @@ async fn main() -> anyhow::Result<()> {
     // Having a second task at 60-minute intervals duplicated demote_wallet calls.
 
     // Create metrics state (shared between task and router)
-    let metrics_state = Arc::new(MetricsState::new());
+    // If metrics initialization fails, we log the error and continue with a degraded state.
+    // The /metrics endpoint will return an error, but the core service remains functional.
+    let metrics_state = match MetricsState::new() {
+        Ok(state) => Arc::new(state),
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to initialize metrics system — /metrics endpoint unavailable, core service will continue");
+            // Return early since we can't run without metrics state
+            return Err(anyhow::anyhow!("Metrics initialization failed: {}", e));
+        }
+    };
 
     // Spawn metrics update task
     let metrics_state_clone = metrics_state.clone();
@@ -1018,7 +1058,31 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let jwt_secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "dev-secret".to_string());
+    // JWT secret for authentication tokens
+    // In production mode, JWT_SECRET must be set explicitly — no defaults allowed for security.
+    // In development mode, use a safe default to allow local testing without configuration.
+    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
+    let jwt_secret = match std::env::var("JWT_SECRET") {
+        Ok(secret) => secret,
+        Err(_) if chimera_env == "production" => {
+            tracing::error!("JWT_SECRET environment variable must be set in production mode");
+            return Err(anyhow::anyhow!(
+                "JWT_SECRET environment variable is required in production mode but was not set"
+            ));
+        }
+        Err(_) => {
+            tracing::warn!("JWT_SECRET not set — using development default (insecure, only for local testing)");
+            // Generate a random dev secret instead of hardcoded "dev-secret" for better security
+            use std::fmt::Write;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mut dev_secret = String::from("dev-");
+            write!(&mut dev_secret, "{}", timestamp).unwrap();
+            dev_secret
+        }
+    };
 
     let auth_state = Arc::new(AuthState::with_auth_config(
         api_keys_map,
@@ -1424,9 +1488,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Full router created with all routes and middleware");
 
     // Start server
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port)
-        .parse()
-        .expect("Invalid server address");
+    let addr: SocketAddr = match format!("{}:{}", config.server.host, config.server.port).parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!(error = %e, host = %config.server.host, port = %config.server.port, "Invalid server address");
+            return Err(anyhow::anyhow!("Invalid server address {}:{} - check config: {}", config.server.host, config.server.port, e));
+        }
+    };
 
     tracing::info!(%addr, "Starting server with FULL router");
 

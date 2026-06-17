@@ -221,13 +221,17 @@ impl Vault {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)?;
-            f.write_all(encrypted.as_bytes())?;
+            let encrypted_bytes = encrypted.as_bytes();
+            // Write in a block to ensure file handle is closed before rename
+            {
+                let mut f = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&tmp_path)?;
+                f.write_all(encrypted_bytes)?;
+            } // File handle dropped here
         }
         #[cfg(not(unix))]
         {

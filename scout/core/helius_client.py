@@ -426,6 +426,18 @@ class HeliusClient:
             return False  # Circuit is open, don't make requests
         return True  # Circuit is closed, allow requests
     
+    def _record_failure_sync(self):
+        """Synchronous version of _record_failure for testing/sync contexts."""
+        self._circuit_breaker_failures += 1
+        self._failure_count += 1
+
+        # Open circuit if threshold reached
+        if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
+            reset_seconds = 60
+            if ScoutConfig:
+                reset_seconds = ScoutConfig.get_circuit_breaker_reset_seconds()
+            self._circuit_breaker_reset_time = time.time() + reset_seconds
+
     async def _record_failure(self):
         """Record a failure for circuit breaker (async with lock for thread safety)."""
         async with self._lock:

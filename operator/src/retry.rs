@@ -59,11 +59,11 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
     let mut rng = rand::thread_rng();
     let jitter = rng.gen_range(-0.25..0.25);
 
-    // Calculate final duration with jitter
+    // Calculate final duration with jitter, ensure at least 1 second minimum
     let with_jitter = base as f64 * (1.0 + jitter);
+    let millis = (with_jitter.min(30.0) * 1000.0).max(100.0) as u64;
 
-    // Cap at 30 seconds per Helius best practices
-    Duration::from_secs(with_jitter.min(30.0) as u64)
+    Duration::from_millis(millis)
 }
 
 /// Retry an async operation with exponential backoff and jitter.
@@ -88,7 +88,7 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
 /// # Example
 /// ```no_run
 /// use anyhow::Result;
-/// use crate::retry::retry_with_backoff;
+/// use chimera_operator::retry::retry_with_backoff;
 ///
 /// async fn fetch_data() -> Result<String> {
 ///     // Your HTTP request here
@@ -163,7 +163,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
-    use anyhow::anyhow;
 
     #[test]
     fn test_is_retryable_status() {
@@ -186,18 +185,20 @@ mod tests {
 
     #[test]
     fn test_calculate_backoff() {
-        // Test base backoff values (without jitter consideration)
+        // Test base backoff values (with ±25% jitter)
         let backoff_0 = calculate_backoff(0);
-        assert!(backoff_0.as_secs() >= 0); // With jitter, could be as low as 0.75s
-        assert!(backoff_0.as_secs() <= 1);  // or as high as 1.25s
+        // 1s base with jitter, minimum 100ms enforced
+        assert!(backoff_0.as_millis() >= 100);
+        assert!(backoff_0.as_millis() <= 1250);  // 1.25s max
 
         let backoff_1 = calculate_backoff(1);
-        assert!(backoff_1.as_secs() >= 1);  // 2s * 0.75 = 1.5s minimum
-        assert!(backoff_1.as_secs() <= 3);  // 2s * 1.25 = 2.5s maximum
+        // 2s base with jitter
+        assert!(backoff_1.as_millis() >= 1500);  // 2s * 0.75 = 1.5s minimum
+        assert!(backoff_1.as_millis() <= 2500);  // 2s * 1.25 = 2.5s maximum
 
         let backoff_4 = calculate_backoff(4);  // 16s base
-        assert!(backoff_4.as_secs() >= 12);   // 16s * 0.75 = 12s minimum
-        assert!(backoff_4.as_secs() <= 20);   // 16s * 1.25 = 20s maximum
+        assert!(backoff_4.as_millis() >= 12000);   // 16s * 0.75 = 12s minimum
+        assert!(backoff_4.as_millis() <= 20000);   // 16s * 1.25 = 20s maximum
 
         // Test max cap (attempt 10 would be 1024s base, but capped at 30s)
         let backoff_capped = calculate_backoff(10);

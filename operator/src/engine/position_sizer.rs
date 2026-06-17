@@ -179,8 +179,8 @@ impl PositionSizer {
         let confidence_mult = if let Some(count) = factors.consensus_wallet_count {
             if count > 0 {
                 let excess = (count - 1).min(3) as i64;
-                (Decimal::ONE + Decimal::from_str("0.15").unwrap() * Decimal::from(excess))
-                    .min(Decimal::from_str("1.5").unwrap())
+                (Decimal::ONE + Decimal::from_str("0.15").unwrap_or(Decimal::from(15) / Decimal::from(100)) * Decimal::from(excess))
+                    .min(Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2)))
             } else {
                 Decimal::ONE
             }

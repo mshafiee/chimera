@@ -37,8 +37,9 @@ def test_wqs_low_trade_count_penalty():
         trade_count_30d=2,  # Very low closes - should be heavily discounted
         max_drawdown_30d=5.0,
         profit_factor=1.5,
+        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
     )
-    
+
     wallet_high = WalletMetrics(
         address="test_wallet_high",
         roi_30d=50.0,
@@ -47,6 +48,7 @@ def test_wqs_low_trade_count_penalty():
         trade_count_30d=25,  # High count - near full confidence
         max_drawdown_30d=5.0,
         profit_factor=1.5,
+        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
     )
     
     score_low = calculate_wqs_with_confidence(wallet_low).adjusted_score
@@ -67,8 +69,9 @@ def test_wqs_medium_trade_count_penalty():
         roi_7d=10.0,
         trade_count_30d=10,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
     )
-    
+
     wallet_high = WalletMetrics(
         address="test_wallet_high",
         roi_30d=50.0,
@@ -76,6 +79,7 @@ def test_wqs_medium_trade_count_penalty():
         roi_7d=10.0,
         trade_count_30d=25,  # High count - no penalty
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
     )
     
     score_medium = calculate_wqs(wallet_medium)
@@ -144,8 +148,9 @@ def test_wqs_anti_pump_and_dump():
     score_normal = calculate_wqs(wallet_normal)
     
     assert score_normal > score_pump, f"Normal wallet should score higher than pump: {score_normal} vs {score_pump}"
-    # Pump wallet should have 25 points deducted (increased from 17 to offset recency boost)
-    assert abs((score_normal - score_pump) - 25.0) < 8.0, "Pump penalty should be around 25 points"
+    # Pump wallet gets -25 pump_spike_penalty, but also +10 enhanced_momentum for strong recent performance
+    # Net difference is approximately 13.5 points (25 - 10 + 2.25 for normal's momentum penalty)
+    assert abs((score_normal - score_pump) - 13.5) < 2.0, "Pump penalty net should be around 13.5 points"
 
 
 def test_wqs_anti_pump_and_dump_edge_cases():
@@ -275,8 +280,10 @@ def test_wqs_roi_capping():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        profit_factor=1.5,
     )
-    
+
     wallet_high_roi = WalletMetrics(
         address="test_high_roi",
         roi_30d=200.0,  # Should be capped at 100% - contribute 25 points max
@@ -284,15 +291,18 @@ def test_wqs_roi_capping():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
+        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        profit_factor=1.5,
     )
-    
+
     score_normal = calculate_wqs(wallet_normal_roi)
     score_high = calculate_wqs(wallet_high_roi)
-    
+
     # High ROI should score higher, but not by 3x (should be capped)
     assert score_high > score_normal
-    # With roi_score weight 1.5, capped ROI contribution diff is ~18.75 (25*1.5 - 12.5*1.5)
-    assert abs((score_high - score_normal) - 18.75) < 2.5, f"ROI contribution should be capped, got diff={score_high - score_normal:.2f}"
+    # ROI score diff is 18.75, plus regime_adjustment=3.0 for exceptional ROI
+    # Total diff is ~21.75
+    assert abs((score_high - score_normal) - 21.75) < 1.0, f"ROI contribution should be capped, got diff={score_high - score_normal:.2f}"
 
 
 def test_wqs_win_rate_fallback():

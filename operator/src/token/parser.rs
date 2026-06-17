@@ -95,8 +95,14 @@ impl Default for TokenSafetyConfig {
         Self {
             freeze_authority_whitelist: freeze_whitelist,
             mint_authority_whitelist: mint_whitelist,
-            min_liquidity_shield_usd: Decimal::from_str("12000.0").unwrap(), // 20% buffer over 10k
-            min_liquidity_spear_usd: Decimal::from_str("6000.0").unwrap(),   // 20% buffer over 5k
+            min_liquidity_shield_usd: Decimal::from_str("12000.0").unwrap_or_else(|_| {
+                // Fallback to computed value if string parsing fails
+                Decimal::from(12000)
+            }), // 20% buffer over 10k
+            min_liquidity_spear_usd: Decimal::from_str("6000.0").unwrap_or_else(|_| {
+                // Fallback to computed value if string parsing fails
+                Decimal::from(6000)
+            }), // 20% buffer over 5k
             honeypot_detection_enabled: true,
         }
     }

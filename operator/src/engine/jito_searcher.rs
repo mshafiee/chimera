@@ -27,26 +27,19 @@ pub struct JitoSearcherClient {
 
 impl JitoSearcherClient {
     /// Create a new Jito Searcher client
-    pub fn new(endpoint: String, rpc_client: Arc<RpcClient>) -> Self {
+    pub fn new(endpoint: String, rpc_client: Arc<RpcClient>) -> Result<Self, String> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-        Self {
+        Ok(Self {
             endpoint,
             http_client,
             rpc_client,
-        }
+        })
     }
 
-    /// Submit a bundle to Jito Searcher
-    ///
-    /// Creates a bundle with:
-    /// 1. Tip transaction (to tip account)
-    /// 2. Swap transaction (the actual trade)
-    ///
-    /// Returns the bundle signature
     /// Submit a bundle to Jito Searcher
     ///
     /// Creates a bundle with:
@@ -173,7 +166,8 @@ mod tests {
         let client = JitoSearcherClient::new(
             "https://mainnet.block-engine.jito.wtf".to_string(),
             rpc_client,
-        );
+        )
+        .expect("Failed to create JitoSearcherClient for test");
         assert_eq!(client.endpoint, "https://mainnet.block-engine.jito.wtf");
     }
 
@@ -186,7 +180,8 @@ mod tests {
         let client = JitoSearcherClient::new(
             "https://mainnet.block-engine.jito.wtf".to_string(),
             rpc_client,
-        );
+        )
+        .expect("Failed to create JitoSearcherClient for test");
 
         // This will fail without recent blockhash, but tests structure
         let result = client.create_tip_transaction(1_000_000, &keypair).await;

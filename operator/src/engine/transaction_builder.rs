@@ -82,18 +82,32 @@ impl TransactionBuilder {
     /// Create a new transaction builder
     pub fn new(rpc_client: Arc<RpcClient>, config: Arc<AppConfig>) -> Self {
         // Create HTTP client with proper TLS and timeout configuration
-        let http_client = reqwest::Client::builder()
+        let http_client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new()); // Fallback to default if builder fails
+        {
+            Ok(client) => client,
+            Err(e) => {
+                // If builder fails, log and panic with clear error message
+                // This is a startup-time failure - fail fast rather than running with broken config
+                panic!("Failed to create HTTP client for TransactionBuilder: {}", e);
+            }
+        };
 
         let jupiter_url = config.jupiter.api_url.clone();
+        let dex_comparator = match DexComparator::with_jupiter_api_url(jupiter_url) {
+            Ok(comparator) => comparator,
+            Err(e) => {
+                panic!("Failed to create DexComparator: {}", e);
+            }
+        };
+
         Self {
             rpc_client,
             config,
             http_client,
-            dex_comparator: DexComparator::with_jupiter_api_url(jupiter_url),
+            dex_comparator,
         }
     }
 

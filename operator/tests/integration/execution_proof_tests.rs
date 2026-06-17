@@ -58,7 +58,7 @@ async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: 
 #[tokio::test]
 async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
     let (pool, _tmp) = create_test_db().await;
-    let price_cache = Arc::new(PriceCache::new());
+    let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // WQS=50 → medium tier → dynamic stop threshold = −15%
     insert_wallet(&pool, "wallet_r3", 50.0).await;
