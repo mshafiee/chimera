@@ -782,7 +782,73 @@ class ScoutConfig:
             warnings.append("It will be created automatically on first run")
         
         return is_valid, warnings
-    
+
+    @staticmethod
+    def validate_production_config(strict: bool = True) -> None:
+        """
+        Validate production configuration and raise an exception if critical settings are missing.
+
+        This is a stricter version of validate_config() that actually fails instead of just warning.
+        Should be called at application startup to fail fast if required configuration is missing.
+
+        Args:
+            strict: If True, raises exceptions for missing critical config. If False, just logs warnings.
+
+        Raises:
+            RuntimeError: If critical production configuration is missing
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        errors = []
+        warnings = []
+
+        # Critical API keys for production
+        if not os.getenv("HELIUS_API_KEY"):
+            error = "HELIUS_API_KEY is required for wallet discovery in production"
+            if strict:
+                errors.append(error)
+            else:
+                warnings.append(error)
+
+        # At least one liquidity source is required in production (unless in simulated mode)
+        mode = ScoutConfig.get_liquidity_mode()
+        if mode == "real":
+            if not os.getenv("BIRDEYE_API_KEY"):
+                error = "BIRDEYE_API_KEY is required for historical liquidity data in production"
+                if strict:
+                    errors.append(error)
+                else:
+                    warnings.append(error)
+
+            # Warn if strict mode is off in production
+            strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
+            if not strict_mode:
+                msg = "SCOUT_STRICT_HISTORICAL_LIQUIDITY is OFF - backtests may use current liquidity for old trades (SURVIVORSHIP BIAS RISK)"
+                warnings.append(msg)
+
+        # Database path validation
+        db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
+        db_dir = Path(db_path).parent
+        if not db_dir.exists() and strict:
+            # Try to create it
+            try:
+                db_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                errors.append(f"Cannot create database directory {db_dir}: {e}")
+
+        # Log warnings first
+        for warning in warnings:
+            logger.warning(f"Config validation warning: {warning}")
+
+        # Raise error if any critical errors
+        if errors:
+            error_msg = "Production configuration validation failed:\n  - " + "\n  - ".join(errors)
+            raise RuntimeError(error_msg)
+
+        if strict:
+            logger.info("Production configuration validation passed")
+
     @staticmethod
     def print_config_summary():
         """Print a summary of current configuration."""

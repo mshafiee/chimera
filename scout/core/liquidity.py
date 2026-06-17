@@ -17,6 +17,8 @@ import json
 import math
 import os
 import logging
+import time
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import random
@@ -130,7 +132,15 @@ class LiquidityProvider:
             if JUPITER_AVAILABLE and JupiterLiquidityClient:
                 self.jupiter_client = JupiterLiquidityClient(jupiter_api_url)
             
+            # Check if we should fail hard in production instead of silent fallback
+            strict_mode = os.getenv("SCOUT_LIQUIDITY_STRICT_MODE", "false").lower() == "true"
             if not any([self.birdeye_client, self.dexscreener_client, self.jupiter_client]):
+                if strict_mode:
+                    raise RuntimeError(
+                        "STRICT_MODE: No liquidity sources available in production. "
+                        "At least one of BIRDEYE_API_KEY, DexScreener, or Jupiter must be configured. "
+                        "Set SCOUT_LIQUIDITY_STRICT_MODE=false to allow fallback to simulated mode."
+                    )
                 logger.warning("No liquidity sources available - falling back to simulated mode")
                 self.mode = "simulated"
         else:
@@ -139,7 +149,12 @@ class LiquidityProvider:
         # In-memory cache (fallback)
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
         self._sol_price_cache: Optional[Tuple[float, datetime]] = None
-        
+
+        # Rate limiting for external API calls
+        self._rate_limit_lock = threading.Lock()
+        self._last_request_time = 0.0
+        self._rate_limit_delay = float(os.getenv("SCOUT_LIQUIDITY_RATE_LIMIT_MS", "100")) / 1000.0  # Default 100ms
+
         # Redis client (if enabled)
         self.redis_client = None
         if REDIS_AVAILABLE and RedisClient:
@@ -160,7 +175,43 @@ class LiquidityProvider:
                         self.redis_client = None
             except Exception as e:
                 logger.warning(f"Failed to initialize Redis client: {e}, using fallback cache")
-    
+
+    def _rate_limit(self):
+        """
+        Rate limiting for external API calls (thread-safe, synchronous).
+
+        Ensures we don't exceed rate limits for external APIs by enforcing
+        a minimum delay between requests.
+        """
+        with self._rate_limit_lock:
+            current_time = time.time()
+            time_since_last = current_time - self._last_request_time
+            if time_since_last < self._rate_limit_delay:
+                time.sleep(self._rate_limit_delay - time_since_last)
+            self._last_request_time = time.time()
+
+    async def _rate_limit_async(self):
+        """
+        Async rate limiting for external API calls (thread-safe, asynchronous).
+
+        Ensures we don't exceed rate limits for external APIs by enforcing
+        a minimum delay between requests. Uses asyncio.sleep instead of time.sleep.
+        """
+        with self._rate_limit_lock:
+            current_time = time.time()
+            time_since_last = current_time - self._last_request_time
+            if time_since_last < self._rate_limit_delay:
+                delay = self._rate_limit_delay - time_since_last
+                # Release lock during sleep to allow other threads to check
+            else:
+                delay = 0
+        if delay > 0:
+            import asyncio
+            await asyncio.sleep(delay)
+            # Update last request time after sleep
+            with self._rate_limit_lock:
+                self._last_request_time = time.time()
+
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
         Get current liquidity for a token using multi-source ranking.
@@ -189,6 +240,7 @@ class LiquidityProvider:
         # 1. Birdeye
         if self.birdeye_client:
             try:
+                self._rate_limit()
                 birdeye_data = self.birdeye_client.get_current_liquidity(token_address)
                 if birdeye_data and birdeye_data.liquidity_usd > 0:
                     candidates.append(birdeye_data)
@@ -198,15 +250,17 @@ class LiquidityProvider:
         # 2. DexScreener
         if self.dexscreener_client:
             try:
+                self._rate_limit()
                 dexscreener_data = self.dexscreener_client.get_current_liquidity(token_address)
                 if dexscreener_data and dexscreener_data.liquidity_usd > 0:
                     candidates.append(dexscreener_data)
             except Exception as e:
                 logger.debug(f"DexScreener failed for {token_address[:8]}...: {e}")
-        
+
         # 3. Jupiter (price only, liquidity_usd = 0)
         if self.jupiter_client:
             try:
+                self._rate_limit()
                 jupiter_data = self.jupiter_client.get_current_liquidity(token_address)
                 if jupiter_data:
                     candidates.append(jupiter_data)
@@ -304,6 +358,7 @@ class LiquidityProvider:
         # Try Birdeye API if available (real mode)
         if self.mode == "real" and self.birdeye_client:
             try:
+                self._rate_limit()
                 birdeye_data = self.birdeye_client.get_historical_liquidity(token_address, timestamp)
                 if birdeye_data:
                     # Check if within tolerance
@@ -763,6 +818,7 @@ class LiquidityProvider:
         # Try Jupiter client first (if available)
         if self.mode == "real" and self.jupiter_client:
             try:
+                await self._rate_limit_async()
                 price = await self.jupiter_client.get_sol_price_usd()
                 if price and price > 0:
                     self._sol_price_cache = (price, datetime.now(timezone.utc))

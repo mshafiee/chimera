@@ -33,6 +33,7 @@ import fcntl
 import logging
 import os
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -144,7 +145,30 @@ class RosterWriter:
         """
         self.output_path = Path(output_path)
         self.temp_path = Path(f"{output_path}.tmp")
-    
+
+    def _cleanup_stale_lock(self, lock_path: Path, max_age_seconds: int = 3600) -> None:
+        """
+        Clean up stale lock files that are older than max_age_seconds.
+
+        A stale lock file may exist if a previous Scout process crashed while
+        holding the lock. This method checks if the lock file is old enough
+        to be considered stale and removes it.
+
+        Args:
+            lock_path: Path to the lock file
+            max_age_seconds: Maximum age in seconds before considering a lock stale (default: 1 hour)
+        """
+        if not lock_path.exists():
+            return
+
+        try:
+            lock_age = time.time() - lock_path.stat().st_mtime
+            if lock_age > max_age_seconds:
+                logger.warning(f"Removing stale lock file: {lock_path} (age: {lock_age:.0f}s)")
+                lock_path.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to check/cleanup stale lock file {lock_path}: {e}")
+
     def write_roster(self, wallets: List[WalletRecord]) -> bool:
         """
         Write wallet roster to SQLite atomically.
@@ -163,6 +187,10 @@ class RosterWriter:
             Exception: If write fails (temp file is cleaned up)
         """
         lock_path = self.output_path.with_suffix('.lock')
+
+        # Clean up stale lock files before attempting to acquire the lock
+        self._cleanup_stale_lock(lock_path)
+
         with open(lock_path, 'w') as lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

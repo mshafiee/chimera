@@ -140,7 +140,16 @@ class HeliusClient:
         # Async session management
         self._session = session
         self._own_session = False
-    
+
+    @staticmethod
+    def _redact_api_key(s: str) -> str:
+        """
+        Redact api-key query parameter values to avoid leaking secrets in logs.
+
+        Example: api-key=XXXX -> api-key=REDACTED
+        """
+        return re.sub(r"(api-key=)[^&\s]+", r"\1REDACTED", s)
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session with default timeout."""
         if self._session is None:
@@ -179,6 +188,8 @@ class HeliusClient:
             rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
             if not rpc_url:
                 rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
+                # Redact API key before potential logging
+                rpc_url_redacted = self._redact_api_key(rpc_url)
 
             session = await self._get_session()
 
@@ -397,92 +408,98 @@ class HeliusClient:
             return False  # Circuit is open, don't make requests
         return True  # Circuit is closed, allow requests
     
-    def _record_failure(self):
-        """Record a failure for circuit breaker."""
-        self._circuit_breaker_failures += 1
-        self._failure_count += 1
+    async def _record_failure(self):
+        """Record a failure for circuit breaker (async with lock for thread safety)."""
+        async with self._lock:
+            self._circuit_breaker_failures += 1
+            self._failure_count += 1
 
-        # Open circuit if threshold reached
-        if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
-            reset_seconds = 60
-            if ScoutConfig:
-                reset_seconds = ScoutConfig.get_circuit_breaker_reset_seconds()
-            self._circuit_breaker_reset_time = time.time() + reset_seconds
-    
-    def _record_success(self):
-        """Record a success, reset circuit breaker if needed."""
-        self._success_count += 1
-        if self._circuit_breaker_failures > 0:
-            self._circuit_breaker_failures = max(0, self._circuit_breaker_failures - 1)
+            # Open circuit if threshold reached
+            if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
+                reset_seconds = 60
+                if ScoutConfig:
+                    reset_seconds = ScoutConfig.get_circuit_breaker_reset_seconds()
+                self._circuit_breaker_reset_time = time.time() + reset_seconds
 
-    def _record_latency(self, latency_ms: float):
-        """Record a latency sample for adaptive rate limiting."""
+    async def _record_success(self):
+        """Record a success, reset circuit breaker if needed (async with lock for thread safety)."""
+        async with self._lock:
+            self._success_count += 1
+            if self._circuit_breaker_failures > 0:
+                self._circuit_breaker_failures = max(0, self._circuit_breaker_failures - 1)
+
+    async def _record_latency(self, latency_ms: float):
+        """Record a latency sample for adaptive rate limiting (async with lock for thread safety)."""
         if not self._adaptive_enabled:
             return
 
-        self._latency_samples.append(latency_ms)
-        if len(self._latency_samples) > self._max_latency_samples:
-            self._latency_samples.pop(0)
+        async with self._lock:
+            self._latency_samples.append(latency_ms)
+            if len(self._latency_samples) > self._max_latency_samples:
+                self._latency_samples.pop(0)
 
-    def _get_avg_latency(self) -> Optional[float]:
-        """Get average latency from recent samples."""
-        if not self._latency_samples:
-            return None
-        return sum(self._latency_samples) / len(self._latency_samples)
+    async def _get_avg_latency(self) -> Optional[float]:
+        """Get average latency from recent samples (async with lock for thread safety)."""
+        async with self._lock:
+            if not self._latency_samples:
+                return None
+            return sum(self._latency_samples) / len(self._latency_samples)
 
-    def _adjust_rate_limit(self):
-        """Adjust rate limit based on latency and success/failure ratio."""
+    async def _adjust_rate_limit(self):
+        """Adjust rate limit based on latency and success/failure ratio (async with lock for thread safety)."""
         if not self._adaptive_enabled:
             return
 
-        avg_latency = self._get_avg_latency()
-        if not avg_latency:
-            return
+        async with self._lock:
+            avg_latency = sum(self._latency_samples) / len(self._latency_samples) if self._latency_samples else None
+            if not avg_latency:
+                return
 
-        # Calculate success ratio
-        total_requests = self._success_count + self._failure_count
-        if total_requests == 0:
-            return
+            # Calculate success ratio
+            total_requests = self._success_count + self._failure_count
+            if total_requests == 0:
+                return
 
-        success_ratio = self._success_count / total_requests
+            success_ratio = self._success_count / total_requests
 
-        # Adaptive adjustment logic
-        # If latency is high (>200ms) or success ratio is low (<95%), slow down
-        if avg_latency > 200 or success_ratio < 0.95:
-            # Slow down by increasing delay
-            new_delay = min(self._max_delay, self._current_delay * 1.2)
-            if new_delay != self._current_delay:
-                self._current_delay = new_delay
+            # Adaptive adjustment logic
+            # If latency is high (>200ms) or success ratio is low (<95%), slow down
+            if avg_latency > 200 or success_ratio < 0.95:
+                # Slow down by increasing delay
+                new_delay = min(self._max_delay, self._current_delay * 1.2)
+                if new_delay != self._current_delay:
+                    self._current_delay = new_delay
                 logger = logging.getLogger(__name__)
                 logger.info(f"[Adaptive Rate Limit] Slowing down: {avg_latency:.1f}ms avg latency, {success_ratio:.1%} success rate -> {self._current_delay*1000:.1f}ms delay")
-        # If latency is low (<50ms) and success ratio is high (>99%), speed up
-        elif avg_latency < 50 and success_ratio > 0.99:
-            # Speed up by decreasing delay
-            new_delay = max(self._min_delay, self._current_delay * 0.9)
-            if new_delay != self._current_delay:
-                self._current_delay = new_delay
+            # If latency is low (<50ms) and success ratio is high (>99%), speed up
+            elif avg_latency < 50 and success_ratio > 0.99:
+                # Speed up by decreasing delay
+                new_delay = max(self._min_delay, self._current_delay * 0.9)
+                if new_delay != self._current_delay:
+                    self._current_delay = new_delay
                 logger = logging.getLogger(__name__)
                 logger.info(f"[Adaptive Rate Limit] Speeding up: {avg_latency:.1f}ms avg latency, {success_ratio:.1%} success rate -> {self._current_delay*1000:.1f}ms delay")
 
-    def get_rate_limit_stats(self) -> Dict[str, Any]:
-        """Get current rate limit statistics."""
-        avg_latency = self._get_avg_latency()
-        total_requests = self._success_count + self._failure_count
-        success_ratio = self._success_count / total_requests if total_requests > 0 else 0.0
-        current_rps = 1.0 / self._current_delay if self._current_delay > 0 else 0.0
+    async def get_rate_limit_stats(self) -> Dict[str, Any]:
+        """Get current rate limit statistics (async with lock for thread safety)."""
+        async with self._lock:
+            avg_latency = sum(self._latency_samples) / len(self._latency_samples) if self._latency_samples else None
+            total_requests = self._success_count + self._failure_count
+            success_ratio = self._success_count / total_requests if total_requests > 0 else 0.0
+            current_rps = 1.0 / self._current_delay if self._current_delay > 0 else 0.0
 
-        return {
-            "adaptive_enabled": self._adaptive_enabled,
-            "target_rps": self._target_rps,
-            "current_rps": round(current_rps, 1),
-            "current_delay_ms": round(self._current_delay * 1000, 1),
-            "avg_latency_ms": round(avg_latency, 1) if avg_latency else None,
-            "success_count": self._success_count,
-            "failure_count": self._failure_count,
-            "success_ratio": round(success_ratio, 3),
-            "circuit_breaker_open": self._circuit_breaker_failures >= self._circuit_breaker_threshold,
-        }
-    
+            return {
+                "adaptive_enabled": self._adaptive_enabled,
+                "target_rps": self._target_rps,
+                "current_rps": round(current_rps, 1),
+                "current_delay_ms": round(self._current_delay * 1000, 1),
+                "avg_latency_ms": round(avg_latency, 1) if avg_latency else None,
+                "success_count": self._success_count,
+                "failure_count": self._failure_count,
+                "success_ratio": round(success_ratio, 3),
+                "circuit_breaker_open": self._circuit_breaker_failures >= self._circuit_breaker_threshold,
+            }
+
     async def _retry_with_backoff(self, coro_factory, max_retries: int = 3):
         """Retry an async callable with exponential backoff.
 
@@ -495,14 +512,14 @@ class HeliusClient:
                     result = await coro_factory()
                 else:
                     result = coro_factory()
-                self._record_success()
+                await self._record_success()
                 return result
             except Exception as e:
                 if attempt == max_retries - 1:
                     # Final attempt failed, log and raise
                     logger = logging.getLogger(__name__)
                     logger.warning(f"Retry exhausted after {max_retries} attempts: {e}")
-                    self._record_failure()
+                    await self._record_failure()
                     raise
                 # Intermediate retry, log but don't fail yet
                 backoff_time = 2 ** attempt  # 1s, 2s, 4s
@@ -558,7 +575,7 @@ class HeliusClient:
             async with session.get(url, params=request_params, timeout=aiohttp.ClientTimeout(total=30)) as response:
                 # Calculate request latency
                 latency_ms = (time.time() - request_start) * 1000
-                self._record_latency(latency_ms)
+                await self._record_latency(latency_ms)
 
                 # Handle rate limiting
                 if response.status == 429:
@@ -568,20 +585,20 @@ class HeliusClient:
                     async with session.get(url, params=request_params, timeout=aiohttp.ClientTimeout(total=30)) as retry_response:
                         retry_response.raise_for_status()
                         self._api_calls_made += 1
-                        self._success_count += 1
-                        self._adjust_rate_limit()
+                        await self._record_success()
+                        await self._adjust_rate_limit()
                         return await retry_response.json()
 
                 response.raise_for_status()
                 self._api_calls_made += 1
-                self._success_count += 1
-                self._adjust_rate_limit()
+                await self._record_success()
+                await self._adjust_rate_limit()
                 return await response.json()
         
         def _redact(s: str) -> str:
             # Redact api-key query parameter values to avoid leaking secrets in logs
             # Example: api-key=XXXX -> api-key=REDACTED
-            return re.sub(r"(api-key=)[^&\s]+", r"\1REDACTED", s)
+            return HeliusClient._redact_api_key(s)
 
         try:
             if use_retry:
@@ -1544,7 +1561,7 @@ class HeliusClient:
 
         # Print rate limit stats if adaptive mode is enabled
         if self._adaptive_enabled:
-            stats = self.get_rate_limit_stats()
+            stats = await self.get_rate_limit_stats()
             print(f"[Helius]   Rate Limit Stats:")
             print(f"[Helius]     Current RPS: {stats['current_rps']}/{stats['target_rps']} (target)")
             print(f"[Helius]     Current Delay: {stats['current_delay_ms']}ms")
