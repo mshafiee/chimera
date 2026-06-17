@@ -154,8 +154,9 @@ where
         }
     }
 
-    // This should be unreachable since we always return within the loop
-    unreachable!("retry_with_backoff loop should always return")
+    // This should be unreachable since we always return within the loop,
+    // but return a proper error instead of panicking in production
+    Err(anyhow::anyhow!("Internal error: retry logic failed to return"))
 }
 
 #[cfg(test)]

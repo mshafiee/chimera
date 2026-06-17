@@ -401,8 +401,8 @@ impl PositionSizer {
         {
             Ok(count) => count,
             Err(e) => {
-                tracing::warn!(error = %e, "Failed to query active positions, allowing trade");
-                return true;
+                tracing::error!(error = %e, "Failed to query active positions, rejecting trade for safety");
+                return false;  // Fail-safe: reject trade on DB error to prevent unlimited position opening
             }
         };
 

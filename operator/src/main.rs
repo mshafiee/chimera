@@ -1319,7 +1319,7 @@ async fn main() -> anyhow::Result<()> {
     let hmac_state = Arc::new(middleware::HmacState::with_rotation(
         hmac_secrets,
         config.security.max_timestamp_drift_secs,
-    ));
+    )?);
 
     // Build rate limiter for webhook routes
     let governor_conf = tower_governor::governor::GovernorConfigBuilder::default()

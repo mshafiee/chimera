@@ -29,7 +29,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 /// HMAC verification state with support for secret rotation
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct HmacState {
     /// List of valid HMAC secrets (current + previous during rotation)
     secrets: Arc<Vec<Vec<u8>>>,
@@ -53,7 +53,7 @@ impl HmacState {
     ///
     /// The first secret is the current/primary secret.
     /// Additional secrets are previous secrets that are still valid during rotation.
-    pub fn with_rotation(secrets: Vec<String>, max_drift_secs: i64) -> Self {
+    pub fn with_rotation(secrets: Vec<String>, max_drift_secs: i64) -> Result<Self, anyhow::Error> {
         let secret_bytes: Vec<Vec<u8>> = secrets
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -61,17 +61,17 @@ impl HmacState {
             .collect();
 
         if secret_bytes.is_empty() {
-            panic!(
+            return Err(anyhow::anyhow!(
                 "No valid HMAC secrets configured — refusing to start. \
                  Set CHIMERA_SECURITY__WEBHOOK_SECRET."
-            );
+            ));
         }
 
-        Self {
+        Ok(Self {
             secrets: Arc::new(secret_bytes),
             max_drift_secs,
             seen_nonces: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     /// Maximum nonce store entries. At 1000 RPS with a 60s drift window the store
@@ -339,7 +339,8 @@ mod tests {
     #[test]
     fn test_hmac_state_with_rotation() {
         let state =
-            HmacState::with_rotation(vec!["new-secret".to_string(), "old-secret".to_string()], 60);
+            HmacState::with_rotation(vec!["new-secret".to_string(), "old-secret".to_string()], 60)
+                .unwrap();
         assert!(state.is_rotation_active());
         assert_eq!(state.secrets.len(), 2);
     }
@@ -349,7 +350,8 @@ mod tests {
         let state = HmacState::with_rotation(
             vec!["secret1".to_string(), "".to_string(), "secret2".to_string()],
             60,
-        );
+        )
+        .unwrap();
         assert_eq!(state.secrets.len(), 2);
     }
 
@@ -574,17 +576,19 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "No valid HMAC secrets configured — refusing to start.")]
     fn test_hmac_state_empty_secrets() {
-        // with_rotation must panic when the secrets list is empty
-        let _ = HmacState::with_rotation(vec![], 60);
+        // with_rotation must return an error when the secrets list is empty
+        let result = HmacState::with_rotation(vec![], 60);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No valid HMAC secrets configured"));
     }
 
     #[test]
-    #[should_panic(expected = "No valid HMAC secrets configured — refusing to start.")]
     fn test_hmac_state_all_empty_strings() {
-        // with_rotation must panic when all provided secrets are empty strings
-        let _ = HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
+        // with_rotation must return an error when all provided secrets are empty strings
+        let result = HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No valid HMAC secrets configured"));
     }
 
     #[test]

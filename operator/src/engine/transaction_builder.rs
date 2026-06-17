@@ -80,7 +80,7 @@ impl BuiltTransaction {
 
 impl TransactionBuilder {
     /// Create a new transaction builder
-    pub fn new(rpc_client: Arc<RpcClient>, config: Arc<AppConfig>) -> Self {
+    pub fn new(rpc_client: Arc<RpcClient>, config: Arc<AppConfig>) -> AppResult<Self> {
         // Create HTTP client with proper TLS and timeout configuration
         let http_client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -89,9 +89,11 @@ impl TransactionBuilder {
         {
             Ok(client) => client,
             Err(e) => {
-                // If builder fails, log and panic with clear error message
-                // This is a startup-time failure - fail fast rather than running with broken config
-                panic!("Failed to create HTTP client for TransactionBuilder: {}", e);
+                // If builder fails, return a proper error instead of panicking
+                return Err(crate::error::AppError::Signal(format!(
+                    "Failed to create HTTP client for TransactionBuilder: {}",
+                    e
+                )));
             }
         };
 
@@ -99,16 +101,19 @@ impl TransactionBuilder {
         let dex_comparator = match DexComparator::with_jupiter_api_url(jupiter_url) {
             Ok(comparator) => comparator,
             Err(e) => {
-                panic!("Failed to create DexComparator: {}", e);
+                return Err(crate::error::AppError::Signal(format!(
+                    "Failed to create DexComparator: {}",
+                    e
+                )));
             }
         };
 
-        Self {
+        Ok(Self {
             rpc_client,
             config,
             http_client,
             dex_comparator,
-        }
+        })
     }
 
     /// Build a swap transaction for a signal

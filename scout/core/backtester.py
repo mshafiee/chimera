@@ -454,10 +454,12 @@ class BacktestSimulator:
                 source="trade_attached",
             )
         else:
-            # Query the liquidity provider for historical or fallback liquidity
-            liquidity_data = self.liquidity.get_historical_liquidity_or_current(
+            # Query ONLY historical liquidity - no fallback to current to avoid survivorship bias
+            liquidity_data = self.liquidity.get_historical_liquidity(
                 trade.token_address, trade.timestamp
             )
+            # No fallback to current liquidity - if historical data is unavailable,
+            # we reject the trade to prevent survivorship bias
             if liquidity_data is not None:
                 source = getattr(liquidity_data, 'source', '')
                 if source and ('fallback' in source.lower() or 'low_confidence' in source.lower()):

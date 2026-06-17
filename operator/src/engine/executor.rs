@@ -426,10 +426,10 @@ impl Executor {
                                     .unwrap_or(Decimal::ZERO);
                                 if sol_price > Decimal::ZERO && liq_usd > Decimal::ZERO {
                                     let trade_usd = signal.payload.amount_sol * sol_price;
-                                    // Clamp between 0.1% and 30% to avoid absurd estimates
+                                    // Clamp between 0.1% and 15% to avoid absurd estimates
                                     let est = (trade_usd / (Decimal::from(2) * liq_usd))
                                         .max(dec!(0.001))
-                                        .min(dec!(0.30));
+                                        .min(dec!(0.15));
                                     tracing::debug!(
                                         trade_uuid = %signal.trade_uuid,
                                         trade_usd = %trade_usd,
@@ -937,7 +937,10 @@ impl Executor {
         // Build transaction (use active RPC client)
         let active_client = self.active_rpc_client();
         let transaction_builder =
-            TransactionBuilder::new(active_client.clone(), self.config.clone());
+            TransactionBuilder::new(active_client.clone(), self.config.clone())
+                .map_err(|e| {
+                    ExecutorError::TransactionFailed(format!("Failed to create transaction builder: {}", e))
+                })?;
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
@@ -1240,7 +1243,10 @@ impl Executor {
         // Build transaction (use active RPC client)
         let active_client = self.active_rpc_client();
         let transaction_builder =
-            TransactionBuilder::new(active_client.clone(), self.config.clone());
+            TransactionBuilder::new(active_client.clone(), self.config.clone())
+                .map_err(|e| {
+                    ExecutorError::TransactionFailed(format!("Failed to create transaction builder: {}", e))
+                })?;
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await

@@ -2349,12 +2349,13 @@ class WalletAnalyzer:
         """
         Shared profit factor computation used by both get_wallet_metrics
         and compute_wallet_trade_stats.
-        
-        Caps PF at win_count * 2 when there are zero losses to prevent
-        infinite PF inflation for wallets with no losing trades.
+
+        Returns capped profit factor for zero-loss wallets to prevent inflation.
         """
         if gross_loss == Decimal('0'):
             if gross_profit > Decimal('0'):
+                # Zero losses have undefined/infinite PF, but we cap at 100.0
+                # to prevent extreme score inflation while still rewarding perfect performance
                 capped = min(Decimal(str(win_count)) * Decimal('2.0'), Decimal('100.0'))
                 return decimal_to_float(capped)
             return 0.0

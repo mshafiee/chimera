@@ -229,10 +229,12 @@ impl KellySizer {
             dec!(0.8)
         };
 
-        // Apply conservative multiplier scaled by velocity confidence.
-        // Hard-cap at full_kelly: the velocity bonus increases the effective Kelly
-        // fraction but can never push past the mathematically optimal bound.
-        let conservative_kelly = (full_kelly * self.conservative_multiplier * velocity_multiplier)
+        // Apply velocity multiplier to full Kelly first, then apply conservative multiplier.
+        // This prevents the velocity multiplier from amplifying the conservative fraction
+        // beyond full Kelly. The order is: apply velocity boost to full Kelly (capped),
+        // then take the conservative percentage of that boosted value.
+        let velocity_boosted_kelly = (full_kelly * velocity_multiplier).min(full_kelly);
+        let conservative_kelly = (velocity_boosted_kelly * self.conservative_multiplier)
             .min(full_kelly)
             .min(Decimal::ONE); // Clamp to 100% of capital for the recommendation
 

@@ -245,10 +245,10 @@ pub async fn update_trade_costs(
     let result = sqlx::query(
         r#"
         UPDATE trades
-        SET jito_tip_sol = jito_tip_sol + ?,
-            dex_fee_sol = dex_fee_sol + ?,
-            slippage_cost_sol = slippage_cost_sol + ?,
-            total_cost_sol = total_cost_sol + ?
+        SET jito_tip_sol = COALESCE(jito_tip_sol, 0.0) + ?,
+            dex_fee_sol = COALESCE(dex_fee_sol, 0.0) + ?,
+            slippage_cost_sol = COALESCE(slippage_cost_sol, 0.0) + ?,
+            total_cost_sol = COALESCE(total_cost_sol, 0.0) + ?
         WHERE trade_uuid = ?
         "#,
     )
@@ -852,6 +852,13 @@ pub async fn open_position(
     signature: &str,
     entry_sol_price_usd: Option<Decimal>,
 ) -> AppResult<i64> {
+    // Validate entry_price - zero price makes PnL calculations impossible
+    if entry_price.is_zero() {
+        return Err(AppError::Validation(
+            "entry_price cannot be zero — PnL calculations would fail".to_string(),
+        ));
+    }
+
     let result = sqlx::query(
         r#"
         INSERT INTO positions (
@@ -1007,6 +1014,13 @@ pub async fn close_position(
     exit_fraction: Decimal,
     confirmed: bool,
 ) -> AppResult<()> {
+    // Validate exit_price - zero price makes PnL calculations impossible
+    if exit_price.is_zero() {
+        return Err(AppError::Validation(
+            "exit_price cannot be zero — PnL calculations would produce -100% loss".to_string(),
+        ));
+    }
+
     if exit_fraction <= Decimal::ZERO || exit_fraction > Decimal::ONE {
         tracing::warn!(
             trade_uuid = %trade_uuid,
@@ -1019,17 +1033,19 @@ pub async fn close_position(
     // Begin a transaction so concurrent close_position calls for the same pair serialize.
     let mut tx = pool.begin().await?;
 
-    // Find all ACTIVE (or EXITING) positions for this wallet+token.
-    // Include trade_uuid so we can fetch each position's entry-leg costs.
+    // Find ACTIVE (or EXITING) position for this wallet+token+trade_uuid.
+    // Include trade_uuid in WHERE clause to ensure we only close the specific position,
+    // not all positions for the same wallet+token pair.
     let active_positions: Vec<(i64, f64, f64, String, Option<f64>)> = sqlx::query_as(
         r#"
         SELECT id, entry_price, entry_amount_sol, trade_uuid, entry_sol_price_usd
         FROM positions
-        WHERE wallet_address = ? AND token_address = ? AND state IN ('ACTIVE', 'EXITING')
+        WHERE wallet_address = ? AND token_address = ? AND trade_uuid = ? AND state IN ('ACTIVE', 'EXITING')
         "#,
     )
     .bind(wallet_address)
     .bind(token_address)
+    .bind(trade_uuid)
     .fetch_all(&mut *tx)
     .await?;
 

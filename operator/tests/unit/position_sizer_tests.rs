@@ -90,13 +90,14 @@ async fn insert_active_positions(pool: &chimera_operator::db::DbPool, count: usi
     }
 }
 
-// ─── Test 25 (plan) ── DB error in can_open_position allows trade ─────────────
+// ─── Test 25 (plan) ── DB error in can_open_position blocks trade (M9 fix) ───
 
 #[tokio::test]
-async fn test_concurrent_position_limit_bypassed_on_db_error() {
-    // BUG DOCUMENTED: When the active position COUNT query fails, can_open_position()
-    // returns true (allow) with only a WARN log.
-    // Risk: during DB connectivity issues, unlimited concurrent positions can be opened.
+async fn test_concurrent_position_limit_blocked_on_db_error() {
+    // M9 FIX: When the active position COUNT query fails, can_open_position()
+    // now returns false (reject) with only a WARN log.
+    // This is fail-safe behavior: during DB connectivity issues, no new positions
+    // are opened until connectivity is restored.
 
     let (pool, _tmp) = create_test_db().await;
 
@@ -110,8 +111,8 @@ async fn test_concurrent_position_limit_bypassed_on_db_error() {
     let can_open = sizer.can_open_position().await;
 
     assert!(
-        can_open,
-        "BUG DOCUMENTED: DB error causes fail-open (returns true), bypassing position limit"
+        !can_open,
+        "M9 FIX: DB error causes fail-safe (returns false), blocking new positions"
     );
 }
 

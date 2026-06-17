@@ -68,8 +68,8 @@ class ScoreTracker:
         # Group penalties by category
         for name, value in self.components.items():
             if value < 0:  # It's a penalty
-                # Determine category
-                category = None
+                # Determine penalty category
+                category = None  # Initialize to None
                 if 'martingale' in name:
                     category = 'martingale_penalty'
                 elif 'pump_spike' in name:

@@ -331,17 +331,16 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         vol.unwrap()
     );
 
-    // At -34%: entry $1.00, current $0.66 → -34% → None
-    // Use max_stop_loss_distance=-35 so widest_stop=-35 applies the hardcoded cap.
-    // The widest_stop clamp is -35% so -34% is within the stop.
+    // At -24%: entry $1.00, current $0.76 → -24% → None
+    // Use max_stop_loss_distance=-25 so widest_stop=-25 applies the clamp (M5 fix).
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.66").unwrap(),
+        Decimal::from_str("0.76").unwrap(),
         PriceSource::Jupiter,
     );
     let mgr = StopLossManager::new(
         pool.clone(),
-        config_with_hard_stop("-35.0"),
+        config_with_hard_stop("-25.0"),
         price_cache.clone(),
     );
     let action_near = mgr
@@ -356,16 +355,16 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     assert_eq!(
         action_near,
         StopLossAction::None,
-        "-34% loss with -35% (clamped) threshold should not exit"
+        "-24% loss with -25% (clamped) threshold should not exit (M5 fix: wick protection)"
     );
 
-    // At -36%: current $0.64 → Exit (past the -35% clamp)
+    // At -26%: current $0.74 → Exit (past the -25% clamp)
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.64").unwrap(),
+        Decimal::from_str("0.74").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-35.0"), price_cache);
+    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-25.0"), price_cache);
     let action_over = mgr2
         .check_stop_loss(
             "uuid-vol-over",
@@ -378,7 +377,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     assert_eq!(
         action_over,
         StopLossAction::Exit,
-        "-36% loss with -35% (clamped) threshold must exit"
+        "-26% loss with -25% (clamped) threshold must exit (M5 fix: wick protection)"
     );
 }
 
@@ -490,16 +489,16 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     insert_consensus_signal(&pool, TOKEN, "wallet_cv").await;
     insert_consensus_signal(&pool, TOKEN, "wallet_other").await;
 
-    // -34% loss: $0.66 from $1.00 — within -35% threshold → None
-    // Use max_stop_loss_distance=-35 so the -35% widening cap applies.
+    // -24% loss: $0.76 from $1.00 — within -25% threshold → None
+    // Use max_stop_loss_distance=-25 so the -25% widening cap applies (M5 fix: wick protection).
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.66").unwrap(),
+        Decimal::from_str("0.76").unwrap(),
         PriceSource::Jupiter,
     );
     let mgr = StopLossManager::new(
         pool.clone(),
-        config_with_hard_stop("-35.0"),
+        config_with_hard_stop("-25.0"),
         price_cache.clone(),
     );
     let none = mgr
@@ -514,16 +513,16 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     assert_eq!(
         none,
         StopLossAction::None,
-        "-34% should not exit when threshold is -35% (vol×2.0 × consensus×1.25 clamped)"
+        "-24% should not exit when threshold is -25% (vol×2.0 × consensus×1.25 clamped, M5 fix)"
     );
 
-    // -36% loss: $0.64 from $1.00 — exceeds -35% threshold → Exit
+    // -26% loss: $0.74 from $1.00 — exceeds -25% threshold → Exit
     price_cache.set_price(
         TOKEN,
-        Decimal::from_str("0.64").unwrap(),
+        Decimal::from_str("0.74").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-35.0"), price_cache);
+    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-25.0"), price_cache);
     let exit = mgr2
         .check_stop_loss(
             "uuid-cv-2",
@@ -536,7 +535,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     assert_eq!(
         exit,
         StopLossAction::Exit,
-        "-36% must exit when threshold is -35% (vol×2.0 × consensus×1.25 clamped)"
+        "-26% must exit when threshold is -25% (vol×2.0 × consensus×1.25 clamped, M5 fix)"
     );
 }
 

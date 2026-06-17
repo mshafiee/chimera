@@ -211,9 +211,10 @@ impl StopLossManager {
         let widest_stop = self.config.max_stop_loss_distance;
         let tightest_stop = dec!(-5);
         stop_loss_threshold = stop_loss_threshold.max(widest_stop).min(tightest_stop);
-        // Absolute floor: never wider than -35% regardless of config.
-        // At 20% portfolio heat cap a single -50% stop wipes 10% of total capital.
-        stop_loss_threshold = stop_loss_threshold.max(dec!(-35));
+        // Absolute floor: never wider than -25% regardless of config.
+        // Changed from -35% to -25% to allow hard stop to trigger for catastrophic drops.
+        // At 20% portfolio heat cap a single -25% stop wipes 5% of total capital.
+        stop_loss_threshold = stop_loss_threshold.max(dec!(-25));
 
         // Warn when max_stop_loss_distance overrides adaptive widening so the operator can
         // see in logs that volatile/consensus tokens are being stopped tighter than intended.

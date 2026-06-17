@@ -179,7 +179,7 @@ impl CircuitBreaker {
                 trip_reason: None,
                 last_check: None,
             })),
-            check_interval: Duration::seconds(30),
+            check_interval: Duration::seconds(5),  // Reduced from 30s to 5s for faster loss detection
             ws_state,
             total_capital_sol: Arc::new(RwLock::new(initial_capital_sol)),
             price_cache: None,

@@ -1930,6 +1930,13 @@ class HeliusClient:
         if tx.get("feePayer") == wallet_address:
             return True
 
+        # Check signatures - wallet may be a signer without appearing in transfer fields
+        # This handles cases where the wallet is the authority/signature but not directly
+        # involved in the tokenTransfer/nativeTransfer fromUserAccount/toUserAccount fields
+        for sig in tx.get("signatures", []) or []:
+            if isinstance(sig, str) and sig == wallet_address:
+                return True
+
         # Check tokenTransfers
         for tr in tx.get("tokenTransfers", []) or []:
             if (tr.get("fromUserAccount") == wallet_address or

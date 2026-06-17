@@ -2,10 +2,10 @@
 //!
 //! Tests silent failure patterns in db.rs that can corrupt trade state or PnL:
 //! - update_trade_status() returns Ok(()) even when UUID does not exist
-//! - close_position() with multiple active positions closes all (not just one)
-//! - close_position() with exit_price=0 records -100% loss
-//! - open_position() with entry_price=0 creates untrackable position
-//! - update_trade_costs() overwrites on retry (not idempotent)
+//! - close_position() with multiple active positions closes all (not just one) [M3 FIXED]
+//! - close_position() with exit_price=0 records -100% loss [M11 FIXED]
+//! - open_position() with entry_price=0 creates untrackable position [M4 FIXED]
+//! - update_trade_costs() accumulates on retry (M10 FIXED)
 //! - PnL precision with f64 round-trip
 //! - Orphaned position after trade deleted
 
@@ -102,14 +102,13 @@ async fn test_update_trade_status_real_trade_affects_exactly_one_row() {
     );
 }
 
-// ─── Test 41 (plan) ── close_position with multiple active positions ──────────
+// ─── Test 41 (plan) ── close_position closes only the specified position (M3 fix) ─
 
 #[tokio::test]
-async fn test_close_position_closes_all_active_positions_for_wallet_token() {
-    // RISK: close_position() fetches ALL active positions for (wallet, token) and
-    // closes every one with the same exit price. If two positions were opened at
-    // different prices, both are closed simultaneously — the second position's PnL
-    // is calculated as if it was opened at the same time as the first.
+async fn test_close_position_closes_only_specified_position() {
+    // M3 FIX: close_position() now includes trade_uuid in WHERE clause, so only
+    // the specified position is closed. If two positions were opened at different
+    // prices, closing one leaves the other ACTIVE — no double-close bug.
 
     let (pool, _tmp) = create_test_db().await;
 
@@ -173,14 +172,14 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
     .unwrap();
     assert_eq!(active.0, 2);
 
-    // Close at $3.00
+    // Close ONLY uuid1 at $3.00
     close_position(
         &pool,
         "token_multi",
         "wallet_multi",
         Decimal::from_str("3.00").unwrap(),
         "sig_exit",
-        "uuid-multi-1",
+        uuid1,  // Only close this specific position
         None,
         Decimal::ONE,
         true,
@@ -188,7 +187,7 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
     .await
     .unwrap();
 
-    // BOTH positions should be CLOSED — documents the all-at-once behavior
+    // Only ONE position should be CLOSED (uuid1), uuid2 remains ACTIVE
     let closed: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND token_address = ? AND state = 'CLOSED'"
     )
@@ -198,18 +197,25 @@ async fn test_close_position_closes_all_active_positions_for_wallet_token() {
     .await
     .unwrap();
     assert_eq!(
-        closed.0, 2,
-        "close_position() closes ALL active positions for wallet+token simultaneously"
+        closed.0, 1,
+        "M3 FIX: close_position() closes only the specified position (by trade_uuid)"
     );
+
+    // Verify uuid2 is still ACTIVE
+    let uuid2_state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = ?")
+        .bind(uuid2)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(uuid2_state.0, "ACTIVE", "Second position must remain ACTIVE");
 }
 
-// ─── Test 42 (plan) ── close_position with exit_price=0 records 100% loss ────
+// ─── Test 42 (plan) ── close_position with exit_price=0 is rejected (M11 fix) ────
 
 #[tokio::test]
-async fn test_close_position_zero_exit_price_records_full_loss() {
-    // BUG RISK: close_position() with exit_price=0 silently records PnL as 0
-    // (since the `if !entry_price_dec.is_zero()` guard returns Decimal::ZERO on bad input).
-    // The position is marked CLOSED with exit_price=0 and realized_pnl=0 — not an error.
+async fn test_close_position_zero_exit_price_is_rejected() {
+    // M11 FIX: close_position() now validates exit_price and returns Err when zero.
+    // This prevents recording invalid PnL with exit_price=0.
 
     let (pool, _tmp) = create_test_db().await;
     let uuid = "uuid-zero-exit";
@@ -242,7 +248,7 @@ async fn test_close_position_zero_exit_price_records_full_loss() {
     .await
     .unwrap();
 
-    // Close with exit_price = 0
+    // Close with exit_price = 0 should return Err
     let result = close_position(
         &pool,
         "token_z",
@@ -256,44 +262,27 @@ async fn test_close_position_zero_exit_price_records_full_loss() {
     )
     .await;
 
-    // The function returns Ok regardless — documents no validation on exit_price=0
+    // M11 FIX: Function returns Err when exit_price is zero
     assert!(
-        result.is_ok(),
-        "close_position with exit_price=0 does not return an error (BUG DOCUMENTED)"
+        result.is_err(),
+        "M11 FIX: close_position with exit_price=0 must return error (validation added)"
     );
 
-    let (exit_price, pnl): (f64, f64) =
-        sqlx::query_as("SELECT exit_price, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
-            .bind(uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-    // When exit_price=0, the PnL formula: (0 - entry) / entry × amount = -100% loss.
-    // The code stores exit_price=0 and realized_pnl = (0 - 100) / 100 × 1.0 = -1.0 SOL.
-    // No validation or error is raised — position is CLOSED with misleading exit_price=0.
-    assert_eq!(
-        exit_price, 0.0,
-        "Exit price stored as 0 — position closed with invalid exit price (no validation)"
-    );
-    // Actual behavior: PnL IS calculated as -1.0 (full loss), not 0.
-    // The code does NOT have a guard on the exit_price side; the formula fires and gives -1.0.
-    // Callers cannot distinguish "intentional 100% loss" from "missing exit price data".
-    assert!(
-        (pnl - (-1.0)).abs() < 1e-9,
-        "PnL should reflect -100% loss when exit_price=0: expected -1.0, got {}. \
-         No validation guard exists on exit_price=0 — callers get a valid-looking full loss.",
-        pnl
-    );
+    // Position should still be ACTIVE (not closed)
+    let state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = ?")
+        .bind(uuid)
+        .fetch_one(&pool)
+        .await
+    .unwrap();
+    assert_eq!(state.0, "ACTIVE", "Position must remain ACTIVE when close fails");
 }
 
-// ─── Test 43 (plan) ── open_position with entry_price=0 is not rejected ──────
+// ─── Test 43 (plan) ── open_position with entry_price=0 is rejected (M4 fix) ──
 
 #[tokio::test]
-async fn test_open_position_zero_entry_price_not_rejected() {
-    // BUG DOCUMENTED: open_position() does not validate entry_price.
-    // Passing entry_price=0 silently creates a position that can never be properly
-    // tracked by stop-loss (loss_percent = 0 → dynamic stop bypassed).
+async fn test_open_position_zero_entry_price_is_rejected() {
+    // M4 FIX: open_position() now validates entry_price and returns Err when zero.
+    // This prevents creating untrackable positions that bypass stop-loss.
 
     let (pool, _tmp) = create_test_db().await;
     let uuid = "uuid-zero-entry";
@@ -326,28 +315,26 @@ async fn test_open_position_zero_entry_price_not_rejected() {
     )
     .await;
 
-    // Documents: no error is raised for zero entry price
+    // M4 FIX: Function returns Err when entry_price is zero
     assert!(
-        result.is_ok(),
-        "BUG DOCUMENTED: open_position with entry_price=0 should error but does not"
+        result.is_err(),
+        "M4 FIX: open_position with entry_price=0 must return error (validation added)"
     );
 
-    let entry: (f64,) = sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = ?")
+    // No position should have been created
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = ?")
         .bind(uuid)
         .fetch_one(&pool)
         .await
-        .unwrap();
-    assert_eq!(
-        entry.0, 0.0,
-        "Zero entry price was stored — position is untrackable"
-    );
+    .unwrap();
+    assert_eq!(count.0, 0, "No position should be created when entry_price is zero");
 }
 
-// ─── Test 44 (plan) ── trade costs overwritten on retry ──────────────────────
+// ─── Test 44 (plan) ── trade costs accumulated on retry (M10 fix) ──────────────
 
 #[tokio::test]
 async fn test_trade_costs_accumulate_on_retry() {
-    // update_trade_costs() uses COALESCE accumulation so that retried cost
+    // M10 FIX: update_trade_costs() uses COALESCE accumulation so that retried cost
     // updates add to existing values rather than silently discarding the
     // first call's costs. Net effect: costs from all calls are summed.
 
@@ -681,13 +668,14 @@ async fn test_revert_position_exit_restores_state_and_amount() {
         .unwrap();
 
     // Call close_position with confirmed = false for partial exit (0.5 SOL / 1.5 SOL = 0.333333 fraction)
+    // Note: With M3 fix, trade_uuid parameter must match the position's trade_uuid (entry_uuid)
     close_position(
         &pool,
         "token_revert",
         "wallet_revert",
         Decimal::from_str("120.0").unwrap(),
         "sig_revert_sell",
-        exit_uuid,
+        entry_uuid,  // M3 FIX: Use entry_uuid (position's trade_uuid), not exit_uuid
         None,
         Decimal::from_str("0.33333333").unwrap(),
         false, // confirmed = false

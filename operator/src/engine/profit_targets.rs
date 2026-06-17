@@ -245,7 +245,7 @@ impl ProfitTargetManager {
 
         // Update current price and peak
         state.current_price = current_price;
-        let is_new_peak = current_price > state.peak_price;
+        let is_new_peak = current_price >= state.peak_price;
         if is_new_peak {
             state.peak_price = current_price;
         }

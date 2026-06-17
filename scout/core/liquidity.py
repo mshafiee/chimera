@@ -800,7 +800,10 @@ class LiquidityProvider:
 
         final_slippage = base_slippage * turnover_factor + age_additive
 
-        return min(final_slippage + max(0.0005, min(0.005, trade_value_usd / 20000.0)), 1.0)
+        # Remove hardcoded 0.05% floor - use pure market-based calculation
+        # Small trades should have lower slippage, not a guaranteed minimum
+        trade_size_component = min(0.005, trade_value_usd / 20000.0)
+        return min(final_slippage + trade_size_component, 1.0)
     
     async def get_sol_price_usd(self) -> float:
         """
