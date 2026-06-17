@@ -173,6 +173,22 @@ class ScoutOptimizer:
 
         return can_analyze_wallet(wallet_wqs)
 
+    def can_validate_backtest(self) -> Tuple[bool, str]:
+        """Check if backtest validation can be performed given current budget."""
+        if not self._credit_tracker:
+            return True, "No credit tracker"
+
+        # Backtest validation is expensive (approx. 5000 credits)
+        # Check if we have enough budget for validation
+        from .helius_credit_tracker import RequestPriority
+        can_proceed, reason = self._credit_tracker.can_make_request(
+            cost=5000,  # Estimated cost for backtest validation
+            category="validation",  # Validation category
+            priority=RequestPriority.MEDIUM,
+            expected_value=0.7  # Backtests have high value for wallet validation
+        )
+        return can_proceed, reason
+
     def cache_wallet_metrics(self, address: str, metrics: Dict[str, Any]):
         """Cache wallet metrics."""
         set_wallet_metrics(address, metrics)
