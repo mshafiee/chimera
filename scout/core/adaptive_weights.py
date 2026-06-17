@@ -37,12 +37,18 @@ class AdaptiveWeightCalibrator:
     copy-trading PnL data from the wqs_pnl_correlation table.
 
     Weights are clamped to [0.5, 2.0] to prevent radical swings.
+
+    Cold start improvements:
+    - MIN_SAMPLES reduced to 3 for faster initial adaptation
+    - Confidence-weighted blending for gradual transition
+    - Warm start with pre-seeded historical calibration
     """
 
     MIN_WEIGHT = 0.5
     MAX_WEIGHT = 2.0
-    MIN_SAMPLES = 5  # Pearson r with n=5 has ~3 df; Bayesian prior handles noise
+    MIN_SAMPLES = 3  # Reduced from 5 for faster initial adaptation
     BAYESIAN_THRESHOLD = 10  # Below this, blend with seeded prior
+    WARM_START_SAMPLES = 15  # Number of samples for full confidence in adaptive weights
 
     def __init__(self, db_path: Optional[str] = None):
         if db_path is None:
@@ -131,19 +137,42 @@ class AdaptiveWeightCalibrator:
             adjusted = 1.0 + corr
             new_weights[comp_name] = max(self.MIN_WEIGHT, min(self.MAX_WEIGHT, adjusted))
 
-        # Bayesian blend: on early runs (< BAYESIAN_THRESHOLD records),
-        # blend 60% seeded prior + 40% regression to prevent noise-driven swings.
+        # Confidence-weighted blend: gradually transition from seeded to adaptive weights
+        # based on data confidence (sample size between MIN_SAMPLES and WARM_START_SAMPLES)
         n_records = len(records)
-        if n_records < self.BAYESIAN_THRESHOLD:
+
+        if n_records < self.WARM_START_SAMPLES:
             seeded = load_seeded_weights()
+
+            # Calculate confidence score (0.0 to 1.0) based on sample size
+            # 0.0 at MIN_SAMPLES, 1.0 at WARM_START_SAMPLES
+            if n_records <= self.MIN_SAMPLES:
+                confidence = 0.0
+            else:
+                confidence = (n_records - self.MIN_SAMPLES) / (self.WARM_START_SAMPLES - self.MIN_SAMPLES)
+                confidence = min(1.0, max(0.0, confidence))
+
+            # Use confidence to weight seeded vs adaptive weights
+            # Low confidence = more seeded weight, High confidence = more adaptive weight
+            seeded_weight = 1.0 - confidence * 0.7  # Starts at 1.0, goes down to 0.3
+            adaptive_weight = 1.0 - seeded_weight
+
             blended = {}
             for key in set(list(current_weights.keys()) + list(new_weights.keys())):
                 seed_w = seeded.get(key, 1.0)
                 reg_w = new_weights.get(key, seed_w)
-                blended[key] = seed_w * 0.6 + reg_w * 0.4
+
+                # Apply confidence-weighted blend
+                if n_records < self.BAYESIAN_THRESHOLD:
+                    # Extra conservative for very early runs
+                    blended[key] = seed_w * 0.7 + reg_w * 0.3
+                else:
+                    # Confidence-weighted blend
+                    blended[key] = seed_w * seeded_weight + reg_w * adaptive_weight
+
             logger.info(
-                "Bayesian blend applied (%d records < %d): 0.6*seeded + 0.4*regression",
-                n_records, self.BAYESIAN_THRESHOLD,
+                "Confidence-weighted blend applied: %.0f%% seeded + %.0f%% adaptive (confidence: %.2f, %d records)",
+                seeded_weight * 100, adaptive_weight * 100, confidence, n_records,
             )
             return blended
 

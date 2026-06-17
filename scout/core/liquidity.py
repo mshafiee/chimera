@@ -322,47 +322,67 @@ class LiquidityProvider:
         self,
         token_address: str,
         timestamp: datetime,
+        strategy: str = "SHIELD",
     ) -> Optional[LiquidityData]:
         """
-        Get historical liquidity, falling back to current if unavailable.
-        
-        This is the primary method for backtesting - it ensures we always
-        have liquidity data, even if historical data is missing.
-        
+        Get historical liquidity with intelligent multi-tier fallback.
+
+        Fallback strategy (in order):
+        1. Historical liquidity (ideal)
+        2. Grace period current with 30% haircut (for recent trades)
+        3. Current with confidence-based penalty (for older trades)
+        4. Simulated (last resort, only if allowed)
+
         Args:
             token_address: Token mint address
             timestamp: Historical timestamp
-            
+            strategy: Trading strategy ('SHIELD' or 'SPEAR') for different thresholds
+
         Returns:
-            LiquidityData (historical if available, otherwise current)
+            LiquidityData with confidence score, or None if all sources fail
         """
-        # Try to get historical liquidity first
+        # Try to get historical liquidity first (highest confidence)
         historical = self.get_historical_liquidity(token_address, timestamp)
         if historical:
+            # Add confidence score to historical data
+            historical.source = f"{historical.source}_confidence_1.0"
             return historical
-        
-        # Grace period: when historical liquidity is unavailable for a recent trade,
-        # use current liquidity with a 30% haircut instead of rejecting. This
-        # prevents Birdeye coverage gaps (tokens < 90d old) from killing backtests.
-        try:
-            from config import ScoutConfig
-            _grace_days = ScoutConfig.get_historical_liquidity_grace_period_days()
-        except ImportError:
-            _grace_days = int(os.getenv("SCOUT_HISTORICAL_LIQUIDITY_GRACE_PERIOD_DAYS", "14"))
-        
+
+        # Calculate trade age and token age for confidence scoring
         now = datetime.now(timezone.utc)
         if timestamp.tzinfo:
             trade_age = now - timestamp
         else:
             trade_age = now.replace(tzinfo=None) - timestamp
-        
+
+        # Get token creation time if available
+        token_age_days = None
+        try:
+            from .analyzer import WalletAnalyzer
+            token_creation = WalletAnalyzer.get_token_creation_time(token_address)
+            if token_creation:
+                token_age = now - token_creation
+                token_age_days = token_age.days
+        except Exception:
+            pass
+
+        # Get grace period configuration
+        try:
+            from config import ScoutConfig
+            _grace_days = ScoutConfig.get_historical_liquidity_grace_period_days()
+        except ImportError:
+            _grace_days = int(os.getenv("SCOUT_HISTORICAL_LIQUIDITY_GRACE_PERIOD_DAYS", "14"))
+
+        # Tier 2: Grace period fallback (for recent trades)
         if trade_age.days < _grace_days:
             current = self.get_current_liquidity(token_address)
             if current:
+                # Calculate confidence based on recency
+                confidence = 1.0 - (trade_age.days / _grace_days) * 0.3  # 0.7-1.0
                 haircut_liquidity = current.liquidity_usd * 0.7
                 logger.info(
                     f"Grace period fallback: Using current liquidity for {token_address[:8]}... "
-                    f"with 30%% haircut (${haircut_liquidity:,.0f}, trade is {trade_age.days}d old < {_grace_days}d)"
+                    f"with 30%% haircut (${haircut_liquidity:,.0f}, confidence: {confidence:.2f})"
                 )
                 return LiquidityData(
                     token_address=current.token_address,
@@ -370,55 +390,89 @@ class LiquidityProvider:
                     price_usd=current.price_usd,
                     volume_24h_usd=current.volume_24h_usd,
                     timestamp=timestamp,
-                    source=f"{current.source}_grace_period_haircut",
+                    source=f"{current.source}_grace_period_haircut_conf_{confidence:.2f}",
                 )
-        
-        # Strict mode check (production recommended)
+
+        # Tier 3: Confidence-weighted current fallback (for older trades)
+        # Check strict mode first
         try:
             from config import ScoutConfig
             strict_mode = ScoutConfig.get_strict_historical_liquidity() if ScoutConfig else False
         except ImportError:
             strict_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "true").lower() == "true"
-        
-        if strict_mode:
+
+        # Check if flexible mode is enabled
+        flexible_mode = os.getenv("SCOUT_STRICT_HISTORICAL_LIQUIDITY", "").lower() == "flexible"
+
+        if strict_mode and not flexible_mode:
             logger.warning(f"Strict mode: Historical liquidity missing for {token_address}, rejecting.")
             return None
-        
-        # Fallback to current liquidity (only if explicitly allowed)
-        # In real mode, we should avoid silent fallbacks unless necessary
-        allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true"
-        
+
+        # For flexible mode or when fallback is allowed, use current with penalty
+        allow_fallback = os.getenv("SCOUT_LIQUIDITY_ALLOW_FALLBACK", "true").lower() == "true" or flexible_mode
+
         if allow_fallback:
             current = self.get_current_liquidity(token_address)
             if current:
-                # Use current liquidity as fallback but CAP it to avoid "Survivorship Bias"
-                # 
-                # CRITICAL WARNING: Using current liquidity for historical backtesting
-                # introduces survivorship bias:
-                # - Tokens that rugged (1M -> 0) will show 0 historical liquidity (safe, but filters them out)
-                # - Tokens that mooned (10k -> 10M) will show 10M historical (dangerous, inflates backtest results)
-                # 
-                # Cap at $10k (Shield strategy minimum) — tokens that mooned past $10k
-                # at trade time were already passing the liquidity gate, so anything above
-                # $10k in the fallback inflates backtest PnL without adding information.
-                safe_fallback_liquidity = min(current.liquidity_usd, 10000.0)
-                
-                logger.warning(
-                    f"⚠️  SURVIVORSHIP BIAS RISK: Historical liquidity not available for "
-                    f"{token_address[:8]}... at {timestamp.isoformat()}. "
-                    f"Using CAPPED current liquidity (${safe_fallback_liquidity:,.0f}) as fallback. "
-                    f"This may inflate backtest results for tokens that mooned, or filter out "
-                    f"tokens that rugged. Backtest confidence: LOW."
+                # Calculate confidence score based on multiple factors
+                confidence_factors = []
+
+                # Factor 1: Trade age (older trades = lower confidence)
+                age_confidence = max(0.3, 1.0 - (trade_age.days / 90.0))  # Decays over 90 days
+                confidence_factors.append(age_confidence)
+
+                # Factor 2: Token age (newer tokens = more uncertain)
+                if token_age_days is not None:
+                    if token_age_days < 7:
+                        token_confidence = 0.5  # Very new tokens are uncertain
+                    elif token_age_days < 30:
+                        token_confidence = 0.7  # Recent tokens
+                    else:
+                        token_confidence = 0.9  # Established tokens
+                    confidence_factors.append(token_confidence)
+
+                # Factor 3: Strategy-specific requirements
+                if strategy == "SHIELD":
+                    strategy_confidence = 0.8  # Shield is more conservative
+                else:  # SPEAR
+                    strategy_confidence = 0.6  # Spear accepts more risk
+                confidence_factors.append(strategy_confidence)
+
+                # Calculate overall confidence
+                overall_confidence = min(confidence_factors) if confidence_factors else 0.5
+
+                # Apply confidence-based penalty to liquidity
+                # Lower confidence = more conservative haircut
+                confidence_haircut = 0.3 + (1.0 - overall_confidence) * 0.4  # 30-70% haircut
+                confidence_penalty_liquidity = current.liquidity_usd * (1.0 - confidence_haircut)
+
+                # Cap to prevent survivorship bias
+                max_fallback = 10000.0 if strategy == "SHIELD" else 5000.0
+                safe_fallback_liquidity = min(confidence_penalty_liquidity, max_fallback)
+
+                logger.info(
+                    f"Confidence-weighted fallback: {token_address[:8]}... "
+                    f"confidence={overall_confidence:.2f}, haircut={confidence_haircut*100:.0f}%, "
+                    f"result=${safe_fallback_liquidity:,.0f}"
                 )
+
                 return LiquidityData(
                     token_address=current.token_address,
                     liquidity_usd=safe_fallback_liquidity,
                     price_usd=current.price_usd,
                     volume_24h_usd=current.volume_24h_usd,
-                    timestamp=timestamp,  # Use historical timestamp
-                    source=f"{current.source}_fallback_capped_low_confidence",
+                    timestamp=timestamp,
+                    source=f"{current.source}_confidence_weighted_conf_{overall_confidence:.2f}",
                 )
-        
+
+        # Tier 4: Last resort - simulated mode (only if enabled)
+        simulated_mode = os.getenv("SCOUT_LIQUIDITY_MODE", "").lower() == "simulated"
+        if simulated_mode:
+            logger.warning(f"Simulated mode: Using simulated liquidity for {token_address[:8]}...")
+            return self._get_simulated_liquidity(token_address, timestamp)
+
+        # All sources failed
+        logger.warning(f"All liquidity sources failed for {token_address[:8]}...")
         return None
 
     def _get_database_connection(self):

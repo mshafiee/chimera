@@ -45,7 +45,16 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PromotionCriteria:
     """Criteria for wallet promotion."""
+    # Base WQS threshold (default, can be overridden by archetype-specific thresholds)
     min_wqs_score: float = 65.0
+    # Archetype-specific thresholds (None means use base threshold)
+    min_wqs_whale: Optional[float] = 55.0  # Lower threshold for high-conviction whale trades
+    min_wqs_swing: Optional[float] = 58.0  # Lower threshold for swing traders
+    min_wqs_scalper: Optional[float] = None  # Use base threshold
+    min_wqs_sniper: Optional[float] = None  # Use base threshold
+    min_wqs_insider: Optional[float] = None  # Use base threshold (insiders need high WQS)
+    # Momentum boost for wallets with IMPROVING trajectory
+    momentum_boost: float = 5.0  # Add this many WQS points for IMPROVING trajectory
     # Minimum raw swap events (basic data sufficiency)
     min_trades: int = 5
     # Minimum ratio of realized closes (SELLs with PnL) to total trades required for promotion.
@@ -76,20 +85,20 @@ class PromotionCriteria:
 class PrePromotionValidator:
     """
     Validates wallets for promotion from CANDIDATE to ACTIVE.
-    
+
     This is the gatekeeper that ensures only high-quality wallets
     with replicable performance are promoted.
-    
+
     Usage:
         validator = PrePromotionValidator(analyzer, backtest_config)
         result = validator.validate_for_promotion(wallet_address)
-        
+
         if result.passed:
             # Promote to ACTIVE
         else:
             # Keep as CANDIDATE or demote
     """
-    
+
     def __init__(
         self,
         liquidity_provider: Optional[LiquidityProvider] = None,
@@ -98,7 +107,7 @@ class PrePromotionValidator:
     ):
         """
         Initialize the validator.
-        
+
         Args:
             liquidity_provider: Provider for liquidity data
             backtest_config: Configuration for backtesting
@@ -107,9 +116,9 @@ class PrePromotionValidator:
         self.liquidity = liquidity_provider or LiquidityProvider()
         self.backtest_config = backtest_config or BacktestConfig()
         self.criteria = promotion_criteria or PromotionCriteria()
-        
+
         self.simulator = BacktestSimulator(self.liquidity, self.backtest_config)
-        
+
         # Initialize RugCheck client if enabled
         self.rugcheck_client = None
         if SECURITY_AVAILABLE and ScoutConfig and ScoutConfig.get_rugcheck_enabled():
@@ -117,7 +126,49 @@ class PrePromotionValidator:
                 self.rugcheck_client = RugCheckClient()
             except Exception as e:
                 logger.warning(f"Failed to initialize RugCheck client: {e}")
-    
+
+    def _get_archetype_threshold(self, archetype: Optional[str]) -> float:
+        """
+        Get the WQS threshold for a specific archetype.
+
+        Args:
+            archetype: Trader archetype string (SCALPER, SWING, WHALE, SNIPER, INSIDER)
+
+        Returns:
+            WQS threshold to use for this archetype
+        """
+        if archetype is None:
+            return self.criteria.min_wqs_score
+
+        archetype_upper = archetype.upper()
+        archetype_thresholds = {
+            "WHALE": self.criteria.min_wqs_whale,
+            "SWING": self.criteria.min_wqs_swing,
+            "SCALPER": self.criteria.min_wqs_scalper,
+            "SNIPER": self.criteria.min_wqs_sniper,
+            "INSIDER": self.criteria.min_wqs_insider,
+        }
+
+        threshold = archetype_thresholds.get(archetype_upper)
+        return threshold if threshold is not None else self.criteria.min_wqs_score
+
+    def _apply_momentum_boost(self, wqs_score: float, trajectory: Optional[str]) -> float:
+        """
+        Apply momentum boost for wallets with IMPROVING trajectory.
+
+        Args:
+            wqs_score: Current WQS score
+            trajectory: Multi-timeframe trajectory state
+
+        Returns:
+            Adjusted WQS score with momentum boost applied
+        """
+        if trajectory == "IMPROVING":
+            boosted = wqs_score + self.criteria.momentum_boost
+            logger.debug(f"Applied momentum boost: {wqs_score:.1f} -> {boosted:.1f}")
+            return boosted
+        return wqs_score
+
     async def validate_for_promotion(
         self,
         wallet_address: str,
@@ -138,15 +189,35 @@ class PrePromotionValidator:
             ValidationResult with pass/fail and details
         """
         logger.info(f"Validating wallet {wallet_address[:8]}... for promotion")
-        
-        # Step 1: Check WQS score (with confidence gating)
+
+        # Step 1: Check WQS score (with archetype-aware thresholds and momentum boost)
         wqs_result = calculate_wqs_with_confidence(metrics, strategy=strategy)
         wqs_score = wqs_result.score
         wqs_confidence = wqs_result.confidence
-        if wqs_score < self.criteria.min_wqs_score or wqs_confidence < 0.70:
+
+        # Get archetype-specific threshold
+        archetype_threshold = self._get_archetype_threshold(getattr(metrics, 'archetype', None))
+
+        # Apply momentum boost for IMPROVING trajectory
+        trajectory = getattr(metrics, 'trajectory', None)
+        boosted_wqs_score = self._apply_momentum_boost(wqs_score, trajectory)
+
+        # Log archetype and trajectory info
+        if trajectory and getattr(metrics, 'archetype', None):
+            logger.info(
+                f"Wallet {wallet_address[:8]}: archetype={metrics.archetype}, "
+                f"trajectory={trajectory}, threshold={archetype_threshold:.1f}, "
+                f"WQS={wqs_score:.1f}{f' (boosted to {boosted_wqs_score:.1f})' if boosted_wqs_score != wqs_score else ''}"
+            )
+
+        # Check against archetype-specific threshold
+        if boosted_wqs_score < archetype_threshold or wqs_confidence < 0.70:
             reason_parts = []
-            if wqs_score < self.criteria.min_wqs_score:
-                reason_parts.append(f"WQS {wqs_score:.1f} < {self.criteria.min_wqs_score}")
+            if boosted_wqs_score < archetype_threshold:
+                reason_parts.append(
+                    f"boosted WQS {boosted_wqs_score:.1f} < {archetype_threshold:.1f} "
+                    f"(base WQS {wqs_score:.1f}, archetype={getattr(metrics, 'archetype', 'N/A')})"
+                )
             if wqs_confidence < 0.70:
                 reason_parts.append(f"confidence {wqs_confidence:.2f} < 0.70")
             logger.info(f"Wallet failed WQS check: {'; '.join(reason_parts)}")
@@ -156,7 +227,7 @@ class PrePromotionValidator:
                 passed=False,
                 reason=f"WQS check failed: {'; '.join(reason_parts)}",
                 recommended_status="CANDIDATE",
-                notes=f"WQS: {wqs_score:.1f}, confidence: {wqs_confidence:.2f}",
+                notes=f"WQS: {wqs_score:.1f} (boosted: {boosted_wqs_score:.1f}), confidence: {wqs_confidence:.2f}, archetype: {getattr(metrics, 'archetype', 'N/A')}",
             )
         
         # Step 2: Check minimum trades

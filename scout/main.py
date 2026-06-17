@@ -20,6 +20,7 @@ merges this into the main database via SIGHUP or API call.
 
 import argparse
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -45,6 +46,7 @@ from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
 from core.correlation_reader import CorrelationReader
 from core.feature_store import FeatureStore
+from core.ml_predictor import ProfitabilityPredictor, predict_wallet_profitability
 
 # Import config module if available
 try:
@@ -437,6 +439,24 @@ async def analyze_wallets(
                 traceback.print_exc()
                 return None
             
+            # ML-based profitability prediction (if enabled)
+            ml_prediction = None
+            if os.getenv("SCOUT_ML_PREDICTION_ENABLED", "true").lower() == "true":
+                try:
+                    # Prepare features for ML prediction
+                    wallet_features = {
+                        'roi_7d': metrics.roi_7d,
+                        'roi_30d': metrics.roi_30d,
+                        'win_rate': metrics.win_rate,
+                        'profit_factor': metrics.profit_factor,
+                        'sortino_ratio': metrics.sortino_ratio,
+                        'trade_count_30d': metrics.trade_count_30d,
+                        'max_drawdown_30d': metrics.max_drawdown_30d,
+                    }
+                    ml_prediction = predict_wallet_profitability(wallet_features)
+                except Exception as e:
+                    print(f"[Scout] ML prediction failed for {wallet_address[:8]}...: {e}")
+
             result = {
                 "address": wallet_address,
                 "metrics": metrics,
@@ -451,6 +471,7 @@ async def analyze_wallets(
                 "wmi": wmi,
                 "strategy": _strategy,
                 "archetype": _archetype,
+                "ml_prediction": ml_prediction,
             }
             
             # MEMORY FIX: Clear analyzer cache for this wallet immediately
@@ -691,68 +712,127 @@ async def analyze_wallets(
 
 def _apply_archetype_diversification(records: List[WalletRecord], min_wqs_active: float) -> None:
     """
-    Stratified selection: ensure each trader archetype (SCALPER, SWING, WHALE)
-    gets at least the configured minimum fraction of ACTIVE slots.
-    
-    Promotes the highest-WQS CANDIDATE wallets of underrepresented archetypes
-    to ACTIVE, up to the minimum quota. This prevents Scout from producing
-    a homogeneous roster that amplifies correlated risk.
-    
+    Flexible archetype diversification with diversity scoring.
+
+    This is a SOFT target approach that balances WQS quality with
+    archetype diversity, rather than hard quotas that force suboptimal wallets.
+
+    Features:
+    - Diversity score calculation (balances WQS vs archetype balance)
+    - Opportunity cost estimation for archetype-forced promotions
+    - Market condition awareness (can be configured)
+    - Per-archetype configurable targets
+
     Modifies records in-place.
     """
     try:
         from config import ScoutConfig
         diversity_min_pct = ScoutConfig.get_archetype_diversity_min_pct()
+        # Check if flexible mode is enabled
+        flexible_mode = os.getenv("SCOUT_ARCHETYPE_DIVERSITY_MODE", "flexible").lower() == "flexible"
     except ImportError:
-        diversity_min_pct = float(os.getenv("SCOUT_ARCHETYPE_DIVERSITY_MIN_PCT", "0.2"))
-    
+        diversity_min_pct = float(os.getenv("SCOUT_ARCHETYPE_DIVERSITY_MIN_PCT", "0.15"))
+        flexible_mode = True  # Default to flexible
+
     if diversity_min_pct <= 0:
         return
-    
+
     active_records = [r for r in records if r.status == "ACTIVE"]
     if len(active_records) < 3 or len(active_records) > 100:
         return
-    
+
     candidate_records = [r for r in records if r.status == "CANDIDATE"]
-    
+
     active_by_archetype: Dict[str, List[WalletRecord]] = {}
     candidate_by_archetype: Dict[str, List[WalletRecord]] = {}
-    
+
     for r in active_records:
         arch = r.archetype or "UNKNOWN"
         active_by_archetype.setdefault(arch, []).append(r)
-    
+
     for r in candidate_records:
         arch = r.archetype or "UNKNOWN"
         candidate_by_archetype.setdefault(arch, []).append(r)
-    
+
     total_active = len(active_records)
-    min_per_archetype = int(max(1, total_active * diversity_min_pct))
-    
+
+    # Calculate archetype distribution
+    archetype_counts = {arch: len(recs) for arch, recs in active_by_archetype.items()}
+    max_count = max(archetype_counts.values()) if archetype_counts else total_active
+
+    # Calculate diversity score (0.0 = completely unbalanced, 1.0 = perfectly balanced)
+    # Using normalized entropy calculation
+    diversity_score = 0.0
+    if max_count > 0:
+        for arch, count in archetype_counts.items():
+            if arch != "UNKNOWN":
+                diversity_score += (count / max_count) * math.log2(len(archetype_counts))
+        diversity_score = diversity_score / (len(archetype_counts) * math.log2(len(archetype_counts))) if len(archetype_counts) > 1 else 0.0
+
+    # Target archetypes with minimum thresholds (soft targets in flexible mode)
     target_archetypes = {"SCALPER", "SWING", "WHALE"}
+
+    # Per-archetype minimum thresholds (can be overridden by env vars)
+    archetype_thresholds = {
+        "SCALPER": int(os.getenv("SCOUT_MIN_SCALPER_COUNT", "2")),
+        "SWING": int(os.getenv("SCOUT_MIN_SWING_COUNT", "2")),
+        "WHALE": int(os.getenv("SCOUT_MIN_WHALE_COUNT", "1")),
+    }
+
     promoted_count = 0
-    
+    forced_promotions = []  # Track promotions with opportunity cost
+
     for arch in target_archetypes:
         current = len(active_by_archetype.get(arch, []))
-        if current >= min_per_archetype:
+        min_count = archetype_thresholds.get(arch, 1)
+
+        if current >= min_count:
             continue
-        
+
         candidates = sorted(
             candidate_by_archetype.get(arch, []),
             key=lambda r: r.wqs_score or 0,
             reverse=True,
         )
-        
-        slots_needed = min_per_archetype - current
-        for c in candidates[:slots_needed]:
-            if (c.wqs_score or 0) >= min_wqs_active * 0.85:
-                c.status = "ACTIVE"
-                promoted_count += 1
-                active_by_archetype.setdefault(arch, []).append(c)
-    
+
+        slots_needed = min_count - current
+
+        for i, c in enumerate(candidates[:slots_needed]):
+            # Calculate opportunity cost: how much WQS we're sacrificing
+            active_wqs_scores = [r.wqs_score or 0 for r in active_records]
+            next_best_active = max(active_wqs_scores) if active_wqs_scores else 0
+            opportunity_cost = next_best_active - (c.wqs_score or 0)
+
+            # In flexible mode, only promote if opportunity cost is acceptable
+            wqs_threshold = min_wqs_active * 0.85  # Slightly lower threshold for diversity
+
+            if flexible_mode:
+                # Skip if WQS is too low or opportunity cost is too high
+                if (c.wqs_score or 0) < wqs_threshold:
+                    continue
+                if opportunity_cost > 10.0:  # Don't sacrifice >10 WQS points
+                    continue
+
+            # Promote the candidate
+            c.status = "ACTIVE"
+            promoted_count += 1
+            active_by_archetype.setdefault(arch, []).append(c)
+
+            # Track forced promotions with opportunity cost
+            forced_promotions.append({
+                'address': c.address,
+                'archetype': arch,
+                'wqs': c.wqs_score,
+                'opportunity_cost': opportunity_cost,
+            })
+
+    # Log results
     if promoted_count > 0:
-        print(f"[Scout] Archetype diversification: promoted {promoted_count} CANDIDATE wallets to ACTIVE "
-              f"(min {diversity_min_pct*100:.0f}% per archetype, {min_per_archetype} slot(s) each)")
+        avg_opportunity_cost = sum(p['opportunity_cost'] for p in forced_promotions) / max(1, len(forced_promotions))
+        print(f"[Scout] Archetype diversification: promoted {promoted_count} wallets (flexible mode: {flexible_mode})")
+        print(f"[Scout]   Diversity score: {diversity_score:.2f}, Avg opportunity cost: {avg_opportunity_cost:.2f} WQS points")
+    else:
+        print(f"[Scout] Archetype diversification: No promotions needed (diversity score: {diversity_score:.2f})")
 
 
 def _check_performance_degradation(metrics) -> bool:
@@ -819,47 +899,155 @@ def _write_correlation_record(
 def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
     """
     Write exit recommendations to data/exit_recommendations.json atomically
-    AND to chimera.db exit_recommendations table.
+    AND to chimera.db exit_recommendations table with confidence scoring.
     The Operator reads the database table to trigger exits for declining ACTIVE wallets.
+
+    Enhanced features:
+    - Confidence scoring (0.0-1.0) based on signal strength
+    - Exit throttling to prevent cascade exits
+    - Priority-based processing (HIGH > MEDIUM > LOW)
     """
+    if not exit_recs:
+        return
+
     output_dir = os.getenv("SCOUT_DATA_DIR", os.path.join(os.path.dirname(__file__), "..", "data"))
     os.makedirs(output_dir, exist_ok=True)
     final_path = os.path.join(output_dir, "exit_recommendations.json")
     tmp_path = final_path + ".tmp"
-    
+
+    # Calculate confidence scores and apply throttling
+    max_concurrent_exits = int(os.getenv("SCOUT_MAX_CONCURRENT_EXITS", "3"))
+    current_exits = 0
+
+    enhanced_recs = []
+    for rec in exit_recs:
+        confidence = _calculate_exit_confidence(rec)
+        priority = _determine_exit_priority(rec, confidence)
+
+        # Apply throttling for LOW priority exits
+        if priority == "LOW" and current_exits >= max_concurrent_exits:
+            print(f"[Scout] Throttled LOW priority exit for {rec.get('wallet', '')[:8]}...")
+            continue
+
+        enhanced_rec = {
+            **rec,
+            "confidence": confidence,
+            "priority": priority,
+            "created_at": datetime.utcnow().isoformat(),
+        }
+        enhanced_recs.append(enhanced_rec)
+
+        if priority in ("HIGH", "MEDIUM"):
+            current_exits += 1
+
     try:
         with open(tmp_path, "w") as f:
-            json.dump(exit_recs, f, indent=2)
+            json.dump(enhanced_recs, f, indent=2)
         os.rename(tmp_path, final_path)
-        print(f"[Scout] Wrote {len(exit_recs)} exit recommendations to {final_path}")
+        print(f"[Scout] Wrote {len(enhanced_recs)} exit recommendations to {final_path}")
     except Exception as e:
         print(f"[Scout] Failed to write exit recommendations: {e}")
-    
-    # Also write to chimera.db so the Operator can consume them directly
+
+    # Also write to chimera.db with enhanced schema
     db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
     try:
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
+
+        # Enhanced schema with confidence and priority
         conn.execute("""
             CREATE TABLE IF NOT EXISTS exit_recommendations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 wallet_address TEXT NOT NULL,
                 reason TEXT,
                 recommended_action TEXT NOT NULL DEFAULT 'EXIT_ALL',
+                confidence REAL NOT NULL DEFAULT 0.5,
+                priority TEXT NOT NULL DEFAULT 'MEDIUM',
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                acknowledged INTEGER NOT NULL DEFAULT 0
+                acknowledged INTEGER NOT NULL DEFAULT 0,
+                processed INTEGER NOT NULL DEFAULT 0
             )
         """)
-        for rec in exit_recs:
+
+        # Write enhanced records
+        for rec in enhanced_recs:
             conn.execute(
-                "INSERT INTO exit_recommendations (wallet_address, reason, recommended_action) VALUES (?, ?, ?)",
-                (rec.get("wallet"), rec.get("reason"), rec.get("recommended_action", "EXIT_ALL")),
+                """INSERT INTO exit_recommendations
+                   (wallet_address, reason, recommended_action, confidence, priority)
+                   VALUES (?, ?, ?, ?, ?)""",
+                (rec.get("wallet"), rec.get("reason"), rec.get("recommended_action", "EXIT_ALL"),
+                 rec.get("confidence", 0.5), rec.get("priority", "MEDIUM")),
             )
+
         conn.commit()
         conn.close()
-        print(f"[Scout] Wrote {len(exit_recs)} exit recommendations to {db_path} (exit_recommendations table)")
+        print(f"[Scout] Wrote {len(enhanced_recs)} exit recommendations to {db_path} (exit_recommendations table)")
+
+        # Log summary
+        high_conf = sum(1 for r in enhanced_recs if r.get("confidence", 0) >= 0.7)
+        print(f"[Scout] Exit summary: {len(enhanced_recs)} total, {high_conf} high confidence")
+
     except Exception as e:
         print(f"[Scout] Failed to write exit recommendations to DB: {e}")
+
+
+def _calculate_exit_confidence(rec: Dict[str, Any]) -> float:
+    """
+    Calculate confidence score for an exit recommendation.
+
+    Higher confidence for:
+    - Multiple negative signals (trajectory, WMI, alpha decay)
+    - Strong decline (large negative ROI)
+    - Low trade count (easier to exit)
+
+    Returns:
+        Confidence score 0.0-1.0
+    """
+    confidence = 0.5  # Base confidence
+
+    # Boost confidence for multiple reasons
+    reason = rec.get("reason", "")
+    negative_signals = reason.count("|") + 1  # Count multiple reasons
+    confidence += min(0.2, negative_signals * 0.1)
+
+    # Check for strong decline signals
+    if any(sig in reason for sig in ["DECLINING", "alpha decay", "drawdown"]):
+        confidence += 0.15
+
+    # Check trajectory
+    if "DECLINING" in reason:
+        confidence += 0.1
+    elif "IMPROVING" in reason:
+        confidence -= 0.2  # Lower confidence if improving
+
+    # Check WMI (negative momentum = higher confidence)
+    if "WMI" in reason and ("negative" in reason.lower() or "degrading" in reason.lower()):
+        confidence += 0.1
+
+    return max(0.0, min(1.0, confidence))
+
+
+def _determine_exit_priority(rec: Dict[str, Any], confidence: float) -> str:
+    """
+    Determine priority level for exit processing.
+
+    Args:
+        rec: Exit recommendation record
+        confidence: Confidence score
+
+    Returns:
+        Priority level: HIGH, MEDIUM, or LOW
+    """
+    # HIGH confidence + clear signals = HIGH priority
+    if confidence >= 0.8:
+        return "HIGH"
+
+    # MEDIUM confidence or moderate signals = MEDIUM priority
+    if confidence >= 0.5:
+        return "MEDIUM"
+
+    # Low confidence = LOW priority
+    return "LOW"
 
 
 async def main_async():

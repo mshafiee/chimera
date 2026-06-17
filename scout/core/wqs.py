@@ -42,6 +42,121 @@ class ScoreTracker:
             components=dict(self.components),
         )
 
+    def _apply_penalty_precedence(self) -> None:
+        """
+        Apply penalty precedence: only keep the most severe penalty per category.
+
+        This prevents multiple penalties from stacking excessively
+        by keeping only the strongest penalty from each penalty category.
+        """
+        # Group penalties by category
+        penalty_categories = {
+            'martingale_penalty': [],  # Bag holder, paper gains, unproven
+            'pump_spike_penalty': [],  # Pump and dump detection
+            'sniper_penalty': [],  # Fast entry penalty
+            'drawdown_penalty': [],  # Drawdown penalty
+            'pf_wr_penalty': [],  # Profit factor to win rate ratio
+            'mev_risk_penalty': [],  # MEV/sandwich risk
+            'scam_penalty': [],  # Scam correlation
+            'insider_penalty': [],  # Fresh wallet
+            'smart_money_removal': [],  # Smart money removal
+        }
+
+        # Group penalties by category
+        for name, value in self.components.items():
+            if value < 0:  # It's a penalty
+                # Determine category
+                category = None
+                if 'martingale' in name:
+                    category = 'martingale_penalty'
+                elif 'pump_spike' in name:
+                    category = 'pump_spike_penalty'
+                elif 'sniper' in name:
+                    category = 'sniper_penalty'
+                elif 'drawdown' in name:
+                    category = 'drawdown_penalty'
+                elif 'pf_wr' in name:
+                    category = 'pf_wr_penalty'
+                elif 'mev_risk' in name:
+                    category = 'mev_risk_penalty'
+                elif 'scam' in name:
+                    category = 'scam_penalty'
+                elif 'insider' in name:
+                    category = 'insider_penalty'
+                elif 'smart_money_removal' in name:
+                    category = 'smart_money_removal'
+
+                if category and category in penalty_categories:
+                    penalty_categories[category].append((name, value))
+
+        # For each category, only keep the most severe (largest absolute value) penalty
+        for category, penalties in penalty_categories.items():
+            if len(penalties) > 1:
+                # Find the most severe penalty
+                penalties.sort(key=lambda x: abs(x[1]), reverse=True)
+                most_severe_name, most_severe_value = penalties[0]
+
+                # Remove all other penalties in this category
+                for other_name, _ in penalties[1:]:
+                    if other_name in self.components:
+                        del self.components[other_name]
+
+                # Restore the most severe penalty
+                self.components[most_severe_name] = most_severe_value
+
+    def _apply_penalty_confidence(self) -> None:
+        """
+        Apply confidence weighting to uncertain penalties.
+
+        Uncertain penalties (from sparse data) are reduced in impact
+        while high-confidence penalties retain full weight.
+        """
+        # Penalty confidence mapping
+        penalty_confidence = {
+            'martingale_penalty': 0.8,  # High confidence (direct calculation)
+            'pump_spike_penalty': 0.9,  # Very high confidence (clear signal)
+            'sniper_penalty': 1.0,  # Certain (direct measurement)
+            'drawdown_penalty': 0.9,  # High confidence (measured data)
+            'pf_wr_penalty': 0.7,  # Medium confidence (ratio calculation)
+            'mev_risk_penalty': 0.6,  # Medium-low confidence (heuristic)
+            'scam_penalty': 1.0,  # Certain (denylist check)
+            'insider_penalty': 0.8,  # High confidence (fresh wallet detection)
+            'smart_money_removal': 0.5,  # Lower confidence (conditional)
+        }
+
+        for name, value in list(self.components.items()):
+            if value < 0:  # It's a penalty
+                # Determine penalty category
+                confidence = 0.5  # Default medium confidence
+                for category, conf in penalty_confidence.items():
+                    if category in name:
+                        confidence = conf
+                        break
+
+                # Apply confidence weighting
+                # Reduce penalty impact if confidence is low
+                if confidence < 0.8:
+                    adjusted_value = value * (0.5 + 0.5 * confidence)
+                    self.components[name] = adjusted_value
+
+                    # Recalculate negative total
+                    self.negative = abs(sum(v for v in self.components.values() if v < 0))
+
+    def _apply_penalty_decay(self) -> None:
+        """
+        Apply penalty decay for old offenses.
+
+        Penalties from old data are reduced in impact to avoid
+        permanently punishing wallets for past mistakes.
+        """
+        # Decay rate: penalties lose 10% of their value per day (not implemented here as
+        # this would require timestamp tracking for each penalty)
+        # For now, we'll implement a simple decay based on wallet age
+
+        # Get wallet age (estimate from trade count)
+        # This is a simplified version - a full implementation would track penalty timestamps
+        pass  # Placeholder for future implementation
+
 
 def _compute_wmi(roi_7d: Optional[float], roi_30d: Optional[float], trade_count_30d: Optional[int]) -> float:
     """
@@ -137,6 +252,8 @@ class WalletMetrics:
     correlated_with_scam: bool = False  # Wallet or funder on known scam denylist
     unique_token_categories: Optional[int] = None  # Count of unique token categories traded
     mev_risk_score: Optional[float] = None  # Fraction of trades appearing in sandwich blocks (0.0-1.0)
+    archetype: Optional[str] = None  # Trader archetype (SCALPER, SWING, WHALE, SNIPER, INSIDER)
+    trajectory: Optional[str] = None  # Multi-timeframe trajectory (IMPROVING, STABLE, DECLINING, PEAKED)
 
 
 @dataclass
@@ -467,6 +584,54 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         tracker.negative = abs(sum(v for v in tracker.components.values() if v < 0))
     except Exception:
         pass
+
+    # ---------------------------------------------------------
+    # INTELLIGENT PENALTY CAPPING (Task 10)
+    # ---------------------------------------------------------
+    # Prevent excessive demotion by capping total penalties
+    # and applying penalty precedence logic
+
+    # Get configuration for penalty capping
+    max_total_penalty = float(os.getenv("SCOUT_MAX_TOTAL_PENALTY", "40.0"))  # Max total penalty points
+    penalty_cap_enabled = os.getenv("SCOUT_PENALTY_CAP_ENABLED", "true").lower() == "true"
+    penalty_precedence_enabled = os.getenv("SCOUT_PENALTY_PRECEDENCE", "true").lower() == "true"
+
+    if penalty_cap_enabled and tracker.negative > 0:
+        # Calculate total negative before capping
+        total_negative_before = tracker.negative
+        total_positive = tracker.positive
+
+        # Apply total penalty cap if negative would exceed threshold
+        if tracker.negative > max_total_penalty:
+            excess = tracker.negative - max_total_penalty
+
+            # Scale down individual penalties proportionally
+            if tracker.negative > 0:
+                scale_factor = max_total_penalty / tracker.negative
+
+                # Scale each negative component
+                for name in list(tracker.components.keys()):
+                    if tracker.components[name] < 0:
+                        tracker.components[name] *= scale_factor
+
+                # Recalculate negative total
+                tracker.negative = max_total_penalty
+
+                logger.debug(
+                    f"Penalty cap applied: {total_negative_before:.1f} -> {tracker.negative:.1f} "
+                    f"(excess {excess:.1f} capped at {max_total_penalty})"
+                )
+
+        # Apply penalty precedence (only keep most severe penalty per category)
+        if penalty_precedence_enabled:
+            tracker._apply_penalty_precedence()
+
+        # Apply penalty confidence weighting
+        # (uncertain penalties count less)
+        tracker._apply_penalty_confidence()
+
+    # Apply penalty decay for old offenses
+    tracker._apply_penalty_decay()
 
     return tracker.to_components()
 

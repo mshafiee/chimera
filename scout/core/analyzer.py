@@ -337,6 +337,11 @@ class WalletAnalyzer:
         self._sol_price_usd: Optional[float] = None  # Cached SOL price
         self._safety_check_total: int = 0  # Cumulative token safety check count
         self._safety_check_failures: int = 0  # Cumulative safety check failures
+
+        # Parse cache for improved reliability - cache successful parse results by tx signature
+        self._parse_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        self._parse_cache_hits = 0
+        self._parse_cache_misses = 0
         
         # Initialize Redis client for persistent caching (if available)
         self._redis_client = None
@@ -383,6 +388,8 @@ class WalletAnalyzer:
             "token_creation_fetched": 0,
             "token_creation_success": 0,
             "token_creation_fallback_helix": 0,
+            "parse_cache_hits": 0,
+            "parse_cache_misses": 0,
         }
         self._discovery_stats = {
             "infrastructure_filtered": 0,
@@ -919,7 +926,26 @@ class WalletAnalyzer:
                     print(f"  [{address[:8]}] ... ({len(lines) - 100} more lines)")
                 print(f"  [{address[:8]}] ━━━ END TRANSACTION STRUCTURE ━━━")
             
-            swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
+            # Check parse cache first (by transaction signature)
+            tx_sig = tx.get("signature", "")
+            swap = None
+
+            if tx_sig in self._parse_cache:
+                self._parse_cache_hits += 1
+                swap = self._parse_cache[tx_sig]
+            else:
+                self._parse_cache_misses += 1
+                # Attempt standard parsing
+                swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
+
+                # Aggressive fallback: if standard parsing failed, try without wallet filter
+                if not swap and tx:
+                    # Try parsing without wallet address filter (more permissive)
+                    swap = self.helius_client.parse_swap_transaction(tx, wallet_address=None)
+
+                # Cache the result (even if None) to avoid re-parsing
+                self._parse_cache[tx_sig] = swap
+
             if swap:
                 self._parse_stats["swaps_parsed"] += 1
                 # Convert to HistoricalTrade format
@@ -937,8 +963,8 @@ class WalletAnalyzer:
                 # Log first few failures for debugging
                 if parse_failures <= 3:
                     tx_type = tx.get("type", "unknown")
-                    tx_sig = tx.get("signature", "")[:8]
-                    print(f"  [{address[:8]}] Parse fail #{parse_failures}: type={tx_type}, sig={tx_sig}..., reason={reason}")
+                    tx_sig_short = tx.get("signature", "")[:8]
+                    print(f"  [{address[:8]}] Parse fail #{parse_failures}: type={tx_type}, sig={tx_sig_short}..., reason={reason}")
                     # Log key fields
                     print(f"  [{address[:8]}]   - tokenTransfers: {len(tx.get('tokenTransfers', []))} items")
                     print(f"  [{address[:8]}]   - nativeTransfers: {len(tx.get('nativeTransfers', []))} items")
@@ -2134,6 +2160,33 @@ class WalletAnalyzer:
                 token_categories.add(cat)
         unique_token_categories = len(token_categories) if token_categories else None
 
+        # Determine trader archetype
+        archetype = None
+        try:
+            temp_metrics = WalletMetrics(
+                address=address,
+                roi_7d=roi_7d,
+                roi_30d=roi_30d,
+                trade_count_30d=len(close_trades_30d),
+                avg_trade_size_sol=float(avg_trade_size) if avg_trade_size else None,
+                avg_entry_delay_seconds=avg_entry_delay,
+                is_fresh_wallet=is_fresh_wallet,
+            )
+            archetype_result = self.determine_archetype(temp_metrics, trades)
+            archetype = archetype_result.value if hasattr(archetype_result, 'value') else str(archetype_result)
+            print(f"  [{address[:8]}] Archetype: {archetype}")
+        except Exception as e:
+            print(f"  [{address[:8]}] Warning: Could not determine archetype: {e}")
+
+        # Calculate trajectory
+        trajectory = None
+        try:
+            from .wqs import _interpret_trajectory
+            trajectory = _interpret_trajectory(roi_7d, roi_30d)
+            print(f"  [{address[:8]}] Trajectory: {trajectory}")
+        except Exception as e:
+            print(f"  [{address[:8]}] Warning: Could not calculate trajectory: {e}")
+
         # Convert Decimal values to float for WalletMetrics
         return WalletMetrics(
             address=address,
@@ -2161,6 +2214,8 @@ class WalletAnalyzer:
             correlated_with_scam=correlated_with_scam,
             unique_token_categories=unique_token_categories,
             mev_risk_score=mev_risk_score,
+            archetype=archetype,
+            trajectory=trajectory,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:
@@ -2749,6 +2804,10 @@ class WalletAnalyzer:
         failures = stats["parse_failures_total"]
         by_reason = stats["parse_failures_by_reason"]
 
+        # Update stats with instance cache counters
+        stats["parse_cache_hits"] = self._parse_cache_hits
+        stats["parse_cache_misses"] = self._parse_cache_misses
+
         print("\n[Analyzer] ════════════════════════════════════════")
         print("[Analyzer] Parse Health Dashboard")
         print("[Analyzer] ════════════════════════════════════════")
@@ -2793,6 +2852,20 @@ class WalletAnalyzer:
             print(f"  Helius fallback used:  {tcfb}  ({fallback_rate:.1f}%)")
             if success_rate < 20:
                 print("  ⚠ WARNING: Token creation fetch success < 20% — sniper detection degraded!")
+
+        # Parse cache statistics
+        cache_hits = stats.get("parse_cache_hits", self._parse_cache_hits)
+        cache_misses = stats.get("parse_cache_misses", self._parse_cache_misses)
+        total_cache_lookups = cache_hits + cache_misses
+        if total_cache_lookups > 0:
+            cache_hit_rate = cache_hits / total_cache_lookups * 100
+            print()
+            print("[Analyzer] Parse Cache Statistics")
+            print(f"  Cache hits:            {cache_hits}  ({cache_hit_rate:.1f}%)")
+            print(f"  Cache misses:          {cache_misses}")
+            print(f"  Total lookups:         {total_cache_lookups}")
+            if cache_hit_rate < 10:
+                print("  ⚠ WARNING: Low cache hit rate — consider increasing cache size or run duration")
         print("[Analyzer] ════════════════════════════════════════")
 
     def is_parse_rate_below_threshold(self) -> bool:
