@@ -646,7 +646,7 @@ class BacktestSimulator:
             
             if token_qty > Decimal('0'):
                 position["qty"] += token_qty
-                position["cost_basis_sol"] += trade_size_sol
+                position["cost_basis_sol"] += trade_size_sol + total_cost
                 # No realized PnL on BUY
                 simulated_pnl = Decimal('0')
             else:

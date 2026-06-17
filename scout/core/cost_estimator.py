@@ -56,7 +56,6 @@ class CostEstimator:
         self._rpc_url = self._build_rpc_url()
         self._cache: Dict[str, Tuple[float, Tuple[float, ...]]] = {}
         self._session: Optional[aiohttp.ClientSession] = None
-        self._fee_cache_path = os.getenv("SCOUT_FEE_CACHE_PATH", DEFAULT_FEE_CACHE_PATH)
         self._load_fee_cache()
 
     def _build_rpc_url(self) -> Optional[str]:

@@ -16,7 +16,7 @@ A wallet is promoted to ACTIVE only if ALL checks pass.
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 import logging
 
 from .models import (

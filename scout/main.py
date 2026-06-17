@@ -294,7 +294,7 @@ async def analyze_wallets(
     min_wqs_candidate: float,
     skip_backtest: bool = False,
     verbose: bool = False,
-) -> Tuple[List[WalletRecord], dict]:
+) -> Tuple[List[WalletRecord], dict, list]:
     """
     Analyze wallets in parallel and generate roster records.
     """
@@ -686,7 +686,7 @@ async def analyze_wallets(
     if exit_recs:
         _write_exit_recommendations(exit_recs)
     
-    return records, stats
+    return records, stats, results
 
 
 def _apply_archetype_diversification(records: List[WalletRecord], min_wqs_active: float) -> None:
@@ -1002,7 +1002,7 @@ async def main_async():
     
     import time
     analysis_start = time.time()
-    records, stats = await analyze_wallets(
+    records, stats, results = await analyze_wallets(
         analyzer,
         validator,
         args.min_wqs_active,
