@@ -188,20 +188,38 @@ class SimpleEnsembleModel:
         return (value - min_val) / (max_val - min_val)
 
     def _calculate_roi_momentum_score(self, features: ProfitabilityFeatures) -> Tuple[float, str]:
-        """Calculate ROI momentum score."""
+        """Calculate enhanced ROI momentum score with growth optimization."""
         roi_7d = features.roi_7d or 0.0
         roi_30d = features.roi_30d or 0.0
 
-        # Positive recent momentum
+        # Growth-optimized momentum calculation
         if roi_7d > 0 and roi_30d > 0:
+            # Base momentum from recent performance
             momentum = self._normalize_score(roi_7d, 0, 100) * 0.7 + \
                        self._normalize_score(roi_30d, 0, 50) * 0.3
 
-            # Bonus for accelerating performance
+            # Enhanced momentum detection for growth goal
+            # Bonus for accelerating performance (recent better than historical)
             if roi_7d > roi_30d * 0.6:
+                momentum *= 1.3  # Increased bonus for growth optimization
+
+            # Additional bonus for explosive growth (7d ROI > 50%)
+            if roi_7d > 50:
                 momentum *= 1.2
 
+            # Super bonus for moonshot (7d ROI > 100%)
+            if roi_7d > 100:
+                momentum *= 1.5
+
+            # Penalty for declining momentum (recent worse than historical)
+            if roi_7d < roi_30d * 0.3:
+                momentum *= 0.5
+
             return min(momentum, 1.0), "roi_momentum"
+
+        # Recovery bonus (turning around from losses)
+        elif roi_7d > 0 and roi_30d < 0:
+            return 0.6, "roi_momentum"  # Moderate score for recovery
 
         return 0.0, "roi_momentum"
 
@@ -575,6 +593,214 @@ class ProfitabilityPredictor:
             allocation[addr] = (weight / total_weight) * total_capital_usd
 
         logger.info(f"Allocated ${total_capital_usd:.2f} across {len(allocation)} wallets")
+        return allocation
+
+    def calculate_kelly_position_size(self, prediction: ProfitabilityPrediction,
+                                     current_capital_usd: float = 200.0,
+                                     target_capital_usd: float = 1000.0) -> float:
+        """
+        Calculate Kelly Criterion-inspired position size for maximum growth.
+
+        Kelly Formula: f* = (bp - q) / b
+        Where:
+        - b = odds (profit_factor - 1)
+        - p = probability of winning (win_rate)
+        - q = probability of losing (1 - p)
+
+        Adapted for our context with expected return and risk score.
+
+        Args:
+            prediction: Profitability prediction
+            current_capital_usd: Current capital
+            target_capital_usd: Target capital
+
+        Returns:
+            Recommended position size in USD
+        """
+        # Growth stage multiplier (more aggressive early on)
+        growth_stage = min(2.0, target_capital_usd / max(current_capital_usd, 1.0))
+
+        # Calculate Kelly fraction based on prediction
+        expected_return = prediction.expected_return_pct / 100.0
+        risk_of_loss = prediction.risk_score
+
+        # Adjust win rate based on confidence
+        win_rate = prediction.probability_of_profit or prediction.confidence
+        lose_rate = 1.0 - win_rate
+
+        # Estimate odds from expected return and risk
+        if risk_of_loss > 0 and expected_return > 0:
+            odds = expected_return / risk_of_loss
+        else:
+            odds = 1.0
+
+        # Kelly calculation
+        if odds > 0:
+            kelly_fraction = (odds * win_rate - lose_rate) / odds
+            # Clamp to reasonable range (0.5% to 25% of capital)
+            kelly_fraction = max(0.005, min(kelly_fraction, 0.25))
+        else:
+            kelly_fraction = 0.01  # Conservative 1% default
+
+        # Apply growth stage multiplier
+        position_size = current_capital_usd * kelly_fraction * growth_stage
+
+        # Capital-efficient sizing for early stage
+        # Minimum position: $5 (2.5% of $200)
+        # Maximum position: $50 (25% of capital)
+        position_size = max(5.0, min(position_size, current_capital_usd * 0.25))
+
+        return position_size
+
+    def rank_wallets_for_growth(self, wallets_metrics: List[Dict[str, Any]],
+                               max_wallets: int = 50,
+                               current_capital_usd: float = 200.0) -> List[Tuple[str, ProfitabilityPrediction, float]]:
+        """
+        Rank wallets optimized for growth goal ($200 → $1000).
+
+        Prioritizes:
+        1. High ROI momentum (recent 7d performance)
+        2. Early wallets (<30 days, high alpha potential)
+        3. Strong risk-adjusted returns
+        4. Penalizes bag-holder situations heavily
+
+        Args:
+            wallets_metrics: List of wallet metrics with addresses
+            max_wallets: Maximum wallets to return
+            current_capital_usd: Current capital for position sizing
+
+        Returns:
+            List of (wallet_address, prediction, position_size) tuples
+        """
+        predictions = []
+
+        for metrics in wallets_metrics:
+            address = metrics.get('address')
+            if not address:
+                continue
+
+            try:
+                prediction = self.predict_wallet_profitability(metrics)
+
+                # Calculate growth-optimized position size
+                position_size = self.calculate_kelly_position_size(
+                    prediction,
+                    current_capital_usd=current_capital_usd
+                )
+
+                predictions.append((address, prediction, position_size))
+            except Exception as e:
+                logger.warning(f"Failed to predict profitability for {address[:8]}...: {e}")
+
+        # Growth-optimized sorting
+        def growth_score(item):
+            addr, pred, pos_size = item
+            metrics = next((m for m in wallets_metrics if m.get('address') == addr), {})
+
+            # Base score: expected return * confidence
+            score = pred.expected_return_pct * pred.confidence
+
+            # Momentum bonus
+            roi_7d = metrics.get('roi_7d', 0)
+            roi_30d = metrics.get('roi_30d', 0)
+            if roi_7d > 0 and roi_30d > 0:
+                momentum_ratio = roi_7d / max(roi_30d, 1.0)
+                if momentum_ratio > 0.8:  # Strong recent momentum
+                    score *= 1.3
+
+            # Early wallet bonus (<30 days history)
+            trade_count_30d = metrics.get('trade_count_30d', 0)
+            if 10 <= trade_count_30d <= 50:  # Early but not brand new
+                score *= 1.2
+
+            # Bag holder penalty
+            bag_holder_score = metrics.get('bag_holder_score', 0)
+            if bag_holder_score > 0.3:
+                score *= 0.5  # Heavy penalty
+
+            # Insider risk penalty
+            insider_prob = metrics.get('insider_probability', 0)
+            if insider_prob > 0.7:
+                score *= 0.3  # Severe penalty
+
+            return score
+
+        # Sort by growth score
+        predictions.sort(key=growth_score, reverse=True)
+
+        return predictions[:max_wallets]
+
+    def get_capital_efficient_allocation(self, predictions: List[Tuple[str, ProfitabilityPrediction]],
+                                       total_capital_usd: float = 200.0,
+                                       min_position_usd: float = 5.0,
+                                       max_position_usd: float = 50.0) -> Dict[str, float]:
+        """
+        Calculate capital-efficient allocation for $200 → $1000 growth goal.
+
+        Focuses capital on highest-conviction opportunities while maintaining
+        diversification.
+
+        Args:
+            predictions: List of (wallet_address, prediction) tuples
+            total_capital_usd: Total capital to allocate
+            min_position_usd: Minimum position size
+            max_position_usd: Maximum position size
+
+        Returns:
+            Dictionary mapping wallet_address to allocation amount
+        """
+        allocation = {}
+
+        # Filter for high-conviction wallets only
+        high_conviction = [
+            (addr, pred) for addr, pred in predictions
+            if pred.expected_return_pct > 5 and pred.confidence > 0.6
+        ]
+
+        if not high_conviction:
+            logger.warning("No high-conviction wallets found, using profitable wallets")
+            high_conviction = [
+                (addr, pred) for addr, pred in predictions
+                if pred.expected_return_pct > 0 and pred.confidence > 0.5
+            ]
+
+        if not high_conviction:
+            return allocation
+
+        # Calculate position sizes using Kelly Criterion
+        position_sizes = []
+        for addr, pred in high_conviction:
+            pos_size = self.calculate_kelly_position_size(pred, total_capital_usd)
+            position_sizes.append((addr, pos_size, pred))
+
+        # Sort by conviction (expected_return * confidence)
+        position_sizes.sort(key=lambda x: x[2].expected_return_pct * x[2].confidence, reverse=True)
+
+        # Allocate capital with diversification constraint
+        # Maximum 20% per wallet, ensure at least 5 wallets
+        max_per_wallet = max(max_position_usd, total_capital_usd * 0.20)
+        min_wallets = max(5, len(high_conviction))
+        remaining_capital = total_capital_usd
+
+        for i, (addr, pos_size, pred) in enumerate(position_sizes):
+            if remaining_capital <= min_position_usd:
+                break
+
+            # Check if we should add more wallets for diversification
+            wallets_allocated = len(allocation)
+            if wallets_allocated < min_wallets and i >= min_wallets:
+                # Ensure minimum allocation for diversification
+                alloc_amount = min(min_position_usd * 2, remaining_capital / (min_wallets - wallets_allocated + 1))
+            else:
+                # Use Kelly size but respect constraints
+                alloc_amount = min(pos_size, max_per_wallet, remaining_capital)
+
+            if alloc_amount >= min_position_usd:
+                allocation[addr] = alloc_amount
+                remaining_capital -= alloc_amount
+
+        logger.info(f"Capital-efficient allocation: ${total_capital_usd:.2f} across {len(allocation)} wallets")
+        logger.info(f"Average position: ${total_capital_usd / len(allocation):.2f}")
         return allocation
 
 
