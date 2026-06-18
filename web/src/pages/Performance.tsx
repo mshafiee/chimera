@@ -1,12 +1,10 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
-import { Badge } from '../components/ui/Badge'
 import { useTradeLatency, useRPCLatency, useDatabasePerformance, useRequestRate, useCostAnalysis } from '../api'
 import { LatencyChart } from '../components/performance/LatencyChart'
 import { RPCLatencyTable } from '../components/performance/RPCLatencyTable'
 import { DatabasePerformanceCard } from '../components/performance/DatabasePerformanceCard'
 import { RequestRateCard } from '../components/performance/RequestRateCard'
 import { CostAnalysisChart } from '../components/performance/CostAnalysisChart'
-import { MetricCard } from '../components/ui/MetricCard'
 import { TimeRangePicker, TimeRange } from '../components/ui/TimeRangePicker'
 import { useState } from 'react'
 

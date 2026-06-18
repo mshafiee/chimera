@@ -1,5 +1,3 @@
-import { Badge } from '../ui/Badge'
-
 interface ConsensusMatrixProps {
   // Placeholder for consensus matrix visualization
   // This would show a heatmap of wallet signal consensus

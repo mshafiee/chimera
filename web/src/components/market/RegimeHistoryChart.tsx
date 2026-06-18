@@ -5,13 +5,6 @@ interface RegimeHistoryChartProps {
   history: RegimeHistoryPoint[]
 }
 
-const REGIME_COLORS = {
-  bull: '#22c55e',
-  bear: '#ef4444',
-  neutral: '#6b7280',
-  volatile: '#f97316',
-}
-
 export function RegimeHistoryChart({ history }: RegimeHistoryChartProps) {
   const chartData = history.map((point) => ({
     time: new Date(point.timestamp).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),

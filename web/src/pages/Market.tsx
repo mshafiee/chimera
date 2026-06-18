@@ -1,11 +1,9 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { useMarketRegime, useMarketConditions } from '../api'
 import { RegimeIndicator } from '../components/market/RegimeIndicator'
 import { RegimeHistoryChart } from '../components/market/RegimeHistoryChart'
 import { PerformanceByRegime } from '../components/market/PerformanceByRegime'
-import { MetricCard } from '../components/ui/MetricCard'
 import { TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react'
 
 export function Market() {
@@ -99,7 +97,7 @@ export function Market() {
                 <div className="text-sm text-text-muted mb-2">Market Sentiment</div>
                 <Badge
                   variant={marketConditions.market_sentiment === 'bullish' ? 'success' : marketConditions.market_sentiment === 'bearish' ? 'danger' : 'default'}
-                  size="lg"
+                  size="md"
                 >
                   {marketConditions.market_sentiment}
                 </Badge>
@@ -110,7 +108,7 @@ export function Market() {
                 <div className="text-sm text-text-muted mb-2">Risk Level</div>
                 <Badge
                   variant={marketConditions.risk_level === 'low' ? 'success' : marketConditions.risk_level === 'medium' ? 'warning' : 'danger'}
-                  size="lg"
+                  size="md"
                 >
                   {marketConditions.risk_level}
                 </Badge>

@@ -1,5 +1,4 @@
-import { Badge } from '../ui/Badge'
-import { TrendingUp, TrendingDown, Minus } from 'lucide-react'
+import { TrendingUp, TrendingDown, Minus, Activity } from 'lucide-react'
 import type { MarketRegimeResponse } from '../../api'
 
 interface RegimeIndicatorProps {

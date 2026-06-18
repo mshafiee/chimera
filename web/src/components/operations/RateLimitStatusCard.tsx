@@ -23,7 +23,7 @@ export function RateLimitStatusCard({ data }: RateLimitStatusCardProps) {
         <div className="text-sm text-text-muted">Overall Status</div>
         <Badge
           variant={data.overall_status === 'healthy' ? 'success' : data.overall_status === 'degraded' ? 'warning' : 'danger'}
-          size="lg"
+          size="md"
         >
           {data.overall_status}
         </Badge>

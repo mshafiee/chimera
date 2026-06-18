@@ -1,5 +1,4 @@
 import { clsx } from 'clsx'
-import { useState } from 'react'
 
 export type TimeRange = '1h' | '6h' | '24h' | '7d' | '30d' | '90d' | 'custom'
 
@@ -58,8 +57,6 @@ export function DateRangePicker({
   onEndChange,
   className,
 }: DateRangePickerProps) {
-  const [showCustom, setShowCustom] = useState(false)
-
   const formatDate = (date: Date | null): string => {
     if (!date) return ''
     return date.toISOString().split('T')[0]

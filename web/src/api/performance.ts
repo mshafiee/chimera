@@ -73,6 +73,7 @@ export interface RequestRateResponse {
   current_rps: number
   peak_rps: number
   avg_rps: number
+  overall_status: 'healthy' | 'degraded' | 'throttled'
   rate_limits: RateLimitInfo[]
 }
 
@@ -81,6 +82,10 @@ export interface RateLimitInfo {
   current_rate: number
   limit: number
   utilization_percent: number
+  window_seconds: number
+  remaining: number
+  reset_at: string
+  status: 'ok' | 'warning' | 'throttled'
 }
 
 // Cost Analysis Response (Enhanced)

@@ -4,7 +4,6 @@ import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '.
 import { useSignalQuality, useSignalSources, useSignalConsensus } from '../api'
 import { SignalQualityChart } from '../components/signals/SignalQualityChart'
 import { SignalSourcesTable } from '../components/signals/SignalSourcesTable'
-import { ConsensusMatrix } from '../components/signals/ConsensusMatrix'
 import { MetricCard } from '../components/ui/MetricCard'
 import { TimeRangePicker, TimeRange } from '../components/ui/TimeRangePicker'
 import { useState } from 'react'
@@ -94,7 +93,7 @@ export function Signals() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle>Signal Consensus</CardTitle>
-            <Badge variant={signalConsensus?.consensus_detection_rate > 0.7 ? 'success' : 'warning'}>
+            <Badge variant={(signalConsensus?.consensus_detection_rate ?? 0) > 0.7 ? 'success' : 'warning'}>
               {signalConsensus?.consensus_detection_rate ? `${(signalConsensus.consensus_detection_rate * 100).toFixed(1)}%` : 'N/A'}
             </Badge>
           </div>
@@ -140,8 +139,8 @@ export function Signals() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {signalConsensus.consensus_signals.slice(0, 10).map((signal) => (
-                        <TableRow key={signal.signal_id}>
+                      {signalConsensus.consensus_signals.slice(0, 10).map((signal, index) => (
+                        <TableRow key={index}>
                           <TableCell>
                             <div className="font-semibold">
                               ${signal.token_symbol || 'Unknown'}
@@ -152,23 +151,11 @@ export function Signals() {
                           </TableCell>
                           <TableCell>
                             <div className="text-sm">
-                              {signal.wallet_count} / {signal.unique_wallets || signal.wallet_count}
+                              {signal.consensus_wallets} / {signal.total_wallets}
                             </div>
-                            <Badge variant={signal.consensus_level === 'strong' ? 'success' : signal.consensus_level === 'moderate' ? 'warning' : 'default'} size="sm">
-                              {signal.consensus_level}
-                            </Badge>
                           </TableCell>
                           <TableCell mono className="text-sm">
                             {signal.quality_score.toFixed(2)}
-                          </TableCell>
-                          <TableCell>
-                            {signal.executed ? (
-                              <Badge variant={signal.execution_result?.success ? 'success' : 'danger'} size="sm">
-                                {signal.execution_result?.success ? '✓' : '✗'}
-                              </Badge>
-                            ) : (
-                              <Badge variant="default" size="sm">Pending</Badge>
-                            )}
                           </TableCell>
                         </TableRow>
                       ))}
@@ -182,22 +169,14 @@ export function Signals() {
                 <div>
                   <h3 className="text-sm font-medium mb-3 text-loss">Divergence Alerts</h3>
                   <div className="space-y-2">
-                    {signalConsensus.divergence_alerts.map((alert) => (
-                      <div key={alert.alert_id} className="bg-loss/10 border border-loss/30 rounded-lg p-3">
+                    {signalConsensus.divergence_alerts.map((alert, index) => (
+                      <div key={index} className="bg-loss/10 border border-loss/30 rounded-lg p-3">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
-                            <div>
-                              <div className="font-semibold text-sm">
-                                ${alert.token_symbol || 'Unknown'}
-                              </div>
-                              <div className="text-xs text-text-muted">
-                                {alert.divergence_type} divergence
-                              </div>
+                            <div className="font-semibold text-sm">
+                              ${alert.token_symbol || 'Unknown'}
                             </div>
                           </div>
-                          <Badge variant={alert.severity === 'high' ? 'danger' : alert.severity === 'medium' ? 'warning' : 'default'} size="sm">
-                            {alert.severity}
-                          </Badge>
                         </div>
                         <div className="mt-2 text-xs text-text-muted">
                           {alert.wallets_divergent.length} wallets diverged from cluster

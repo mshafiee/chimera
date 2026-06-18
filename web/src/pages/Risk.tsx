@@ -1,6 +1,4 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
-import { Badge } from '../components/ui/Badge'
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { usePortfolioRisk, useStopLossMetrics, useProfitTargetMetrics } from '../api'
 import { PortfolioHeatGauge } from '../components/risk/PortfolioHeatGauge'
 import { ConcentrationMatrix } from '../components/risk/ConcentrationMatrix'

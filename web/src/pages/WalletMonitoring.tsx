@@ -3,7 +3,7 @@ import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { useState } from 'react'
 import { MetricCard } from '../components/ui/MetricCard'
-import { Webhook, Pulse, AlertCircle } from 'lucide-react'
+import { Webhook, Zap, AlertCircle } from 'lucide-react'
 
 // Mock data for now - this would come from API
 interface WalletMonitoringState {
@@ -61,7 +61,7 @@ export function WalletMonitoring() {
           label="Active Monitors"
           value={activeCount}
           positive={activeCount > 0}
-          icon={<Pulse className="w-4 h-4" />}
+          icon={<Zap className="w-4 h-4" />}
         />
         <MetricCard
           label="Webhook"
@@ -71,7 +71,7 @@ export function WalletMonitoring() {
         <MetricCard
           label="Polling"
           value={pollingCount}
-          icon={<Pulse className="w-4 h-4" />}
+          icon={<Zap className="w-4 h-4" />}
         />
         <MetricCard
           label="Errors"
@@ -114,7 +114,7 @@ export function WalletMonitoring() {
                       {wallet.method === 'webhook' ? (
                         <><Webhook className="w-3 h-3 inline mr-1" />Webhook</>
                       ) : (
-                        <><Pulse className="w-3 h-3 inline mr-1" />Polling</>
+                        <><Zap className="w-3 h-3 inline mr-1" />Polling</>
                       )}
                     </Badge>
                   </TableCell>

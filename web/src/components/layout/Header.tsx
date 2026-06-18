@@ -1,15 +1,24 @@
 import { useLocation } from 'react-router-dom'
 import { RefreshCw, Wifi, WifiOff } from 'lucide-react'
 import { Button } from '../ui/Button'
-import { ConnectWalletButton, AdminLogin, LogoutButton } from '../wallet'
+import { ConnectWalletButton, LogoutButton } from '../wallet'
 import { useAuthStore } from '../../stores/authStore'
 
 const pageTitles: Record<string, string> = {
   '/dashboard': 'Command Center',
   '/wallets': 'Wallet Roster',
+  '/wallet-monitoring': 'Wallet Monitoring',
   '/trades': 'Trade Ledger',
   '/config': 'Configuration',
   '/incidents': 'Incident Log',
+  '/scout': 'Scout Intelligence',
+  '/signals': 'Signal Intelligence',
+  '/market': 'Market Analysis',
+  '/risk': 'Risk Management',
+  '/reconciliation': 'Reconciliation',
+  '/performance': 'Performance Analytics',
+  '/operations': 'Operations',
+  '/consensus': 'Signal Consensus',
 }
 
 interface HeaderProps {
@@ -80,10 +89,8 @@ export function Header({ isConnected = false, lastUpdate, onRefresh }: HeaderPro
           </div>
         )}
 
-        {/* Admin Login or Connect Wallet */}
-        {!isAuthenticated ? (
-          <AdminLogin />
-        ) : (
+        {/* Connect Wallet Button - Only show when not authenticated */}
+        {!isAuthenticated && (
           <ConnectWalletButton />
         )}
       </div>

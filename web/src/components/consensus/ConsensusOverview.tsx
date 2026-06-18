@@ -19,7 +19,7 @@ export function ConsensusOverview({ data }: ConsensusOverviewProps) {
         />
         <MetricCard
           label="Avg Clustering"
-          value={data.average_clustering.toFixed(2)}
+          value={data.avg_clustering_coefficient.toFixed(2)}
           icon={<Users className="w-4 h-4" />}
         />
         <MetricCard

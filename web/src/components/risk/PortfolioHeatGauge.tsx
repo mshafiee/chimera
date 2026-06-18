@@ -41,9 +41,7 @@ export function PortfolioHeatGauge({ data }: PortfolioHeatGaugeProps) {
               strokeLinecap="round"
             />
             {/* Colored segments */}
-            {gaugeSegments.map((segment, i) => {
-              const startAngle = i === 0 ? 180 : (180 + (gaugeSegments[i - 1].limit - 180))
-              const segmentAngle = segment.limit - (i === 0 ? 0 : gaugeSegments[i - 1].limit)
+            {gaugeSegments.map(() => {
               // Simplified - just show a single colored arc for current level
               return null
             })}
@@ -75,7 +73,7 @@ export function PortfolioHeatGauge({ data }: PortfolioHeatGaugeProps) {
             status === 'elevated' ? 'warning' :
             status === 'high' ? 'danger' : 'danger'
           }
-          size="lg"
+          size="md"
         >
           {status.charAt(0).toUpperCase() + status.slice(1)}
         </Badge>

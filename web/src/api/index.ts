@@ -71,13 +71,15 @@ export type {
   SignalSourceResponse,
   SignalSource,
   SignalConsensusResponse,
-  DivergenceAlert,
-  ConsensusSignal,
+  DivergenceAlert as SignalDivergenceAlert,
+  ConsensusSignal as SignalConsensusItem,
 } from './signals'
 export type {
   MarketRegime,
   MarketRegimeResponse,
   MarketConditionsResponse,
+  RegimeHistoryPoint,
+  PerformanceByRegime,
 } from './market'
 export type {
   PortfolioRiskResponse,
@@ -93,6 +95,7 @@ export type {
   Discrepancy,
   ReconciliationHistoryResponse,
   ReconciliationStatsResponse,
+  ReconciliationRun,
 } from './reconciliation'
 export type {
   TradeLatencyResponse,
@@ -112,7 +115,7 @@ export type {
   ConsensusResponse,
   Cluster,
   ConsensusSignal,
-  DivergenceAlert,
+  DivergenceAlert as ConsensusDivergenceAlert,
   WalletClusteringResponse,
   SignalAggregationResponse,
 } from './consensus'

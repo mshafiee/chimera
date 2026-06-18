@@ -1,12 +1,10 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
-import { Badge } from '../components/ui/Badge'
 import { useResourceUsage, useSecretRotation, useRateLimitStatus, useHealthCheckDetails } from '../api'
 import { ResourceUsageCard } from '../components/operations/ResourceUsageCard'
 import { SecretRotationCard } from '../components/operations/SecretRotationCard'
 import { RateLimitStatusCard } from '../components/operations/RateLimitStatusCard'
 import { HealthChecksCard } from '../components/operations/HealthChecksCard'
-import { MetricCard } from '../components/ui/MetricCard'
-import { Activity, Key, Zap, Heartbeat } from 'lucide-react'
+import { Activity, Key, Zap, Heart } from 'lucide-react'
 
 export function Operations() {
   const { data: resourceUsage, isLoading: resourcesLoading } = useResourceUsage(10000)
@@ -83,7 +81,7 @@ export function Operations() {
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
-            <Heartbeat className="w-5 h-5 text-text-muted" />
+            <Heart className="w-5 h-5 text-text-muted" />
             <CardTitle>Health Checks</CardTitle>
           </div>
         </CardHeader>

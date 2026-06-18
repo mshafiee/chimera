@@ -1,7 +1,11 @@
-import axios, { AxiosError } from 'axios'
+import axios, { AxiosError, InternalAxiosRequestConfig } from 'axios'
 import { useAuthStore } from '../stores/authStore'
 
 const API_BASE = '/api/v1'
+
+interface AxiosRequestConfigWithRetry extends InternalAxiosRequestConfig {
+  _retry?: boolean
+}
 
 export const apiClient = axios.create({
   baseURL: API_BASE,
@@ -10,32 +14,119 @@ export const apiClient = axios.create({
   },
 })
 
+let isRefreshing = false
+let failedQueue: Array<{
+  resolve: (value?: unknown) => void
+  reject: (reason?: unknown) => void
+}> = []
+
+const processQueue = (error: unknown, token: string | null = null) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error)
+    } else {
+      prom.resolve(token)
+    }
+  })
+  failedQueue = []
+}
+
 // Add auth token to requests
 apiClient.interceptors.request.use((config) => {
-  const { user } = useAuthStore.getState()
-  if (user?.token) {
-    config.headers.Authorization = `Bearer ${user.token}`
+  const authState = useAuthStore.getState()
+
+  // Check if session has expired
+  if (authState.isSessionExpired()) {
+    authState.logout()
+    return Promise.reject(new Error('Session expired due to inactivity'))
+  }
+
+  // Check if token is expired and we're not already trying to refresh
+  if (authState.isTokenExpired() && !config.url?.includes('/auth/refresh')) {
+    // If we have a refresh token, we'll handle it in the response interceptor
+    // For now, just add the current token
+  }
+
+  if (authState.user?.token) {
+    config.headers.Authorization = `Bearer ${authState.user.token}`
   }
   return config
 })
 
-// Handle errors
+// Handle errors and token refresh
 apiClient.interceptors.response.use(
   (response) => response,
-  (error: AxiosError<{ reason?: string; details?: string }>) => {
-    if (error.response?.status === 401) {
-      // Only logout on 401 if it's clearly an authentication failure
-      // Don't logout on 401 for operation failures (let components handle those)
-      const url = error.config?.url || ''
+  async (error: AxiosError<{ reason?: string; details?: string }>) => {
+    const originalRequest = error.config as AxiosRequestConfigWithRetry
+    const authState = useAuthStore.getState()
+
+    // Handle 401 errors
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      const url = originalRequest.url || ''
       const isAuthEndpoint = url.includes('/auth/')
-      
-      // Only auto-logout if it's an auth endpoint (login/authentication failed)
-      // For other endpoints, it might be a permission issue or invalid token - let component handle it
-      if (isAuthEndpoint) {
-        useAuthStore.getState().logout()
+      const isRefreshEndpoint = url.includes('/auth/refresh')
+
+      // If it's the refresh endpoint that failed, logout and reject
+      if (isRefreshEndpoint) {
+        authState.logout()
+        processQueue(error)
+        return Promise.reject(error)
       }
-      // For non-auth endpoints, don't auto-logout - let the component show the error
+
+      // If it's the login endpoint that failed, just reject (don't refresh)
+      if (isAuthEndpoint) {
+        authState.logout()
+        return Promise.reject(error)
+      }
+
+      // For other endpoints, try to refresh the token
+      if (authState.refreshToken && !isRefreshing) {
+        isRefreshing = true
+        originalRequest._retry = true
+
+        try {
+          // Attempt to refresh the token
+          const response = await axios.post(`${API_BASE}/auth/refresh`, {
+            refresh_token: authState.refreshToken,
+          })
+
+          const { access_token, refresh_token: newRefreshToken, expires_in } = response.data
+
+          // Update the auth store with new tokens
+          authState.updateTokens(access_token, newRefreshToken, expires_in)
+
+          // Update the header for the original request
+          originalRequest.headers.Authorization = `Bearer ${access_token}`
+
+          processQueue(null, access_token)
+          return apiClient(originalRequest)
+        } catch (refreshError) {
+          // Refresh failed, logout and reject all queued requests
+          authState.logout()
+          processQueue(refreshError)
+          return Promise.reject(refreshError)
+        } finally {
+          isRefreshing = false
+        }
+      } else if (authState.refreshToken && isRefreshing) {
+        // If we're already refreshing, add this request to the queue
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject })
+        })
+          .then((token) => {
+            originalRequest.headers.Authorization = `Bearer ${token}`
+            return apiClient(originalRequest)
+          })
+          .catch((err) => {
+            return Promise.reject(err)
+          })
+      } else {
+        // No refresh token available, logout
+        authState.logout()
+        return Promise.reject(error)
+      }
     }
+
     return Promise.reject(error)
   }
 )

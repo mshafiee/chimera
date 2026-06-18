@@ -1,21 +1,12 @@
 import { MetricCard } from '../ui/MetricCard'
 import type { ResourceUsageResponse } from '../../api'
-import { Cpu, HardDrive, Wifi, Memory } from 'lucide-react'
+import { Cpu, HardDrive, Wifi, Database } from 'lucide-react'
 
 interface ResourceUsageCardProps {
   data: ResourceUsageResponse
 }
 
 export function ResourceUsageCard({ data }: ResourceUsageCardProps) {
-  const getStatusVariant = (status: string) => {
-    switch (status) {
-      case 'normal': return 'success'
-      case 'warning': return 'warning'
-      case 'critical': return 'danger'
-      default: return 'default'
-    }
-  }
-
   return (
     <div className="space-y-6">
       {/* CPU */}
@@ -31,7 +22,7 @@ export function ResourceUsageCard({ data }: ResourceUsageCardProps) {
         label="Memory Usage"
         value={`${data.memory.percentage.toFixed(0)}%`}
         positive={data.memory.status === 'normal'}
-        icon={<Memory className="w-4 h-4" />}
+        icon={<Database className="w-4 h-4" />}
       />
 
       {/* Disk */}

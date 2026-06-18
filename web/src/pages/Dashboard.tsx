@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from 'react'
-import { ExternalLink, AlertTriangle, TrendingUp, TrendingDown, Shield } from 'lucide-react'
+import { useEffect, useMemo } from 'react'
+import { ExternalLink, AlertTriangle, Shield } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge, StrategyBadge, StatusBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
@@ -13,10 +13,8 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/ui/Toast'
 import { MetricCard } from '../components/ui/MetricCard'
 import { usePortfolioRisk, useRPCLatency, useCostAnalysis } from '../api'
-import { PortfolioHeatGauge } from '../components/risk/PortfolioHeatGauge'
 import { CostBreakdownChart } from '../components/dashboard/CostBreakdownChart'
 import { WalletAttribution } from '../components/dashboard/WalletAttribution'
-import { RPCLatencyMini } from '../components/dashboard/RPCLatencyMini'
 
 export function Dashboard() {
   const { setLastUpdate } = useLayoutContext()
@@ -784,34 +782,6 @@ export function Dashboard() {
 }
 
 // Helper components
-function MetricCard({
-  label,
-  value,
-  change,
-  positive,
-}: {
-  label: string
-  value: string
-  change?: string
-  positive: boolean
-}) {
-  return (
-    <div className="bg-surface-light rounded-lg p-4">
-      <div className="text-sm text-text-muted mb-1">{label}</div>
-      <div className="text-2xl font-semibold font-mono-numbers">{value}</div>
-      {change && (
-        <div
-          className={`text-sm font-mono-numbers ${
-            positive ? 'text-profit' : 'text-loss'
-          }`}
-        >
-          {change}
-        </div>
-      )}
-    </div>
-  )
-}
-
 function HealthIndicator({
   name,
   status,

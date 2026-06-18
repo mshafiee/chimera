@@ -1,14 +1,13 @@
 import { useState } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
+import { MetricCard } from '../components/ui/MetricCard'
 import { useReconciliationStatus, useReconciliationHistory, useTriggerReconciliation } from '../api'
 import { ReconciliationStatusCard } from '../components/reconciliation/ReconciliationStatusCard'
 import { DiscrepanciesList } from '../components/reconciliation/DiscrepanciesList'
 import { ReconciliationHistory } from '../components/reconciliation/ReconciliationHistory'
 import { Play } from 'lucide-react'
 import { toast } from '../components/ui/Toast'
-import { MetricCard } from '../components/ui/MetricCard'
 
 export function Reconciliation() {
   const [historyLimit, setHistoryLimit] = useState(10)

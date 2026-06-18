@@ -40,7 +40,7 @@ export function SecretRotationCard({ data }: SecretRotationCardProps) {
         <StatusIcon className={`w-8 h-8 ${statusConfig.color}`} />
         <div>
           <div className="text-sm text-text-muted">Rotation Status</div>
-          <Badge variant={getStatusVariant(data.status)} size="lg">
+          <Badge variant={getStatusVariant(data.status)} size="md">
             {statusConfig.label}
           </Badge>
         </div>

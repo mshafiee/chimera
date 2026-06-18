@@ -5,8 +5,6 @@ import { useConsensus, useWalletClustering, useSignalAggregation } from '../api'
 import { ConsensusOverview } from '../components/consensus/ConsensusOverview'
 import { WalletClustersVisualization } from '../components/consensus/WalletClustersVisualization'
 import { SignalAggregationView } from '../components/consensus/SignalAggregationView'
-import { MetricCard } from '../components/ui/MetricCard'
-import { Users, Network, Zap } from 'lucide-react'
 
 export function Consensus() {
   const { data: consensusData, isLoading: consensusLoading } = useConsensus()
@@ -70,7 +68,7 @@ export function Consensus() {
       </Card>
 
       {/* Recent Consensus Signals */}
-      {consensusData && consensusData.consensus_signals.length > 0 && (
+      {consensusData && consensusData.recent_signals.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Recent Consensus Signals</CardTitle>
@@ -89,7 +87,7 @@ export function Consensus() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {consensusData.consensus_signals.slice(0, 20).map((signal) => (
+                {consensusData.recent_signals.slice(0, 20).map((signal) => (
                   <TableRow key={signal.signal_id}>
                     <TableCell className="text-sm text-text-muted">
                       {new Date(signal.timestamp).toLocaleString()}
@@ -114,7 +112,7 @@ export function Consensus() {
                       </Badge>
                     </TableCell>
                     <TableCell mono className="text-sm">
-                      {signal.wallet_count} / {signal.unique_wallets || signal.wallet_count}
+                      {signal.wallet_count}
                     </TableCell>
                     <TableCell mono className="text-sm">
                       <span className={signal.quality_score >= 0.7 ? 'text-profit' : signal.quality_score >= 0.5 ? 'text-spear' : 'text-loss'}>

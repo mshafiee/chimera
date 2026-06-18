@@ -29,7 +29,7 @@ security:
   webhook_burst_size: 150
   # Admin wallets for API access
   admin_wallets:
-    - address: "7s79kvpdcGzjHF4bHtJVEbd9p2eESZ9kv1hNjhgBepCp"
+    - address: "4nLqMGpdGoWT9kQZ4gWrGocT8HHbzvnwgRDU5pRuz62W"
       role: "admin"
   # API keys for automated scripts
   api_keys:

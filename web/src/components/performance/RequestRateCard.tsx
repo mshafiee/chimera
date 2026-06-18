@@ -33,7 +33,7 @@ export function RequestRateCard({ data }: RequestRateCardProps) {
           <div className="text-xs text-text-muted mb-1">Status</div>
           <Badge
             variant={data.overall_status === 'healthy' ? 'success' : data.overall_status === 'degraded' ? 'warning' : 'danger'}
-            size="lg"
+            size="md"
           >
             {data.overall_status}
           </Badge>

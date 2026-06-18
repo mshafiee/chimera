@@ -56,7 +56,7 @@ export function ReconciliationStatusCard({ status, isLoading }: ReconciliationSt
                   status.status === 'failed' ? 'danger' :
                   status.status === 'running' ? 'warning' : 'default'
                 }
-                size="lg"
+                size="md"
               >
                 {config.label}
               </Badge>

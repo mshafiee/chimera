@@ -1,5 +1,5 @@
 import { clsx } from 'clsx'
-import { Pulse, Radio } from 'lucide-react'
+import { Zap, Radio } from 'lucide-react'
 
 interface RealtimeBadgeProps {
   isLive: boolean
@@ -49,7 +49,7 @@ export function RealtimeBadge({
       <div className={clsx('flex items-center gap-1.5', sizeClasses[size])}>
         {isLive ? (
           <>
-            <Pulse className={clsx('text-profit animate-pulse', iconSizes[size])} />
+            <Zap className={clsx('text-profit animate-pulse', iconSizes[size])} />
             <span className="text-profit font-medium">LIVE</span>
           </>
         ) : (

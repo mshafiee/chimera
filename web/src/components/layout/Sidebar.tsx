@@ -13,7 +13,6 @@ import {
   Activity,
   Zap,
   Database,
-  Users,
   Network,
   Radio,
 } from 'lucide-react'

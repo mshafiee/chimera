@@ -1,5 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from './components/layout/Layout'
+import { ProtectedRoute } from './components/auth/ProtectedRoute'
+import { Login } from './pages/Login'
 import { Dashboard } from './pages/Dashboard'
 import { Wallets } from './pages/Wallets'
 import { Trades } from './pages/Trades'
@@ -20,13 +22,20 @@ import { WalletMonitoring } from './pages/WalletMonitoring'
 function App() {
   return (
     <Routes>
-      <Route path="/" element={<Layout />}>
+      {/* Public route - Login page */}
+      <Route path="/login" element={<Login />} />
+
+      {/* Protected routes - require authentication */}
+      <Route path="/" element={
+        <ProtectedRoute>
+          <Layout />
+        </ProtectedRoute>
+      }>
         <Route index element={<Navigate to="/dashboard" replace />} />
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="wallets" element={<Wallets />} />
         <Route path="wallet-monitoring" element={<WalletMonitoring />} />
         <Route path="trades" element={<Trades />} />
-        <Route path="config" element={<Config />} />
         <Route path="incidents" element={<Incidents />} />
         {/* New pages */}
         <Route path="scout" element={<Scout />} />
@@ -37,7 +46,17 @@ function App() {
         <Route path="performance" element={<Performance />} />
         <Route path="operations" element={<Operations />} />
         <Route path="consensus" element={<Consensus />} />
+
+        {/* Admin-only routes */}
+        <Route path="config" element={
+          <ProtectedRoute requireRole="admin">
+            <Config />
+          </ProtectedRoute>
+        } />
       </Route>
+
+      {/* Catch all - redirect to dashboard or login */}
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
   )
 }

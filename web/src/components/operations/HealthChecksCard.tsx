@@ -18,18 +18,19 @@ export function HealthChecksCard({ data }: HealthChecksCardProps) {
     return STATUS_ICONS[status as keyof typeof STATUS_ICONS] || STATUS_ICONS.failing
   }
 
-  const overallVariant = {
-    healthy: 'success',
-    degraded: 'warning',
-    unhealthy: 'danger',
-  }[data.overall_status] as const
+  const overallVariant: 'default' | 'danger' | 'shield' | 'spear' | 'success' | 'warning' | 'info' =
+    ({
+      healthy: 'success',
+      degraded: 'warning',
+      unhealthy: 'danger',
+    } as Record<string, 'default' | 'danger' | 'shield' | 'spear' | 'success' | 'warning' | 'info'>)[data.overall_status] || 'default'
 
   return (
     <div className="space-y-4">
       {/* Overall Status */}
       <div className="flex items-center justify-between">
         <div className="text-sm text-text-muted">Overall Health</div>
-        <Badge variant={overallVariant} size="lg">
+        <Badge variant={overallVariant} size="md">
           {data.overall_status}
         </Badge>
       </div>
