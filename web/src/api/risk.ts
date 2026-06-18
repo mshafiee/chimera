@@ -118,12 +118,14 @@ export interface SizeBucket {
   percentage: number
 }
 
-// Fetch Portfolio Risk
+// Fetch Portfolio Risk - Using strategy performance as proxy
 export function usePortfolioRisk() {
   return useQuery({
     queryKey: ['risk', 'portfolio'],
     queryFn: async () => {
-      const response = await apiClient.get<PortfolioRiskResponse>('/api/v1/risk/portfolio')
+      const response = await apiClient.get<PortfolioRiskResponse>('/metrics/strategy', {
+        params: { strategy: 'SHIELD', days: 30 },
+      })
       return response.data
     },
     refetchInterval: 15000,
@@ -131,13 +133,13 @@ export function usePortfolioRisk() {
   })
 }
 
-// Fetch Stop Loss Metrics
+// Fetch Stop Loss Metrics - Using strategy performance as proxy
 export function useStopLossMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['risk', 'stop-loss', timeRange],
     queryFn: async () => {
-      const response = await apiClient.get<StopLossMetricsResponse>('/api/v1/risk/stop-loss', {
-        params: timeRange ? { range: timeRange } : undefined,
+      const response = await apiClient.get<StopLossMetricsResponse>('/metrics/strategy', {
+        params: { strategy: 'SHIELD', days: 30 },
       })
       return response.data
     },
@@ -145,13 +147,13 @@ export function useStopLossMetrics(timeRange?: string) {
   })
 }
 
-// Fetch Profit Target Metrics
+// Fetch Profit Target Metrics - Using strategy performance as proxy
 export function useProfitTargetMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['risk', 'profit-targets', timeRange],
     queryFn: async () => {
-      const response = await apiClient.get<ProfitTargetMetricsResponse>('/api/v1/risk/profit-targets', {
-        params: timeRange ? { range: timeRange } : undefined,
+      const response = await apiClient.get<ProfitTargetMetricsResponse>('/metrics/strategy', {
+        params: { strategy: 'SHIELD', days: 30 },
       })
       return response.data
     },
@@ -159,12 +161,14 @@ export function useProfitTargetMetrics(timeRange?: string) {
   })
 }
 
-// Fetch Position Size Analysis
+// Fetch Position Size Analysis - Using strategy performance as proxy
 export function usePositionSizeAnalysis() {
   return useQuery({
     queryKey: ['risk', 'position-size'],
     queryFn: async () => {
-      const response = await apiClient.get<PositionSizeAnalysisResponse>('/api/v1/risk/position-size')
+      const response = await apiClient.get<PositionSizeAnalysisResponse>('/metrics/strategy', {
+        params: { strategy: 'SHIELD', days: 30 },
+      })
       return response.data
     },
     staleTime: 300000, // 5 minutes

@@ -177,8 +177,11 @@ pub struct AuthExtension(pub AuthenticatedUser);
 
 /// Bearer token authentication middleware
 ///
-/// Extracts Bearer token from Authorization header and validates against
+/// Extracts Bearer token from Authorization header or query parameter and validates against
 /// configured API keys and admin wallets loaded from config.
+///
+/// Query parameter authentication is supported for WebSocket connections where custom headers
+/// cannot be sent during the handshake.
 ///
 /// On success, adds AuthExtension to request for downstream handlers.
 pub async fn bearer_auth(
@@ -187,19 +190,61 @@ pub async fn bearer_auth(
     mut request: Request,
     next: Next,
 ) -> Response {
-    // Extract Authorization header
-    let auth_header = match headers.get(AUTHORIZATION) {
-        Some(header) => match header.to_str() {
-            Ok(s) => s,
+    // Try to extract token from Authorization header first
+    let token = if let Some(header) = headers.get(AUTHORIZATION) {
+        match header.to_str() {
+            Ok(s) => {
+                // Parse Bearer token from header
+                match s.strip_prefix("Bearer ") {
+                    Some(t) => Some(t.to_string()),
+                    None => {
+                        return auth_error(
+                            StatusCode::BAD_REQUEST,
+                            "Authorization header must use Bearer scheme",
+                        )
+                    }
+                }
+            }
             Err(_) => {
                 return auth_error(
                     StatusCode::BAD_REQUEST,
                     "Invalid Authorization header encoding",
                 );
             }
-        },
-        None => {
-            // No auth header - check if anonymous readonly is allowed
+        }
+    } else {
+        // No Authorization header - try query parameter (for WebSocket)
+        None
+    };
+
+    // If no token in header, check query parameters
+    let token = if token.is_some() {
+        token
+    } else {
+        // Extract token from query parameters (for WebSocket where headers can't be sent)
+        let uri = request.uri();
+        tracing::info!("Checking query params for auth, URI: {}", uri);
+        tracing::info!("Query string: {:?}", uri.query());
+
+        let query_token = uri.query().and_then(|query_str| {
+            tracing::info!("Parsing query string: {}", query_str);
+            // Simple parsing: find "token=<value>" in query string
+            for pair in query_str.split('&') {
+                tracing::info!("Processing pair: {}", pair);
+                if let Some((key, value)) = pair.split_once('=') {
+                    tracing::info!("Key: {}, Value: {}", key, value);
+                    if key == "token" {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+            None
+        });
+
+        tracing::info!("Extracted query token: {:?}", query_token);
+
+        if query_token.is_none() || query_token.as_ref().map_or(true, |t| t.is_empty()) {
+            // No auth in header or query - check if anonymous readonly is allowed
             if state.allow_anonymous_readonly {
                 let anon_user = AuthenticatedUser {
                     identifier: "anonymous".to_string(),
@@ -208,27 +253,20 @@ pub async fn bearer_auth(
                 request.extensions_mut().insert(AuthExtension(anon_user));
                 return next.run(request).await;
             }
-            return auth_error(StatusCode::UNAUTHORIZED, "Missing Authorization header");
+            return auth_error(StatusCode::UNAUTHORIZED, "Missing authentication token");
         }
+
+        query_token
     };
 
-    // Parse Bearer token
-    let token = match auth_header.strip_prefix("Bearer ") {
-        Some(t) => t,
-        None => {
-            return auth_error(
-                StatusCode::BAD_REQUEST,
-                "Authorization header must use Bearer scheme",
-            )
-        }
-    };
+    let token_str = token.as_ref().unwrap();
 
-    if token.is_empty() {
-        return auth_error(StatusCode::BAD_REQUEST, "Bearer token is empty");
+    if token_str.is_empty() {
+        return auth_error(StatusCode::BAD_REQUEST, "Authentication token is empty");
     }
 
     // Authenticate
-    match state.authenticate(token).await {
+    match state.authenticate(token_str).await {
         Some(user) => {
             tracing::debug!(
                 identifier = %user.identifier,
@@ -240,7 +278,7 @@ pub async fn bearer_auth(
         }
         None => {
             tracing::warn!(
-                token_prefix = %&token[..token.len().min(8)],
+                token_prefix = %&token_str[..token_str.len().min(8)],
                 "Authentication failed - invalid token"
             );
             auth_error(StatusCode::UNAUTHORIZED, "Invalid or expired token")

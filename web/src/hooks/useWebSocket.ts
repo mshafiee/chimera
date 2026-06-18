@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useAuthStore } from '../stores/authStore'
 
 interface WebSocketMessage {
   type: 'position_update' | 'health_update' | 'alert' | 'trade_update'
@@ -13,8 +14,9 @@ interface UseWebSocketOptions {
 }
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
+  const { user } = useAuthStore()
   const {
-    url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`,
+    url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/api/v1/ws`,
     reconnectInterval = 3000,
     maxReconnectAttempts = 10,
   } = options
@@ -31,7 +33,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     }
 
     try {
-      const ws = new WebSocket(url)
+      // Add auth token as query parameter for WebSocket authentication
+      const wsUrl = user?.token ? `${url}?token=${user.token}` : url
+      const ws = new WebSocket(wsUrl)
 
       ws.onopen = () => {
         console.log('[WebSocket] Connected')

@@ -58,8 +58,34 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
       
       // Sign the message
       const signature = await signMessage(encodedMessage)
-      
+
       // Send to backend for verification
+      // Convert signature to URL-safe base64 without padding (as expected by backend)
+      // Handle both 64-byte and 65-byte (with legacy flag) Solana signatures
+      // Use browser-compatible base64 encoding
+      const signatureBytes = signature.length === 65 ? signature.slice(0, 64) : signature
+      // Convert Uint8Array to binary string, then to base64
+      let binary = ''
+      const len = signatureBytes.byteLength
+      for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(signatureBytes[i])
+      }
+      const signatureBase64 = btoa(binary)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '')
+
+      console.log('🔐 Debug Auth:', {
+        walletAddress: publicKey.toBase58(),
+        signatureLength: signature.length,
+        signatureBytesLength: signatureBytes.length,
+        signatureBase64Length: signatureBase64.length,
+        signatureBase64: signatureBase64.substring(0, 20) + '...',
+        fullSignatureBase64: signatureBase64
+      })
+
+      console.log('📤 Sending auth request to:', '/auth/wallet')
+
       const response = await apiClient.post<{
         token: string
         role: string
@@ -67,7 +93,7 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
       }>('/auth/wallet', {
         wallet_address: publicKey.toBase58(),
         message,
-        signature: btoa(String.fromCharCode.apply(null, Array.from(signature))),
+        signature: signatureBase64,
       })
 
       // Store auth state
@@ -77,9 +103,14 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
         token: response.data.token,
       })
       toast.success('Wallet authenticated successfully')
-    } catch (error) {
-      console.error('Authentication failed:', error)
-      toast.error('Authentication failed. Please try again.')
+    } catch (error: any) {
+      console.error('❌ Authentication failed:', error)
+      console.error('Error details:', {
+        message: error.message,
+        response: error.response?.data,
+        status: error.response?.status
+      })
+      toast.error(`Authentication failed: ${error.response?.data?.reason || error.message || 'Unknown error'}`)
       // Disconnect wallet on auth failure
       disconnect()
     }

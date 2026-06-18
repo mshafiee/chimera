@@ -13,6 +13,7 @@ interface AuthState {
   tokenExpiresAt: number | null
   refreshToken: string | null
   lastActivity: number | null
+  _hasHydrated: boolean
   login: (user: AuthUser, expiresIn?: number) => void
   logout: () => void
   hasPermission: (required: Role) => boolean
@@ -36,6 +37,7 @@ export const useAuthStore = create<AuthState>()(
       tokenExpiresAt: null,
       refreshToken: null,
       lastActivity: null,
+      _hasHydrated: false,
 
       login: (user: AuthUser, expiresIn?: number) => {
         const now = Date.now()
@@ -101,6 +103,9 @@ export const useAuthStore = create<AuthState>()(
         refreshToken: state.refreshToken,
         lastActivity: state.lastActivity,
       }),
+      onRehydrateStorage: () => (state) => {
+        state?.setState({ _hasHydrated: true })
+      },
     }
   )
 )

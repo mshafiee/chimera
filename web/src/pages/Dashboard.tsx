@@ -573,7 +573,7 @@ export function Dashboard() {
                     portfolioRisk.heat_status === 'high' ? 'text-loss' :
                     portfolioRisk.heat_status === 'elevated' ? 'text-spear' : 'text-profit'
                   }`}>
-                    {portfolioRisk.portfolio_heat_percent.toFixed(1)}%
+                    {(portfolioRisk.portfolio_heat_percent ?? 0).toFixed(1)}%
                   </div>
                   <Badge
                     variant={
@@ -592,10 +592,10 @@ export function Dashboard() {
                 <div className="text-xs text-text-muted mb-2">Current Drawdown</div>
                 <div className="flex items-center gap-3">
                   <div className="text-2xl font-bold font-mono-numbers">
-                    {portfolioRisk.drawdown.current_drawdown_percent.toFixed(1)}%
+                    {(portfolioRisk.drawdown?.current_drawdown_percent ?? 0).toFixed(1)}%
                   </div>
                   <div className="text-xs text-text-muted">
-                    Max: {portfolioRisk.drawdown.max_drawdown_percent.toFixed(1)}%
+                    Max: {(portfolioRisk.drawdown?.max_drawdown_percent ?? 0).toFixed(1)}%
                   </div>
                 </div>
               </div>
@@ -605,10 +605,10 @@ export function Dashboard() {
                 <div className="text-xs text-text-muted mb-2">Max Concentration</div>
                 <div className="flex items-center gap-3">
                   <div className={`text-2xl font-bold font-mono-numbers ${
-                    portfolioRisk.concentration.max_concentration_percent > 30 ? 'text-loss' :
-                    portfolioRisk.concentration.max_concentration_percent > 15 ? 'text-spear' : 'text-profit'
+                    (portfolioRisk.concentration?.max_concentration_percent ?? 0) > 30 ? 'text-loss' :
+                    (portfolioRisk.concentration?.max_concentration_percent ?? 0) > 15 ? 'text-spear' : 'text-profit'
                   }`}>
-                    {portfolioRisk.concentration.max_concentration_percent.toFixed(1)}%
+                    {(portfolioRisk.concentration?.max_concentration_percent ?? 0).toFixed(1)}%
                   </div>
                   <div className="text-xs text-text-muted">
                     Single Token
@@ -621,38 +621,38 @@ export function Dashboard() {
       )}
 
       {/* NEW: RPC Latency */}
-      {rpcLatency && (
+      {rpcLatency && rpcLatency.endpoints && (
         <Card>
           <CardHeader>
             <div className="flex items-center justify-between">
               <CardTitle>RPC Latency</CardTitle>
               <Badge
-                variant={rpcLatency.overall_avg < 50 ? 'success' : rpcLatency.overall_avg < 100 ? 'warning' : 'danger'}
+                variant={(rpcLatency.overall_avg || 100) < 50 ? 'success' : (rpcLatency.overall_avg || 100) < 100 ? 'warning' : 'danger'}
                 size="sm"
               >
-                Avg: {rpcLatency.overall_avg.toFixed(0)}ms
+                Avg: {(rpcLatency.overall_avg || 0).toFixed(0)}ms
               </Badge>
             </div>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {rpcLatency.endpoints.slice(0, 3).map((endpoint) => (
-                <div key={endpoint.endpoint} className="bg-surface-light rounded-lg p-4">
-                  <div className="text-xs text-text-muted mb-2">{endpoint.endpoint}</div>
+              {rpcLatency.endpoints.slice(0, 3).map((endpoint, idx) => (
+                <div key={endpoint.endpoint || idx} className="bg-surface-light rounded-lg p-4">
+                  <div className="text-xs text-text-muted mb-2">{endpoint.endpoint || 'Unknown'}</div>
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-lg font-semibold font-mono-numbers">
-                        {endpoint.avg_latency_ms.toFixed(0)}ms
+                        {(endpoint.avg_latency_ms || 0).toFixed(0)}ms
                       </div>
                       <div className="text-xs text-text-muted">
-                        p95: {endpoint.p95_latency_ms.toFixed(0)}ms
+                        p95: {(endpoint.p95_latency_ms || 0).toFixed(0)}ms
                       </div>
                     </div>
                     <Badge
-                      variant={endpoint.error_rate < 0.01 ? 'success' : endpoint.error_rate < 0.05 ? 'warning' : 'danger'}
+                      variant={(endpoint.error_rate ?? 0) < 0.01 ? 'success' : (endpoint.error_rate ?? 0) < 0.05 ? 'warning' : 'danger'}
                       size="sm"
                     >
-                      {(endpoint.error_rate * 100).toFixed(1)}% errors
+                      {((endpoint.error_rate ?? 0) * 100).toFixed(1)}% errors
                     </Badge>
                   </div>
                 </div>
