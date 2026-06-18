@@ -6,16 +6,38 @@ import { DatabasePerformanceCard } from '../components/performance/DatabasePerfo
 import { RequestRateCard } from '../components/performance/RequestRateCard'
 import { CostAnalysisChart } from '../components/performance/CostAnalysisChart'
 import { TimeRangePicker, TimeRange } from '../components/ui/TimeRangePicker'
+import { Info } from 'lucide-react'
 import { useState } from 'react'
+
+// Helper function to safely access nested properties
+const safeGet = <T,>(obj: any, path: string, defaultValue: T): T => {
+  try {
+    const keys = path.split('.')
+    let result = obj
+    for (const key of keys) {
+      if (result && typeof result === 'object' && key in result) {
+        result = result[key]
+      } else {
+        return defaultValue
+      }
+    }
+    return result as T
+  } catch {
+    return defaultValue
+  }
+}
 
 export function Performance() {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h')
 
-  const { data: tradeLatency, isLoading: latencyLoading } = useTradeLatency(timeRange)
+  const { data: tradeLatency, isLoading: latencyLoading, error: latencyError } = useTradeLatency(timeRange)
   const { data: rpcLatency, isLoading: rpcLoading } = useRPCLatency()
   const { data: dbPerformance, isLoading: dbLoading } = useDatabasePerformance()
   const { data: requestRate, isLoading: rateLoading } = useRequestRate()
   const { data: costAnalysis, isLoading: costLoading } = useCostAnalysis(timeRange)
+
+  // Check if we have proper trade latency data structure
+  const hasTradeLatencyData = tradeLatency && 'p50' in tradeLatency
 
   return (
     <div className="space-y-6">
@@ -28,6 +50,26 @@ export function Performance() {
         <TimeRangePicker value={timeRange} onChange={setTimeRange} />
       </div>
 
+      {/* API Not Available Notice */}
+      {!hasTradeLatencyData && !latencyLoading && !latencyError && (
+        <Card className="border-spear bg-spear/10">
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <Info className="w-5 h-5 text-spear" />
+              <div className="flex-1">
+                <div className="font-semibold text-spear">
+                  Performance Metrics API Not Implemented
+                </div>
+                <div className="text-sm text-text-muted">
+                  The comprehensive performance metrics API endpoints are not yet available.
+                  Metrics will be displayed once the backend implementation is complete.
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Trade Latency */}
       <Card>
         <CardHeader>
@@ -36,39 +78,43 @@ export function Performance() {
         <CardContent>
           {latencyLoading ? (
             <div className="text-center text-text-muted py-8">Loading latency data...</div>
-          ) : tradeLatency ? (
+          ) : latencyError ? (
+            <div className="text-center text-loss py-8">Error loading latency data</div>
+          ) : hasTradeLatencyData ? (
             <div className="space-y-6">
               {/* Summary */}
               <div className="grid grid-cols-4 gap-4">
                 <div className="bg-surface-light rounded-lg p-4">
                   <div className="text-xs text-text-muted mb-1">p50</div>
                   <div className="text-xl font-semibold font-mono-numbers">
-                    {tradeLatency.p50.toFixed(0)}ms
+                    {safeGet(tradeLatency, 'p50', 0)?.toFixed(0)}ms
                   </div>
                 </div>
                 <div className="bg-surface-light rounded-lg p-4">
                   <div className="text-xs text-text-muted mb-1">p95</div>
                   <div className="text-xl font-semibold font-mono-numbers">
-                    {tradeLatency.p95.toFixed(0)}ms
+                    {safeGet(tradeLatency, 'p95', 0)?.toFixed(0)}ms
                   </div>
                 </div>
                 <div className="bg-surface-light rounded-lg p-4">
                   <div className="text-xs text-text-muted mb-1">p99</div>
                   <div className="text-xl font-semibold font-mono-numbers">
-                    {tradeLatency.p99.toFixed(0)}ms
+                    {safeGet(tradeLatency, 'p99', 0)?.toFixed(0)}ms
                   </div>
                 </div>
                 <div className="bg-surface-light rounded-lg p-4">
                   <div className="text-xs text-text-muted mb-1">Avg</div>
                   <div className="text-xl font-semibold font-mono-numbers">
-                    {tradeLatency.avg.toFixed(0)}ms
+                    {safeGet(tradeLatency, 'avg', 0)?.toFixed(0)}ms
                   </div>
                 </div>
               </div>
               <LatencyChart data={tradeLatency} />
             </div>
           ) : (
-            <div className="text-center text-text-muted py-8">No latency data available</div>
+            <div className="text-center text-text-muted py-8">
+              Latency metrics not available - API endpoint not implemented
+            </div>
           )}
         </CardContent>
       </Card>

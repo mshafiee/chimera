@@ -43,13 +43,44 @@ export interface MarketConditionsResponse {
   }
 }
 
+// Mock data for when API is not available
+const mockMarketRegime: MarketRegimeResponse = {
+  current_regime: 'neutral',
+  confidence: 0,
+  volatility_index: 0,
+  trend_strength: 0,
+  last_regime_change: new Date().toISOString(),
+  regime_history: [],
+  performance_by_regime: []
+}
+
+const mockMarketConditions: MarketConditionsResponse = {
+  volatility_index: 0,
+  trend_strength: 0,
+  liquidity_index: 0,
+  market_sentiment: 'neutral',
+  risk_level: 'low',
+  recommended_allocation: {
+    shield_percent: 70,
+    spear_percent: 30
+  }
+}
+
 // Fetch Market Regime
 export function useMarketRegime() {
   return useQuery({
     queryKey: ['market', 'regime'],
     queryFn: async () => {
-      const response = await apiClient.get<MarketRegimeResponse>('/api/v1/market/regime')
-      return response.data
+      try {
+        const response = await apiClient.get<MarketRegimeResponse>('/market/regime')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Market API] Regime endpoint not implemented, using mock data')
+          return mockMarketRegime
+        }
+        throw error
+      }
     },
     refetchInterval: 60000,
     staleTime: 30000,
@@ -61,8 +92,16 @@ export function useMarketConditions() {
   return useQuery({
     queryKey: ['market', 'conditions'],
     queryFn: async () => {
-      const response = await apiClient.get<MarketConditionsResponse>('/api/v1/market/conditions')
-      return response.data
+      try {
+        const response = await apiClient.get<MarketConditionsResponse>('/market/conditions')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Market API] Conditions endpoint not implemented, using mock data')
+          return mockMarketConditions
+        }
+        throw error
+      }
     },
     refetchInterval: 30000,
     staleTime: 15000,

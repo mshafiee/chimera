@@ -63,13 +63,51 @@ export interface DiscrepancyTypeStats {
   percentage: number
 }
 
+// Mock data for when API is not available
+const mockReconciliationStatus: ReconciliationStatusResponse = {
+  last_reconciliation_at: null,
+  next_reconciliation_at: null,
+  status: 'pending',
+  checked_count: 0,
+  discrepancy_count: 0,
+  unresolved_count: 0,
+  duration_seconds: null,
+  recent_discrepancies: []
+}
+
+const mockReconciliationHistory: ReconciliationHistoryResponse = {
+  runs: [],
+  total_runs: 0,
+  success_rate: 0,
+  avg_duration_seconds: 0
+}
+
+const mockReconciliationStats: ReconciliationStatsResponse = {
+  total_reconciliations: 0,
+  successful_reconciliations: 0,
+  failed_reconciliations: 0,
+  total_checked: 0,
+  total_discrepancies: 0,
+  total_unresolved: 0,
+  avg_discrepancies_per_run: 0,
+  most_common_discrepancy_types: []
+}
+
 // Fetch Reconciliation Status
 export function useReconciliationStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'status'],
     queryFn: async () => {
-      const response = await apiClient.get<ReconciliationStatusResponse>('/api/v1/reconciliation/status')
-      return response.data
+      try {
+        const response = await apiClient.get<ReconciliationStatusResponse>('/reconciliation/status')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Reconciliation API] Status endpoint not implemented, using mock data')
+          return mockReconciliationStatus
+        }
+        throw error
+      }
     },
     refetchInterval,
     staleTime: 5000,
@@ -81,10 +119,18 @@ export function useReconciliationHistory(limit?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'history', limit],
     queryFn: async () => {
-      const response = await apiClient.get<ReconciliationHistoryResponse>('/api/v1/reconciliation/history', {
-        params: limit ? { limit } : undefined,
-      })
-      return response.data
+      try {
+        const response = await apiClient.get<ReconciliationHistoryResponse>('/reconciliation/history', {
+          params: limit ? { limit } : undefined,
+        })
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Reconciliation API] History endpoint not implemented, using mock data')
+          return mockReconciliationHistory
+        }
+        throw error
+      }
     },
     staleTime: 60000,
   })
@@ -95,10 +141,18 @@ export function useReconciliationStats(timeRange?: string) {
   return useQuery({
     queryKey: ['reconciliation', 'stats', timeRange],
     queryFn: async () => {
-      const response = await apiClient.get<ReconciliationStatsResponse>('/api/v1/reconciliation/stats', {
-        params: timeRange ? { range: timeRange } : undefined,
-      })
-      return response.data
+      try {
+        const response = await apiClient.get<ReconciliationStatsResponse>('/reconciliation/stats', {
+          params: timeRange ? { range: timeRange } : undefined,
+        })
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Reconciliation API] Stats endpoint not implemented, using mock data')
+          return mockReconciliationStats
+        }
+        throw error
+      }
     },
     staleTime: 300000,
   })
@@ -110,7 +164,7 @@ export function useTriggerReconciliation() {
 
   return useMutation({
     mutationFn: async () => {
-      const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/api/v1/reconciliation/trigger')
+      const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/reconciliation/trigger')
       return response.data
     },
     onSuccess: () => {

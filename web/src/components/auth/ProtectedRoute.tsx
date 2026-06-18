@@ -20,19 +20,22 @@ export function ProtectedRoute({
 }: ProtectedRouteProps) {
   const { isAuthenticated, hasPermission, isSessionExpired } = useAuthStore()
 
+  // TEMPORARY BYPASS FOR DEBUGGING - Remove in production
+  const DEV_BYPASS_AUTH = false
+
   // Check session expiration first
-  if (isSessionExpired()) {
+  if (!DEV_BYPASS_AUTH && isSessionExpired()) {
     // Logout will happen automatically in the API interceptor or next request
     return <Navigate to={redirectTo} replace />
   }
 
   // Redirect to login if not authenticated
-  if (!isAuthenticated) {
+  if (!DEV_BYPASS_AUTH && !isAuthenticated) {
     return <Navigate to={redirectTo} replace />
   }
 
   // Check role-based permissions
-  if (requireRole && !hasPermission(requireRole)) {
+  if (!DEV_BYPASS_AUTH && requireRole && !hasPermission(requireRole)) {
     // User is authenticated but lacks required role
     // Redirect to dashboard with insufficient permissions
     return <Navigate to="/dashboard" replace />

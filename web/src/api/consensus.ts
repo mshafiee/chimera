@@ -87,13 +87,50 @@ export interface AggregatedSignal {
   confidence: number
 }
 
+// Mock data for when API is not available
+const mockConsensus: ConsensusResponse = {
+  consensus_rate: 0,
+  avg_clustering_coefficient: 0,
+  active_clusters: [],
+  recent_signals: [],
+  divergence_alerts: []
+}
+
+const mockWalletClustering: WalletClusteringResponse = {
+  clusters: [],
+  total_wallets: 0,
+  clustering_metrics: {
+    avg_cluster_size: 0,
+    max_cluster_size: 0,
+    silhouette_score: 0,
+    modularity: 0
+  }
+}
+
+const mockSignalAggregation: SignalAggregationResponse = {
+  window_start: new Date().toISOString(),
+  window_end: new Date().toISOString(),
+  total_signals: 0,
+  unique_tokens: 0,
+  aggregated_signals: [],
+  aggregation_latency_ms: 0
+}
+
 // Fetch Consensus Data
 export function useConsensus() {
   return useQuery({
     queryKey: ['consensus'],
     queryFn: async () => {
-      const response = await apiClient.get<ConsensusResponse>('/api/v1/signals/consensus')
-      return response.data
+      try {
+        const response = await apiClient.get<ConsensusResponse>('/signals/consensus')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Consensus API] Consensus endpoint not implemented, using mock data')
+          return mockConsensus
+        }
+        throw error
+      }
     },
     refetchInterval: 15000,
     staleTime: 5000,
@@ -105,8 +142,16 @@ export function useWalletClustering() {
   return useQuery({
     queryKey: ['consensus', 'clustering'],
     queryFn: async () => {
-      const response = await apiClient.get<WalletClusteringResponse>('/api/v1/signals/clustering')
-      return response.data
+      try {
+        const response = await apiClient.get<WalletClusteringResponse>('/signals/clustering')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Consensus API] Clustering endpoint not implemented, using mock data')
+          return mockWalletClustering
+        }
+        throw error
+      }
     },
     refetchInterval: 60000,
     staleTime: 30000,
@@ -118,8 +163,16 @@ export function useSignalAggregation() {
   return useQuery({
     queryKey: ['consensus', 'aggregation'],
     queryFn: async () => {
-      const response = await apiClient.get<SignalAggregationResponse>('/api/v1/signals/aggregation')
-      return response.data
+      try {
+        const response = await apiClient.get<SignalAggregationResponse>('/signals/aggregation')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Consensus API] Aggregation endpoint not implemented, using mock data')
+          return mockSignalAggregation
+        }
+        throw error
+      }
     },
     refetchInterval: 10000,
     staleTime: 5000,

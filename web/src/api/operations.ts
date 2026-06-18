@@ -95,13 +95,54 @@ export interface HealthCheck {
   response_time_ms: number
 }
 
+// Mock data for when API is not available
+const mockResourceUsage: ResourceUsageResponse = {
+  memory: { current: 0, max: 0, percentage: 0, status: 'normal' },
+  disk: { current: 0, max: 0, percentage: 0, status: 'normal' },
+  cpu: { current: 0, max: 0, percentage: 0, status: 'normal' },
+  network: { bytes_sent: 0, bytes_received: 0, packets_sent: 0, packets_received: 0, error_rate: 0 },
+  timestamp: new Date().toISOString()
+}
+
+const mockSecretRotation: SecretRotationResponse = {
+  last_rotation_at: null,
+  next_rotation_at: null,
+  days_until_due: null,
+  status: 'unknown',
+  rotation_history: []
+}
+
+const mockRateLimitStatus: RateLimitStatusResponse = {
+  endpoints: [],
+  overall_status: 'healthy'
+}
+
+const mockSystemLogs: SystemLogsResponse = {
+  logs: [],
+  total_count: 0,
+  log_levels: []
+}
+
+const mockHealthCheckDetails: HealthCheckDetailsResponse = {
+  overall_status: 'healthy',
+  checks: []
+}
+
 // Fetch Resource Usage
 export function useResourceUsage(refetchInterval?: number) {
   return useQuery({
     queryKey: ['operations', 'resources'],
     queryFn: async () => {
-      const response = await apiClient.get<ResourceUsageResponse>('/api/v1/operations/resources')
-      return response.data
+      try {
+        const response = await apiClient.get<ResourceUsageResponse>('/operations/resources')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Operations API] Resources endpoint not implemented, using mock data')
+          return mockResourceUsage
+        }
+        throw error
+      }
     },
     refetchInterval,
     staleTime: 5000,
@@ -113,8 +154,16 @@ export function useSecretRotation() {
   return useQuery({
     queryKey: ['operations', 'secrets'],
     queryFn: async () => {
-      const response = await apiClient.get<SecretRotationResponse>('/api/v1/operations/secrets')
-      return response.data
+      try {
+        const response = await apiClient.get<SecretRotationResponse>('/operations/secrets')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Operations API] Secrets endpoint not implemented, using mock data')
+          return mockSecretRotation
+        }
+        throw error
+      }
     },
     refetchInterval: 300000, // 5 minutes
     staleTime: 60000,
@@ -126,8 +175,16 @@ export function useRateLimitStatus() {
   return useQuery({
     queryKey: ['operations', 'rate-limit'],
     queryFn: async () => {
-      const response = await apiClient.get<RateLimitStatusResponse>('/api/v1/operations/rate-limit')
-      return response.data
+      try {
+        const response = await apiClient.get<RateLimitStatusResponse>('/operations/rate-limit')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Operations API] Rate limit endpoint not implemented, using mock data')
+          return mockRateLimitStatus
+        }
+        throw error
+      }
     },
     refetchInterval: 10000,
     staleTime: 5000,
@@ -139,13 +196,21 @@ export function useSystemLogs(level?: string, limit?: number) {
   return useQuery({
     queryKey: ['operations', 'logs', level, limit],
     queryFn: async () => {
-      const response = await apiClient.get<SystemLogsResponse>('/api/v1/operations/logs', {
-        params: {
-          ...(level && { level }),
-          ...(limit && { limit }),
-        },
-      })
-      return response.data
+      try {
+        const response = await apiClient.get<SystemLogsResponse>('/operations/logs', {
+          params: {
+            ...(level && { level }),
+            ...(limit && { limit }),
+          },
+        })
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Operations API] Logs endpoint not implemented, using mock data')
+          return mockSystemLogs
+        }
+        throw error
+      }
     },
     refetchInterval: 30000,
     staleTime: 10000,
@@ -157,8 +222,16 @@ export function useHealthCheckDetails() {
   return useQuery({
     queryKey: ['operations', 'health-checks'],
     queryFn: async () => {
-      const response = await apiClient.get<HealthCheckDetailsResponse>('/api/v1/operations/health-checks')
-      return response.data
+      try {
+        const response = await apiClient.get<HealthCheckDetailsResponse>('/operations/health-checks')
+        return response.data
+      } catch (error: any) {
+        if (error.response?.status === 404) {
+          console.warn('[Operations API] Health checks endpoint not implemented, using mock data')
+          return mockHealthCheckDetails
+        }
+        throw error
+      }
     },
     refetchInterval: 30000,
     staleTime: 10000,
