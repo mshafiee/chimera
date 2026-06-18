@@ -5,6 +5,7 @@ mod auth;
 mod health;
 mod monitoring;
 mod roster;
+mod telegram;
 mod webhook;
 mod ws;
 
@@ -13,6 +14,7 @@ pub use auth::*;
 pub use health::*;
 pub use monitoring::*;
 pub use roster::*;
+pub use telegram::*;
 pub use webhook::*;
 pub use ws::{
     ws_handler, AlertData, HealthUpdateData, PositionUpdateData, TradeUpdateData, WsEvent, WsState,

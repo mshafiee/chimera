@@ -23,7 +23,7 @@ database:
 
 security:
   # Overridden by CHIMERA_SECURITY__WEBHOOK_SECRET
-  webhook_secret: "dev-secret-placeholder"
+  webhook_secret: "704d221525125d91a9650d331ad3eb3acf075077d9a2bcb57ecdb54cd586617d"
   max_timestamp_drift_secs: 60
   webhook_rate_limit: 100
   webhook_burst_size: 150
@@ -116,6 +116,67 @@ notifications:
     enabled: true
     hour_utc: 20  # 8 PM UTC
     minute: 0
+
+# Telegram signal source configuration
+telegram_sources:
+  enabled: true  # Enable telegram signal sources
+
+  # High-value channels from analysis (scores 70-80)
+  channels:
+    - channel_id: "@solana_whales_signal"
+      telegram_channel_id: 123456789  # Numeric Telegram channel ID
+      enabled: true
+      min_quality_score: 70.0
+      max_signals_per_hour: 30
+      strategy_preference: "SHIELD"
+      max_signal_age_seconds: 180  # 3 minutes - fast signals
+
+    - channel_id: "@SolmemeWhaleinsider"
+      telegram_channel_id: 987654321
+      enabled: true
+      min_quality_score: 72.0
+      max_signals_per_hour: 30
+      strategy_preference: "SHIELD"
+      max_signal_age_seconds: 180  # 3 minutes - fast signals
+
+    - channel_id: "@SolanaDaily_Pumps"
+      telegram_channel_id: 456789123
+      enabled: true
+      min_quality_score: 70.0
+      max_signals_per_hour: 30
+      strategy_preference: "SPEAR"
+      max_signal_age_seconds: 300  # 5 minutes - slightly slower
+
+    # Medium-value channels (require manual approval)
+    - channel_id: "@memespumper"
+      telegram_channel_id: 111111111
+      enabled: false  # Disabled until manual approval
+      min_quality_score: 47.0
+      max_signals_per_hour: 20
+
+    - channel_id: "@solana_new_tokens_raydium"
+      telegram_channel_id: 222222222
+      enabled: false
+      min_quality_score: 52.0
+      max_signals_per_hour: 20
+
+    - channel_id: "@solanapumpsfree"
+      telegram_channel_id: 333333333
+      enabled: false
+      min_quality_score: 48.0
+      max_signals_per_hour: 10
+
+    - channel_id: "@whaleinsidersignalss"
+      telegram_channel_id: 444444444
+      enabled: false
+      min_quality_score: 47.0
+      max_signals_per_hour: 10
+
+  # Global settings
+  rate_limit_per_channel: 30
+  min_parse_success_rate: 0.8
+  require_token_address: true
+  dedup_window_minutes: 5
 
 # Monitoring configuration
 monitoring:

@@ -1,9 +1,4 @@
-# Add real Solana wallet addresses here, one per line
-# Example:
-# 7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU
-
-
-
-
-
-
+# Mix of whale wallets for testing
+MJKqp326RZCHnAAbew9MDdui3iCKWco7fsK9sVuZTX2
+52C9T2T7JRojtxumYnYZhyUmrN7kqzvCLc4Ksvjk7TxD
+8BseXT9EtoEhBTKFFYkwTnjKSUZwhtmdKY2Jrj8j45Rt

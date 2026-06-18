@@ -1,0 +1,7 @@
+# Telegram collector configuration
+telegram:
+  channels:
+    - "@solana_whales_signal"
+exploration:
+  days_back: 7
+  message_limit: 200

@@ -1,0 +1,47 @@
+# Telegram Signal Explorer Configuration
+# Copy this file to telegram_config.yaml and fill in your credentials
+
+telegram:
+  # Get these from https://my.telegram.org/apps
+  # Alternatively, set TELEGRAM_API_ID and TELEGRAM_API_HASH environment variables
+  api_id: "${TELEGRAM_API_ID}"
+  api_hash: "${TELEGRAM_API_HASH}"
+  session_name: "telegram_explorer"
+
+# Channels to analyze
+channels:
+  - "@solana_whales_signal"
+  - "@memespumper"
+  - "@Solana_whales_calls"
+  - "@SolmemeWhaleinsider"
+  - "@cryptowhale72"
+  - "@whaleinsidersignalss"
+  - "@solanapumpsfree"
+  - "@solana_new_tokens_raydium"
+  - "@SolanaDaily_Pumps"
+  - "@elonpumpscrypto"
+  - "@solanainsiderpumps"
+  - "@solanapumping"
+  - "@catwifhatonsolana"
+  - "@cryptoomonarch"
+  - "@trojan_on_solana"
+  - "@myroSOL"
+
+# Exploration settings
+exploration:
+  days_back: 7              # Number of days to analyze
+  message_limit: 200        # Maximum messages per channel to analyze
+  output_dir: "/Users/mohammad/Documents/GitHub/chimera/tools/telegram_analysis"
+
+# Performance tracking (optional)
+performance_tracking:
+  enabled: false            # Set to true to track ROI performance
+  check_intervals:          # Time intervals to check ROI
+    - "1h"
+    - "24h"
+    - "7d"
+  min_volume_threshold: 10000  # Minimum volume to track (USD)
+
+# RPC Configuration (for performance tracking)
+# Set CHIMERA_RPC__PRIMARY_URL environment variable or add here
+# rpc_url: "https://rpc.helius.xyz/?api-key=YOUR_API_KEY"

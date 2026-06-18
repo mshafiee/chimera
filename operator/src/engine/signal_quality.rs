@@ -7,6 +7,9 @@
 //! - Token age (10% weight)
 //!
 //! Signals with quality < 0.7 are rejected to improve win rate.
+//!
+//! Supports both on-chain wallet signals and external channel signals
+//! (e.g., Telegram channels treated as virtual wallets).
 
 /// Signal quality factors
 #[derive(Debug, Clone)]
@@ -19,6 +22,17 @@ pub struct SignalFactors {
     pub liquidity_score: f64,
     /// Token age in hours (None if unknown)
     pub token_age_hours: Option<f64>,
+}
+
+/// Signal source type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalSourceType {
+    /// On-chain wallet (standard copy-trading)
+    OnChainWallet,
+    /// Telegram channel (virtual wallet)
+    TelegramChannel,
+    /// Webhook signal
+    Webhook,
 }
 
 /// Signal quality result
@@ -119,6 +133,106 @@ impl SignalQuality {
     /// true if quality >= min_quality, false otherwise
     pub fn should_enter(&self, min_quality: f64) -> bool {
         self.score >= min_quality
+    }
+
+    /// Calculate signal quality score with source type support
+    ///
+    /// This is an extended version of `calculate` that supports different signal
+    /// sources (on-chain wallets, Telegram channels, etc.) with appropriate
+    /// base scoring for each type.
+    ///
+    /// # Arguments
+    /// * `wallet_wqs` - Wallet or channel WQS (0-100)
+    /// * `consensus_count` - Number of sources in agreement
+    /// * `liquidity_usd` - Current liquidity in USD
+    /// * `token_age_hours` - Token age in hours
+    /// * `source_type` - Type of signal source
+    /// * `channel_score` - Optional channel-specific quality override
+    ///
+    /// # Returns
+    /// SignalQuality with score and factors
+    pub fn calculate_with_source(
+        wallet_wqs: f64,
+        consensus_count: Option<usize>,
+        liquidity_usd: rust_decimal::Decimal,
+        token_age_hours: Option<f64>,
+        source_type: SignalSourceType,
+        channel_score: Option<f64>,
+    ) -> Self {
+        let mut score = 0.0;
+
+        // 1. Source-specific base score (40% weight)
+        let base_score = match source_type {
+            SignalSourceType::OnChainWallet => {
+                // On-chain wallets: direct WQS
+                (wallet_wqs / 100.0).min(1.0)
+            }
+            SignalSourceType::TelegramChannel => {
+                // Telegram channels: combine channel WQS with parse success rate
+                let channel_wqs = channel_score.unwrap_or(wallet_wqs) / 100.0;
+                // Base 30% for being a channel, 70% based on performance
+                channel_wqs * 0.7 + 0.3
+            }
+            SignalSourceType::Webhook => {
+                // Webhook signals: neutral base, rely on consensus
+                0.5
+            }
+        };
+        score += base_score * 0.4;
+
+        // 2. Consensus strength (30% weight) — same logic for all sources
+        // Consensus can be: 2+ wallets, 2+ channels, or mixed (1 wallet + 1 channel)
+        let consensus_score = match consensus_count {
+            None | Some(0) | Some(1) => 0.0, // no consensus
+            Some(2) => 0.5,
+            Some(3) => 0.7,
+            Some(4) => 0.9,
+            Some(_) => 1.0, // 5+ sources
+        };
+        score += consensus_score * 0.3;
+
+        // 3. Liquidity score (20% weight) - same for all sources
+        let liquidity_score: f64 = if liquidity_usd > rust_decimal::Decimal::from(50000i64) {
+            1.0
+        } else if liquidity_usd > rust_decimal::Decimal::from(20000i64) {
+            0.7
+        } else if liquidity_usd > rust_decimal::Decimal::from(10000i64) {
+            0.5
+        } else if liquidity_usd > rust_decimal::Decimal::from(5000i64) {
+            0.3
+        } else {
+            0.1
+        };
+        score += liquidity_score * 0.2;
+
+        // 4. Token age (10% weight) - older tokens are safer
+        let age_score = if let Some(age) = token_age_hours {
+            if age > 168.0 {
+                1.0 // > 7 days
+            } else if age > 24.0 {
+                0.7 // > 1 day
+            } else if age > 6.0 {
+                0.5 // > 6 hours
+            } else {
+                0.3 // < 6 hours (very new)
+            }
+        } else {
+            0.5 // Unknown age - neutral
+        };
+        score += age_score * 0.1;
+
+        // Clamp to 0.0-1.0
+        let score = score.clamp(0.0, 1.0);
+
+        SignalQuality {
+            score,
+            factors: SignalFactors {
+                wallet_wqs,
+                consensus_strength: consensus_score,
+                liquidity_score,
+                token_age_hours,
+            },
+        }
     }
 
     /// Hard liquidity floor check — rejects signals for tokens with insufficient

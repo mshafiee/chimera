@@ -37,6 +37,9 @@ pub struct AppConfig {
     /// Notification configuration
     #[serde(default)]
     pub notifications: NotificationsConfig,
+    /// Telegram signal source configuration
+    #[serde(default)]
+    pub telegram_sources: TelegramSourceConfig,
     /// Monitoring configuration
     #[serde(default)]
     pub monitoring: Option<MonitoringConfig>,
@@ -654,6 +657,97 @@ impl Default for DailySummaryConfig {
             enabled: true,
             hour_utc: default_summary_hour(),
             minute: 0,
+        }
+    }
+}
+
+/// Telegram signal source configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramSourceConfig {
+    /// Whether Telegram signal sources are enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Virtual wallet address prefix
+    #[serde(default = "default_telegram_wallet_prefix")]
+    pub virtual_wallet_prefix: String,
+    /// Channel configurations
+    #[serde(default)]
+    pub channels: Vec<ChannelSourceConfig>,
+    /// Per-channel rate limit (signals per hour)
+    #[serde(default = "default_telegram_rate_limit")]
+    pub rate_limit_per_channel: u32,
+    /// Minimum parse success rate to consider channel healthy
+    #[serde(default = "default_min_parse_rate")]
+    pub min_parse_success_rate: f64,
+    /// Whether to require token address in signals
+    #[serde(default = "default_true")]
+    pub require_token_address: bool,
+    /// Deduplication window in minutes
+    #[serde(default = "default_dedup_window")]
+    pub dedup_window_minutes: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChannelSourceConfig {
+    /// Channel ID (e.g., "@solana_whales_signal")
+    pub channel_id: String,
+    /// Numeric Telegram channel ID (optional)
+    #[serde(default)]
+    pub telegram_channel_id: Option<i64>,
+    /// Whether channel is enabled
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Minimum quality score for signals
+    #[serde(default = "default_min_quality")]
+    pub min_quality_score: f64,
+    /// Maximum signals per hour
+    #[serde(default = "default_channel_rate_limit")]
+    pub max_signals_per_hour: u32,
+    /// Strategy preference (optional)
+    pub strategy_preference: Option<String>,
+    /// Maximum signal age in seconds (reject older signals)
+    #[serde(default = "default_max_signal_age")]
+    pub max_signal_age_seconds: u64,
+}
+
+fn default_max_signal_age() -> u64 {
+    300 // 5 minutes default
+}
+
+fn default_telegram_wallet_prefix() -> String {
+    "TG_".to_string()
+}
+
+fn default_telegram_rate_limit() -> u32 {
+    30
+}
+
+fn default_min_parse_rate() -> f64 {
+    0.8
+}
+
+fn default_min_quality() -> f64 {
+    70.0
+}
+
+fn default_channel_rate_limit() -> u32 {
+    30
+}
+
+fn default_dedup_window() -> u32 {
+    5
+}
+
+impl Default for TelegramSourceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            virtual_wallet_prefix: default_telegram_wallet_prefix(),
+            channels: Vec::new(),
+            rate_limit_per_channel: default_telegram_rate_limit(),
+            min_parse_success_rate: default_min_parse_rate(),
+            require_token_address: true,
+            dedup_window_minutes: default_dedup_window(),
         }
     }
 }

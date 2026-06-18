@@ -735,6 +735,13 @@ pub async fn webhook_handler(
         &signal.payload.action.to_string(),
         trade_amount_sol,
         "PENDING",
+        Some(&signal.payload.signal_source),
+        signal.payload.signal_source_id,
+        if signal.payload.signal_source_id.is_some() {
+            Some(signal.payload.signal_source.as_str())
+        } else {
+            None
+        },
     )
     .await?;
 

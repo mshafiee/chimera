@@ -241,6 +241,8 @@ async fn process_transaction(
         wallet_address: tx.wallet_address.clone(),
         trade_uuid: None, // Will be auto-generated
         exit_fraction: None,
+        signal_source_id: None,
+        signal_source: "WALLET".to_string(),
     };
 
     // Gate 3: duplicate UUID check — prevents re-processing on restart/pagination gaps
@@ -296,6 +298,7 @@ async fn process_transaction(
         liquidity_usd: None,
         force_slow_path: false,
         token_decimals,
+        original_signal_id: None,
     };
 
     tracing::info!(

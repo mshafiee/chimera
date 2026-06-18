@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS wallets (
     notes TEXT,
     archetype TEXT,  -- TraderArchetype as string (SNIPER, SWING, SCALPER, INSIDER, WHALE)
     avg_entry_delay_seconds REAL,
+    -- Telegram signal support fields
+    wallet_type TEXT DEFAULT 'ON_CHAIN' CHECK(wallet_type IN ('ON_CHAIN', 'TELEGRAM', 'WEBHOOK')),
+    channel_username TEXT,
+    signal_frequency REAL DEFAULT 0.0,  -- signals per day for channels
+    parse_success_rate REAL DEFAULT 0.0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -33,5 +38,7 @@ CREATE TABLE IF NOT EXISTS wallets (
 -- Indexes for wallets table
 CREATE INDEX IF NOT EXISTS idx_wallets_status ON wallets(status);
 CREATE INDEX IF NOT EXISTS idx_wallets_wqs ON wallets(wqs_score DESC);
+CREATE INDEX IF NOT EXISTS idx_wallets_type ON wallets(wallet_type);
+CREATE INDEX IF NOT EXISTS idx_wallets_channel ON wallets(channel_username) WHERE wallet_type = 'TELEGRAM';
 
 

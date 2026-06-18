@@ -58,6 +58,7 @@ dotenvy = "0.15"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 anyhow = "1.0"
+regex = "1.10"
 thiserror = "2.0"
 uuid = { version = "1.11", features = ["v4"] }
 async-trait = "0.1"

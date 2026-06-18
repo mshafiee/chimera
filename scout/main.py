@@ -307,6 +307,7 @@ async def analyze_wallets(
     min_wqs_candidate: float,
     skip_backtest: bool = False,
     verbose: bool = False,
+    optimizer: Optional[Any] = None,
 ) -> Tuple[List[WalletRecord], dict, list]:
     """
     Analyze wallets in parallel and generate roster records.
@@ -318,8 +319,8 @@ async def analyze_wallets(
         "trajectory_demotions": 0, "trajectory_peak_blocks": 0,
     }
     exit_recs: List[Dict[str, Any]] = []
-    
-    candidates = analyzer.get_candidate_wallets()
+
+    candidates = await analyzer.get_candidate_wallets()
     stats["total"] = len(candidates)
     
     print(f"[Scout] Analyzing {len(candidates)} candidate wallets (Parallel, max 10 concurrent)...")
@@ -389,13 +390,16 @@ async def analyze_wallets(
 
             print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
             # Get trades from cache (already fetched during metrics calculation)
-            trades = analyzer._trades_cache.get(wallet_address, [])
+            # Access base analyzer's cache if using OptimizedWalletAnalyzer
+            base_analyzer = analyzer._analyzer if hasattr(analyzer, '_analyzer') else analyzer
+            trades = base_analyzer._trades_cache.get(wallet_address, []) if hasattr(base_analyzer, '_trades_cache') else []
             print(f"[Scout] Got {len(trades)} trades from cache")
 
             # Phase 3c: Determine strategy from archetype
             _archetype = None
             try:
-                _archetype_enum = analyzer.determine_archetype(metrics, trades)
+                base = analyzer._analyzer if hasattr(analyzer, '_analyzer') else analyzer
+                _archetype_enum = base.determine_archetype(metrics, trades)
                 _archetype = _archetype_enum.value if _archetype_enum else None
             except Exception:
                 _archetype = None
@@ -503,7 +507,8 @@ async def analyze_wallets(
             
             print(f"[Scout] Computing wallet stats for {wallet_address[:8]}...")
             try:
-                wallet_stats = analyzer.compute_wallet_trade_stats(trades)
+                base = analyzer._analyzer if hasattr(analyzer, '_analyzer') else analyzer
+                wallet_stats = base.compute_wallet_trade_stats(trades)
                 print("[Scout] Wallet stats computed")
             except Exception as e:
                 print(f"[Scout] ✗ ERROR computing wallet stats for {wallet_address[:8]}...: {e}")
@@ -548,13 +553,13 @@ async def analyze_wallets(
             
             # MEMORY FIX: Clear analyzer cache for this wallet immediately
             # We have extracted everything we need into 'result'
-            analyzer.clear_wallet_cache(wallet_address)
+            await analyzer.clear_wallet_cache(wallet_address)
             print(f"[Scout] ✓ Completed {wallet_address[:8]}... (WQS={wqs_score:.1f}, Status={final_status})")
             return result
         except Exception as e:
             print(f"[Scout] ✗ ERROR processing {wallet_address[:8]}...: {e}")
             # Ensure cleanup happens even on error
-            analyzer.clear_wallet_cache(wallet_address)
+            await analyzer.clear_wallet_cache(wallet_address)
             return None
 
     # Run in parallel using asyncio (with semaphore for rate limiting)
@@ -1303,6 +1308,7 @@ async def main_async():
         args.min_wqs_candidate,
         skip_backtest=args.skip_backtest,
         verbose=args.verbose,
+        optimizer=optimizer if OPTIMIZATION_AVAILABLE else None,
     )
 
     analysis_duration = time.time() - analysis_start
@@ -1431,11 +1437,15 @@ async def main_async():
 
     # Print parse health dashboard (always in verbose/dry-run, otherwise only if >0 failures)
     if args.verbose or args.dry_run or stats["total"] > 0:
-        analyzer.print_parse_health_dashboard()
+        # Access base analyzer if using OptimizedWalletAnalyzer
+        base = analyzer._analyzer if hasattr(analyzer, '_analyzer') else analyzer
+        if hasattr(base, 'print_parse_health_dashboard'):
+            base.print_parse_health_dashboard()
 
     # If overall parse rate across ALL wallets is below threshold, exit non-zero
     # so that cron can alert. Configurable via SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT.
-    if analyzer.is_parse_rate_below_threshold():
+    base = analyzer._analyzer if hasattr(analyzer, '_analyzer') else analyzer
+    if hasattr(base, 'is_parse_rate_below_threshold') and base.is_parse_rate_below_threshold():
         exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
         print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
         sys.exit(2)

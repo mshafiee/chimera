@@ -1,0 +1,22 @@
+# Telegram session files
+*.session
+*.session-journal
+
+# Local configuration
+telegram_config.local.yaml
+
+# Analysis output (optional - comment out if you want to track results)
+telegram_analysis/
+*.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/

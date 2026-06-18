@@ -73,7 +73,7 @@ pub struct SignalPayload {
     pub action: Action,
     /// Amount in SOL
     pub amount_sol: Decimal,
-    /// Wallet address being copied
+    /// Wallet address being copied (for wallet signals)
     pub wallet_address: String,
     /// Optional trade UUID from signal provider
     #[serde(default)]
@@ -81,6 +81,21 @@ pub struct SignalPayload {
     /// Optional fraction of the position to exit (used for partial exits)
     #[serde(default)]
     pub exit_fraction: Option<Decimal>,
+    /// Signal source ID (references signal_sources.id for non-wallet signals)
+    #[serde(default)]
+    pub signal_source_id: Option<i64>,
+    /// Signal source type (WALLET, TELEGRAM, WEBHOOK)
+    #[serde(default = "default_signal_source")]
+    #[serde(skip_serializing_if = "is_default_signal_source")]
+    pub signal_source: String,
+}
+
+fn default_signal_source() -> String {
+    "WALLET".to_string()
+}
+
+fn is_default_signal_source(source: &str) -> bool {
+    source == "WALLET"
 }
 
 impl SignalPayload {
@@ -88,14 +103,21 @@ impl SignalPayload {
     ///
     /// Does NOT include the request timestamp so that webhook retries (same payload,
     /// later timestamp) produce the SAME UUID and are caught by the DB dedup check.
-    /// Hash: SHA256(wallet_address || token || action || amount_sol).
+    /// Hash: SHA256(wallet_address/signal_source_id || token || action || amount_sol).
     pub fn generate_trade_uuid(&self, _timestamp: i64) -> String {
         if let Some(ref uuid) = self.trade_uuid {
             return uuid.clone();
         }
 
         let mut hasher = Sha256::new();
-        hasher.update(self.wallet_address.as_bytes());
+
+        // Use signal_source_id if available (Telegram/webhook signals), otherwise wallet_address
+        if let Some(source_id) = self.signal_source_id {
+            hasher.update(source_id.to_string().as_bytes());
+        } else {
+            hasher.update(self.wallet_address.as_bytes());
+        }
+
         hasher.update(b"|");
         hasher.update(self.token.as_bytes());
         hasher.update(b"|");
@@ -114,9 +136,12 @@ impl SignalPayload {
             return Err("Token symbol cannot be empty".to_string());
         }
 
-        // Check wallet address looks valid (basic check)
-        if self.wallet_address.len() < 32 || self.wallet_address.len() > 44 {
-            return Err("Invalid wallet address length".to_string());
+        // For wallet signals, check wallet address looks valid
+        // For non-wallet signals (Telegram, webhook), wallet_address can be empty
+        if self.signal_source == "WALLET" {
+            if self.wallet_address.len() < 32 || self.wallet_address.len() > 44 {
+                return Err("Invalid wallet address length".to_string());
+            }
         }
 
         // Check amount is positive and reasonable
@@ -161,6 +186,8 @@ pub struct Signal {
     /// [B-M1] Used by get_last_fill_price_sol_per_token to convert lamports/base_unit to
     /// SOL/whole_token without hardcoding 9. None when not populated from token metadata.
     pub token_decimals: Option<u8>,
+    /// Original signal ID from external sources (e.g., Telegram message_id)
+    pub original_signal_id: Option<String>,
 }
 
 impl Signal {
@@ -175,6 +202,7 @@ impl Signal {
             liquidity_usd: None,
             force_slow_path: false,
             token_decimals: None,
+            original_signal_id: None,
         }
     }
 
@@ -184,6 +212,11 @@ impl Signal {
             .token_address
             .as_deref()
             .unwrap_or(&self.payload.token)
+    }
+
+    /// Get the signal source type
+    pub fn signal_source(&self) -> &str {
+        &self.payload.signal_source
     }
 }
 

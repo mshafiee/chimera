@@ -254,8 +254,8 @@ class RosterWriter:
                         trade_count_30d, win_rate, max_drawdown_30d,
                         avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                         last_trade_at, promoted_at,
-                        ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ttl_expires_at, notes, archetype, avg_entry_delay_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         wallet.address,
@@ -278,8 +278,6 @@ class RosterWriter:
                         wallet.notes,
                         wallet.archetype,
                         wallet.avg_entry_delay_seconds,
-                        now,
-                        now,
                     )
                 )
             

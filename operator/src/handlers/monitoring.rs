@@ -194,6 +194,8 @@ pub async fn helius_webhook_handler(
                     amount_sol: swap.amount_in,
                     trade_uuid: None,
                     exit_fraction: None,
+                    signal_source_id: None,
+                    signal_source: "WALLET".to_string(),
                 };
 
                 let signal = Signal::new(

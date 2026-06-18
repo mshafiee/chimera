@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS trades (
     slippage_cost_sol REAL DEFAULT 0,
     total_cost_sol REAL DEFAULT 0,
     net_pnl_sol REAL,
+    signal_source TEXT DEFAULT 'WALLET',  -- Track signal source (WALLET, TELEGRAM, WEBHOOK)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -46,6 +47,7 @@ CREATE INDEX IF NOT EXISTS idx_trades_token ON trades(token_address);
 CREATE INDEX IF NOT EXISTS idx_trades_created ON trades(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_costs ON trades(total_cost_sol) WHERE total_cost_sol > 0;
 CREATE INDEX IF NOT EXISTS idx_trades_net_pnl ON trades(net_pnl_sol) WHERE net_pnl_sol IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_trades_source ON trades(signal_source);
 
 -- Positions table: Active positions being tracked
 CREATE TABLE IF NOT EXISTS positions (

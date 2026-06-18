@@ -153,13 +153,17 @@ pub async fn insert_trade(
     side: &str,
     amount_sol: Decimal,
     status: &str,
+    signal_source: Option<&str>,
+    signal_source_id: Option<i64>,
+    signal_source_type: Option<&str>,
 ) -> AppResult<i64> {
     let result = sqlx::query(
         r#"
         INSERT INTO trades (
             trade_uuid, wallet_address, token_address, token_symbol,
-            strategy, side, amount_sol, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            strategy, side, amount_sol, status, signal_source,
+            signal_source_id, signal_source_type
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(trade_uuid)
@@ -170,6 +174,9 @@ pub async fn insert_trade(
     .bind(side)
     .bind(amount_sol.to_f64().unwrap_or(0.0))
     .bind(status)
+    .bind(signal_source.unwrap_or("WALLET"))
+    .bind(signal_source_id)
+    .bind(signal_source_type)
     .execute(pool)
     .await?;
 

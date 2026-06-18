@@ -35,13 +35,15 @@ use chimera_operator::handlers::{
     list_config_audit, list_dead_letter_queue, list_positions, list_trades, list_wallets,
     reset_circuit_breaker, roster_merge, roster_validate, trip_circuit_breaker, update_config,
     update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet, wallet_auth,
-    webhook_handler, ws_handler, ApiState, AppState, RosterState, WalletAuthState, WebhookState,
-    WsState,
+    webhook_handler, ws_handler, telegram_channel_toggle_handler, telegram_signal_handler,
+    telegram_status_handler, ApiState, AppState, RosterState, TelegramHandlerState, WalletAuthState,
+    WebhookState, WsState,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
 use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
 use chimera_operator::monitoring::{rate_limiter, HeliusClient, MonitoringState, SignalAggregator};
 use chimera_operator::notifications::{self, NotificationEvent};
+use chimera_operator::telegram::{parser::TelegramParser, TelegramSourceManager};
 use chimera_operator::price_cache::PriceCache;
 use chimera_operator::roster;
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
@@ -1482,6 +1484,75 @@ async fn main() -> anyhow::Result<()> {
             bearer_auth,
         ));
 
+    // Initialize Telegram signal source manager if enabled
+    let telegram_routes = if config.telegram_sources.enabled {
+        tracing::info!("Telegram signal sources enabled, initializing...");
+
+        // Convert config channels to ChannelConfig
+        let telegram_channels: Vec<chimera_operator::telegram::source_manager::ChannelConfig> = config
+            .telegram_sources
+            .channels
+            .iter()
+            .map(|c| chimera_operator::telegram::source_manager::ChannelConfig {
+                channel_id: c.channel_id.clone(),
+                channel_id_numeric: c.telegram_channel_id,
+                enabled: c.enabled,
+                min_quality_score: c.min_quality_score,
+                max_signals_per_hour: c.max_signals_per_hour,
+                strategy_preference: c.strategy_preference.clone(),
+                max_signal_age_seconds: c.max_signal_age_seconds,
+            })
+            .collect();
+
+        let telegram_manager = Arc::new(TelegramSourceManager::new(
+            db_pool.clone(),
+            telegram_channels.clone(),
+        ));
+        let telegram_parser = Arc::new(TelegramParser::new());
+
+        // Register channels as virtual wallets
+        for channel_config in telegram_channels.iter() {
+            if let Err(e) = telegram_manager.register_channel(channel_config).await {
+                tracing::warn!(
+                    channel = %channel_config.channel_id,
+                    error = %e,
+                    "Failed to register Telegram channel"
+                );
+            }
+        }
+
+        let telegram_handler_state = Arc::new(TelegramHandlerState {
+            db: db_pool.clone(),
+            engine: _engine_handle.clone(),
+            circuit_breaker: circuit_breaker.clone(),
+            source_manager: telegram_manager.clone(),
+            parser: telegram_parser.clone(),
+        });
+
+        tracing::info!("Telegram signal source manager initialized with {} channels", config.telegram_sources.channels.len());
+
+        // Telegram signal endpoint is public (called by Python collector)
+        // Status endpoint is public (dashboard reads)
+        // Channel toggle requires operator role
+        let telegram_public = Router::new()
+            .route("/telegram/signal", post(telegram_signal_handler))
+            .route("/telegram/status", get(telegram_status_handler))
+            .with_state(telegram_handler_state.clone());
+
+        let telegram_protected = Router::new()
+            .route("/telegram/channel/{channel_id}/{action}", post(telegram_channel_toggle_handler))
+            .with_state(telegram_handler_state)
+            .layer(axum_middleware::from_fn_with_state(
+                auth_state.clone(),
+                bearer_auth,
+            ));
+
+        telegram_public.merge(telegram_protected)
+    } else {
+        tracing::info!("Telegram signal sources disabled");
+        Router::new()
+    };
+
     // Create full router with all routes and middleware
     // Note: Layer order matters - bottom layers are applied first (innermost)
     let app = Router::new()
@@ -1496,6 +1567,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", auth_routes)
         .nest("/api/v1", ws_routes)
         .nest("/api/v1", monitoring_routes)
+        .nest("/api/v1", telegram_routes)
         .merge(metrics_routes)
         .layer(cors)
         .layer(
@@ -1572,6 +1644,8 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
         wallet_address: pos.wallet_address.clone(),
         trade_uuid: Some(pos.trade_uuid.clone()),
         exit_fraction: Some(fraction),
+        signal_source_id: None,
+        signal_source: "WALLET".to_string(),
     };
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
@@ -1608,6 +1682,8 @@ fn build_exit_signal_amount(
         wallet_address: pos.wallet_address.clone(),
         trade_uuid: Some(pos.trade_uuid.clone()),
         exit_fraction: Some(fraction),
+        signal_source_id: None,
+        signal_source: "WALLET".to_string(),
     };
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
