@@ -1,16 +1,22 @@
-import { useEffect, useMemo } from 'react'
-import { ExternalLink, AlertTriangle } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { ExternalLink, AlertTriangle, TrendingUp, TrendingDown, Shield } from 'lucide-react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge, StrategyBadge, StatusBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { PnLChart } from '../components/charts/PnLChart'
-import { useHealth, usePositions } from '../api'
+import { useHealth, usePositions, useWallets } from '../api'
 import { useCostMetrics, usePerformanceMetrics, useStrategyPerformance } from '../api/metrics'
 import { useTrades } from '../api/trades'
 import { useConfig } from '../api/config'
 import { useLayoutContext } from '../components/layout/Layout'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/ui/Toast'
+import { MetricCard } from '../components/ui/MetricCard'
+import { usePortfolioRisk, useRPCLatency, useCostAnalysis } from '../api'
+import { PortfolioHeatGauge } from '../components/risk/PortfolioHeatGauge'
+import { CostBreakdownChart } from '../components/dashboard/CostBreakdownChart'
+import { WalletAttribution } from '../components/dashboard/WalletAttribution'
+import { RPCLatencyMini } from '../components/dashboard/RPCLatencyMini'
 
 export function Dashboard() {
   const { setLastUpdate } = useLayoutContext()
@@ -21,6 +27,12 @@ export function Dashboard() {
   const { data: shieldPerformance } = useStrategyPerformance('SHIELD', 30)
   const { data: spearPerformance } = useStrategyPerformance('SPEAR', 30)
   const { data: configData } = useConfig()
+
+  // New data sources for enhanced dashboard
+  const { data: portfolioRisk } = usePortfolioRisk()
+  const { data: rpcLatency } = useRPCLatency()
+  const { data: costAnalysis } = useCostAnalysis('24h')
+  const { data: walletsData } = useWallets()
   
   // Fetch trades for PnL chart (last 30 days)
   const thirtyDaysAgo = useMemo(() => {
@@ -524,7 +536,7 @@ export function Dashboard() {
             <HealthIndicator
               name="Helius"
               status={
-                configData?.rpc_status?.primary === 'helius' 
+                configData?.rpc_status?.primary === 'helius'
                   ? (configData?.rpc_status?.fallback_triggered ? 'degraded' : 'healthy')
                   : 'unknown'
               }
@@ -542,6 +554,139 @@ export function Dashboard() {
           </div>
         </CardContent>
       </Card>
+
+      {/* NEW: Portfolio Risk Overview */}
+      {portfolioRisk && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center gap-2">
+              <Shield className="w-5 h-5 text-text-muted" />
+              <CardTitle>Portfolio Risk</CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {/* Portfolio Heat */}
+              <div className="bg-surface-light rounded-lg p-4">
+                <div className="text-xs text-text-muted mb-2">Portfolio Heat</div>
+                <div className="flex items-center gap-3">
+                  <div className={`text-2xl font-bold font-mono-numbers ${
+                    portfolioRisk.heat_status === 'critical' ? 'text-loss' :
+                    portfolioRisk.heat_status === 'high' ? 'text-loss' :
+                    portfolioRisk.heat_status === 'elevated' ? 'text-spear' : 'text-profit'
+                  }`}>
+                    {portfolioRisk.portfolio_heat_percent.toFixed(1)}%
+                  </div>
+                  <Badge
+                    variant={
+                      portfolioRisk.heat_status === 'normal' ? 'success' :
+                      portfolioRisk.heat_status === 'elevated' ? 'warning' : 'danger'
+                    }
+                    size="sm"
+                  >
+                    {portfolioRisk.heat_status}
+                  </Badge>
+                </div>
+              </div>
+
+              {/* Drawdown */}
+              <div className="bg-surface-light rounded-lg p-4">
+                <div className="text-xs text-text-muted mb-2">Current Drawdown</div>
+                <div className="flex items-center gap-3">
+                  <div className="text-2xl font-bold font-mono-numbers">
+                    {portfolioRisk.drawdown.current_drawdown_percent.toFixed(1)}%
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    Max: {portfolioRisk.drawdown.max_drawdown_percent.toFixed(1)}%
+                  </div>
+                </div>
+              </div>
+
+              {/* Concentration */}
+              <div className="bg-surface-light rounded-lg p-4">
+                <div className="text-xs text-text-muted mb-2">Max Concentration</div>
+                <div className="flex items-center gap-3">
+                  <div className={`text-2xl font-bold font-mono-numbers ${
+                    portfolioRisk.concentration.max_concentration_percent > 30 ? 'text-loss' :
+                    portfolioRisk.concentration.max_concentration_percent > 15 ? 'text-spear' : 'text-profit'
+                  }`}>
+                    {portfolioRisk.concentration.max_concentration_percent.toFixed(1)}%
+                  </div>
+                  <div className="text-xs text-text-muted">
+                    Single Token
+                  </div>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* NEW: RPC Latency */}
+      {rpcLatency && (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>RPC Latency</CardTitle>
+              <Badge
+                variant={rpcLatency.overall_avg < 50 ? 'success' : rpcLatency.overall_avg < 100 ? 'warning' : 'danger'}
+                size="sm"
+              >
+                Avg: {rpcLatency.overall_avg.toFixed(0)}ms
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {rpcLatency.endpoints.slice(0, 3).map((endpoint) => (
+                <div key={endpoint.endpoint} className="bg-surface-light rounded-lg p-4">
+                  <div className="text-xs text-text-muted mb-2">{endpoint.endpoint}</div>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-lg font-semibold font-mono-numbers">
+                        {endpoint.avg_latency_ms.toFixed(0)}ms
+                      </div>
+                      <div className="text-xs text-text-muted">
+                        p95: {endpoint.p95_latency_ms.toFixed(0)}ms
+                      </div>
+                    </div>
+                    <Badge
+                      variant={endpoint.error_rate < 0.01 ? 'success' : endpoint.error_rate < 0.05 ? 'warning' : 'danger'}
+                      size="sm"
+                    >
+                      {(endpoint.error_rate * 100).toFixed(1)}% errors
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* NEW: Enhanced Cost Breakdown */}
+      {costAnalysis && costAnalysis.per_trade_costs.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Cost Breakdown (Recent Trades)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <CostBreakdownChart data={costAnalysis} />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* NEW: Wallet Attribution */}
+      {walletsData && walletsData.wallets.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Top Performing Wallets (30d)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <WalletAttribution wallets={walletsData.wallets.slice(0, 5)} />
+          </CardContent>
+        </Card>
+      )}
 
       {/* Live Positions - Mobile Optimized */}
       <Card padding="none">

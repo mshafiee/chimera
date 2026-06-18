@@ -6,14 +6,34 @@ import {
   ArrowLeftRight,
   Settings,
   AlertTriangle,
+  // New icons
+  Search,
+  TrendingUp,
+  Shield,
+  Activity,
+  Zap,
+  Database,
+  Users,
+  Network,
+  Radio,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Wallets', href: '/wallets', icon: Wallet },
+  { name: 'Wallet Monitoring', href: '/wallet-monitoring', icon: Radio },
   { name: 'Trades', href: '/trades', icon: ArrowLeftRight },
   { name: 'Config', href: '/config', icon: Settings },
   { name: 'Incidents', href: '/incidents', icon: AlertTriangle },
+  // New pages
+  { name: 'Scout', href: '/scout', icon: Search },
+  { name: 'Signals', href: '/signals', icon: TrendingUp },
+  { name: 'Market', href: '/market', icon: Activity },
+  { name: 'Risk', href: '/risk', icon: Shield },
+  { name: 'Reconciliation', href: '/reconciliation', icon: Database },
+  { name: 'Performance', href: '/performance', icon: Zap },
+  { name: 'Operations', href: '/operations', icon: Activity },
+  { name: 'Consensus', href: '/consensus', icon: Network },
 ]
 
 // Mobile bottom navigation - only show key items
