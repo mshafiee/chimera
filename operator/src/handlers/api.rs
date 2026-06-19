@@ -22,6 +22,7 @@ use crate::db::{
 };
 use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
+use crate::monitoring::signal_aggregator::SignalAggregator;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use rust_decimal::prelude::*;
 use solana_sdk::pubkey::Pubkey;
@@ -40,6 +41,8 @@ pub struct ApiState {
     pub engine: Option<Arc<crate::engine::EngineHandle>>,
     /// Metrics state for updating Prometheus metrics
     pub metrics: Arc<crate::metrics::MetricsState>,
+    /// Signal aggregator for consensus detection
+    pub signal_aggregator: Option<Arc<SignalAggregator>>,
 }
 
 // =============================================================================

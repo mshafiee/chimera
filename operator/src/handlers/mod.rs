@@ -7,6 +7,7 @@ mod monitoring;
 mod operations;
 mod risk;
 mod roster;
+mod signals;
 mod webhook;
 mod ws;
 
@@ -17,6 +18,7 @@ pub use monitoring::*;
 pub use operations::*;
 pub use risk::*;
 pub use roster::*;
+pub use signals::*;
 pub use webhook::*;
 pub use ws::{
     ws_handler, AlertData, HealthUpdateData, PositionUpdateData, TradeUpdateData, WsEvent, WsState,

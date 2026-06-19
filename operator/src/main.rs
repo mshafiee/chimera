@@ -1069,6 +1069,7 @@ async fn main() -> anyhow::Result<()> {
         notifier: notifier.clone(),
         engine: Some(Arc::new(_engine_handle.clone())),
         metrics: metrics_state.clone(),
+        signal_aggregator: Some(signal_aggregator.clone()),
     });
 
     // Create operations state
@@ -1150,6 +1151,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/risk/position-size", get(chimera_operator::handlers::get_position_size_analysis))
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
+        .route("/signals/consensus", get(chimera_operator::handlers::get_consensus))
+        .route("/signals/clustering", get(chimera_operator::handlers::get_wallet_clustering))
+        .route("/signals/aggregation", get(chimera_operator::handlers::get_signal_aggregation))
         .with_state(api_state.clone());
 
     // Build operations API routes (use OperationsState)
