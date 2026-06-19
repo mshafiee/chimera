@@ -242,6 +242,16 @@ impl MarketRegimeDetector {
         }
     }
 
+    /// Get price history for analysis (read-only access)
+    ///
+    /// Returns a cloned Arc to the internal price history, allowing read access
+    /// without exposing mutable state.
+    pub fn get_price_history(
+        &self,
+    ) -> Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>> {
+        self.price_history.clone()
+    }
+
     /// Check volume trend (week-over-week)
     ///
     /// # Returns

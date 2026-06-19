@@ -30,14 +30,14 @@ use chimera_operator::engine::{
 };
 use chimera_operator::handlers::{
     disable_wallet_monitoring, enable_wallet_monitoring, export_trades, get_config,
-    get_cost_metrics, get_health_check_details, get_monitoring_status, get_performance_metrics,
-    get_position, get_rate_limit_status, get_resources, get_secrets, get_strategy_performance,
-    get_wallet, health_check, health_simple, helius_webhook_handler, list_config_audit,
-    list_dead_letter_queue, list_positions, list_trades, list_wallets, reset_circuit_breaker,
-    roster_merge, roster_validate, trip_circuit_breaker, update_config,
-    update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet, wallet_auth,
-    webhook_handler, ws_handler, ApiState, AppState, OperationsState, RosterState,
-    WalletAuthState, WebhookState, WsState,
+    get_cost_metrics, get_health_check_details, get_market_conditions, get_market_regime,
+    get_monitoring_status, get_performance_metrics, get_position, get_rate_limit_status,
+    get_resources, get_secrets, get_strategy_performance, get_wallet, health_check,
+    health_simple, helius_webhook_handler, list_config_audit, list_dead_letter_queue,
+    list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
+    roster_validate, trip_circuit_breaker, update_config, update_reconciliation_metrics,
+    update_secret_rotation_metrics, update_wallet, wallet_auth, webhook_handler, ws_handler,
+    ApiState, AppState, OperationsState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
 use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
@@ -1108,6 +1108,7 @@ async fn main() -> anyhow::Result<()> {
         engine: Some(Arc::new(_engine_handle.clone())),
         metrics: metrics_state.clone(),
         signal_aggregator: Some(signal_aggregator.clone()),
+        market_regime_detector: Some(market_regime_detector.clone()),
     });
 
     // Create operations state
@@ -1156,6 +1157,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/signals/consensus", get(chimera_operator::handlers::get_consensus))
         .route("/signals/clustering", get(chimera_operator::handlers::get_wallet_clustering))
         .route("/signals/aggregation", get(chimera_operator::handlers::get_signal_aggregation))
+        .route("/market/regime", get(get_market_regime))
+        .route("/market/conditions", get(get_market_conditions))
         .with_state(api_state.clone());
 
     // Build operations API routes (use OperationsState)

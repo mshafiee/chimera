@@ -3,6 +3,7 @@
 mod api;
 mod auth;
 mod health;
+mod market;
 mod monitoring;
 mod operations;
 mod risk;
@@ -14,6 +15,7 @@ mod ws;
 pub use api::*;
 pub use auth::*;
 pub use health::*;
+pub use market::*;
 pub use monitoring::*;
 pub use operations::*;
 pub use risk::*;

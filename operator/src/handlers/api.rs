@@ -43,6 +43,8 @@ pub struct ApiState {
     pub metrics: Arc<crate::metrics::MetricsState>,
     /// Signal aggregator for consensus detection
     pub signal_aggregator: Option<Arc<SignalAggregator>>,
+    /// Market regime detector for regime analysis
+    pub market_regime_detector: Option<Arc<crate::engine::MarketRegimeDetector>>,
 }
 
 // =============================================================================
