@@ -94,7 +94,9 @@ export function Signals() {
           <div className="flex items-center justify-between">
             <CardTitle>Signal Consensus</CardTitle>
             <Badge variant={(signalConsensus?.consensus_detection_rate ?? 0) > 0.7 ? 'success' : 'warning'}>
-              {signalConsensus?.consensus_detection_rate ? `${(signalConsensus.consensus_detection_rate * 100).toFixed(1)}%` : 'N/A'}
+              {signalConsensus?.consensus_detection_rate !== null && signalConsensus?.consensus_detection_rate !== undefined
+                ? `${(signalConsensus.consensus_detection_rate * 100).toFixed(1)}%`
+                : 'N/A'}
             </Badge>
           </div>
         </CardHeader>

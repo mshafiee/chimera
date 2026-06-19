@@ -1157,6 +1157,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/signals/consensus", get(chimera_operator::handlers::get_consensus))
         .route("/signals/clustering", get(chimera_operator::handlers::get_wallet_clustering))
         .route("/signals/aggregation", get(chimera_operator::handlers::get_signal_aggregation))
+        .route("/signals/quality", get(chimera_operator::handlers::get_signal_quality))
+        .route("/signals/sources", get(chimera_operator::handlers::get_signal_sources))
         .route("/market/regime", get(get_market_regime))
         .route("/market/conditions", get(get_market_conditions))
         .with_state(api_state.clone());
