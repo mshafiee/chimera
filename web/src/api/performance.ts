@@ -128,7 +128,7 @@ export function useTradeLatency(timeRange?: string) {
   return useQuery({
     queryKey: ['performance', 'trade-latency', timeRange],
     queryFn: async () => {
-      const response = await apiClient.get<TradeLatencyResponse>('/metrics/performance', {
+      const response = await apiClient.get<TradeLatencyResponse>('/metrics/trade-latency', {
         params: timeRange ? { range: timeRange } : undefined,
       })
       return response.data
@@ -138,29 +138,21 @@ export function useTradeLatency(timeRange?: string) {
   })
 }
 
-// Fetch RPC Latency - Using health endpoint RPC latency as proxy
+// Fetch RPC Latency
 export function useRPCLatency() {
   return useQuery({
     queryKey: ['performance', 'rpc-latency'],
     queryFn: async () => {
-      const response = await apiClient.get<{ rpc_latency_ms?: number }>('/health')
-      // Transform health response into expected RPC latency format
-      const latencyData = response.data.rpc_latency_ms || 0
+      const response = await apiClient.get<any>('/metrics/rpc-latency')
+      // Transform response to match expected format
+      const data = response.data
       return {
-        endpoints: [{
-          endpoint: 'Helius RPC',
-          avg_latency_ms: latencyData,
-          p95_latency_ms: latencyData * 1.2,
-          p99_latency_ms: latencyData * 1.5,
-          error_rate: 0,
-          request_count: 100,
-          success_rate: 100
-        }],
-        overall_avg: latencyData,
-        overall_p95: latencyData * 1.2,
-        overall_p99: latencyData * 1.5,
-        error_rate: 0,
-        request_rate: 40
+        endpoints: data.endpoints || [],
+        overall_avg: data.overall_avg_ms || 0,
+        overall_p95: data.overall_p95_ms || 0,
+        overall_p99: data.overall_p99_ms || 0,
+        error_rate: data.error_rate_percent || 0,
+        request_rate: data.sample_size || 0
       } as RPCLatencyResponse
     },
     refetchInterval: 10000,
@@ -168,34 +160,35 @@ export function useRPCLatency() {
   })
 }
 
-// Fetch Database Performance - Using performance metrics as proxy
+// Fetch Database Performance
 export function useDatabasePerformance() {
   return useQuery({
     queryKey: ['performance', 'database'],
     queryFn: async () => {
-      const response = await apiClient.get<DatabasePerformanceResponse>('/metrics/performance')
-      // Transform simple performance response into expected database format
+      const response = await apiClient.get<any>('/metrics/database-performance')
+      // Transform response to match expected format
+      const data = response.data
       return {
         query_latency: {
-          avg_ms: 5,
-          p95_ms: 10,
-          p99_ms: 20,
-          slow_queries: 0,
-          total_queries: 1000
+          avg_ms: data.query_latency?.avg_ms || 0,
+          p95_ms: data.query_latency?.p95_ms || 0,
+          p99_ms: data.query_latency?.p99_ms || 0,
+          slow_queries: data.query_latency?.slow_queries_count || 0,
+          total_queries: data.query_latency?.total_queries_count || 0
         },
         connection_pool: {
-          active_connections: 1,
-          idle_connections: 4,
-          max_connections: 10,
-          utilization_percent: 10
+          active_connections: data.connection_pool?.active_connections || 0,
+          idle_connections: data.connection_pool?.idle_connections || 0,
+          max_connections: data.connection_pool?.max_connections || 0,
+          utilization_percent: data.connection_pool?.utilization_percent || 0
         },
         cache_performance: {
-          hit_rate: 95,
-          miss_rate: 5,
-          total_hits: 950,
-          total_misses: 50,
-          size: 100,
-          max_size: 1000
+          hit_rate: data.cache_performance?.hit_rate_percent || 0,
+          miss_rate: data.cache_performance?.miss_rate_percent || 0,
+          total_hits: data.cache_performance?.total_hits || 0,
+          total_misses: data.cache_performance?.total_misses || 0,
+          size: data.cache_performance?.current_size || 0,
+          max_size: data.cache_performance?.max_size || 0
         }
       } as DatabasePerformanceResponse
     },
@@ -204,28 +197,29 @@ export function useDatabasePerformance() {
   })
 }
 
-// Fetch Request Rate - Using performance metrics as proxy
+// Fetch Request Rate
 export function useRequestRate() {
   return useQuery({
     queryKey: ['performance', 'request-rate'],
     queryFn: async () => {
-      const response = await apiClient.get<RequestRateResponse>('/metrics/performance')
-      // Transform into expected request rate format
+      const response = await apiClient.get<any>('/metrics/request-rate')
+      // Transform response to match expected format
+      const data = response.data
       return {
-        current_rps: 10,
-        peak_rps: 50,
-        avg_rps: 15,
-        overall_status: 'healthy' as const,
-        rate_limits: [{
-          endpoint: '/api/v1/*',
-          current_rate: 10,
-          limit: 100,
-          utilization_percent: 10,
-          window_seconds: 60,
-          remaining: 90,
-          reset_at: new Date(Date.now() + 60000).toISOString(),
-          status: 'ok' as const
-        }]
+        current_rps: data.current_rps || 0,
+        peak_rps: data.peak_rps_24h || 0,
+        avg_rps: data.avg_rps_1h || 0,
+        overall_status: data.overall_status || 'healthy',
+        rate_limits: (data.rate_limits || []).map((limit: any) => ({
+          endpoint: limit.endpoint || '/api/v1/*',
+          current_rate: limit.current_rate || 0,
+          limit: limit.limit || 100,
+          utilization_percent: limit.utilization_percent || 0,
+          window_seconds: limit.window_seconds || 60,
+          remaining: (limit.limit || 100) - (limit.current_rate || 0),
+          reset_at: new Date(Date.now() + (limit.window_seconds || 60) * 1000).toISOString(),
+          status: limit.status || 'ok'
+        }))
       } as RequestRateResponse
     },
     refetchInterval: 5000,

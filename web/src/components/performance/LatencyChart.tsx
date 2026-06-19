@@ -12,6 +12,18 @@ export function LatencyChart({ data }: LatencyChartProps) {
     percentage: bucket.percentage,
   }))
 
+  // Show empty state if no data
+  if (chartData.length === 0) {
+    return (
+      <div className="h-64 flex items-center justify-center">
+        <div className="text-center text-text-muted">
+          <p className="text-sm">No latency data available</p>
+          <p className="text-xs mt-1">Charts will populate after trade execution</p>
+        </div>
+      </div>
+    )
+  }
+
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       return (

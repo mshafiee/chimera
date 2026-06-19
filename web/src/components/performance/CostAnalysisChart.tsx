@@ -19,6 +19,18 @@ export function CostAnalysisChart({ data }: CostAnalysisChartProps) {
     percentage: item.percentage,
   }))
 
+  // Show empty state if no data
+  if (data.total_costs === 0 && pieData.length === 0) {
+    return (
+      <div className="h-64 flex items-center justify-center">
+        <div className="text-center text-text-muted">
+          <p className="text-sm">No cost data available</p>
+          <p className="text-xs mt-1">Cost analysis will populate after trade execution</p>
+        </div>
+      </div>
+    )
+  }
+
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       return (
@@ -61,29 +73,38 @@ export function CostAnalysisChart({ data }: CostAnalysisChartProps) {
         {/* Pie Chart */}
         <div>
           <h3 className="text-sm font-medium mb-3">Cost Distribution</h3>
-          <div className="h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={pieData}
-                  cx="50%"
-                  cy="50%"
-                  labelLine={false}
-                  label={(entry) => `${entry.name}: ${entry.percentage.toFixed(1)}%`}
-                  outerRadius={80}
-                  dataKey="value"
-                >
-                  {pieData.map((entry, index) => (
-                    <Cell
-                      key={`cell-${index}`}
-                      fill={COST_COLORS[entry.name as keyof typeof COST_COLORS] || '#6b7280'}
-                    />
-                  ))}
-                </Pie>
-                <Tooltip content={<CustomTooltip />} />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
+          {pieData.length === 0 || data.total_costs === 0 ? (
+            <div className="h-64 flex items-center justify-center">
+              <div className="text-center text-text-muted">
+                <p className="text-sm">No cost data available</p>
+                <p className="text-xs mt-1">Chart will populate after trade execution</p>
+              </div>
+            </div>
+          ) : (
+            <div className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pieData}
+                    cx="50%"
+                    cy="50%"
+                    labelLine={false}
+                    label={(entry) => `${entry.name}: ${entry.percentage.toFixed(1)}%`}
+                    outerRadius={80}
+                    dataKey="value"
+                  >
+                    {pieData.map((entry, index) => (
+                      <Cell
+                        key={`cell-${index}`}
+                        fill={COST_COLORS[entry.name as keyof typeof COST_COLORS] || '#6b7280'}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip content={<CustomTooltip />} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+          )}
         </div>
 
         {/* Cost by Type Table */}

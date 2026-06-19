@@ -2939,6 +2939,151 @@ pub async fn delete_exit_target(pool: &DbPool, trade_uuid: &str) -> AppResult<()
     Ok(())
 }
 
+// =============================================================================
+// PERFORMANCE METRICS FUNCTIONS
+// =============================================================================
+
+/// Response structure for trade latency statistics
+#[derive(Debug, serde::Serialize)]
+pub struct TradeLatencyStats {
+    pub count: u32,
+    pub avg_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+/// Response structure for latency histogram bucket
+#[derive(Debug, serde::Serialize)]
+pub struct LatencyBucket {
+    pub range: String, // "0-10ms", "10-50ms", etc.
+    pub count: u32,
+    pub percentage: f64,
+}
+
+/// Get trade latency statistics including percentiles
+///
+/// Returns latency statistics (average, p50, p95, p99, max) for closed trades
+/// within the specified time range. Uses SQLite's julianday function for
+/// accurate timestamp calculation.
+pub async fn get_trade_latency_stats(
+    pool: &DbPool,
+    hours: u32,
+) -> AppResult<TradeLatencyStats> {
+    let time_filter = format!("-{} hours", hours);
+
+    // Use SQLite's julianday function for accurate timestamp calculation
+    // Returns milliseconds as REAL numbers
+    let latencies: Vec<f64> = sqlx::query_scalar(
+        r#"
+        SELECT CAST((julianday(updated_at) - julianday(created_at)) * 86400000 AS REAL)
+         FROM trades
+         WHERE status = 'CLOSED'
+         AND created_at >= datetime('now', ?)
+         AND updated_at IS NOT NULL
+         AND updated_at > created_at
+        "#
+    )
+    .bind(&time_filter)
+    .fetch_all(pool)
+    .await?;
+
+    if latencies.is_empty() {
+        return Ok(TradeLatencyStats {
+            count: 0,
+            avg_ms: 0.0,
+            p50_ms: 0.0,
+            p95_ms: 0.0,
+            p99_ms: 0.0,
+            max_ms: 0.0,
+        });
+    }
+
+    let count = latencies.len() as u32;
+    let avg_ms = latencies.iter().sum::<f64>() / count as f64;
+
+    // Sort for percentile calculation
+    let mut sorted_latencies = latencies.clone();
+    sorted_latencies.sort_by(|a, b| a.total_cmp(b));
+
+    // Safe percentile calculation with bounds checking
+    let p50_ms = *sorted_latencies.get((count as f64 * 0.50) as usize)
+        .unwrap_or(&avg_ms);
+    let p95_ms = *sorted_latencies.get((count as f64 * 0.95) as usize)
+        .unwrap_or(&avg_ms);
+    let p99_ms = *sorted_latencies.get((count as f64 * 0.99) as usize)
+        .unwrap_or(&avg_ms);
+    let max_ms = *sorted_latencies.last().unwrap_or(&avg_ms);
+
+    Ok(TradeLatencyStats { count, avg_ms, p50_ms, p95_ms, p99_ms, max_ms })
+}
+
+/// Get trade latency histogram data for visualization
+///
+/// Returns histogram buckets showing the distribution of trade latencies
+/// for the specified time range. Useful for visualizing performance patterns.
+pub async fn get_trade_latency_histogram(
+    pool: &DbPool,
+    hours: u32,
+    bucket_bounds: &[f64],
+) -> AppResult<Vec<LatencyBucket>> {
+    let time_filter = format!("-{} hours", hours);
+    let total_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM trades
+         WHERE status = 'CLOSED'
+         AND created_at >= datetime('now', ?)
+         AND updated_at IS NOT NULL
+        "#
+    )
+    .bind(&time_filter)
+    .fetch_one(pool)
+    .await.unwrap_or(0);
+
+    if total_count == 0 {
+        return Ok(vec![]);
+    }
+
+    let mut buckets = Vec::new();
+    let mut lower_bound = 0.0;
+
+    for (i, &upper_bound) in bucket_bounds.iter().enumerate() {
+        let count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM trades
+             WHERE status = 'CLOSED'
+             AND created_at >= datetime('now', ?)
+             AND updated_at IS NOT NULL
+             AND (julianday(updated_at) - julianday(created_at)) * 86400000 >= ?
+             AND (julianday(updated_at) - julianday(created_at)) * 86400000 < ?
+            "#
+        )
+        .bind(&time_filter)
+        .bind(lower_bound)
+        .bind(upper_bound)
+        .fetch_one(pool)
+        .await.unwrap_or(0);
+
+        let percentage = (count as f64 / total_count as f64) * 100.0;
+        let range = if i == bucket_bounds.len() - 1 {
+            format!("{}ms+", upper_bound)
+        } else {
+            format!("{}-{}ms", lower_bound, upper_bound)
+        };
+
+        buckets.push(LatencyBucket {
+            range,
+            count: count as u32,
+            percentage,
+        });
+
+        lower_bound = upper_bound;
+    }
+
+    Ok(buckets)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

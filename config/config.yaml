@@ -23,7 +23,7 @@ database:
 
 security:
   # Overridden by CHIMERA_SECURITY__WEBHOOK_SECRET
-  webhook_secret: "dev-secret-placeholder"
+  webhook_secret: "05cdd9e2448ca375b36aff8bc9d9fdc5499caf5eb64f8df83bd9b7d901866e65"
   max_timestamp_drift_secs: 60
   webhook_rate_limit: 100
   webhook_burst_size: 150
