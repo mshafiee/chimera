@@ -70,7 +70,7 @@ export function Operations() {
                 </div>
               </div>
               {!resourcesLoading && resourceUsage && (
-                <div className="text-right">
+                <div className="text-right ml-4">
                   <div className="text-xs text-text-muted">Last updated</div>
                   <div className="text-sm font-mono-numbers">
                     {new Date(resourceUsage.timestamp).toLocaleTimeString()}
