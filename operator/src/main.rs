@@ -105,6 +105,39 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Vault startup validation failed: {}", e))?;
     tracing::info!("Vault/secrets validated at startup");
 
+    // Load API keys and JWT secret early for WebSocket state initialization
+    let mut api_keys_map = std::collections::HashMap::new();
+    for key_config in &config.security.api_keys {
+        if let Ok(role) = key_config.role.parse::<Role>() {
+            api_keys_map.insert(key_config.key.clone(), role);
+            tracing::debug!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %role, "API key configured");
+        } else {
+            tracing::warn!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %key_config.role, "Invalid role in API key config");
+        }
+    }
+
+    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
+    let jwt_secret = match std::env::var("JWT_SECRET") {
+        Ok(secret) => secret,
+        Err(_) if chimera_env == "production" => {
+            tracing::error!("JWT_SECRET environment variable must be set in production mode");
+            return Err(anyhow::anyhow!(
+                "JWT_SECRET environment variable is required in production mode but was not set"
+            ));
+        }
+        Err(_) => {
+            tracing::warn!("JWT_SECRET not set — using development default (insecure, only for local testing)");
+            use std::fmt::Write;
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let mut dev_secret = String::from("dev-");
+            write!(&mut dev_secret, "{}", timestamp).unwrap();
+            dev_secret
+        }
+    };
+
     // Initialize database
     let db_pool = db::init_pool(&config.database).await?;
     db::run_migrations(&db_pool).await?;
@@ -112,9 +145,14 @@ async fn main() -> anyhow::Result<()> {
     db::recover_executing_trades(&db_pool).await?;
     tracing::info!("Database initialized");
 
-    // Create WebSocket state
-    let ws_state = Arc::new(WsState::new());
     let cancel_token = CancellationToken::new();
+
+    // Initialize WebSocket state with authentication (early initialization for circuit breaker)
+    let ws_state = Arc::new(WsState::new(
+        api_keys_map.clone(),
+        jwt_secret.clone(),
+        false, // Don't allow anonymous readonly for WebSocket
+    ));
 
     // Initialize price cache
     let price_cache = match PriceCache::new() {
@@ -1080,52 +1118,16 @@ async fn main() -> anyhow::Result<()> {
         price_cache: price_cache.clone(),
     });
 
-    // Create auth state
-    // Load API keys and admin wallets from config
-    let mut api_keys_map = std::collections::HashMap::new();
-    for key_config in &config.security.api_keys {
-        if let Ok(role) = key_config.role.parse::<Role>() {
-            api_keys_map.insert(key_config.key.clone(), role);
-            tracing::debug!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %role, "API key configured");
-        } else {
-            tracing::warn!(key_prefix = %&key_config.key[..key_config.key.len().min(8)], role = %key_config.role, "Invalid role in API key config");
-        }
-    }
-
-    // JWT secret for authentication tokens
-    // In production mode, JWT_SECRET must be set explicitly — no defaults allowed for security.
-    // In development mode, use a safe default to allow local testing without configuration.
-    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
-    let jwt_secret = match std::env::var("JWT_SECRET") {
-        Ok(secret) => secret,
-        Err(_) if chimera_env == "production" => {
-            tracing::error!("JWT_SECRET environment variable must be set in production mode");
-            return Err(anyhow::anyhow!(
-                "JWT_SECRET environment variable is required in production mode but was not set"
-            ));
-        }
-        Err(_) => {
-            tracing::warn!("JWT_SECRET not set — using development default (insecure, only for local testing)");
-            // Generate a random dev secret instead of hardcoded "dev-secret" for better security
-            use std::fmt::Write;
-            let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-            let mut dev_secret = String::from("dev-");
-            write!(&mut dev_secret, "{}", timestamp).unwrap();
-            dev_secret
-        }
-    };
-
+    // Create auth state (reuse already-loaded api_keys_map and jwt_secret)
     let auth_state = Arc::new(AuthState::with_auth_config(
-        api_keys_map,
+        api_keys_map.clone(),
         jwt_secret.clone(),
     ));
     tracing::info!(
         api_key_count = config.security.api_keys.len(),
         "Auth state initialized"
     );
+    tracing::info!("WebSocket state initialized");
 
     // Build health routes with AppState
     let health_routes = Router::new()
@@ -1179,6 +1181,15 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/metrics/secret-rotation",
             post(update_secret_rotation_metrics),
+        )
+        // Reconciliation API endpoints
+        .route("/reconciliation/status", get(chimera_operator::handlers::get_reconciliation_status))
+        .route("/reconciliation/history", get(chimera_operator::handlers::get_reconciliation_history))
+        .route("/reconciliation/stats", get(chimera_operator::handlers::get_reconciliation_stats))
+        .route("/reconciliation/trigger", post(chimera_operator::handlers::trigger_reconciliation))
+        .route(
+            "/reconciliation/discrepancies/:id/resolve",
+            post(chimera_operator::handlers::resolve_discrepancy),
         )
         .with_state(api_state.clone())
         .layer(axum_middleware::from_fn_with_state(
@@ -1434,14 +1445,10 @@ async fn main() -> anyhow::Result<()> {
             )),
         }));
 
-    // Build WebSocket routes — require bearer auth to prevent unauthenticated position data leaks
+    // Build WebSocket routes — authentication handled within the handler via query parameter
     let ws_routes = Router::new()
         .route("/ws", get(ws_handler))
-        .with_state(ws_state.clone())
-        .layer(axum_middleware::from_fn_with_state(
-            auth_state.clone(),
-            bearer_auth,
-        ));
+        .with_state(ws_state.clone());
 
     // Build metrics routes
     let metrics_routes = metrics_router().with_state(metrics_state.clone());
@@ -1502,14 +1509,10 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Root-level WebSocket for web dashboard — bearer auth required to prevent data leaks
+    // Root-level WebSocket for web dashboard — authentication handled within handler via query parameter
     let root_ws_routes = Router::new()
         .route("/ws", get(ws_handler))
-        .with_state(ws_state.clone())
-        .layer(axum_middleware::from_fn_with_state(
-            auth_state.clone(),
-            bearer_auth,
-        ));
+        .with_state(ws_state.clone());
 
     // Create full router with all routes and middleware
     // Note: Layer order matters - bottom layers are applied first (innermost)

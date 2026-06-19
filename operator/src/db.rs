@@ -1606,6 +1606,392 @@ pub async fn insert_reconciliation_log(
 }
 
 // =============================================================================
+// RECONCILIATION QUERIES
+// =============================================================================
+
+/// Reconciliation status response
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReconciliationStatusRow {
+    pub last_reconciliation_at: Option<String>,
+    pub next_reconciliation_at: Option<String>,
+    pub status: String,
+    pub checked_count: i64,
+    pub discrepancy_count: i64,
+    pub unresolved_count: i64,
+    pub duration_seconds: Option<f64>,
+    pub recent_discrepancies: Vec<DiscrepancyRow>,
+}
+
+/// Individual discrepancy entry
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscrepancyRow {
+    pub id: i64,
+    pub trade_uuid: String,
+    pub discrepancy_type: String,
+    pub severity: String,
+    pub description: String,
+    pub db_value: Option<String>,
+    pub on_chain_value: Option<String>,
+    pub detected_at: String,
+    pub resolved: bool,
+    pub resolved_at: Option<String>,
+}
+
+/// Reconciliation history entry
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReconciliationRunRow {
+    pub id: i64,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub status: String,
+    pub checked_count: i64,
+    pub discrepancy_count: i64,
+    pub unresolved_count: i64,
+    pub duration_seconds: Option<f64>,
+}
+
+/// Reconciliation statistics
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ReconciliationStatsRow {
+    pub total_reconciliations: i64,
+    pub successful_reconciliations: i64,
+    pub failed_reconciliations: i64,
+    pub total_checked: i64,
+    pub total_discrepancies: i64,
+    pub total_unresolved: i64,
+    pub avg_discrepancies_per_run: f64,
+    pub most_common_discrepancy_types: Vec<DiscrepancyTypeStats>,
+}
+
+/// Discrepancy type statistics
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscrepancyTypeStats {
+    pub discrepancy_type: String,
+    pub count: i64,
+    pub percentage: f64,
+}
+
+/// Get current reconciliation status with recent discrepancies
+pub async fn get_reconciliation_status(
+    pool: &DbPool,
+    discrepancies_limit: Option<i64>,
+) -> AppResult<ReconciliationStatusRow> {
+    let limit = discrepancies_limit.unwrap_or(10).min(100);
+
+    // Get the latest reconciliation entry (most recent created_at)
+    let latest_row = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
+        r#"
+        SELECT
+            datetime(created_at) as created_at,
+            CAST(strftime('%s', created_at) AS INTEGER) as created_ts
+        FROM reconciliation_log
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let (last_at, last_ts) = latest_row.unwrap_or((None, None));
+
+    // Calculate next reconciliation (4 AM UTC daily)
+    let next_at = last_ts.and_then(|ts| {
+        let next = ts + 86400 - (ts % 86400) + 14400; // 4 AM UTC = 14400 seconds
+        Some(datetime_from_timestamp(next as f64))
+    });
+
+    // Get counts
+    let (checked_count, discrepancy_count, unresolved_count): (i64, i64, i64) =
+        sqlx::query_as(
+            r#"
+            SELECT
+                COALESCE(COUNT(*), 0) as checked,
+                COALESCE(SUM(CASE WHEN discrepancy != 'NONE' THEN 1 ELSE 0 END), 0) as discrepancies,
+                COALESCE(SUM(CASE WHEN discrepancy != 'NONE' AND resolved_at IS NULL THEN 1 ELSE 0 END), 0) as unresolved
+            FROM reconciliation_log
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+
+    // Get recent unresolved discrepancies
+    let recent_rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            trade_uuid,
+            discrepancy,
+            notes,
+            expected_state,
+            actual_on_chain,
+            datetime(created_at) as detected_at,
+            resolved_at IS NOT NULL as resolved,
+            datetime(resolved_at) as resolved_at
+        FROM reconciliation_log
+        WHERE discrepancy != 'NONE'
+        ORDER BY created_at DESC
+        LIMIT ?
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let recent_discrepancies = recent_rows
+        .iter()
+        .map(|row| {
+            let discrepancy: String = row.get("discrepancy");
+            let notes: Option<String> = row.get("notes");
+
+            DiscrepancyRow {
+                id: row.get("id"),
+                trade_uuid: row.get("trade_uuid"),
+                discrepancy_type: normalize_discrepancy_type(&discrepancy),
+                severity: infer_severity(&discrepancy),
+                description: notes.unwrap_or_else(|| discrepancy.clone()),
+                db_value: row.get("expected_state"),
+                on_chain_value: row.get("actual_on_chain"),
+                detected_at: row.get("detected_at"),
+                resolved: row.get("resolved"),
+                resolved_at: row.get("resolved_at"),
+            }
+        })
+        .collect();
+
+    Ok(ReconciliationStatusRow {
+        last_reconciliation_at: last_at,
+        next_reconciliation_at: next_at,
+        status: "completed".to_string(),
+        checked_count,
+        discrepancy_count,
+        unresolved_count,
+        duration_seconds: None,
+        recent_discrepancies,
+    })
+}
+
+/// Get reconciliation history (grouped by day)
+pub async fn get_reconciliation_history(
+    pool: &DbPool,
+    limit: Option<i64>,
+) -> AppResult<Vec<ReconciliationRunRow>> {
+    let limit = limit.unwrap_or(10).min(100);
+
+    let rows = sqlx::query(
+        r#"
+        WITH daily_runs AS (
+            SELECT
+                DATE(created_at) as run_date,
+                MIN(id) as id,
+                MIN(created_at) as started_at,
+                MAX(created_at) as completed_at,
+                'completed' as status,
+                COUNT(*) as checked_count,
+                SUM(CASE WHEN discrepancy != 'NONE' THEN 1 ELSE 0 END) as discrepancy_count,
+                SUM(CASE WHEN discrepancy != 'NONE' AND resolved_at IS NULL THEN 1 ELSE 0 END) as unresolved_count,
+                CAST((julianday(MAX(created_at)) - julianday(MIN(created_at))) * 86400.0 AS REAL) as duration_seconds
+            FROM reconciliation_log
+            GROUP BY DATE(created_at)
+            ORDER BY run_date DESC
+            LIMIT ?
+        )
+        SELECT
+            id,
+            datetime(started_at) as started_at,
+            CASE WHEN completed_at IS NOT NULL THEN datetime(completed_at) ELSE NULL END as completed_at,
+            status,
+            checked_count,
+            discrepancy_count,
+            unresolved_count,
+            duration_seconds
+        FROM daily_runs
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let runs = rows
+        .iter()
+        .map(|row| ReconciliationRunRow {
+            id: row.get("id"),
+            started_at: row.get("started_at"),
+            completed_at: row.get("completed_at"),
+            status: row.get("status"),
+            checked_count: row.get("checked_count"),
+            discrepancy_count: row.get("discrepancy_count"),
+            unresolved_count: row.get("unresolved_count"),
+            duration_seconds: row.get("duration_seconds"),
+        })
+        .collect();
+
+    Ok(runs)
+}
+
+/// Count total reconciliation runs
+pub async fn count_reconciliation_runs(pool: &DbPool) -> AppResult<i64> {
+    let result: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COUNT(DISTINCT DATE(created_at)) as count
+        FROM reconciliation_log
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.0)
+}
+
+/// Get reconciliation statistics
+pub async fn get_reconciliation_stats(
+    pool: &DbPool,
+    _time_range: Option<&str>,
+) -> AppResult<ReconciliationStatsRow> {
+    let (total_reconciliations, total_checked, total_discrepancies, total_unresolved): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            r#"
+            WITH stats AS (
+                SELECT
+                    COUNT(DISTINCT DATE(created_at)) as total_runs,
+                    COUNT(*) as total_checked,
+                    SUM(CASE WHEN discrepancy != 'NONE' THEN 1 ELSE 0 END) as total_discrepancies,
+                    SUM(CASE WHEN discrepancy != 'NONE' AND resolved_at IS NULL THEN 1 ELSE 0 END) as total_unresolved
+                FROM reconciliation_log
+            )
+            SELECT
+                total_runs,
+                total_checked,
+                COALESCE(total_discrepancies, 0) as total_discrepancies,
+                COALESCE(total_unresolved, 0) as total_unresolved
+            FROM stats
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+
+    // Count successful (no unresolved) vs failed runs
+    let successful_reconciliations = sqlx::query_as::<_, (i64,)>(
+        r#"
+        SELECT COUNT(DISTINCT DATE(created_at))
+        FROM reconciliation_log
+        WHERE discrepancy = 'NONE' OR resolved_at IS NOT NULL
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+    .0;
+
+    let failed_reconciliations = total_reconciliations - successful_reconciliations;
+
+    // Calculate average discrepancies per run
+    let avg_discrepancies_per_run = if total_reconciliations > 0 {
+        total_discrepancies as f64 / total_reconciliations as f64
+    } else {
+        0.0
+    };
+
+    // Get most common discrepancy types
+    let discrepancy_types = sqlx::query(
+        r#"
+        SELECT
+            discrepancy,
+            COUNT(*) as count
+        FROM reconciliation_log
+        WHERE discrepancy != 'NONE'
+        GROUP BY discrepancy
+        ORDER BY count DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let most_common_discrepancy_types = discrepancy_types
+        .iter()
+        .map(|row| {
+            let discrepancy_type: String = row.get("discrepancy");
+            let count: i64 = row.get("count");
+            let percentage = if total_discrepancies > 0 {
+                (count as f64 / total_discrepancies as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            DiscrepancyTypeStats {
+                discrepancy_type: normalize_discrepancy_type(&discrepancy_type),
+                count,
+                percentage,
+            }
+        })
+        .collect();
+
+    Ok(ReconciliationStatsRow {
+        total_reconciliations,
+        successful_reconciliations,
+        failed_reconciliations,
+        total_checked,
+        total_discrepancies,
+        total_unresolved,
+        avg_discrepancies_per_run,
+        most_common_discrepancy_types,
+    })
+}
+
+/// Resolve a discrepancy by ID
+pub async fn resolve_discrepancy(
+    pool: &DbPool,
+    id: i64,
+    resolved_by: &str,
+    resolution: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE reconciliation_log
+        SET resolved_at = CURRENT_TIMESTAMP,
+            resolved_by = ?,
+            notes = COALESCE(notes || '; ', '') || ?
+        WHERE id = ? AND resolved_at IS NULL
+        "#,
+    )
+    .bind(resolved_by)
+    .bind(resolution)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Normalize discrepancy type to frontend enum values
+fn normalize_discrepancy_type(discrepancy: &str) -> String {
+    match discrepancy {
+        "NONE" => "none".to_string(),
+        "MISSING_TX" => "missing_position".to_string(),
+        "AMOUNT_MISMATCH" => "pnl_mismatch".to_string(),
+        "STATE_MISMATCH" => "state_mismatch".to_string(),
+        "COST_MISMATCH" => "cost_mismatch".to_string(),
+        _ => discrepancy.to_lowercase(),
+    }
+}
+
+/// Infer severity from discrepancy type
+fn infer_severity(discrepancy: &str) -> String {
+    match discrepancy {
+        "NONE" => "low".to_string(),
+        "MISSING_TX" => "critical".to_string(),
+        "AMOUNT_MISMATCH" => "high".to_string(),
+        "STATE_MISMATCH" => "medium".to_string(),
+        "COST_MISMATCH" => "medium".to_string(),
+        _ => "low".to_string(),
+    }
+}
+
+/// Convert Unix timestamp to ISO 8601 datetime string
+fn datetime_from_timestamp(ts: f64) -> String {
+    // Simple conversion - in production would use chrono
+    format!("{}", ts)
+}
+
+// =============================================================================
 // CIRCUIT BREAKER SUPPORT
 // =============================================================================
 

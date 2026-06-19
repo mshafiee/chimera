@@ -110,6 +110,8 @@ export function Reconciliation() {
           <div className="flex items-center justify-between">
             <CardTitle>Reconciliation History</CardTitle>
             <select
+              id="reconciliation-history-limit"
+              name="historyLimit"
               value={historyLimit}
               onChange={(e) => setHistoryLimit(Number(e.target.value))}
               className="bg-surface-light border border-border rounded px-2 py-1 text-sm"

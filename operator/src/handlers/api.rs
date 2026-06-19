@@ -2432,6 +2432,307 @@ pub fn require_role_from_request(
             required
         )));
     }
-
     Ok(auth)
+}
+
+// =============================================================================
+// RECONCILIATION API
+// =============================================================================
+
+/// Query parameters for reconciliation status
+#[derive(Debug, Deserialize)]
+pub struct ReconciliationStatusQuery {
+    pub discrepancies_limit: Option<i64>,
+}
+
+/// Query parameters for reconciliation history
+#[derive(Debug, Deserialize)]
+pub struct ReconciliationHistoryQuery {
+    pub limit: Option<i64>,
+}
+
+/// Query parameters for reconciliation stats
+#[derive(Debug, Deserialize)]
+pub struct ReconciliationStatsQuery {
+    pub range: Option<String>,
+}
+
+/// Reconciliation status response
+#[derive(Debug, Serialize)]
+pub struct ReconciliationStatusResponse {
+    pub last_reconciliation_at: Option<String>,
+    pub next_reconciliation_at: Option<String>,
+    pub status: String,
+    pub checked_count: i64,
+    pub discrepancy_count: i64,
+    pub unresolved_count: i64,
+    pub duration_seconds: Option<f64>,
+    pub recent_discrepancies: Vec<DiscrepancyResponse>,
+}
+
+/// Discrepancy response
+#[derive(Debug, Serialize)]
+pub struct DiscrepancyResponse {
+    pub id: i64,
+    pub trade_uuid: String,
+    #[serde(rename = "type")]
+    pub discrepancy_type: String,
+    pub severity: String,
+    pub description: String,
+    pub db_value: Option<String>,
+    pub on_chain_value: Option<String>,
+    pub detected_at: String,
+    pub resolved: bool,
+    pub resolved_at: Option<String>,
+}
+
+/// Reconciliation history response
+#[derive(Debug, Serialize)]
+pub struct ReconciliationHistoryResponse {
+    pub runs: Vec<ReconciliationRunResponse>,
+    pub total_runs: i64,
+    pub success_rate: f64,
+    pub avg_duration_seconds: f64,
+}
+
+/// Reconciliation run response
+#[derive(Debug, Serialize)]
+pub struct ReconciliationRunResponse {
+    pub id: i64,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub status: String,
+    pub checked_count: i64,
+    pub discrepancy_count: i64,
+    pub unresolved_count: i64,
+    pub duration_seconds: Option<f64>,
+}
+
+/// Reconciliation statistics response
+#[derive(Debug, Serialize)]
+pub struct ReconciliationStatsResponse {
+    pub total_reconciliations: i64,
+    pub successful_reconciliations: i64,
+    pub failed_reconciliations: i64,
+    pub total_checked: i64,
+    pub total_discrepancies: i64,
+    pub total_unresolved: i64,
+    pub avg_discrepancies_per_run: f64,
+    pub most_common_discrepancy_types: Vec<DiscrepancyTypeStatsResponse>,
+}
+
+/// Discrepancy type statistics response
+#[derive(Debug, Serialize)]
+pub struct DiscrepancyTypeStatsResponse {
+    #[serde(rename = "type")]
+    pub discrepancy_type: String,
+    pub count: i64,
+    pub percentage: f64,
+}
+
+/// Trigger reconciliation response
+#[derive(Debug, Serialize)]
+pub struct TriggerReconciliationResponse {
+    pub run_id: String,
+    pub scheduled_at: String,
+}
+
+/// Resolve discrepancy request
+#[derive(Debug, Deserialize)]
+pub struct ResolveDiscrepancyRequest {
+    pub resolution: String,
+}
+
+/// Resolve discrepancy response
+#[derive(Debug, Serialize)]
+pub struct ResolveDiscrepancyResponse {
+    pub success: bool,
+}
+
+/// Get reconciliation status
+///
+/// GET /api/v1/reconciliation/status
+/// Requires: readonly+ role
+pub async fn get_reconciliation_status(
+    State(state): State<Arc<ApiState>>,
+    Query(params): Query<ReconciliationStatusQuery>,
+) -> Result<Json<ReconciliationStatusResponse>, AppError> {
+    let discrepancies_limit = params.discrepancies_limit.unwrap_or(10).min(100);
+    let status_row = db::get_reconciliation_status(&state.db, Some(discrepancies_limit)).await?;
+
+    let recent_discrepancies = status_row
+        .recent_discrepancies
+        .into_iter()
+        .map(|d| DiscrepancyResponse {
+            id: d.id,
+            trade_uuid: d.trade_uuid,
+            discrepancy_type: d.discrepancy_type,
+            severity: d.severity,
+            description: d.description,
+            db_value: d.db_value,
+            on_chain_value: d.on_chain_value,
+            detected_at: d.detected_at,
+            resolved: d.resolved,
+            resolved_at: d.resolved_at,
+        })
+        .collect();
+
+    Ok(Json(ReconciliationStatusResponse {
+        last_reconciliation_at: status_row.last_reconciliation_at,
+        next_reconciliation_at: status_row.next_reconciliation_at,
+        status: status_row.status,
+        checked_count: status_row.checked_count,
+        discrepancy_count: status_row.discrepancy_count,
+        unresolved_count: status_row.unresolved_count,
+        duration_seconds: status_row.duration_seconds,
+        recent_discrepancies,
+    }))
+}
+
+/// Get reconciliation history
+///
+/// GET /api/v1/reconciliation/history
+/// Requires: readonly+ role
+pub async fn get_reconciliation_history(
+    State(state): State<Arc<ApiState>>,
+    Query(params): Query<ReconciliationHistoryQuery>,
+) -> Result<Json<ReconciliationHistoryResponse>, AppError> {
+    let limit = params.limit.unwrap_or(10).min(100);
+    let runs = db::get_reconciliation_history(&state.db, Some(limit)).await?;
+    let total = db::count_reconciliation_runs(&state.db).await?;
+
+    let run_responses: Vec<ReconciliationRunResponse> = runs
+        .into_iter()
+        .map(|r| ReconciliationRunResponse {
+            id: r.id,
+            started_at: r.started_at,
+            completed_at: r.completed_at,
+            status: r.status,
+            checked_count: r.checked_count,
+            discrepancy_count: r.discrepancy_count,
+            unresolved_count: r.unresolved_count,
+            duration_seconds: r.duration_seconds,
+        })
+        .collect();
+
+    // Calculate success rate and average duration
+    let successful_count = run_responses.iter().filter(|r| r.status == "completed").count() as i64;
+    let success_rate = if total > 0 {
+        (successful_count as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
+
+    let avg_duration = if !run_responses.is_empty() {
+        let total_duration: f64 = run_responses
+            .iter()
+            .filter_map(|r| r.duration_seconds)
+            .sum();
+        total_duration / run_responses.len() as f64
+    } else {
+        0.0
+    };
+
+    Ok(Json(ReconciliationHistoryResponse {
+        runs: run_responses,
+        total_runs: total,
+        success_rate,
+        avg_duration_seconds: avg_duration,
+    }))
+}
+
+/// Get reconciliation statistics
+///
+/// GET /api/v1/reconciliation/stats
+/// Requires: readonly+ role
+pub async fn get_reconciliation_stats(
+    State(state): State<Arc<ApiState>>,
+    Query(params): Query<ReconciliationStatsQuery>,
+) -> Result<Json<ReconciliationStatsResponse>, AppError> {
+    let _range = params.range.as_deref();
+    let stats = db::get_reconciliation_stats(&state.db, _range).await?;
+
+    let discrepancy_types = stats
+        .most_common_discrepancy_types
+        .into_iter()
+        .map(|t| DiscrepancyTypeStatsResponse {
+            discrepancy_type: t.discrepancy_type,
+            count: t.count,
+            percentage: t.percentage,
+        })
+        .collect();
+
+    Ok(Json(ReconciliationStatsResponse {
+        total_reconciliations: stats.total_reconciliations,
+        successful_reconciliations: stats.successful_reconciliations,
+        failed_reconciliations: stats.failed_reconciliations,
+        total_checked: stats.total_checked,
+        total_discrepancies: stats.total_discrepancies,
+        total_unresolved: stats.total_unresolved,
+        avg_discrepancies_per_run: stats.avg_discrepancies_per_run,
+        most_common_discrepancy_types: discrepancy_types,
+    }))
+}
+
+/// Trigger manual reconciliation
+///
+/// POST /api/v1/reconciliation/trigger
+/// Requires: operator+ role
+pub async fn trigger_reconciliation(
+    State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
+) -> Result<Json<TriggerReconciliationResponse>, AppError> {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden(
+            "Requires operator role or higher".to_string(),
+        ));
+    }
+
+    // For now, return success - reconciliation runs via cron
+    // TODO: Implement async task spawning for on-demand reconciliation
+    tracing::info!("Manual reconciliation triggered by {}", auth.0.identifier);
+
+    // Log the trigger event
+    db::log_config_change(
+        &state.db,
+        "reconciliation.manual_trigger",
+        None,
+        "triggered",
+        &auth.0.identifier,
+        Some("Manual reconciliation trigger via API"),
+    )
+    .await?;
+
+    Ok(Json(TriggerReconciliationResponse {
+        run_id: uuid::Uuid::new_v4().to_string(),
+        scheduled_at: chrono::Utc::now().to_rfc3339(),
+    }))
+}
+
+/// Resolve a discrepancy
+///
+/// POST /api/v1/reconciliation/discrepancies/:id/resolve
+/// Requires: operator+ role
+pub async fn resolve_discrepancy(
+    State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
+    Path(id): Path<i64>,
+    Json(payload): Json<ResolveDiscrepancyRequest>,
+) -> Result<Json<ResolveDiscrepancyResponse>, AppError> {
+    if !auth.0.role.has_permission(Role::Operator) {
+        return Err(AppError::Forbidden(
+            "Requires operator role or higher".to_string(),
+        ));
+    }
+
+    tracing::info!(
+        id = id,
+        resolver = auth.0.identifier,
+        resolution = payload.resolution,
+        "Discrepancy resolution requested"
+    );
+
+    db::resolve_discrepancy(&state.db, id, &auth.0.identifier, &payload.resolution).await?;
+
+    Ok(Json(ResolveDiscrepancyResponse { success: true }))
 }

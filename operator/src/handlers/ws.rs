@@ -9,14 +9,16 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        State, Query,
     },
-    response::Response,
+    http::StatusCode,
+    response::{Response, IntoResponse},
 };
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -24,12 +26,18 @@ use tokio::sync::broadcast;
 pub struct WsState {
     /// Broadcast channel for sending updates to all clients
     pub tx: broadcast::Sender<WsEvent>,
+    /// API keys for authentication (key -> role)
+    pub api_keys: HashMap<String, crate::middleware::Role>,
+    /// JWT secret for token validation
+    pub jwt_secret: String,
+    /// Whether to allow anonymous readonly access
+    pub allow_anonymous_readonly: bool,
 }
 
 impl WsState {
-    pub fn new() -> Self {
+    pub fn new(api_keys: HashMap<String, crate::middleware::Role>, jwt_secret: String, allow_anonymous_readonly: bool) -> Self {
         let (tx, _) = broadcast::channel(100);
-        Self { tx }
+        Self { tx, api_keys, jwt_secret, allow_anonymous_readonly }
     }
 
     /// Broadcast an event to all connected clients
@@ -37,12 +45,52 @@ impl WsState {
         // Ignore send errors (no receivers)
         let _ = self.tx.send(event);
     }
+
+    /// Authenticate a token (either API key or JWT)
+    pub async fn authenticate(&self, token: &str) -> Option<crate::middleware::AuthenticatedUser> {
+        // Try API key first
+        if let Some(role) = self.api_keys.get(token) {
+            return Some(crate::middleware::AuthenticatedUser {
+                identifier: format!("api_key:{}", token),
+                role: *role,
+            });
+        }
+
+        // Try JWT - decode inline
+        use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+
+        #[derive(Debug, serde::Deserialize)]
+        struct JwtClaims {
+            sub: String,
+            role: String,
+        }
+
+        let validation = Validation::new(Algorithm::HS256);
+        match decode::<JwtClaims>(
+            token,
+            &DecodingKey::from_secret(self.jwt_secret.as_bytes()),
+            &validation,
+        ) {
+            Ok(token_data) => {
+                if let Ok(role) = token_data.claims.role.parse::<crate::middleware::Role>() {
+                    return Some(crate::middleware::AuthenticatedUser {
+                        identifier: token_data.claims.sub,
+                        role,
+                    });
+                }
+            }
+            Err(_) => {
+                // Not a valid JWT
+            }
+        }
+
+        None
+    }
 }
 
-impl Default for WsState {
-    fn default() -> Self {
-        Self::new()
-    }
+#[derive(Debug, Deserialize)]
+pub struct WsQueryParams {
+    pub token: Option<String>,
 }
 
 /// Events that can be sent over WebSocket
@@ -109,19 +157,63 @@ pub struct AlertData {
     pub message: String,
 }
 
-/// WebSocket upgrade handler
+/// WebSocket upgrade handler with authentication
 ///
-/// GET /ws
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<WsState>>) -> Response {
-    ws.on_upgrade(|socket| handle_socket(socket, state))
+/// GET /ws?token=<api_key_or_jwt>
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<WsState>>,
+    Query(params): Query<WsQueryParams>,
+) -> Response {
+    // Authenticate from query parameter (WebSocket can't send custom headers in browser)
+    let token = match params.token {
+        Some(t) if !t.is_empty() => t,
+        _ => {
+            // No token provided - check if anonymous readonly is allowed
+            if state.allow_anonymous_readonly {
+                tracing::info!("WebSocket connection allowed (anonymous readonly)");
+                return ws.on_upgrade(|socket| handle_socket(socket, state, Some("anonymous".to_string())));
+            }
+            tracing::warn!("WebSocket connection rejected: no token provided");
+            // Return a 401 Unauthorized response instead of upgrading
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+
+    tracing::debug!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection attempt");
+
+    // Validate token asynchronously
+    match state.authenticate(&token).await {
+        Some(user) => {
+            tracing::info!(identifier = %user.identifier, role = %user.role, "WebSocket connection authenticated");
+            ws.on_upgrade(move |socket| handle_socket(socket, state, Some(user.identifier)))
+        }
+        None => {
+            tracing::warn!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection rejected: invalid token");
+            // Return a 401 Unauthorized response instead of upgrading and closing
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+    }
 }
 
 /// Handle individual WebSocket connection
-async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
+async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: Option<String>) {
+    // If no identifier, close the connection immediately
+    let user_id = match user_identifier {
+        Some(id) => id,
+        None => {
+            tracing::warn!("WebSocket closed: no valid authentication");
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
     let (mut sender, mut receiver) = socket.split();
 
     // Subscribe to broadcast channel
     let mut rx = state.tx.subscribe();
+
+    tracing::debug!(user = %user_id, "WebSocket connection established");
 
     // Task to send events to client
     let send_task = tokio::spawn(async move {
@@ -169,7 +261,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>) {
         }
     }
 
-    tracing::debug!("WebSocket connection closed");
+    tracing::debug!(user = %user_id, "WebSocket connection closed");
 }
 
 #[cfg(test)]
