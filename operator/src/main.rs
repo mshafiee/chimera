@@ -30,13 +30,14 @@ use chimera_operator::engine::{
 };
 use chimera_operator::handlers::{
     disable_wallet_monitoring, enable_wallet_monitoring, export_trades, get_config,
-    get_cost_metrics, get_monitoring_status, get_performance_metrics, get_position,
-    get_strategy_performance, get_wallet, health_check, health_simple, helius_webhook_handler,
-    list_config_audit, list_dead_letter_queue, list_positions, list_trades, list_wallets,
-    reset_circuit_breaker, roster_merge, roster_validate, trip_circuit_breaker, update_config,
+    get_cost_metrics, get_health_check_details, get_monitoring_status, get_performance_metrics,
+    get_position, get_rate_limit_status, get_resources, get_secrets, get_strategy_performance,
+    get_wallet, health_check, health_simple, helius_webhook_handler, list_config_audit,
+    list_dead_letter_queue, list_positions, list_trades, list_wallets, reset_circuit_breaker,
+    roster_merge, roster_validate, trip_circuit_breaker, update_config,
     update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet, wallet_auth,
-    webhook_handler, ws_handler, ApiState, AppState, RosterState, WalletAuthState, WebhookState,
-    WsState,
+    webhook_handler, ws_handler, ApiState, AppState, OperationsState, RosterState,
+    WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
 use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
@@ -1070,6 +1071,14 @@ async fn main() -> anyhow::Result<()> {
         metrics: metrics_state.clone(),
     });
 
+    // Create operations state
+    let operations_state = Arc::new(OperationsState {
+        db: db_pool.clone(),
+        engine: Some(Arc::new(_engine_handle.clone())),
+        circuit_breaker: circuit_breaker.clone(),
+        price_cache: price_cache.clone(),
+    });
+
     // Create auth state
     // Load API keys and admin wallets from config
     let mut api_keys_map = std::collections::HashMap::new();
@@ -1142,6 +1151,14 @@ async fn main() -> anyhow::Result<()> {
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
         .with_state(api_state.clone());
+
+    // Build operations API routes (use OperationsState)
+    let operations_routes = Router::new()
+        .route("/operations/resources", get(get_resources))
+        .route("/operations/secrets", get(get_secrets))
+        .route("/operations/rate-limit", get(get_rate_limit_status))
+        .route("/operations/health-checks", get(get_health_check_details))
+        .with_state(operations_state.clone());
 
     // Build protected API routes (auth required — includes reads that expose sensitive config)
     let protected_api_routes = Router::new()
@@ -1499,6 +1516,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", health_routes)
         .nest("/api/v1", public_api_routes)
         .nest("/api/v1", protected_api_routes)
+        .nest("/api/v1", operations_routes)
         .nest("/api/v1", webhook_routes)
         .nest("/api/v1", roster_routes)
         .nest("/api/v1", auth_routes)

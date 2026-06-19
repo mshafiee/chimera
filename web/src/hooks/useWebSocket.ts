@@ -11,6 +11,7 @@ interface UseWebSocketOptions {
   url?: string
   reconnectInterval?: number
   maxReconnectAttempts?: number
+  apiKey?: string // Add API key option for WebSocket auth
 }
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
@@ -19,47 +20,86 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
     url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/api/v1/ws`,
     reconnectInterval = 3000,
     maxReconnectAttempts = 10,
+    apiKey: customApiKey = 'dev-admin-key', // Default API key for development
   } = options
 
   const [isConnected, setIsConnected] = useState(false)
+  const [isConnecting, setIsConnecting] = useState(false)
   const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null)
+  const [connectionError, setConnectionError] = useState<string | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectAttempts = useRef(0)
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const queryClient = useQueryClient()
 
   const connect = useCallback(() => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
       return
     }
 
+    // Clear any existing reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
+
+    setIsConnecting(true)
+    setConnectionError(null)
+
     try {
-      // Add auth token as query parameter for WebSocket authentication
-      const wsUrl = user?.token ? `${url}?token=${user.token}` : url
+      // Use API key for WebSocket authentication instead of JWT token
+      // The backend expects simple API keys for WebSocket connections
+      const wsUrl = `${url}?token=${customApiKey}`
       const ws = new WebSocket(wsUrl)
 
+      // Set a timeout to detect failed connections
+      const connectionTimeout = setTimeout(() => {
+        if (ws.readyState !== WebSocket.OPEN) {
+          console.warn('[WebSocket] Connection timeout - closing')
+          setConnectionError('Connection timeout')
+          setIsConnecting(false)
+          ws.close()
+        }
+      }, 5000) // 5 second timeout
+
       ws.onopen = () => {
+        clearTimeout(connectionTimeout)
         console.log('[WebSocket] Connected')
         setIsConnected(true)
+        setIsConnecting(false)
+        setConnectionError(null)
         reconnectAttempts.current = 0
       }
 
       ws.onclose = (event) => {
+        clearTimeout(connectionTimeout)
         console.log('[WebSocket] Disconnected:', event.code, event.reason)
         setIsConnected(false)
+        setIsConnecting(false)
         wsRef.current = null
 
-        // Attempt reconnect if not a normal closure
-        if (event.code !== 1000 && reconnectAttempts.current < maxReconnectAttempts) {
+        // Attempt reconnect if not a normal closure and not explicitly closed by client
+        if (event.code !== 1000 && event.code !== 1005 && reconnectAttempts.current < maxReconnectAttempts) {
           reconnectAttempts.current++
+          const backoffDelay = reconnectInterval * Math.min(reconnectAttempts.current, 5) // Exponential backoff
           console.log(
-            `[WebSocket] Reconnecting in ${reconnectInterval}ms (attempt ${reconnectAttempts.current})`
+            `[WebSocket] Reconnecting in ${backoffDelay}ms (attempt ${reconnectAttempts.current}/${maxReconnectAttempts})`
           )
-          setTimeout(connect, reconnectInterval)
+          setConnectionError(`Disconnected - reconnecting in ${(backoffDelay/1000).toFixed(0)}s`)
+
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connect()
+          }, backoffDelay)
+        } else if (reconnectAttempts.current >= maxReconnectAttempts) {
+          setConnectionError('Max reconnection attempts reached')
         }
       }
 
       ws.onerror = (error) => {
+        clearTimeout(connectionTimeout)
         console.error('[WebSocket] Error:', error)
+        setConnectionError('Connection error')
+        // Don't immediately reconnect on error, let the onclose handle it
       }
 
       ws.onmessage = (event) => {
@@ -96,10 +136,19 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
   }, [url, reconnectInterval, maxReconnectAttempts, queryClient])
 
   const disconnect = useCallback(() => {
+    // Clear any reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current)
+      reconnectTimeoutRef.current = null
+    }
+
     if (wsRef.current) {
       wsRef.current.close(1000, 'Client disconnect')
       wsRef.current = null
       setIsConnected(false)
+      setIsConnecting(false)
+      setConnectionError(null)
+      reconnectAttempts.current = 0
     }
   }, [])
 
@@ -121,6 +170,8 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
   return {
     isConnected,
+    isConnecting,
+    connectionError,
     lastMessage,
     connect,
     disconnect,
