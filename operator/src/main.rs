@@ -1135,6 +1135,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics/database-performance", get(chimera_operator::handlers::get_database_performance))
         .route("/metrics/request-rate", get(chimera_operator::handlers::get_request_rate))
         .route("/metrics/rpc-latency", get(chimera_operator::handlers::get_rpc_latency))
+        .route("/risk/portfolio", get(chimera_operator::handlers::get_portfolio_risk))
+        .route("/risk/stop-loss", get(chimera_operator::handlers::get_stop_loss_metrics))
+        .route("/risk/profit-target", get(chimera_operator::handlers::get_profit_target_metrics))
+        .route("/risk/position-size", get(chimera_operator::handlers::get_position_size_analysis))
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
         .with_state(api_state.clone());
