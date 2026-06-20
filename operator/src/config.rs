@@ -697,6 +697,70 @@ pub struct MonitoringConfig {
     /// Enable automatic wallet demotion based on copy performance
     #[serde(default = "default_auto_demote_wallets")]
     pub auto_demote_wallets: bool,
+    /// Webhook lifecycle management configuration
+    #[serde(default)]
+    pub webhook_lifecycle: Option<WebhookLifecycleConfig>,
+}
+
+/// Webhook lifecycle management configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookLifecycleConfig {
+    /// Enable automatic webhook registration (default: true)
+    #[serde(default = "default_auto_webhook_register")]
+    pub auto_register_enabled: bool,
+    /// Enable automatic webhook cleanup (default: true)
+    #[serde(default = "default_auto_webhook_cleanup")]
+    pub auto_cleanup_enabled: bool,
+    /// Health check interval in seconds (default: 3600 = 1 hour)
+    #[serde(default = "default_webhook_health_interval")]
+    pub health_check_interval_secs: u64,
+    /// Stale webhook threshold in days (default: 7)
+    #[serde(default = "default_stale_webhook_threshold")]
+    pub stale_threshold_days: u32,
+    /// Maximum registration retries (default: 3)
+    #[serde(default = "default_max_registration_retries")]
+    pub max_registration_retries: u32,
+    /// Enable Helius dashboard reconciliation on startup (default: true)
+    #[serde(default = "default_helius_reconciliation_enabled")]
+    pub helius_reconciliation_enabled: bool,
+    /// Delete orphaned webhooks during reconciliation (default: true)
+    #[serde(default = "default_helius_delete_orphaned")]
+    pub helius_delete_orphaned: bool,
+    /// Dry-run mode - log only, don't delete (default: false)
+    #[serde(default = "default_helius_dry_run")]
+    pub helius_dry_run: bool,
+}
+
+fn default_auto_webhook_register() -> bool {
+    true
+}
+
+fn default_auto_webhook_cleanup() -> bool {
+    true
+}
+
+fn default_webhook_health_interval() -> u64 {
+    3600 // 1 hour
+}
+
+fn default_stale_webhook_threshold() -> u32 {
+    7 // 7 days
+}
+
+fn default_max_registration_retries() -> u32 {
+    3
+}
+
+fn default_helius_reconciliation_enabled() -> bool {
+    true
+}
+
+fn default_helius_delete_orphaned() -> bool {
+    true
+}
+
+fn default_helius_dry_run() -> bool {
+    false
 }
 
 fn default_true() -> bool {
@@ -750,6 +814,7 @@ impl Default for MonitoringConfig {
             rpc_poll_rate_limit: default_rpc_poll_rate_limit(),
             max_active_wallets: default_max_active_wallets(),
             auto_demote_wallets: default_auto_demote_wallets(),
+            webhook_lifecycle: None,
         }
     }
 }

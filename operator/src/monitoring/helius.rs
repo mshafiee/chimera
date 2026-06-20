@@ -108,6 +108,60 @@ pub struct HeliusMetrics {
     pub failed_requests: u64,
 }
 
+/// Webhook update request structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookUpdate {
+    #[serde(rename = "webhookURL")]
+    pub webhook_url: Option<String>,
+    #[serde(rename = "transactionTypes")]
+    pub transaction_types: Option<Vec<String>>,
+    #[serde(rename = "accountAddresses")]
+    pub account_addresses: Option<Vec<String>>,
+    #[serde(rename = "authHeader")]
+    pub auth_header: Option<serde_json::Value>,
+}
+
+/// Webhook toggle request structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookToggle {
+    #[serde(rename = "isActive")]
+    pub is_active: bool,
+}
+
+/// Helius webhook details from API
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeliusWebhook {
+    #[serde(rename = "webhookID")]
+    pub webhook_id: String,
+    #[serde(rename = "webhookURL")]
+    pub webhook_url: String,
+    #[serde(rename = "walletAddresses")]
+    pub wallet_addresses: Vec<String>,
+    #[serde(rename = "transactionTypes")]
+    pub transaction_types: Vec<String>,
+}
+
+/// Webhook reconciliation result for profitability assessment
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WebhookReconciliationResult {
+    pub total_helius_webhooks: usize,
+    pub eligible_wallets: usize,
+    pub ineligible_wallets: usize,
+    pub deleted_webhooks: usize,
+    pub failed_deletions: usize,
+    pub duration_ms: u64,
+    pub details: Vec<WebhookReconciliationDetail>,
+}
+
+/// Individual webhook reconciliation detail
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WebhookReconciliationDetail {
+    pub webhook_id: String,
+    pub wallet_address: String,
+    pub kept: bool,
+    pub reason: String,
+}
+
 impl HeliusClient {
     pub fn new(api_key: String) -> Result<Self> {
         Ok(Self {
@@ -414,6 +468,207 @@ impl HeliusClient {
                 Ok(webhooks)
             }
         }, 5).await
+    }
+
+    /// Get specific webhook by ID (GET endpoint)
+    pub async fn get_webhook(&self, webhook_id: &str) -> Result<serde_json::Value> {
+        let url = format!(
+            "{}/webhooks/{}?api-key={}",
+            self.base_url, webhook_id, self.api_key
+        );
+        let client = self.client.clone();
+
+        retry_with_backoff(|| {
+            let url = url.clone();
+            let client = client.clone();
+            async move {
+                let response = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .context("Failed to get webhook")?;
+
+                if !response.status().is_success() {
+                    let status = response.status().as_u16();
+                    let error_text = response.text().await.unwrap_or_default();
+                    return Err(anyhow!("HTTP error: {}", status)
+                        .context(format!("Failed to get webhook: {}", error_text)));
+                }
+
+                let webhook: serde_json::Value = response
+                    .json()
+                    .await
+                    .context("Failed to parse webhook response")?;
+
+                Ok(webhook)
+            }
+        }, 5).await
+    }
+
+    /// Get specific webhook by ID with typed return
+    pub async fn get_webhook_typed(&self, webhook_id: &str) -> Result<HeliusWebhook> {
+        let url = format!(
+            "{}/webhooks/{}?api-key={}",
+            self.base_url, webhook_id, self.api_key
+        );
+        let client = self.client.clone();
+
+        retry_with_backoff(|| {
+            let url = url.clone();
+            let client = client.clone();
+            async move {
+                let response = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .context("Failed to get webhook")?;
+
+                if !response.status().is_success() {
+                    let status = response.status().as_u16();
+                    let error_text = response.text().await.unwrap_or_default();
+                    return Err(anyhow!("HTTP error: {}", status)
+                        .context(format!("Failed to get webhook: {}", error_text)));
+                }
+
+                let webhook: HeliusWebhook = response
+                    .json()
+                    .await
+                    .context("Failed to parse webhook response")?;
+
+                Ok(webhook)
+            }
+        }, 5).await
+    }
+
+    /// List all webhooks with typed return
+    pub async fn list_webhooks_typed(&self) -> Result<Vec<HeliusWebhook>> {
+        let url = format!("{}/webhooks?api-key={}", self.base_url, self.api_key);
+        let client = self.client.clone();
+
+        retry_with_backoff(|| {
+            let url = url.clone();
+            let client = client.clone();
+            async move {
+                let response = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .context("Failed to list webhooks")?;
+
+                if !response.status().is_success() {
+                    let status = response.status().as_u16();
+                    let error_text = response.text().await.unwrap_or_default();
+                    return Err(anyhow!("HTTP error: {}", status)
+                        .context(format!("Failed to list webhooks: {}", error_text)));
+                }
+
+                let webhooks: Vec<HeliusWebhook> = response
+                    .json()
+                    .await
+                    .context("Failed to parse webhooks response")?;
+
+                Ok(webhooks)
+            }
+        }, 5).await
+    }
+
+    /// Update an existing webhook configuration (PUT endpoint)
+    ///
+    /// Use this to update webhook URL without losing the webhook ID,
+    /// or to modify transaction types and monitored addresses.
+    pub async fn update_webhook(&self, webhook_id: &str, update: WebhookUpdate) -> Result<()> {
+        let url = format!(
+            "{}/webhooks/{}?api-key={}",
+            self.base_url, webhook_id, self.api_key
+        );
+        let client = self.client.clone();
+
+        retry_with_backoff(|| {
+            let url = url.clone();
+            let client = client.clone();
+            let update = update.clone();
+            async move {
+                let response = client
+                    .put(&url)
+                    .json(&update)
+                    .send()
+                    .await
+                    .context("Failed to update webhook")?;
+
+                if !response.status().is_success() {
+                    let status = response.status().as_u16();
+                    let error_text = response.text().await.unwrap_or_default();
+                    return Err(anyhow!("HTTP error: {}", status)
+                        .context(format!("Webhook update failed: {}", error_text)));
+                }
+
+                Ok(())
+            }
+        }, 5).await
+    }
+
+    /// Toggle webhook enabled/disabled without deletion (PATCH endpoint)
+    ///
+    /// Use this to temporarily suspend webhook delivery without
+    /// losing the webhook configuration.
+    pub async fn toggle_webhook(&self, webhook_id: &str, enabled: bool) -> Result<()> {
+        let url = format!(
+            "{}/webhooks/{}/toggle?api-key={}",
+            self.base_url, webhook_id, self.api_key
+        );
+        let client = self.client.clone();
+        let toggle = WebhookToggle { is_active: enabled };
+
+        retry_with_backoff(|| {
+            let url = url.clone();
+            let client = client.clone();
+            let toggle = toggle.clone();
+            async move {
+                let response = client
+                    .patch(&url)
+                    .json(&toggle)
+                    .send()
+                    .await
+                    .context("Failed to toggle webhook")?;
+
+                if !response.status().is_success() {
+                    let status = response.status().as_u16();
+                    let error_text = response.text().await.unwrap_or_default();
+                    return Err(anyhow!("HTTP error: {}", status)
+                        .context(format!("Webhook toggle failed: {}", error_text)));
+                }
+
+                Ok(())
+            }
+        }, 5).await
+    }
+
+    /// Bulk update webhook URLs for multiple webhooks
+    pub async fn bulk_update_webhook_urls(
+        &self,
+        updates: Vec<(String, String)>, // (webhook_id, new_url)
+        rate_limiter: Arc<crate::monitoring::rate_limiter::RateLimiter>,
+    ) -> Result<Vec<(String, Result<()>)>> {
+        let mut results = Vec::new();
+
+        for (webhook_id, new_url) in updates {
+            rate_limiter
+                .acquire_standard(crate::monitoring::rate_limiter::RequestPriority::Polling)
+                .await;
+
+            let result = self
+                .update_webhook(&webhook_id, WebhookUpdate {
+                    webhook_url: Some(new_url.clone()),
+                    transaction_types: None,
+                    account_addresses: None,
+                    auth_header: None,
+                })
+                .await;
+
+            results.push((webhook_id, result));
+        }
+
+        Ok(results)
     }
 }
 

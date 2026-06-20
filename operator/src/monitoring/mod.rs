@@ -12,6 +12,8 @@ pub mod rpc_polling;
 pub mod signal_aggregator;
 pub mod transaction_parser;
 pub mod wallet_performance;
+pub mod webhook_health_task;
+pub mod webhook_lifecycle;
 
 pub use exit_detector::ExitDetector;
 pub use helius::HeliusClient;
@@ -21,6 +23,8 @@ pub use rate_limiter::{RateLimitMetrics, RateLimiter, RequestPriority};
 pub use rpc_polling::RpcPollingState;
 pub use signal_aggregator::SignalAggregator;
 pub use wallet_performance::WalletPerformanceTracker;
+pub use webhook_health_task::{reconcile_helius_webhooks_async, start_webhook_health_task, run_startup_webhook_check, StartupWebhookResult, WebhookHealthConfig};
+pub use webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;

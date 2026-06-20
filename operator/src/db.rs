@@ -2395,6 +2395,7 @@ pub struct WalletDetail {
     pub promoted_at: Option<String>,
     pub ttl_expires_at: Option<String>,
     pub notes: Option<String>,
+    pub archetype: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -2425,6 +2426,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WalletDetail {
             promoted_at: row.try_get("promoted_at")?,
             ttl_expires_at: row.try_get("ttl_expires_at")?,
             notes: row.try_get("notes")?,
+            archetype: row.try_get("archetype").ok(), // Use .ok() for backward compatibility
             created_at: row.try_get("created_at")?,
             updated_at: row.try_get("updated_at")?,
         })
@@ -2444,7 +2446,7 @@ pub async fn get_wallets(
                        win_rate, max_drawdown_30d, avg_trade_size_sol,
                        avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                        last_trade_at,
-                       promoted_at, ttl_expires_at, notes, created_at, updated_at
+                       promoted_at, ttl_expires_at, notes, archetype, created_at, updated_at
                 FROM wallets
                 WHERE status = ?
                 ORDER BY wqs_score DESC NULLS LAST
@@ -2462,7 +2464,7 @@ pub async fn get_wallets(
                        win_rate, max_drawdown_30d, avg_trade_size_sol,
                        avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                        last_trade_at,
-                       promoted_at, ttl_expires_at, notes, created_at, updated_at
+                       promoted_at, ttl_expires_at, notes, archetype, created_at, updated_at
                 FROM wallets
                 ORDER BY wqs_score DESC NULLS LAST
                 LIMIT 1000
@@ -2730,6 +2732,14 @@ pub struct WalletMonitoring {
     pub monitoring_enabled: i32,
     pub created_at: String,
     pub updated_at: String,
+    // Webhook lifecycle fields
+    pub webhook_status: Option<String>,
+    pub webhook_registered_at: Option<String>,
+    pub webhook_last_health_check: Option<String>,
+    pub webhook_health_status: Option<String>,
+    pub registration_attempts: i32,
+    pub last_registration_error: Option<String>,
+    pub last_updated_url: Option<String>,
 }
 
 /// Update wallet monitoring last transaction signature
@@ -2810,6 +2820,621 @@ pub async fn get_wallet_monitoring_by_address(
     .await?;
 
     Ok(result)
+}
+
+// =============================================================================
+// WEBHOOK LIFECYCLE MANAGEMENT
+// =============================================================================
+
+/// Get wallets that need webhook registration (ACTIVE but no webhook)
+pub async fn get_wallets_needing_webhook_registration(pool: &DbPool) -> AppResult<Vec<String>> {
+    let wallets = sqlx::query_scalar(
+        r#"
+        SELECT w.address
+        FROM wallets w
+        LEFT JOIN wallet_monitoring wm ON w.address = wm.wallet_address
+        WHERE w.status = 'ACTIVE'
+        AND (wm.helius_webhook_id IS NULL OR wm.helius_webhook_id = '')
+        AND w.address IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(wallets)
+}
+
+/// Get stale webhook wallets for cleanup (inactive for threshold days)
+pub async fn get_stale_webhook_wallets(pool: &DbPool, threshold_days: u32) -> AppResult<Vec<String>> {
+    let threshold_timestamp = chrono::Utc::now() - chrono::Duration::days(threshold_days as i64);
+
+    let wallets = sqlx::query_scalar(
+        r#"
+        SELECT wallet_address
+        FROM wallet_monitoring
+        WHERE webhook_status = 'active'
+        AND (webhook_last_health_check IS NULL OR webhook_last_health_check < ?)
+        AND helius_webhook_id IS NOT NULL
+        "#,
+    )
+    .bind(threshold_timestamp.format("%Y-%m-%d %H:%M:%S").to_string())
+    .fetch_all(pool)
+    .await?;
+
+    Ok(wallets)
+}
+
+/// Get all wallet monitoring records for webhook reconciliation
+pub async fn get_all_wallet_monitoring(pool: &DbPool) -> AppResult<Vec<WalletMonitoring>> {
+    let records = sqlx::query_as(
+        r#"
+        SELECT
+            wallet_address,
+            helius_webhook_id,
+            rpc_polling_active,
+            last_transaction_signature,
+            last_monitored_at,
+            monitoring_enabled,
+            webhook_status,
+            webhook_registered_at,
+            webhook_last_health_check,
+            webhook_health_status,
+            registration_attempts,
+            last_registration_error,
+            last_updated_url,
+            created_at,
+            updated_at
+        FROM wallet_monitoring
+        WHERE wallet_address IS NOT NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(records)
+}
+
+/// Update webhook health status with timestamp
+pub async fn update_webhook_health_status(
+    pool: &DbPool,
+    wallet_address: &str,
+    health_status: &str,
+    webhook_id: Option<&str>,
+) -> AppResult<()> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        UPDATE wallet_monitoring
+        SET webhook_health_status = ?,
+            webhook_last_health_check = CURRENT_TIMESTAMP,
+            webhook_status = CASE
+                WHEN ? = 'healthy' THEN 'active'
+                WHEN ? = 'unhealthy' THEN 'paused'
+                ELSE webhook_status
+            END
+        WHERE wallet_address = ?
+        "#,
+    )
+    .bind(health_status)
+    .bind(health_status)
+    .bind(health_status)
+    .bind(wallet_address)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    if let Some(webhook_id) = webhook_id {
+        info!(
+            wallet = %wallet_address,
+            webhook_id = %webhook_id,
+            status = %health_status,
+            "Updated webhook health status"
+        );
+    }
+
+    Ok(())
+}
+
+/// Update webhook status (active, paused, failed, orphaned)
+pub async fn update_webhook_status(
+    pool: &DbPool,
+    wallet_address: &str,
+    webhook_status: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE wallet_monitoring
+        SET webhook_status = ?
+        WHERE wallet_address = ?
+        "#,
+    )
+    .bind(webhook_status)
+    .bind(wallet_address)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Update webhook URL in database (after bulk URL update)
+pub async fn update_webhook_url(
+    pool: &DbPool,
+    wallet_address: &str,
+    new_url: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE wallet_monitoring
+        SET last_updated_url = ?
+        WHERE wallet_address = ?
+        "#,
+    )
+    .bind(new_url)
+    .bind(wallet_address)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Log webhook lifecycle event with comprehensive tracking
+pub async fn log_webhook_lifecycle_event(
+    pool: &DbPool,
+    wallet_address: &str,
+    action: &str,
+    status: &str,
+    webhook_id: Option<&str>,
+    details: Option<&str>,
+    error_message: Option<&str>,
+    duration_ms: Option<i32>,
+) -> AppResult<()> {
+    // Non-blocking insert - returns success even if audit logging fails
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO webhook_lifecycle_audit
+        (wallet_address, action, status, webhook_id, details, error_message, duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(wallet_address)
+    .bind(action)
+    .bind(status)
+    .bind(webhook_id)
+    .bind(details)
+    .bind(error_message)
+    .bind(duration_ms)
+    .execute(pool)
+    .await;
+
+    Ok(())
+}
+
+/// Increment webhook registration attempts with error tracking
+pub async fn increment_webhook_registration_attempts(
+    pool: &DbPool,
+    wallet_address: &str,
+    error: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        UPDATE wallet_monitoring
+        SET registration_attempts = registration_attempts + 1,
+            last_registration_error = ?,
+            webhook_status = CASE
+                WHEN registration_attempts >= 2 THEN 'failed'
+                ELSE webhook_status
+            END
+        WHERE wallet_address = ?
+        "#,
+    )
+    .bind(error)
+    .bind(wallet_address)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get webhook configuration for change detection
+pub async fn get_webhook_configuration(pool: &DbPool, key: &str) -> AppResult<Option<String>> {
+    let result = sqlx::query_scalar(
+        r#"
+        SELECT config_value FROM webhook_configuration WHERE config_key = ?
+        "#,
+    )
+    .bind(key)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(result)
+}
+
+/// Update webhook configuration with audit trail
+pub async fn update_webhook_configuration(
+    pool: &DbPool,
+    key: &str,
+    value: &str,
+    updated_by: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        r#"
+        INSERT OR REPLACE INTO webhook_configuration
+        (config_key, config_value, last_updated_at, updated_by)
+        VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .bind(updated_by)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Get orphaned webhooks (exist in Helius but not in our database)
+pub async fn get_orphaned_webhooks(
+    pool: &DbPool,
+    helius_webhook_ids: Vec<String>,
+) -> AppResult<Vec<String>> {
+    if helius_webhook_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query = format!(
+        r#"
+        SELECT helius_webhook_id
+        FROM ({})
+        WHERE helius_webhook_id NOT IN (
+            SELECT helius_webhook_id
+            FROM wallet_monitoring
+            WHERE helius_webhook_id IS NOT NULL
+        )
+        "#,
+        helius_webhook_ids.iter()
+            .map(|id| format!("SELECT '{}' AS helius_webhook_id", id))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ")
+    );
+
+    let orphaned = sqlx::query_scalar(&query)
+        .fetch_all(pool)
+        .await?;
+
+    Ok(orphaned)
+}
+
+/// Get webhook lifecycle audit log with filtering
+pub async fn get_webhook_audit_log(
+    pool: &DbPool,
+    wallet_address: Option<&str>,
+    action: Option<&str>,
+    status: Option<&str>,
+    limit: Option<i64>,
+) -> AppResult<Vec<WebhookAuditLog>> {
+    let mut query = String::from(
+        r#"
+        SELECT
+            id,
+            wallet_address,
+            action,
+            status,
+            webhook_id,
+            details,
+            error_message,
+            duration_ms,
+            created_at
+        FROM webhook_lifecycle_audit
+        WHERE 1=1
+        "#,
+    );
+
+    let mut params = Vec::new();
+
+    if let Some(addr) = wallet_address {
+        query.push_str(&format!(" AND wallet_address = ?"));
+        params.push(addr.to_string());
+    }
+
+    if let Some(act) = action {
+        query.push_str(&format!(" AND action = ?"));
+        params.push(act.to_string());
+    }
+
+    if let Some(st) = status {
+        query.push_str(&format!(" AND status = ?"));
+        params.push(st.to_string());
+    }
+
+    query.push_str(&format!(" ORDER BY created_at DESC"));
+
+    if let Some(lim) = limit {
+        query.push_str(&format!(" LIMIT {}", lim));
+    }
+
+    let mut q = sqlx::query_as(&query);
+    for param in params {
+        q = q.bind(param);
+    }
+
+    let logs = q.fetch_all(pool).await?;
+    Ok(logs)
+}
+
+/// Get webhook statistics for monitoring
+pub async fn get_webhook_stats(pool: &DbPool) -> AppResult<WebhookStats> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallet_monitoring WHERE helius_webhook_id IS NOT NULL"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallet_monitoring WHERE webhook_status = 'active'"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let stale: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM wallet_monitoring
+        WHERE webhook_status = 'active'
+        AND webhook_last_health_check < datetime('now', '-7 days')
+        "#
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let failed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallet_monitoring WHERE webhook_status = 'failed'"
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(WebhookStats {
+        total_webhooks: total as usize,
+        active_webhooks: active as usize,
+        stale_webhooks: stale as usize,
+        failed_registrations: failed as usize,
+    })
+}
+
+/// Webhook monitoring record for comprehensive tracking
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WalletMonitoringExtended {
+    pub wallet_address: String,
+    pub helius_webhook_id: Option<String>,
+    pub monitoring_enabled: i32,
+    pub webhook_status: String,
+    pub webhook_registered_at: Option<String>,
+    pub webhook_last_health_check: Option<String>,
+    pub webhook_health_status: String,
+    pub registration_attempts: i32,
+    pub last_registration_error: Option<String>,
+    pub last_updated_url: Option<String>,
+}
+
+/// Webhook audit log record
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WebhookAuditLog {
+    pub id: i64,
+    pub wallet_address: String,
+    pub action: String,
+    pub status: String,
+    pub webhook_id: Option<String>,
+    pub details: Option<String>,
+    pub error_message: Option<String>,
+    pub duration_ms: Option<i32>,
+    pub created_at: String,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for WebhookAuditLog {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
+        Ok(WebhookAuditLog {
+            id: row.try_get("id")?,
+            wallet_address: row.try_get("wallet_address")?,
+            action: row.try_get("action")?,
+            status: row.try_get("status")?,
+            webhook_id: row.try_get("webhook_id")?,
+            details: row.try_get("details")?,
+            error_message: row.try_get("error_message")?,
+            duration_ms: row.try_get("duration_ms")?,
+            created_at: row.try_get("created_at")?,
+        })
+    }
+}
+
+/// Webhook statistics for monitoring
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WebhookStats {
+    pub total_webhooks: usize,
+    pub active_webhooks: usize,
+    pub stale_webhooks: usize,
+    pub failed_registrations: usize,
+}
+
+/// Wallet webhook eligibility result with profitability assessment
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WebhookEligibility {
+    pub eligible: bool,
+    pub wqs_score: Option<f64>,
+    pub confidence: f64,
+    pub status: String,
+    pub archetype: String,
+    pub trade_count: i64,
+    pub roi_7d: Option<f64>,
+    pub roi_30d: Option<f64>,
+    pub reason: String,
+}
+
+/// Get archetype-specific WQS threshold for webhook eligibility
+///
+/// Different archetypes have different thresholds because:
+/// - WHALE: High conviction, large positions → lower threshold (55.0)
+/// - SWING: Medium-term trades → medium threshold (58.0)
+/// - SCALPER/SNIPER/INSIDER: Short-term, needs higher consistency → higher threshold (65.0)
+fn get_archetype_threshold(archetype: &str) -> f64 {
+    match archetype {
+        "WHALE" => 55.0,
+        "SWING" => 58.0,
+        _ => 65.0,  // SCALPER, SNIPER, INSIDER, UNKNOWN
+    }
+}
+
+/// Calculate confidence score from trade count
+///
+/// Confidence reaches 1.0 at 20+ trades, based on WQS calculation logic.
+/// Formula: confidence = min(1.0, trade_count / 20.0)
+fn calculate_confidence(trade_count: i64) -> f64 {
+    if trade_count >= 20 {
+        1.0
+    } else {
+        trade_count as f64 / 20.0
+    }
+}
+
+/// Check if a wallet is eligible for webhook monitoring based on profitability
+///
+/// This function assesses whether a wallet deserves an active webhook by checking:
+/// 1. Status must be ACTIVE
+/// 2. WQS score must meet archetype-specific threshold
+/// 3. Confidence must be ≥ 0.70
+/// 4. Trade count must be ≥ 5
+///
+/// Returns detailed eligibility information with human-readable reason.
+pub async fn check_wallet_webhook_eligibility(
+    pool: &DbPool,
+    wallet_address: &str,
+) -> AppResult<WebhookEligibility> {
+    let wallet = sqlx::query_as::<_, WalletDetail>(
+        r#"
+        SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
+               win_rate, max_drawdown_30d, avg_trade_size_sol,
+               avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+               last_trade_at,
+               promoted_at, ttl_expires_at, notes, archetype, created_at, updated_at
+        FROM wallets
+        WHERE address = ?
+        "#,
+    )
+    .bind(wallet_address)
+    .fetch_optional(pool)
+    .await?;
+
+    match wallet {
+        Some(w) => {
+            let archetype = w.archetype.as_deref().unwrap_or("UNKNOWN");
+            let trade_count = w.trade_count_30d.unwrap_or(0) as i64;
+            let confidence = calculate_confidence(trade_count);
+            let threshold = get_archetype_threshold(archetype);
+
+            // Check eligibility criteria
+            if w.status != "ACTIVE" {
+                return Ok(WebhookEligibility {
+                    eligible: false,
+                    wqs_score: w.wqs_score,
+                    confidence,
+                    status: w.status.clone(),
+                    archetype: archetype.to_string(),
+                    trade_count,
+                    roi_7d: w.roi_7d,
+                    roi_30d: w.roi_30d,
+                    reason: format!("Wallet status is {} (not ACTIVE)", w.status),
+                });
+            }
+
+            if let Some(wqs) = w.wqs_score {
+                if wqs < threshold {
+                    return Ok(WebhookEligibility {
+                        eligible: false,
+                        wqs_score: Some(wqs),
+                        confidence,
+                        status: w.status,
+                        archetype: archetype.to_string(),
+                        trade_count,
+                        roi_7d: w.roi_7d,
+                        roi_30d: w.roi_30d,
+                        reason: format!(
+                            "WQS {:.1} below threshold {:.1} for archetype {}",
+                            wqs, threshold, archetype
+                        ),
+                    });
+                }
+            } else {
+                return Ok(WebhookEligibility {
+                    eligible: false,
+                    wqs_score: None,
+                    confidence,
+                    status: w.status,
+                    archetype: archetype.to_string(),
+                    trade_count,
+                    roi_7d: w.roi_7d,
+                    roi_30d: w.roi_30d,
+                    reason: "WQS score is NULL".to_string(),
+                });
+            }
+
+            if confidence < 0.70 {
+                return Ok(WebhookEligibility {
+                    eligible: false,
+                    wqs_score: w.wqs_score,
+                    confidence,
+                    status: w.status,
+                    archetype: archetype.to_string(),
+                    trade_count,
+                    roi_7d: w.roi_7d,
+                    roi_30d: w.roi_30d,
+                    reason: format!("Confidence {:.2} below minimum 0.70", confidence),
+                });
+            }
+
+            if trade_count < 5 {
+                return Ok(WebhookEligibility {
+                    eligible: false,
+                    wqs_score: w.wqs_score,
+                    confidence,
+                    status: w.status,
+                    archetype: archetype.to_string(),
+                    trade_count,
+                    roi_7d: w.roi_7d,
+                    roi_30d: w.roi_30d,
+                    reason: format!("Insufficient trades ({} < 5)", trade_count),
+                });
+            }
+
+            // All criteria passed
+            Ok(WebhookEligibility {
+                eligible: true,
+                wqs_score: w.wqs_score,
+                confidence,
+                status: w.status,
+                archetype: archetype.to_string(),
+                trade_count,
+                roi_7d: w.roi_7d,
+                roi_30d: w.roi_30d,
+                reason: format!(
+                    "Eligible: WQS {:.1}, confidence {:.2}, {} trades, archetype {}",
+                    w.wqs_score.unwrap_or(0.0),
+                    confidence,
+                    trade_count,
+                    archetype
+                ),
+            })
+        }
+        None => Ok(WebhookEligibility {
+            eligible: false,
+            wqs_score: None,
+            confidence: 0.0,
+            status: "NOT_FOUND".to_string(),
+            archetype: "UNKNOWN".to_string(),
+            trade_count: 0,
+            roi_7d: None,
+            roi_30d: None,
+            reason: "Wallet not found in database".to_string(),
+        }),
+    }
 }
 
 // =============================================================================

@@ -38,6 +38,9 @@ use chimera_operator::handlers::{
     reset_circuit_breaker, roster_merge, roster_validate, trip_circuit_breaker, trigger_scout_run,
     update_config, update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet,
     wallet_auth, webhook_handler, ws_handler,
+    // Webhook lifecycle handlers
+    get_webhook_stats, bulk_register_webhooks, bulk_cleanup_webhooks, manual_reconcile_webhooks,
+    manual_health_check, get_webhook_audit_log, retry_webhook_registration, toggle_wallet_webhook,
     ApiState, AppState, OperationsState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
@@ -1100,6 +1103,29 @@ async fn main() -> anyhow::Result<()> {
         price_cache: price_cache.clone(),
     });
 
+    // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
+    // into the stop-loss manager's consensus cache. Reuse it here.
+    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
+        config
+            .monitoring
+            .as_ref()
+            .and_then(|m| m.helius_api_key.clone())
+            .unwrap_or_default(),
+    )
+    .map(Arc::new)
+    .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
+    .ok();
+
+    // Create webhook API rate limiter for lifecycle management operations
+    let webhook_api_rate_limiter: Arc<rate_limiter::RateLimiter> = Arc::new(rate_limiter::RateLimiter::new(
+        config
+            .monitoring
+            .as_ref()
+            .map(|m| m.webhook_processing_rate_limit)
+            .unwrap_or(40),
+        1,
+    ));
+
     // Create API state
     let api_state = Arc::new(ApiState {
         db: db_pool.clone(),
@@ -1110,7 +1136,106 @@ async fn main() -> anyhow::Result<()> {
         metrics: metrics_state.clone(),
         signal_aggregator: Some(signal_aggregator.clone()),
         market_regime_detector: Some(market_regime_detector.clone()),
+        helius_client: helius_client.clone(),
+        webhook_rate_limiter: Some(webhook_api_rate_limiter.clone()),
     });
+
+    // Run startup webhook management check
+    // This ensures all ACTIVE wallets have registered webhooks before server starts
+    if config.monitoring.as_ref().map(|m| m.enabled).unwrap_or(false) {
+        if let Some(ref webhook_lifecycle_config) = config.monitoring
+            .as_ref()
+            .and_then(|m| m.webhook_lifecycle.as_ref())
+        {
+            if webhook_lifecycle_config.auto_register_enabled {
+                if let Some(ref startup_helius) = helius_client {
+                    let startup_db = db_pool.clone();
+                    let startup_rate_limiter = webhook_api_rate_limiter.clone();
+                    let startup_webhook_url = config.monitoring
+                        .as_ref()
+                        .and_then(|m| m.helius_webhook_url.clone())
+                        .unwrap_or_default();
+
+                    let startup_config = chimera_operator::monitoring::WebhookHealthConfig {
+                        check_interval_secs: webhook_lifecycle_config.health_check_interval_secs,
+                        stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
+                        webhook_url: startup_webhook_url,
+                    };
+
+                    tracing::info!("Running startup webhook check...");
+
+                    let startup_result = chimera_operator::monitoring::webhook_health_task::run_startup_webhook_check(
+                        startup_db,
+                        startup_helius.clone(),
+                        startup_rate_limiter,
+                        startup_config,
+                    ).await;
+
+                    match startup_result {
+                        Ok(result) => {
+                            tracing::info!(
+                                wallets_checked = result.wallets_checked,
+                                registered = result.registered,
+                                orphaned = result.orphaned,
+                                cleaned_up = result.cleaned_up,
+                                failed = result.failed,
+                                duration_ms = result.duration_ms,
+                                "Startup webhook check completed"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Startup webhook check failed");
+                        }
+                    }
+                } else {
+                    tracing::info!("Helius client not available, skipping startup webhook check");
+                }
+
+                // Spawn Helius webhook reconciliation as background task
+                // This runs asynchronously and does NOT delay startup
+                if webhook_lifecycle_config.helius_reconciliation_enabled {
+                    if let Some(ref reconcile_helius) = helius_client {
+                        let reconcile_db = db_pool.clone();
+                        let reconcile_helius_client = reconcile_helius.clone();
+                        let reconcile_rate_limiter = webhook_api_rate_limiter.clone();
+                        let reconcile_webhook_url = config.monitoring
+                            .as_ref()
+                            .and_then(|m| m.helius_webhook_url.clone())
+                            .unwrap_or_default();
+                        let reconcile_config = chimera_operator::monitoring::WebhookHealthConfig {
+                            check_interval_secs: webhook_lifecycle_config.health_check_interval_secs,
+                            stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
+                            webhook_url: reconcile_webhook_url,
+                        };
+
+                        tokio::spawn(async move {
+                            tracing::info!("Helius webhook reconciliation task started (async)");
+                            match chimera_operator::monitoring::webhook_health_task::reconcile_helius_webhooks_async(
+                                reconcile_db,
+                                reconcile_helius_client,
+                                reconcile_rate_limiter,
+                                reconcile_config,
+                            ).await {
+                                Ok(result) => {
+                                    tracing::info!(
+                                        total = result.total_helius_webhooks,
+                                        eligible = result.eligible_wallets,
+                                        ineligible = result.ineligible_wallets,
+                                        deleted = result.deleted_webhooks,
+                                        duration_ms = result.duration_ms,
+                                        "Helius webhook reconciliation completed"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Helius webhook reconciliation task failed");
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // Create operations state
     let operations_state = Arc::new(OperationsState {
@@ -1209,19 +1334,6 @@ async fn main() -> anyhow::Result<()> {
         ));
 
     // Create webhook state (token_parser already created above)
-
-    // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
-    // into the stop-loss manager's consensus cache. Reuse it here.
-    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
-        config
-            .monitoring
-            .as_ref()
-            .and_then(|m| m.helius_api_key.clone())
-            .unwrap_or_default(),
-    )
-    .map(Arc::new)
-    .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
-    .ok();
 
     // Refresh total_capital_sol from the live wallet balance every 60 seconds so that
     // compounding gains and drawdown recovery propagate into heat capacity without restart.
@@ -1506,6 +1618,21 @@ async fn main() -> anyhow::Result<()> {
                 .route(
                     "/monitoring/wallets/{wallet_address}/disable",
                     post(disable_wallet_monitoring),
+                )
+                // Webhook lifecycle management routes (require operator role)
+                .route("/monitoring/webhooks/stats", get(get_webhook_stats))
+                .route("/monitoring/webhooks/bulk-register", post(bulk_register_webhooks))
+                .route("/monitoring/webhooks/bulk-cleanup", post(bulk_cleanup_webhooks))
+                .route("/monitoring/webhooks/reconcile", post(manual_reconcile_webhooks))
+                .route("/monitoring/webhooks/health-check", post(manual_health_check))
+                .route("/monitoring/webhooks/audit", get(get_webhook_audit_log))
+                .route(
+                    "/monitoring/webhooks/:wallet_address/retry",
+                    post(retry_webhook_registration),
+                )
+                .route(
+                    "/monitoring/webhooks/:wallet_address/toggle",
+                    post(toggle_wallet_webhook),
                 )
                 .with_state(monitoring_state_arc)
                 .layer(axum_middleware::from_fn_with_state(

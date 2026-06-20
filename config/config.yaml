@@ -121,7 +121,7 @@ notifications:
 monitoring:
   enabled: true
   helius_api_key: "609cb910-17a5-4a76-9d1b-2ca9c42f759e"
-  helius_webhook_url: "http://operator:8080/api/v1/monitoring/helius"
+  helius_webhook_url: "https://captivity-grunge-curtsy.ngrok-free.dev/api/v1/monitoring/helius-webhook"
   webhook_registration_batch_size: 10
   webhook_registration_delay_ms: 200
   webhook_processing_rate_limit: 45
@@ -131,6 +131,16 @@ monitoring:
   rpc_poll_rate_limit: 40
   max_active_wallets: 20
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
+  # Webhook lifecycle management
+  webhook_lifecycle:
+    auto_register_enabled: true    # Auto-register webhooks for promoted wallets
+    auto_cleanup_enabled: true     # Auto-cleanup webhooks for demoted wallets
+    health_check_interval_secs: 3600  # Health check every hour
+    stale_threshold_days: 7       # Cleanup webhooks inactive for 7+ days
+    max_registration_retries: 3   # Retry failed registrations up to 3 times
+    helius_reconciliation_enabled: true  # Check Helius dashboard and clean up unprofitable webhooks
+    helius_delete_orphaned: true   # Delete webhooks for wallets that don't meet profitability criteria
+    helius_dry_run: false          # Log only, don't delete (set to true for testing)
 
 # Profit management configuration
 profit_management:
