@@ -59,7 +59,7 @@ export function Operations() {
         {/* Resource Usage - Full Width on Mobile, Half on Desktop */}
         <Card className="lg:col-span-2 hover:shadow-lg transition-shadow duration-200">
           <CardHeader>
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between w-full">
               <div className="flex items-center gap-3">
                 <div className="p-2 bg-surface-light rounded-lg">
                   <Activity className="w-5 h-5 text-profit" />
@@ -70,9 +70,9 @@ export function Operations() {
                 </div>
               </div>
               {!resourcesLoading && resourceUsage && (
-                <div className="text-right ml-4">
-                  <div className="text-xs text-text-muted">Last updated</div>
-                  <div className="text-sm font-mono-numbers">
+                <div className="flex-shrink-0 text-right">
+                  <div className="text-xs text-text-muted mb-1">Last updated</div>
+                  <div className="text-sm font-mono-numbers font-medium">
                     {new Date(resourceUsage.timestamp).toLocaleTimeString()}
                   </div>
                 </div>
