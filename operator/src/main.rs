@@ -32,11 +32,12 @@ use chimera_operator::handlers::{
     disable_wallet_monitoring, enable_wallet_monitoring, export_trades, get_config,
     get_cost_metrics, get_health_check_details, get_market_conditions, get_market_regime,
     get_monitoring_status, get_performance_metrics, get_position, get_rate_limit_status,
-    get_resources, get_secrets, get_strategy_performance, get_wallet, health_check,
-    health_simple, helius_webhook_handler, list_config_audit, list_dead_letter_queue,
-    list_positions, list_trades, list_wallets, reset_circuit_breaker, roster_merge,
-    roster_validate, trip_circuit_breaker, update_config, update_reconciliation_metrics,
-    update_secret_rotation_metrics, update_wallet, wallet_auth, webhook_handler, ws_handler,
+    get_resources, get_secrets, get_scout_metrics, get_scout_status, get_strategy_performance,
+    get_wallet, get_wqs_distribution, health_check, health_simple, helius_webhook_handler,
+    list_config_audit, list_dead_letter_queue, list_positions, list_trades, list_wallets,
+    reset_circuit_breaker, roster_merge, roster_validate, trip_circuit_breaker, trigger_scout_run,
+    update_config, update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet,
+    wallet_auth, webhook_handler, ws_handler,
     ApiState, AppState, OperationsState, RosterState, WalletAuthState, WebhookState, WsState,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
@@ -151,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
     let ws_state = Arc::new(WsState::new(
         api_keys_map.clone(),
         jwt_secret.clone(),
-        false, // Don't allow anonymous readonly for WebSocket
+        true, // Allow anonymous readonly for development dashboard
     ));
 
     // Initialize price cache
@@ -1161,6 +1162,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/signals/sources", get(chimera_operator::handlers::get_signal_sources))
         .route("/market/regime", get(get_market_regime))
         .route("/market/conditions", get(get_market_conditions))
+        // Scout intelligence endpoints
+        .route("/scout/status", get(get_scout_status))
+        .route("/scout/wqs-distribution", get(get_wqs_distribution))
+        .route("/scout/metrics", get(get_scout_metrics))
+        .route("/scout/run", post(trigger_scout_run))
         .with_state(api_state.clone());
 
     // Build operations API routes (use OperationsState)

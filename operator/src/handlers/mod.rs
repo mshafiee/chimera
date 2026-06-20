@@ -8,6 +8,7 @@ mod monitoring;
 mod operations;
 mod risk;
 mod roster;
+mod scout;
 mod signals;
 mod webhook;
 mod ws;
@@ -20,6 +21,7 @@ pub use monitoring::*;
 pub use operations::*;
 pub use risk::*;
 pub use roster::*;
+pub use scout::*;
 pub use signals::*;
 pub use webhook::*;
 pub use ws::{
