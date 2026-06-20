@@ -935,6 +935,11 @@ class GrowthTracker:
             """)
 
             conn.commit()
+            
+            # Enable WAL mode for better concurrency
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            conn.commit()
             conn.close()
 
             logger.debug(f"Growth database initialized: {self._db_path}")
@@ -1121,12 +1126,13 @@ class GrowthTracker:
 
     def _store_growth_snapshot(self, metrics: GrowthMetrics):
         """Store growth metrics snapshot in database."""
+        conn = None
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = sqlite3.connect(self._db_path, timeout=10.0)
             cursor = conn.cursor()
 
             cursor.execute("""
-                INSERT OR REPLACE INTO growth_history VALUES
+                INSERT INTO growth_history VALUES
                 (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 metrics.timestamp,
@@ -1146,9 +1152,13 @@ class GrowthTracker:
             ))
 
             conn.commit()
-            conn.close()
+            logger.debug(f"Successfully stored growth snapshot for capital={metrics.current_capital}")
         except Exception as e:
             logger.debug(f"Failed to store growth snapshot: {e}")
+            logger.debug(f"Exception type: {type(e).__name__}")
+        finally:
+            if conn:
+                conn.close()
 
     def _record_capital_event(
         self,
@@ -1159,11 +1169,12 @@ class GrowthTracker:
         metadata: Dict[str, Any] = None,
     ):
         """Record a significant capital event."""
+        conn = None
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = sqlite3.connect(self._db_path, timeout=10.0)
             cursor = conn.cursor()
 
-            event_id = f"{event_type}_{int(time.time())}"
+            event_id = f"{event_type}_{int(time.time())}_{time.time_ns()}"
             change_amount = new_capital - old_capital
             change_percent = (change_amount / old_capital * 100) if old_capital > 0 else 0.0
 
@@ -1183,13 +1194,14 @@ class GrowthTracker:
             ))
 
             conn.commit()
-            conn.close()
 
             # Check for alert conditions
             self._check_capital_alerts(change_amount, change_percent)
-
         except Exception as e:
             logger.debug(f"Failed to record capital event: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def _check_capital_alerts(self, change_amount: float, change_percent: float):
         """Check if capital change warrants an alert."""
@@ -1225,11 +1237,12 @@ class GrowthTracker:
 
     def _store_alert(self, alert_type: str, severity: str, message: str):
         """Store growth alert."""
+        conn = None
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = sqlite3.connect(self._db_path, timeout=10.0)
             cursor = conn.cursor()
 
-            alert_id = f"{alert_type}_{int(time.time())}"
+            alert_id = f"{alert_type}_{int(time.time())}_{time.time_ns()}"
 
             cursor.execute("""
                 INSERT INTO growth_alerts VALUES (?, ?, ?, ?, ?, ?)
@@ -1243,12 +1256,13 @@ class GrowthTracker:
             ))
 
             conn.commit()
-            conn.close()
 
             logger.warning(f"[Growth Alert] {severity.upper()}: {message}")
-
         except Exception as e:
             logger.debug(f"Failed to store alert: {e}")
+        finally:
+            if conn:
+                conn.close()
 
     def get_current_metrics(self) -> GrowthMetrics:
         """Get current growth metrics."""

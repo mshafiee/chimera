@@ -7,7 +7,7 @@ import { Button } from '../components/ui/Button'
 const DEV_MODE = true
 
 export function Login() {
-  const { isAuthenticated, _hasHydrated, login } = useAuthStore()
+  const { isAuthenticated, login } = useAuthStore()
 
   // Handle dev login
   const handleDevLogin = async () => {

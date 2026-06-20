@@ -1,4 +1,3 @@
-import { MetricCard } from '../ui/MetricCard'
 import type { ResourceUsageResponse } from '../../api'
 import { Cpu, HardDrive, Wifi, Database, TrendingUp, TrendingDown } from 'lucide-react'
 
@@ -13,12 +12,6 @@ const getStatusColor = (status: string) => {
     case 'critical': return 'text-loss'
     default: return 'text-text-muted'
   }
-}
-
-const getStatusIcon = (percentage: number) => {
-  if (percentage < 50) return TrendingUp
-  if (percentage < 80) return null
-  return TrendingDown
 }
 
 export function ResourceUsageCard({ data }: ResourceUsageCardProps) {

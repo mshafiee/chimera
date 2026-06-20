@@ -68,7 +68,7 @@ export function Consensus() {
       </Card>
 
       {/* Recent Consensus Signals */}
-      {consensusData?.recent_signals?.length > 0 && (
+      {consensusData && consensusData.recent_signals && consensusData.recent_signals.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Recent Consensus Signals</CardTitle>
@@ -87,7 +87,7 @@ export function Consensus() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {consensusData.recent_signals.slice(0, 20).map((signal) => (
+                {consensusData && consensusData.recent_signals && consensusData.recent_signals.slice(0, 20).map((signal) => (
                   <TableRow key={signal.signal_id}>
                     <TableCell className="text-sm text-text-muted">
                       {new Date(signal.timestamp).toLocaleString()}
@@ -142,14 +142,14 @@ export function Consensus() {
       )}
 
       {/* Divergence Alerts */}
-      {consensusData?.divergence_alerts?.length > 0 && (
+      {consensusData && consensusData.divergence_alerts && consensusData.divergence_alerts.length > 0 && (
         <Card className="border-loss">
           <CardHeader>
             <CardTitle className="text-loss">Divergence Alerts</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="space-y-3">
-              {consensusData.divergence_alerts.map((alert) => (
+              {consensusData && consensusData.divergence_alerts && consensusData.divergence_alerts.map((alert) => (
                 <div key={alert.alert_id} className="bg-loss/10 border border-loss/30 rounded-lg p-4">
                   <div className="flex items-start justify-between">
                     <div className="flex-1">

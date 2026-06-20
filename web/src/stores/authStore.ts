@@ -103,8 +103,8 @@ export const useAuthStore = create<AuthState>()(
         refreshToken: state.refreshToken,
         lastActivity: state.lastActivity,
       }),
-      onRehydrateStorage: () => (state) => {
-        state?.setState({ _hasHydrated: true })
+      onRehydrateStorage: () => () => {
+        // No-op since we removed _hasHydrated
       },
     }
   )
