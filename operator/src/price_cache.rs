@@ -419,7 +419,7 @@ impl PriceCache {
 
         // Build URL with comma-separated token addresses
         let token_list = tokens.join(",");
-        let url = format!("https://price.jup.ag/v6/price?ids={}", token_list);
+        let url = format!("https://api.jup.ag/price/v3?ids={}", token_list);
 
         tracing::debug!(
             token_count = tokens.len(),
@@ -455,16 +455,16 @@ impl PriceCache {
             if let Some(price_data) = data.data.get(token) {
                 // Jupiter returns price in USD as f64, convert to Decimal for precision
                 // Try from_f64_retain first for best precision, fall back to string conversion
-                let price = match Decimal::from_f64_retain(price_data.price) {
+                let price = match Decimal::from_f64_retain(price_data.usdPrice) {
                     Some(decimal) => decimal,
                     None => {
                         // Fallback: string conversion handles edge cases where from_f64_retain fails
-                        match Decimal::from_str(&price_data.price.to_string()) {
+                        match Decimal::from_str(&price_data.usdPrice.to_string()) {
                             Ok(decimal) => decimal,
                             Err(_) => {
                                 tracing::error!(
                                     token = token,
-                                    price_f64 = price_data.price,
+                                    price_f64 = price_data.usdPrice,
                                     "Failed to convert Jupiter price to Decimal — both from_f64_retain and from_str failed"
                                 );
                                 // Skip this token rather than using a zero price
@@ -618,20 +618,29 @@ pub struct PriceCacheStats {
     pub tracked_tokens: usize,
 }
 
-/// Jupiter Price API response structure
+/// Jupiter Price API V3 response structure
+/// The API returns a flat map where keys are token addresses and values are price data
 #[derive(Debug, serde::Deserialize)]
 struct JupiterPriceResponse {
+    #[serde(flatten)]
     data: std::collections::HashMap<String, JupiterPriceData>,
 }
 
-/// Price data for a single token
+/// Price data for a single token from Jupiter Price API V3
 #[derive(Debug, serde::Deserialize)]
 struct JupiterPriceData {
-    /// Price in USD
-    price: f64,
-    /// Other fields (we only need price)
-    #[serde(flatten)]
-    _other: serde_json::Value,
+    /// Price in USD (field name changed from "price" to "usdPrice" in V3)
+    usdPrice: f64,
+    /// Block height when this price was recorded
+    blockId: u64,
+    /// Token decimals
+    decimals: u8,
+    /// Price change over 24 hours (percentage)
+    priceChange24h: f64,
+    /// When this price was first created
+    createdAt: String,
+    /// Liquidity available for this token
+    liquidity: f64,
 }
 
 /// Price cache errors

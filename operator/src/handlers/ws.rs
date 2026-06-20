@@ -189,9 +189,11 @@ pub async fn ws_handler(
     // Validate token asynchronously
     match state.authenticate(&token).await {
         Some(user) => {
-            tracing::info!(identifier = %user.identifier, role = %user.role, "WebSocket connection authenticated");
-            let response = ws.on_upgrade(move |socket| handle_socket(socket, state, Some(user.identifier)));
-            tracing::info!("WebSocket upgrade successful for user: {}", user.identifier);
+            let identifier = user.identifier.clone();
+            tracing::info!(identifier = %identifier, role = %user.role, "WebSocket connection authenticated");
+            let identifier_for_closure = identifier.clone();
+            let response = ws.on_upgrade(move |socket| handle_socket(socket, state, Some(identifier_for_closure)));
+            tracing::info!("WebSocket upgrade successful for user: {}", identifier);
             response
         }
         None => {
@@ -221,6 +223,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
     // Subscribe to broadcast channel
     let mut rx = state.tx.subscribe();
 
+    let user_id_for_send = user_id.clone();
+    let user_id_for_recv = user_id.clone();
+    let user_id_cleanup = user_id.clone();
     tracing::debug!(user = %user_id, "WebSocket subscribed to broadcast channel");
 
     // Task to send events to client
@@ -230,22 +235,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
             event_count += 1;
             let msg = match serde_json::to_string(&event) {
                 Ok(json) => {
-                    tracing::debug!(user = %user_id, event_count, "Sending WebSocket event");
+                    tracing::debug!(user = %user_id_for_send, event_count, "Sending WebSocket event");
                     Message::Text(json)
                 },
                 Err(e) => {
-                    tracing::error!(error = %e, user = %user_id, "Failed to serialize WebSocket event");
+                    tracing::error!(error = %e, user = %user_id_for_send, "Failed to serialize WebSocket event");
                     continue;
                 }
             };
 
             if sender.send(msg).await.is_err() {
                 // Client disconnected
-                tracing::info!(user = %user_id, events_sent = event_count, "WebSocket client disconnected");
+                tracing::info!(user = %user_id_for_send, events_sent = event_count, "WebSocket client disconnected");
                 break;
             }
         }
-        tracing::debug!(user = %user_id, events_sent = event_count, "WebSocket send task completed");
+        tracing::debug!(user = %user_id_for_send, events_sent = event_count, "WebSocket send task completed");
     });
 
     // Task to receive messages from client (mainly for ping/pong)
@@ -257,44 +262,44 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
                     msg_count += 1;
                     match msg {
                         Message::Ping(data) => {
-                            tracing::debug!(user = %user_id, msg_count, "Received ping, pong will be automatic");
+                            tracing::debug!(user = %user_id_for_recv, msg_count, "Received ping, pong will be automatic");
                             let _ = data;
                         }
                         Message::Close(frame) => {
-                            tracing::info!(user = %user_id, msg_count, close_reason = ?frame.as_ref().map(|f| &f.reason), "Client requested close");
+                            tracing::info!(user = %user_id_for_recv, msg_count, close_reason = ?frame.as_ref().map(|f| &f.reason), "Client requested close");
                             break;
                         }
                         Message::Pong(_) => {
-                            tracing::debug!(user = %user_id, msg_count, "Received pong");
+                            tracing::debug!(user = %user_id_for_recv, msg_count, "Received pong");
                         }
                         Message::Text(text) => {
-                            tracing::debug!(user = %user_id, msg_count, text_len = text.len(), "Received text message");
+                            tracing::debug!(user = %user_id_for_recv, msg_count, text_len = text.len(), "Received text message");
                         }
                         Message::Binary(data) => {
-                            tracing::debug!(user = %user_id, msg_count, data_len = data.len(), "Received binary message");
+                            tracing::debug!(user = %user_id_for_recv, msg_count, data_len = data.len(), "Received binary message");
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, user = %user_id, "WebSocket receive error");
+                    tracing::error!(error = %e, user = %user_id_for_recv, "WebSocket receive error");
                     break;
                 }
             }
         }
-        tracing::debug!(user = %user_id, messages_received = msg_count, "WebSocket receive task completed");
+        tracing::debug!(user = %user_id_for_recv, messages_received = msg_count, "WebSocket receive task completed");
     });
 
     // Wait for either task to finish
     tokio::select! {
         _ = send_task => {
-            tracing::info!(user = %user_id, "WebSocket send task finished first");
+            tracing::info!(user = %user_id_cleanup, "WebSocket send task finished first");
         }
         _ = recv_task => {
-            tracing::info!(user = %user_id, "WebSocket receive task finished first");
+            tracing::info!(user = %user_id_cleanup, "WebSocket receive task finished first");
         }
     }
 
-    tracing::info!(user = %user_id, "WebSocket connection closed and cleanup completed");
+    tracing::info!(user = %user_id_cleanup, "WebSocket connection closed and cleanup completed");
 }
 
 #[cfg(test)]
