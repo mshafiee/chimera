@@ -165,6 +165,8 @@ pub async fn ws_handler(
     State(state): State<Arc<WsState>>,
     Query(params): Query<WsQueryParams>,
 ) -> Response {
+    tracing::info!("WebSocket upgrade request received");
+
     // Authenticate from query parameter (WebSocket can't send custom headers in browser)
     let token = match params.token {
         Some(t) if !t.is_empty() => t,
@@ -172,7 +174,9 @@ pub async fn ws_handler(
             // No token provided - check if anonymous readonly is allowed
             if state.allow_anonymous_readonly {
                 tracing::info!("WebSocket connection allowed (anonymous readonly)");
-                return ws.on_upgrade(|socket| handle_socket(socket, state, Some("anonymous".to_string())));
+                let response = ws.on_upgrade(|socket| handle_socket(socket, state, Some("anonymous".to_string())));
+                tracing::info!("WebSocket upgrade successful (anonymous)");
+                return response;
             }
             tracing::warn!("WebSocket connection rejected: no token provided");
             // Return a 401 Unauthorized response instead of upgrading
@@ -180,13 +184,15 @@ pub async fn ws_handler(
         }
     };
 
-    tracing::debug!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection attempt");
+    tracing::info!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection attempt");
 
     // Validate token asynchronously
     match state.authenticate(&token).await {
         Some(user) => {
             tracing::info!(identifier = %user.identifier, role = %user.role, "WebSocket connection authenticated");
-            ws.on_upgrade(move |socket| handle_socket(socket, state, Some(user.identifier)))
+            let response = ws.on_upgrade(move |socket| handle_socket(socket, state, Some(user.identifier)));
+            tracing::info!("WebSocket upgrade successful for user: {}", user.identifier);
+            response
         }
         None => {
             tracing::warn!(token_prefix = %&token[..token.len().min(8)], "WebSocket connection rejected: invalid token");
@@ -208,60 +214,87 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
         }
     };
 
+    tracing::info!(user = %user_id, "WebSocket connection established, starting message handler");
+
     let (mut sender, mut receiver) = socket.split();
 
     // Subscribe to broadcast channel
     let mut rx = state.tx.subscribe();
 
-    tracing::debug!(user = %user_id, "WebSocket connection established");
+    tracing::debug!(user = %user_id, "WebSocket subscribed to broadcast channel");
 
     // Task to send events to client
     let send_task = tokio::spawn(async move {
+        let mut event_count = 0;
         while let Ok(event) = rx.recv().await {
+            event_count += 1;
             let msg = match serde_json::to_string(&event) {
-                Ok(json) => Message::Text(json),
+                Ok(json) => {
+                    tracing::debug!(user = %user_id, event_count, "Sending WebSocket event");
+                    Message::Text(json)
+                },
                 Err(e) => {
-                    tracing::error!(error = %e, "Failed to serialize WebSocket event");
+                    tracing::error!(error = %e, user = %user_id, "Failed to serialize WebSocket event");
                     continue;
                 }
             };
 
             if sender.send(msg).await.is_err() {
                 // Client disconnected
+                tracing::info!(user = %user_id, events_sent = event_count, "WebSocket client disconnected");
                 break;
             }
         }
+        tracing::debug!(user = %user_id, events_sent = event_count, "WebSocket send task completed");
     });
 
     // Task to receive messages from client (mainly for ping/pong)
     let recv_task = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                Message::Ping(data) => {
-                    tracing::debug!("Received ping");
-                    // Pong is automatically sent by axum
-                    let _ = data;
+        let mut msg_count = 0;
+        while let Some(result) = receiver.next().await {
+            match result {
+                Ok(msg) => {
+                    msg_count += 1;
+                    match msg {
+                        Message::Ping(data) => {
+                            tracing::debug!(user = %user_id, msg_count, "Received ping, pong will be automatic");
+                            let _ = data;
+                        }
+                        Message::Close(frame) => {
+                            tracing::info!(user = %user_id, msg_count, close_reason = ?frame.as_ref().map(|f| &f.reason), "Client requested close");
+                            break;
+                        }
+                        Message::Pong(_) => {
+                            tracing::debug!(user = %user_id, msg_count, "Received pong");
+                        }
+                        Message::Text(text) => {
+                            tracing::debug!(user = %user_id, msg_count, text_len = text.len(), "Received text message");
+                        }
+                        Message::Binary(data) => {
+                            tracing::debug!(user = %user_id, msg_count, data_len = data.len(), "Received binary message");
+                        }
+                    }
                 }
-                Message::Close(_) => {
-                    tracing::debug!("Client requested close");
+                Err(e) => {
+                    tracing::error!(error = %e, user = %user_id, "WebSocket receive error");
                     break;
                 }
-                _ => {}
             }
         }
+        tracing::debug!(user = %user_id, messages_received = msg_count, "WebSocket receive task completed");
     });
 
     // Wait for either task to finish
     tokio::select! {
         _ = send_task => {
-            tracing::debug!("Send task finished");
+            tracing::info!(user = %user_id, "WebSocket send task finished first");
         }
         _ = recv_task => {
-            tracing::debug!("Receive task finished");
+            tracing::info!(user = %user_id, "WebSocket receive task finished first");
         }
     }
 
-    tracing::debug!(user = %user_id, "WebSocket connection closed");
+    tracing::info!(user = %user_id, "WebSocket connection closed and cleanup completed");
 }
 
 #[cfg(test)]

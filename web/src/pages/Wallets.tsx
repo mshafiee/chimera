@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import React from 'react'
 import { Search, ChevronDown, ChevronUp, Download, CheckSquare, Square, ExternalLink } from 'lucide-react'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
@@ -247,8 +248,11 @@ export function Wallets() {
 
             {/* Search - Full width on mobile */}
             <div className="relative w-full sm:w-auto">
+              <label htmlFor="wallet-search" className="sr-only">Search wallets by address</label>
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" />
               <input
+                id="wallet-search"
+                name="wallet-search"
                 type="text"
                 placeholder="Search by address..."
                 value={searchQuery}
@@ -313,8 +317,10 @@ export function Wallets() {
         <div id="advanced-filters" className="hidden bg-surface-light rounded-lg p-4 space-y-3">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div>
-              <label className="block text-sm text-text-muted mb-1">WQS Min</label>
+              <label htmlFor="wqs-min" className="block text-sm text-text-muted mb-1">WQS Min</label>
               <input
+                id="wqs-min"
+                name="wqs-min"
                 type="number"
                 min="0"
                 max="100"
@@ -325,8 +331,10 @@ export function Wallets() {
               />
             </div>
             <div>
-              <label className="block text-sm text-text-muted mb-1">WQS Max</label>
+              <label htmlFor="wqs-max" className="block text-sm text-text-muted mb-1">WQS Max</label>
               <input
+                id="wqs-max"
+                name="wqs-max"
                 type="number"
                 min="0"
                 max="100"
@@ -337,8 +345,10 @@ export function Wallets() {
               />
             </div>
             <div>
-              <label className="block text-sm text-text-muted mb-1">ROI 30d Min (%)</label>
+              <label htmlFor="roi-min" className="block text-sm text-text-muted mb-1">ROI 30d Min (%)</label>
               <input
+                id="roi-min"
+                name="roi-min"
                 type="number"
                 placeholder="0"
                 value={roiMinFilter ?? ''}
@@ -347,8 +357,10 @@ export function Wallets() {
               />
             </div>
             <div>
-              <label className="block text-sm text-text-muted mb-1">Trade Count Min</label>
+              <label htmlFor="trade-count-min" className="block text-sm text-text-muted mb-1">Trade Count Min</label>
               <input
+                id="trade-count-min"
+                name="trade-count-min"
                 type="number"
                 min="0"
                 placeholder="0"
@@ -432,16 +444,17 @@ export function Wallets() {
                 </TableRow>
               </TableHeader>
             <TableBody>
-              {filteredWallets.map((wallet) => (
-                <>
-                  <TableRow
-                    key={wallet.address}
-                    onClick={() =>
-                      setExpandedWallet(
-                        expandedWallet === wallet.address ? null : wallet.address
-                      )
-                    }
-                  >
+              {filteredWallets.map((wallet) => {
+                const isExpanded = expandedWallet === wallet.address
+                return (
+                  <React.Fragment key={wallet.address}>
+                    <TableRow
+                      onClick={() =>
+                        setExpandedWallet(
+                          isExpanded ? null : wallet.address
+                        )
+                      }
+                    >
                     {canModify && (
                       <TableCell>
                         <button
@@ -588,7 +601,7 @@ export function Wallets() {
                   </TableRow>
 
                   {/* Expanded Row */}
-                  {expandedWallet === wallet.address && (
+                  {isExpanded && (
                     <tr className="bg-surface-light">
                       <td colSpan={canModify ? 10 : 9} className="px-2 sm:px-4 py-4 w-full">
                         <div className="w-full max-w-full overflow-x-hidden">
@@ -597,8 +610,9 @@ export function Wallets() {
                       </td>
                     </tr>
                   )}
-                </>
-              ))}
+                  </React.Fragment>
+                )
+              })}
             </TableBody>
           </Table>
           </div>
@@ -623,10 +637,12 @@ export function Wallets() {
             </p>
 
             <div>
-              <label className="block text-sm font-medium text-text mb-2">
+              <label htmlFor="ttl-hours" className="block text-sm font-medium text-text mb-2">
                 TTL (optional)
               </label>
               <select
+                id="ttl-hours"
+                name="ttl-hours"
                 value={ttlHours || ''}
                 onChange={(e) =>
                   setTtlHours(e.target.value ? parseInt(e.target.value) : undefined)

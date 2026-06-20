@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { useAuthStore } from '../stores/authStore'
 
 interface WebSocketMessage {
   type: 'position_update' | 'health_update' | 'alert' | 'trade_update'
@@ -15,7 +14,6 @@ interface UseWebSocketOptions {
 }
 
 export function useWebSocket(options: UseWebSocketOptions = {}) {
-  const { user } = useAuthStore()
   const {
     url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/api/v1/ws`,
     reconnectInterval = 3000,
@@ -34,6 +32,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
+      console.log('[WebSocket] Already connected or connecting, skipping duplicate connection')
       return
     }
 
@@ -50,13 +49,14 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       // Use API key for WebSocket authentication instead of JWT token
       // The backend expects simple API keys for WebSocket connections
       const wsUrl = `${url}?token=${customApiKey}`
+      console.log('[WebSocket] Attempting connection to:', wsUrl.replace(/token=\w+/, 'token=***'))
       const ws = new WebSocket(wsUrl)
 
       // Set a timeout to detect failed connections
       const connectionTimeout = setTimeout(() => {
         if (ws.readyState !== WebSocket.OPEN) {
           console.warn('[WebSocket] Connection timeout - closing')
-          setConnectionError('Connection timeout')
+          setConnectionError('Connection timeout - check if backend server is running')
           setIsConnecting(false)
           ws.close()
         }
@@ -64,7 +64,7 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
 
       ws.onopen = () => {
         clearTimeout(connectionTimeout)
-        console.log('[WebSocket] Connected')
+        console.log('[WebSocket] Connected successfully')
         setIsConnected(true)
         setIsConnecting(false)
         setConnectionError(null)
@@ -91,20 +91,22 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
             connect()
           }, backoffDelay)
         } else if (reconnectAttempts.current >= maxReconnectAttempts) {
-          setConnectionError('Max reconnection attempts reached')
+          console.error('[WebSocket] Max reconnection attempts reached')
+          setConnectionError('Max reconnection attempts reached - backend server may be down')
         }
       }
 
       ws.onerror = (error) => {
         clearTimeout(connectionTimeout)
         console.error('[WebSocket] Error:', error)
-        setConnectionError('Connection error')
+        setConnectionError('Connection error - check browser console for details')
         // Don't immediately reconnect on error, let the onclose handle it
       }
 
       ws.onmessage = (event) => {
         try {
           const message: WebSocketMessage = JSON.parse(event.data)
+          console.log('[WebSocket] Received message:', message.type)
           setLastMessage(message)
 
           // Invalidate relevant queries based on message type
@@ -132,8 +134,9 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
       wsRef.current = ws
     } catch (error) {
       console.error('[WebSocket] Failed to connect:', error)
+      setConnectionError('Failed to establish connection')
     }
-  }, [url, reconnectInterval, maxReconnectAttempts, queryClient])
+  }, [url, reconnectInterval, maxReconnectAttempts, queryClient, customApiKey])
 
   const disconnect = useCallback(() => {
     // Clear any reconnect timeout
