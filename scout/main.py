@@ -307,6 +307,7 @@ async def analyze_wallets(
     min_wqs_candidate: float,
     skip_backtest: bool = False,
     verbose: bool = False,
+    optimizer: Optional['ScoutOptimizer'] = None,
 ) -> Tuple[List[WalletRecord], dict, list]:
     """
     Analyze wallets in parallel and generate roster records.
@@ -1303,6 +1304,7 @@ async def main_async():
         args.min_wqs_candidate,
         skip_backtest=args.skip_backtest,
         verbose=args.verbose,
+        optimizer=optimizer,
     )
 
     analysis_duration = time.time() - analysis_start

@@ -44,6 +44,28 @@ class OptimizedWalletAnalyzer:
         self._optimizer = optimizer
         self._optimization_enabled = optimizer is not None
 
+    @property
+    def _trades_cache(self):
+        """Delegate trades cache access to base analyzer."""
+        return getattr(self._analyzer, '_trades_cache', {})
+
+    def compute_wallet_trade_stats(self, trades):
+        """Delegate trade stats computation to base analyzer."""
+        if hasattr(self._analyzer, 'compute_wallet_trade_stats'):
+            return self._analyzer.compute_wallet_trade_stats(trades)
+        return {}
+
+    def print_parse_health_dashboard(self) -> None:
+        """Delegate print parse health dashboard to base analyzer."""
+        if hasattr(self._analyzer, 'print_parse_health_dashboard'):
+            self._analyzer.print_parse_health_dashboard()
+
+    def is_parse_rate_below_threshold(self) -> bool:
+        """Delegate parse rate threshold check to base analyzer."""
+        if hasattr(self._analyzer, 'is_parse_rate_below_threshold'):
+            return self._analyzer.is_parse_rate_below_threshold()
+        return False
+
     async def get_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
         """
         Get wallet metrics with full optimization stack.
@@ -135,7 +157,7 @@ class OptimizedWalletAnalyzer:
             sortino_ratio=data.get('sortino_ratio'),
         )
 
-    async def get_candidate_wallets(self) -> List[str]:
+    def get_candidate_wallets(self) -> List[str]:
         """Get candidate wallets with credit-aware filtering."""
         candidates = self._analyzer.get_candidate_wallets()
 
