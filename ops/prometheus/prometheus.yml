@@ -18,6 +18,7 @@ alerting:
 # Load alert rules
 rule_files:
   - 'alerts.yml'
+  - 'security-alerts.yml'
 
 # Scrape configurations
 scrape_configs:
@@ -40,3 +41,31 @@ scrape_configs:
     static_configs:
       - targets: ['node-exporter:9100']  # Node exporter service name (if available)
     scrape_interval: 15s
+
+  # HAProxy metrics exporter
+  - job_name: 'haproxy'
+    static_configs:
+      - targets: ['chimera-haproxy-exporter:9101']
+    scrape_interval: 15s
+    metrics_path: '/metrics'
+
+  # Security log parser metrics (for security event processing)
+  - job_name: 'security-log-parser'
+    static_configs:
+      - targets: ['chimera-security-log-parser:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # GeoIP lookup service metrics
+  - job_name: 'geoip-lookup'
+    static_configs:
+      - targets: ['chimera-geoip-lookup:8001']
+    metrics_path: '/metrics'
+    scrape_interval: 60s
+
+  # Attack detection service metrics
+  - job_name: 'attack-detection'
+    static_configs:
+      - targets: ['chimera-attack-detection:8002']
+    metrics_path: '/metrics'
+    scrape_interval: 30s

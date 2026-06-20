@@ -1,0 +1,223 @@
+# HAProxy Integration for Chimera Trading System
+# Adds reverse proxy with SSL/TLS termination and rate limiting
+
+services:
+  # HAProxy Reverse Proxy
+  haproxy:
+    image: haproxy:2.8-alpine
+    container_name: chimera-haproxy
+    restart: unless-stopped
+    ports:
+      - "80:80"      # HTTP (redirect to HTTPS)
+      - "443:443"    # HTTPS
+      - "8404:8404"  # HAProxy statistics dashboard
+    volumes:
+      - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./ssl/certbot/letsencrypt:/etc/haproxy/certs:ro
+      - ./docker/haproxy/errors:/usr/local/etc/haproxy/errors:ro
+      - ./docker/haproxy/policies:/usr/local/etc/haproxy/policies:ro
+      - ./docker/haproxy/geoip:/geoip:ro
+      - ./docker/haproxy/monitoring-auth.cfg:/usr/local/etc/haproxy/monitoring-auth.cfg:ro
+      - ./docker/haproxy/monitoring-routing.conf:/usr/local/etc/haproxy/monitoring-routing.conf:ro
+    environment:
+      # Monitoring authentication environment variables
+      - MONITORING_ADMIN_PASSWORD=${MONITORING_ADMIN_PASSWORD:-changeme_asap}
+      - MONITORING_OPERATOR_PASSWORD=${MONITORING_OPERATOR_PASSWORD:-changeme_asap}
+      - MONITORING_VIEWER_PASSWORD=${MONITORING_VIEWER_PASSWORD:-changeme_asap}
+      # Grafana integration
+      - GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme_asap}
+      - GRAFANA_ANON_KEY=${GRAFANA_ANON_KEY:-changeme_asap}
+    networks:
+      - chimera-network
+    depends_on:
+      - operator
+      - web
+      - prometheus
+      - grafana
+      - alertmanager
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "443"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # Certificate Manager (Certbot)
+  # HAProxy Prometheus Exporter - Security Metrics
+  haproxy-exporter:
+    image: prom/haproxy-exporter:latest
+    container_name: chimera-haproxy-exporter
+    restart: unless-stopped
+    ports:
+      - "9101:9101"
+    command:
+      - "--haproxy.scrape-uri=http://stats:8404/"
+      - "--haproxy.stats_AUTH=admin:CHANGE_ME_PASSWORD"
+      - "--web.listen-address=:9101"
+    networks:
+      - chimera-network
+    depends_on:
+      - haproxy
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # Security Log Parser Service
+  security-log-parser:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.security-parser
+    container_name: chimera-security-log-parser
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - METRICS_PORT=8000
+      - LOG_CHECK_INTERVAL=5
+      - HAPROXY_LOG_PATH=/var/log/haproxy/security.log
+    volumes:
+      - /var/log/haproxy:/var/log/haproxy:ro
+    networks:
+      - chimera-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # Redis Cache for GeoIP Lookups
+  redis:
+    image: redis:7-alpine
+    container_name: chimera-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    networks:
+      - chimera-network
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # GeoIP Lookup Service
+  geoip-lookup:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.geoip
+    container_name: chimera-geoip-lookup
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - METRICS_PORT=8001
+      - GEOIP_CITY_DB_PATH=/geoip/GeoLite2-City.mmdb
+      - GEOIP_COUNTRY_DB_PATH=/geoip/GeoLite2-Country.mmdb
+      - GEOIP_ASN_DB_PATH=/geoip/GeoLite2-ASN.mmdb
+      - MAXMIND_LICENSE_KEY=${MAXMIND_LICENSE_KEY}
+      - CACHE_TTL=3600
+      - POLICY_CACHE_TTL=300
+    volumes:
+      - ./docker/haproxy/geoip:/geoip:ro
+    networks:
+      - chimera-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # GeoIP Database Updater (Scheduled)
+  geoip-updater:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.geoip-updater
+    container_name: chimera-geoip-updater
+    restart: unless-stopped
+    environment:
+      - MAXMIND_LICENSE_KEY=${MAXMIND_LICENSE_KEY}
+      - GEOIP_DB_DIR=/geoip
+      - UPDATE_SCHEDULE=0 3 * * 0  # Weekly: Sundays at 3 AM
+    volumes:
+      - ./docker/haproxy/geoip:/geoip
+    networks:
+      - chimera-network
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # Attack Detection Service
+  attack-detection:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.attack-detection
+    container_name: chimera-attack-detection
+    restart: unless-stopped
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - METRICS_PORT=8002
+      - BRUTE_FORCE_THRESHOLD=100
+      - DDOS_MULTIPLIER=10
+      - WEBHOOK_FLOOD_THRESHOLD=50
+    networks:
+      - chimera-network
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # Policy Manager Service
+  policy-manager:
+    build:
+      context: .
+      dockerfile: tools/Dockerfile.policy-manager
+    container_name: chimera-policy-manager
+    restart: unless-stopped
+    ports:
+      - "8003:8003"
+    environment:
+      - METRICS_PORT=8003
+      - POLICY_DIR=/policies
+      - HAPROXY_CONFIG=/usr/local/etc/haproxy/haproxy.cfg
+      - HAPROXY_RELOAD_COMMAND=docker-compose restart haproxy
+    volumes:
+      - ./docker/haproxy/policies:/policies:ro
+      - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+networks:
+  chimera-network:
+    driver: bridge
+    external: true

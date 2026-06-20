@@ -1,0 +1,200 @@
+# Chimera Access Control Policy Configuration
+# Main policy configuration for geographic and IP-based access control
+
+access_control:
+  # Global access control mode
+  # Options: "off", "whitelist", "blacklist", "mixed"
+  mode: "mixed"
+
+  # Default policy for all endpoints
+  default_policy:
+    # Countries that are explicitly allowed (Germany only)
+    allowed_countries: ["DE"]
+
+    # Countries that are explicitly blocked (all others)
+    blocked_countries: ["CN", "RU", "KP", "IR", "US", "GB", "FR", "JP", "SG", "CH", "CA", "AU", "NL", "SE", "NO", "DK", "FI", "IT", "ES", "PT", "IE", "AT", "BE", "LU"]
+
+    # Cities that are explicitly blocked
+    blocked_cities: ["Moscow", "Beijing", "Shanghai", "Tianjin", "Shenzhen"]
+
+    # IP whitelist mode (false = blacklist mode)
+    ip_whitelist_mode: false
+
+    # Rate limiting overrides for geographic regions
+    regional_rate_limits:
+      trusted_regions: ["DE"]
+      trusted_multiplier: 1.5  # 50% higher rate limit for Germany
+      restricted_regions: ["CN", "RU", "KP", "IR", "US", "GB", "FR", "JP", "SG", "CH", "CA", "AU", "NL", "SE", "NO", "DK", "FI", "IT", "ES", "PT", "IE", "AT", "BE", "LU"]
+      restricted_multiplier: 0.5  # 50% lower rate limit for restricted regions
+
+  # Endpoint-specific policy overrides
+  endpoint_policies:
+    /admin:
+      mode: "strict_whitelist"
+      allowed_ips: ["192.168.1.0/24", "10.0.0.0/8"]
+      require_authentication: true
+      log_all_access: true
+
+    /api/v1/webhook:
+      mode: "geo_restricted"
+      allowed_countries: ["DE"]
+      rate_limit_override: 50  # More restrictive rate limit
+      enhanced_logging: true
+
+    /api/v1/trading:
+      mode: "strict"
+      allowed_countries: ["DE"]
+      blocked_asns: []
+      require_authentication: true
+
+    /api/v1/monitoring/*:
+      mode: "permissive"
+      allowed_countries: ["DE"]
+      enhanced_monitoring: true
+
+    /:
+      mode: "permissive"
+      # No geographic restrictions for public dashboard
+      rate_limit_only: true
+
+    # Monitoring-specific endpoint policies
+    /monitoring:
+      mode: "geo_restricted"
+      allowed_countries: ["DE"]
+      require_authentication: true
+      log_all_access: true
+      enhanced_security: true
+
+    /monitoring/prometheus:
+      mode: "authenticated"
+      allowed_roles: ["admin", "operator", "viewer"]
+      rate_limit_override: 30  # Stricter rate limiting for queries
+      enhanced_logging: true
+      session_required: true
+
+    /monitoring/grafana:
+      mode: "authenticated"
+      allowed_roles: ["admin", "operator", "viewer"]
+      enhanced_security: true
+      websocket_support: true
+      session_timeout: 3600  # 1 hour session
+
+    /monitoring/alerts:
+      mode: "admin_only"
+      allowed_roles: ["admin"]
+      log_all_access: true
+      enhanced_security: true
+      audit_required: true
+
+    # Legacy URL compatibility mappings
+    /metrics:
+      mode: "authenticated"
+      target_path: "/monitoring/prometheus/"
+      allowed_roles: ["admin", "operator", "viewer"]
+      deprecation_notice: true
+
+    /grafana:
+      mode: "authenticated"
+      target_path: "/monitoring/grafana/"
+      allowed_roles: ["admin", "operator", "viewer"]
+      deprecation_notice: true
+
+    /alerts:
+      mode: "admin_only"
+      target_path: "/monitoring/alerts/"
+      allowed_roles: ["admin"]
+      log_all_access: true
+      deprecation_notice: true
+
+    /ws:
+      mode: "geo_restricted"
+      allowed_countries: ["DE"]
+      connection_limits: true
+
+  # Time-based policies (optional)
+  time_based_policies:
+    business_hours_only:
+      enabled: false
+      allowed_hours: [9, 10, 11, 12, 13, 14, 15, 16, 17]  # 9 AM - 5 PM
+      allowed_days: [1, 2, 3, 4, 5]  # Monday - Friday
+      timezone: "America/New_York"
+
+    maintenance_windows:
+      enabled: false
+      blocked_hours: [2, 3, 4]  # 2 AM - 4 AM maintenance window
+      maintenance_days: [6, 0]  # Saturday, Sunday
+
+  # Emergency access settings
+  emergency_access:
+    override_code: "EMERGENCY_OVERRIDE_2026"
+    whitelist_file: "emergency_whitelist.lst"
+    notification_required: true
+
+  # Logging and monitoring
+  logging:
+    access_denials: true
+    access_grants: true
+    policy_evaluations: true
+    geo_enrichment: true
+    audit_trail: true
+
+  # Performance settings
+  performance:
+    cache_ttl: 3600  # 1 hour cache for GeoIP lookups
+    policy_cache_ttl: 300  # 5 minutes cache for policy decisions
+    max_concurrent_evaluations: 1000
+
+  # Role-Based Access Control for Monitoring Tools
+  monitoring_roles:
+    admin:
+      description: "Full access to all monitoring tools"
+      permissions:
+        prometheus: "full"
+        grafana: "full"
+        alertmanager: "full"
+        system: "admin"
+      rate_limits:
+        api_requests: 100
+        query_complexity: "high"
+        concurrent_sessions: 5
+
+    operator:
+      description: "Operational access - read metrics and view dashboards"
+      permissions:
+        prometheus: "read_only"
+        grafana: "view_dashboards"
+        alertmanager: "view_alerts"
+        system: "readonly"
+      rate_limits:
+        api_requests: 50
+        query_complexity: "medium"
+        concurrent_sessions: 3
+
+    viewer:
+      description: "Viewer access - dashboard view only"
+      permissions:
+        prometheus: "none"
+        grafana: "view_dashboards"
+        alertmanager: "none"
+        system: "readonly"
+      rate_limits:
+        api_requests: 20
+        query_complexity: "low"
+        concurrent_sessions: 2
+
+  # Monitoring authentication settings
+  monitoring_auth:
+    method: "basic_auth"  # Options: basic_auth, admin_wallet, oauth2
+    password_rotation_days: 90
+    session_timeout_minutes: 60
+    max_failed_attempts: 5
+    lockout_duration_minutes: 15
+
+# Policy metadata
+metadata:
+  version: "2.0.0"
+  last_updated: "2026-06-20"
+  updated_by: "admin@chimera"
+  compliance: ["OFAC", "GDPR"]
+  review_frequency: "quarterly"
+  notes: "Germany-only access policy implemented - all other countries blocked"

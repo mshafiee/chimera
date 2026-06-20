@@ -1,0 +1,35 @@
+FROM python:3.11-slim
+
+LABEL maintainer="Chimera Team"
+LABEL description="GeoIP lookup service with MaxMind GeoLite2 integration"
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY tools/geoip-requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r geoip-requirements.txt
+
+# Copy GeoIP lookup service
+COPY tools/geoip-lookup.py .
+
+# Create directory for GeoIP databases
+RUN mkdir -p /geoip
+
+# Expose metrics port
+EXPOSE 8001
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"
+
+# Run the GeoIP lookup service
+CMD ["python", "geoip-lookup.py"]

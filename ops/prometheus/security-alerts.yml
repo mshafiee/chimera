@@ -1,0 +1,243 @@
+groups:
+  - name: chimera_security_critical
+    interval: 30s
+    rules:
+      # DDoS Attack Detection Alerts
+      - alert: DDoSAttackDetected
+        expr: |
+          (
+            rate(haproxy_frontend_connections_total[1m]) > 10000
+            or
+            sum(rate(chimera_ddos_attacks_total[1m])) > 1
+          )
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+          attack_type: ddos
+        annotations:
+          summary: "DDoS attack detected - traffic spike >10k connections/sec"
+          description: "Possible DDoS attack detected. Current connection rate: {{ $value | humanize }} connections/sec"
+
+      - alert: HighDDoSTrafficSpike
+        expr: rate(haproxy_frontend_connections_total[1m]) > 50000
+        for: 30s
+        labels:
+          severity: critical
+          component: security
+          attack_type: massive_ddos
+        annotations:
+          summary: "Massive DDoS attack detected - >50k connections/sec"
+          description: "Massive traffic spike detected. Current rate: {{ $value | humanize }} connections/sec"
+
+      # Brute Force Detection Alerts
+      - alert: BruteForceAttackDetected
+        expr: sum by (source_ip) (rate(chimera_brute_force_attempts_total[1m])) > 100
+        for: 2m
+        labels:
+          severity: critical
+          component: authentication
+          attack_type: brute_force
+        annotations:
+          summary: "Brute force attack detected - >100 auth failures/min from single IP"
+          description: "Brute force attack from IP {{ $labels.source_ip }}. Attempt rate: {{ $value | humanize }} attempts/min"
+
+      - alert: DistributedBruteForceDetected
+        expr: sum(rate(chimera_brute_force_attempts_total[5m])) > 1000
+        for: 5m
+        labels:
+          severity: critical
+          component: authentication
+          attack_type: distributed_brute_force
+        annotations:
+          summary: "Distributed brute force attack detected - >1000 auth failures/min"
+          description: "Distributed brute force attack across multiple IPs. Total rate: {{ $value | humanize }} attempts/min"
+
+      # Webhook Security Alerts
+      - alert: WebhookFloodDetected
+        expr: rate(chimera_haproxy_rate_limit_violations_total{endpoint="/api/v1/webhook"}[1m]) > 50
+        for: 1m
+        labels:
+          severity: critical
+          component: webhook
+          attack_type: webhook_flood
+        annotations:
+          summary: "Webhook flood attack detected - >50 429 responses/sec"
+          description: "Webhook flood attack detected. Rate limit violations: {{ $value | humanize }}/sec"
+
+      - alert: WebhookSignatureSpoofing
+        expr: rate(chimera_webhook_attacks_total{attack_type="signature_spoofing"}[1m]) > 10
+        for: 1m
+        labels:
+          severity: critical
+          component: webhook
+          attack_type: signature_spoofing
+        annotations:
+          summary: "Webhook signature spoofing attempts detected"
+          description: "Multiple webhook signature spoofing attempts detected: {{ $value | humanize }}/sec"
+
+      # Injection Attack Alerts
+      - alert: SQLInjectionAttackDetected
+        expr: rate(chimera_injection_attempts_total{injection_type="sql_injection"}[1m]) > 5
+        for: 1m
+        labels:
+          severity: critical
+          component: security
+          attack_type: sql_injection
+        annotations:
+          summary: "SQL injection attack detected"
+          description: "SQL injection attempts detected: {{ $value | humanize }}/sec from IP {{ $labels.source_ip }}"
+
+      - alert: CommandInjectionAttackDetected
+        expr: rate(chimera_injection_attempts_total{injection_type="command_injection"}[1m]) > 1
+        for: 30s
+        labels:
+          severity: critical
+          component: security
+          attack_type: command_injection
+        annotations:
+          summary: "Command injection attack detected"
+          description: "Command injection attempts detected: {{ $value | humanize }}/sec from IP {{ $labels.source_ip }}"
+
+  - name: chimera_security_warning
+    interval: 60s
+    rules:
+      # Geographic Anomaly Alerts
+      - alert: GeographicAnomalyDetected
+        expr: |
+          abs(
+            rate(chimera_haproxy_security_events_total{geo_country=~"(CN|RU|KP|IR)"}[5m]) -
+            rate(chimera_haproxy_security_events_total{geo_country=~"(CN|RU|KP|IR)"}[1h])
+          ) > 100
+        for: 5m
+        labels:
+          severity: warning
+          component: security
+          attack_type: geographic_anomaly
+        annotations:
+          summary: "Geographic traffic anomaly detected from {{ $labels.geo_country }}"
+          description: "Unusual traffic pattern from {{ $labels.geo_country }}. Delta: {{ $value | humanize }} requests/min"
+
+      - alert: HighRiskCountryAccess
+        expr: sum(rate(chimera_haproxy_security_events_total{geo_country=~"(CN|RU|KP|IR)"}[5m])) > 50
+        for: 10m
+        labels:
+          severity: warning
+          component: security
+          attack_type: high_risk_country
+        annotations:
+          summary: "High traffic from high-risk country detected"
+          description: "Elevated traffic from high-risk countries: {{ $value | humanize }} requests/min"
+
+      # Backend Degradation Alerts
+      - alert: HaproxyBackendDegraded
+        expr: haproxy_server_up < 1
+        for: 2m
+        labels:
+          severity: warning
+          component: infrastructure
+          attack_type: backend_degradation
+        annotations:
+          summary: "HAProxy backend degraded - server unhealthy"
+          description: "Backend server {{ $labels.server }} is unhealthy. Status: {{ $value }}"
+
+      - alert: HighErrorRateDetected
+        expr: |
+          (
+            sum(rate(haproxy_backend_response_errors_total[5m])) /
+            sum(rate(haproxy_backend_http_requests_total[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          component: infrastructure
+          attack_type: high_error_rate
+        annotations:
+          summary: "High error rate detected - >5% error rate"
+          description: "Backend error rate elevated: {{ $value | humanize }}%"
+
+      - alert: ResponseTimeDegradation
+        expr: |
+          histogram_quantile(0.95, rate(haproxy_backend_response_time_seconds_bucket[5m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+          component: performance
+          attack_type: response_time
+        annotations:
+          summary: "Response time degradation detected"
+          description: "95th percentile response time elevated: {{ $value | humanize }}s"
+
+      # Elevated Security Activity
+      - alert: ElevatedSecurityEvents
+        expr: sum(rate(chimera_haproxy_security_events_total[5m])) > 1000
+        for: 5m
+        labels:
+          severity: warning
+          component: security
+          attack_type: elevated_activity
+        annotations:
+          summary: "Elevated security event rate detected"
+          description: "Security event rate elevated: {{ $value | humanize }} events/min"
+
+      # Authentication Failures
+      - alert: HighAuthenticationFailures
+        expr: sum(rate(chimera_haproxy_auth_failures_total[5m])) > 50
+        for: 5m
+        labels:
+          severity: warning
+          component: authentication
+          attack_type: auth_failures
+        annotations:
+          summary: "High authentication failure rate detected"
+          description: "Authentication failure rate elevated: {{ $value | humanize }} failures/min"
+
+  - name: chimera_security_info
+    interval: 5m
+    rules:
+      # System Health Monitoring
+      - alert: SecurityServiceDown
+        expr: up{job=~"(security-log-parser|attack-detection|geoip-lookup)"} == 0
+        for: 2m
+        labels:
+          severity: info
+          component: infrastructure
+          attack_type: service_unavailable
+        annotations:
+          summary: "Security service {{ $labels.job }} is down"
+          description: "Security service {{ $labels.job }} has been down for 2 minutes"
+
+      - alert: GeoIPDatabaseStale
+        expr: chimera_geoip_database_age_hours > 168  # 1 week
+        for: 1h
+        labels:
+          severity: info
+          component: maintenance
+          attack_type: stale_database
+        annotations:
+          summary: "GeoIP database is stale - {{ $value }} hours old"
+          description: "GeoIP {{ $labels.database_type }} database is {{ $value }} hours old. Consider updating."
+
+      # Rate Limit Monitoring
+      - alert: HighRateLimitActivity
+        expr: rate(chimera_haproxy_rate_limit_violations_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: info
+          component: security
+          attack_type: rate_limit_activity
+        annotations:
+          summary: "High rate limit violation activity detected"
+          description: "Rate limit violations occurring at {{ $value | humanize }}/sec"
+
+      # Threat Tracking
+      - alert: ActiveThreatsDetected
+        expr: sum(chimera_active_threats) > 0
+        for: 1m
+        labels:
+          severity: info
+          component: security
+          attack_type: active_threats
+        annotations:
+          summary: "Active security threats detected"
+          description: "Currently {{ $value }} active security threats being tracked"

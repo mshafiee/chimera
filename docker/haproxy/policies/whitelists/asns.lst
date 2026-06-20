@@ -1,0 +1,16 @@
+# ASN Whitelist Configuration
+# Add ASNs, one per line
+# Format: AS{number} or just the number
+# Example: AS13335 or 13335
+
+# Major cloud providers (examples)
+# AS13335  # Cloudflare
+# AS15169  # Google Cloud
+# AS16509  # Amazon AWS
+# AS8075   # Microsoft Azure
+
+# Major ISPs (examples)
+# AS3356   # Level 3
+# AS174    # Cogent
+# AS3257   # GTT
+# AS6453   # Tata Communications

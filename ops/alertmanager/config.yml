@@ -57,6 +57,50 @@ route:
       receiver: 'warning'
       repeat_interval: 6h
 
+    # Security critical alerts - immediate notification
+    - match:
+        severity: critical
+        component: security
+      receiver: 'security-critical'
+      group_wait: 0s
+      repeat_interval: 5m
+      routes:
+        # DDoS attacks - highest priority
+        - match:
+            attack_type: ddos
+          receiver: 'ddos-alerts'
+          continue: true
+        # Webhook attacks
+        - match:
+            attack_type: webhook_flood
+          receiver: 'webhook-security-alerts'
+          continue: true
+        # Brute force attacks
+        - match:
+            attack_type: brute_force
+          receiver: 'auth-security-alerts'
+          continue: true
+        # Injection attacks
+        - match:
+            attack_type: sql_injection
+          receiver: 'injection-attack-alerts'
+
+    # Security warning alerts
+    - match:
+        severity: warning
+        component: security
+      receiver: 'security-warnings'
+      group_wait: 30s
+      repeat_interval: 15m
+
+    # Security info alerts
+    - match:
+        severity: info
+        component: security
+      receiver: 'security-info'
+      group_wait: 5m
+      repeat_interval: 1h
+
 # Receivers
 receivers:
   - name: 'default'
@@ -103,6 +147,113 @@ receivers:
           <b>Description:</b> {{ .Annotations.description }}
           {{ end }}
 
+  # Security critical alerts receiver
+  - name: 'security-critical'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          🚨 <b>CRITICAL SECURITY ALERT</b> 🚨
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          <b>Severity:</b> {{ .Labels.severity }}
+          <b>Attack Type:</b> {{ .Labels.attack_type }}
+          <b>Component:</b> {{ .Labels.component }}
+          <b>Summary:</b> {{ .Annotations.summary }}
+          <b>Description:</b> {{ .Annotations.description }}
+          <b>Time:</b> {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+  # DDoS specific alerts
+  - name: 'ddos-alerts'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          🛡️ <b>DDoS ATTACK DETECTED</b> 🛡️
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          <b>Time:</b> {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+  # Webhook security alerts
+  - name: 'webhook-security-alerts'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          ⚠️ <b>WEBHOOK SECURITY ALERT</b> ⚠️
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          <b>Time:</b> {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+  # Authentication security alerts
+  - name: 'auth-security-alerts'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          🔐 <b>AUTHENTICATION SECURITY ALERT</b> 🔐
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          <b>Time:</b> {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+  # Injection attack alerts
+  - name: 'injection-attack-alerts'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          💉 <b>INJECTION ATTACK DETECTED</b> 💉
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          <b>Source IP:</b> {{ $labels.source_ip }}
+          <b>Time:</b> {{ .StartsAt.Format "2006-01-02 15:04:05" }}
+          {{ end }}
+
+  # Security warning alerts
+  - name: 'security-warnings'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          ⚠️ <b>Security Warning</b> ⚠️
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
+  # Security info alerts
+  - name: 'security-info'
+    telegram_configs:
+      - bot_token: '${TELEGRAM_BOT_TOKEN}'
+        chat_id: '${TELEGRAM_CHAT_ID}'
+        parse_mode: 'HTML'
+        message: |
+          ℹ️ <b>Security Info</b> ℹ️
+          {{ range .Alerts }}
+          <b>{{ .Labels.alertname }}</b>
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+
 # Inhibition rules (suppress alerts when others are firing)
 inhibit_rules:
   # If system is down, don't alert on individual component failures
@@ -112,3 +263,21 @@ inhibit_rules:
     target_match:
       severity: 'warning'
     equal: ['instance']
+
+  # Inhibit warning alerts if critical security alert is firing for same component
+  - source_match:
+      severity: 'critical'
+      component: 'security'
+    target_match:
+      severity: 'warning'
+      component: 'security'
+    equal: ['component', 'attack_type']
+
+  # Inhibit info alerts if warning security alert is firing
+  - source_match:
+      severity: 'warning'
+      component: 'security'
+    target_match:
+      severity: 'info'
+      component: 'security'
+    equal: ['component']

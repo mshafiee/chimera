@@ -1,0 +1,9 @@
+# Country Whitelist Configuration
+# Add ISO 3166-1 alpha-2 country codes, one per line
+# Example: US, GB, DE, FR, etc.
+
+# Germany Only Access Policy
+# Last Updated: 2026-06-20
+# Only Germany (DE) is allowed for access
+
+DE

@@ -1,0 +1,13 @@
+# ASN Blacklist Configuration
+# Add ASNs, one per line
+# Format: AS{number} or just the number
+# These ASNs will be blocked from accessing the system
+
+# Known problematic ASNs (examples)
+# Add actual malicious ASNs here as needed
+
+# ASNs associated with high bot/spam activity
+# AS14928  # Example - replace with actual problematic ASNs
+# AS36492   # Example - replace with actual problematic ASNs
+
+# Note: Use ASN intelligence to identify actual threats

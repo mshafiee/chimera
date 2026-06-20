@@ -1,0 +1,26 @@
+HTTP/1.1 502 Bad Gateway
+Cache-Control: no-cache
+Connection: close
+Content-Type: text/html
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>502 Bad Gateway</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+        .error-container { background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }
+        h1 { color: #e74c3c; font-size: 48px; margin: 0 0 20px 0; }
+        p { color: #333; font-size: 18px; line-height: 1.6; }
+        .info { color: #7f8c8d; font-size: 14px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div class="error-container">
+        <h1>502</h1>
+        <p><strong>Bad Gateway</strong></p>
+        <p>The Chimera server received an invalid response from an upstream server.</p>
+        <div class="info">Chimera Trading System • HAProxy Error Page</div>
+    </div>
+</body>
+</html>

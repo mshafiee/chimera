@@ -1,0 +1,32 @@
+FROM python:3.11-slim
+
+LABEL maintainer="Chimera Team"
+LABEL description="Attack detection service for real-time threat analysis"
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY tools/attack-detection-requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r attack-detection-requirements.txt
+
+# Copy attack detection service
+COPY tools/attack-detection.py .
+
+# Expose metrics port
+EXPOSE 8002
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
+
+# Run the attack detection service
+CMD ["python", "attack-detection.py"]

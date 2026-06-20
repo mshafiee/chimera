@@ -1,0 +1,34 @@
+FROM python:3.11-slim
+
+LABEL maintainer="Chimera Team"
+LABEL description="GeoIP database updater for MaxMind GeoLite2 databases"
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
+COPY tools/geoip-updater-requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r geoip-updater-requirements.txt
+
+# Copy GeoIP updater script
+COPY tools/geoip-updater.py .
+
+# Create directory for GeoIP databases
+RUN mkdir -p /geoip
+
+# Set up cron job
+RUN echo "0 3 * * 0 python /app/geoip-updater.py >> /var/log/geoip-updater.log 2>&1" | crontab -
+
+# Create log file
+RUN touch /var/log/geoip-updater.log
+
+# Run cron in foreground
+CMD crond -f -l 2
