@@ -6,7 +6,7 @@ use axum::{extract::State, Json};
 use chrono::{Duration, Utc};
 use serde::Serialize;
 use std::sync::Arc;
-use sysinfo::System;
+use sysinfo::{Networks, System};
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use crate::db::{ConfigAuditItem, DbPool};
@@ -70,6 +70,10 @@ pub async fn get_resources(State(_state): State<Arc<OperationsState>>) -> Result
     let mut sys = System::new_all();
     sys.refresh_all();
 
+    // Get network data
+    let mut networks = Networks::new_with_refreshed_list();
+    networks.refresh(false); // don't remove not listed interfaces
+
     // CPU metrics
     let cpu_usage = sys.global_cpu_usage();
     let cpu_current = cpu_usage as u64;
@@ -116,12 +120,20 @@ pub async fn get_resources(State(_state): State<Arc<OperationsState>>) -> Result
         MetricStatus::Critical
     };
 
-    // Network metrics (using defaults since sysinfo doesn't provide network stats directly)
-    let bytes_sent = 0;
-    let bytes_received = 0;
-    let packets_sent = 0;
-    let packets_received = 0;
-    let error_rate = 0.0;
+    // Network metrics from sysinfo
+    let mut bytes_sent = 0;
+    let mut bytes_received = 0;
+    let mut packets_sent = 0;
+    let mut packets_received = 0;
+
+    for (_interface_name, data) in &networks {
+        bytes_sent += data.total_transmitted();
+        bytes_received += data.total_received();
+        packets_sent += data.total_packets_transmitted();
+        packets_received += data.total_packets_received();
+    }
+
+    let error_rate = 0.0; // Network error rate would need more detailed monitoring
 
     let response = ResourceUsageResponse {
         cpu: ResourceMetric {

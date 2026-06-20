@@ -68,7 +68,7 @@ export function Consensus() {
       </Card>
 
       {/* Recent Consensus Signals */}
-      {consensusData && consensusData.recent_signals.length > 0 && (
+      {consensusData?.recent_signals?.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Recent Consensus Signals</CardTitle>
@@ -142,7 +142,7 @@ export function Consensus() {
       )}
 
       {/* Divergence Alerts */}
-      {consensusData && consensusData.divergence_alerts.length > 0 && (
+      {consensusData?.divergence_alerts?.length > 0 && (
         <Card className="border-loss">
           <CardHeader>
             <CardTitle className="text-loss">Divergence Alerts</CardTitle>
