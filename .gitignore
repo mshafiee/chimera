@@ -44,3 +44,4 @@ temp/
 /operator/.hypothesis
 /scout/.hypothesis
 /.claude
+.crush.json
