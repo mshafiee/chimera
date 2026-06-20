@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
 interface WebSocketMessage {
-  type: 'position_update' | 'health_update' | 'alert' | 'trade_update'
+  type: 'position_update' | 'health_update' | 'alert' | 'trade_update' | 'webhook_status' | 'webhook_health' | 'webhook_audit'
   data: unknown
 }
 
@@ -120,6 +120,13 @@ export function useWebSocket(options: UseWebSocketOptions = {}) {
             case 'trade_update':
               queryClient.invalidateQueries({ queryKey: ['trades'] })
               queryClient.invalidateQueries({ queryKey: ['positions'] })
+              break
+            case 'webhook_status':
+            case 'webhook_health':
+              queryClient.invalidateQueries({ queryKey: ['webhooks'] })
+              break
+            case 'webhook_audit':
+              queryClient.invalidateQueries({ queryKey: ['webhooks', 'audit'] })
               break
             case 'alert':
               // Could trigger a notification here

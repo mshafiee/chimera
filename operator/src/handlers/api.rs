@@ -45,6 +45,10 @@ pub struct ApiState {
     pub signal_aggregator: Option<Arc<SignalAggregator>>,
     /// Market regime detector for regime analysis
     pub market_regime_detector: Option<Arc<crate::engine::MarketRegimeDetector>>,
+    /// Helius client for webhook operations
+    pub helius_client: Option<Arc<crate::monitoring::HeliusClient>>,
+    /// Webhook rate limiter for API calls
+    pub webhook_rate_limiter: Option<Arc<crate::monitoring::rate_limiter::RateLimiter>>,
 }
 
 // =============================================================================
@@ -262,6 +266,73 @@ pub async fn update_wallet(
                     wqs_score,
                 })
                 .await;
+        }
+
+        // Trigger automatic webhook registration for promoted wallet
+        if config
+            .monitoring
+            .as_ref()
+            .and_then(|m| m.webhook_lifecycle.as_ref())
+            .map(|wl| wl.auto_register_enabled)
+            .unwrap_or(true)
+        {
+            let db_clone = state.db.clone();
+            let helius_client = state.helius_client.clone();
+            let rate_limiter = state.webhook_rate_limiter.clone();
+            let webhook_url = config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.helius_webhook_url.clone())
+                .unwrap_or_default();
+
+            let address_clone = address.clone();
+
+            // Only spawn webhook registration if resources are available
+            if let (Some(helius), Some(limiter)) = (helius_client, rate_limiter) {
+                tokio::spawn(async move {
+                    use crate::monitoring::webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
+
+                    let lifecycle_config = WebhookLifecycleConfig {
+                        auto_register_enabled: true,
+                        auto_cleanup_enabled: true,
+                        health_check_interval_secs: 3600,
+                        stale_threshold_days: 7,
+                        max_registration_retries: 3,
+                        webhook_url: webhook_url.clone(),
+                    };
+
+                    let manager = WebhookLifecycleManager::new(
+                        db_clone,
+                        helius,
+                        limiter,
+                    lifecycle_config,
+                );
+
+                match manager.register_wallet_webhook(&address_clone).await {
+                    Ok(result) if result.success => {
+                        tracing::info!(
+                            wallet = %address_clone,
+                            webhook_id = %result.webhook_id,
+                            "Auto-registered webhook for promoted wallet"
+                        );
+                    }
+                    Ok(result) => {
+                        tracing::warn!(
+                            wallet = %address_clone,
+                            error = ?result.error_message,
+                            "Auto-registration for promoted wallet failed"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            wallet = %address_clone,
+                            error = %e,
+                            "Failed to auto-register webhook for promoted wallet"
+                        );
+                    }
+                }
+            });
+            }
         }
     }
 

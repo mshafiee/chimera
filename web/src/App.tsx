@@ -18,6 +18,7 @@ import { Performance } from './pages/Performance'
 import { Operations } from './pages/Operations'
 import { Consensus } from './pages/Consensus'
 import { WalletMonitoring } from './pages/WalletMonitoring'
+import { Webhooks } from './pages/Webhooks'
 
 function App() {
   return (
@@ -35,6 +36,7 @@ function App() {
         <Route path="dashboard" element={<Dashboard />} />
         <Route path="wallets" element={<Wallets />} />
         <Route path="wallet-monitoring" element={<WalletMonitoring />} />
+        <Route path="webhooks" element={<Webhooks />} />
         <Route path="trades" element={<Trades />} />
         <Route path="incidents" element={<Incidents />} />
         {/* New pages */}

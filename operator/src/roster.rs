@@ -472,6 +472,27 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
     )
     .await?;
 
+    // Trigger automatic webhook registration for newly promoted ACTIVE wallets
+    let newly_promoted: Vec<String> = all_rows
+        .iter()
+        .filter(|r| r.status == "ACTIVE" && r.promoted_at.is_some())
+        .map(|r| r.address.clone())
+        .collect();
+
+    if !newly_promoted.is_empty() {
+        info!(
+            count = newly_promoted.len(),
+            "Triggering webhook registration for newly promoted wallets"
+        );
+
+        // Note: This is a simplified version that doesn't have access to Helius client
+        // The actual webhook registration should be triggered by the API layer or
+        // a monitoring task that has access to the full application state
+        for wallet in &newly_promoted {
+            info!(wallet = %wallet, "Wallet promoted to ACTIVE - webhook registration needed");
+        }
+    }
+
     Ok(MergeResult {
         wallets_merged,
         wallets_removed,

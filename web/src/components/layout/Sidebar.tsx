@@ -15,12 +15,14 @@ import {
   Database,
   Network,
   Radio,
+  GitBranch,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Wallets', href: '/wallets', icon: Wallet },
   { name: 'Wallet Monitoring', href: '/wallet-monitoring', icon: Radio },
+  { name: 'Webhooks', href: '/webhooks', icon: GitBranch },
   { name: 'Trades', href: '/trades', icon: ArrowLeftRight },
   { name: 'Config', href: '/config', icon: Settings },
   { name: 'Incidents', href: '/incidents', icon: AlertTriangle },

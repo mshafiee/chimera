@@ -95,7 +95,7 @@ pub struct ScoutRunResponse {
 // =============================================================================
 
 #[derive(Debug, Deserialize)]
-pub struct TimeRangeQuery {
+pub struct ScoutTimeRangeQuery {
     pub range: Option<String>,
 }
 
@@ -145,7 +145,7 @@ pub async fn get_scout_status(
 /// Get WQS score distribution
 pub async fn get_wqs_distribution(
     State(state): State<Arc<ApiState>>,
-    Query(_params): Query<TimeRangeQuery>,
+    Query(_params): Query<ScoutTimeRangeQuery>,
 ) -> Result<Json<WQSDistributionResponse>, AppError> {
     let distribution = calculate_wqs_distribution(&state.db).await?;
 
@@ -165,7 +165,7 @@ pub async fn get_wqs_distribution(
 /// Get Scout metrics and performance statistics
 pub async fn get_scout_metrics(
     State(state): State<Arc<ApiState>>,
-    Query(_params): Query<TimeRangeQuery>,
+    Query(_params): Query<ScoutTimeRangeQuery>,
 ) -> Result<Json<ScoutMetricsResponse>, AppError> {
     let metrics = calculate_scout_metrics(&state.db).await?;
 

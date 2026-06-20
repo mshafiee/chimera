@@ -628,6 +628,8 @@ struct JupiterPriceResponse {
 
 /// Price data for a single token from Jupiter Price API V3
 #[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+#[allow(non_snake_case)]
 struct JupiterPriceData {
     /// Price in USD (field name changed from "price" to "usdPrice" in V3)
     usdPrice: f64,

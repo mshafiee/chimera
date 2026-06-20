@@ -11,6 +11,7 @@ mod roster;
 mod scout;
 mod signals;
 mod webhook;
+mod webhook_lifecycle;
 mod ws;
 
 pub use api::*;
@@ -24,6 +25,7 @@ pub use roster::*;
 pub use scout::*;
 pub use signals::*;
 pub use webhook::*;
+pub use webhook_lifecycle::*;
 pub use ws::{
     ws_handler, AlertData, HealthUpdateData, PositionUpdateData, TradeUpdateData, WsEvent, WsState,
 };

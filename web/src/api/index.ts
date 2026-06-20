@@ -55,6 +55,16 @@ export {
   useWalletClustering,
   useSignalAggregation,
 } from './consensus'
+export {
+  useWebhookStats,
+  useWebhookAuditLog,
+  useBulkRegisterWebhooks,
+  useBulkCleanupWebhooks,
+  useReconcileWebhooks,
+  useHealthCheckWebhooks,
+  useToggleWebhook,
+  useRetryWebhook,
+} from './webhooks'
 
 // Type exports
 export type {
@@ -119,3 +129,17 @@ export type {
   WalletClusteringResponse,
   SignalAggregationResponse,
 } from './consensus'
+export type {
+  WebhookStats,
+  WebhookAuditLog,
+  BulkOperationResult,
+  BulkOperationItem,
+  ReconciliationResult,
+  HealthCheckResult,
+  WebhookAction,
+  WebhookStatus,
+  BulkRegisterRequest,
+  BulkCleanupRequest,
+  ToggleWebhookRequest,
+  WebhookAuditQuery,
+} from './webhooks'
