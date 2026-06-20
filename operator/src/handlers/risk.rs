@@ -43,6 +43,7 @@ pub struct PortfolioRiskResponse {
     pub concentration: ConcentrationData,
     pub exposure: ExposureData,
     pub drawdown: DrawdownData,
+    pub total_capital_sol: f64,  // Current wallet balance
 }
 
 /// Concentration data (by token and sector)
@@ -744,6 +745,7 @@ pub async fn get_portfolio_risk(
         },
         exposure,
         drawdown,
+        total_capital_sol: total_capital.to_f64().unwrap_or(0.0),
     }))
 }
 

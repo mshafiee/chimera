@@ -33,7 +33,8 @@ use chimera_operator::handlers::{
     get_cost_metrics, get_health_check_details, get_market_conditions, get_market_regime,
     get_monitoring_status, get_performance_metrics, get_position, get_rate_limit_status,
     get_resources, get_secrets, get_scout_metrics, get_scout_status, get_strategy_performance,
-    get_wallet, get_wqs_distribution, health_check, health_simple, helius_webhook_handler,
+    get_wallet, get_wallet_monitoring_states, get_wqs_distribution, health_check, health_simple,
+    helius_webhook_handler,
     list_config_audit, list_dead_letter_queue, list_positions, list_trades, list_wallets,
     reset_circuit_breaker, roster_merge, roster_validate, trip_circuit_breaker, trigger_scout_run,
     update_config, update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet,
@@ -1634,6 +1635,8 @@ async fn main() -> anyhow::Result<()> {
                     "/monitoring/webhooks/:wallet_address/toggle",
                     post(toggle_wallet_webhook),
                 )
+                // Wallet monitoring state (requires readonly+)
+                .route("/monitoring/wallets/states", get(get_wallet_monitoring_states))
                 .with_state(monitoring_state_arc)
                 .layer(axum_middleware::from_fn_with_state(
                     auth_state.clone(),

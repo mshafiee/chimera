@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiClient } from './client'
 
 // Signal Quality Response
@@ -62,55 +63,26 @@ export interface ConsensusSignal {
   quality_score: number
 }
 
-// Mock data for when API is not available
-const mockSignalQuality: SignalQualityResponse = {
-  current_quality_score: 0,
-  quality_distribution: [
-    { range: '0-0.2', count: 0, percentage: 0 },
-    { range: '0.2-0.4', count: 0, percentage: 0 },
-    { range: '0.4-0.6', count: 0, percentage: 0 },
-    { range: '0.6-0.8', count: 0, percentage: 0 },
-    { range: '0.8-1.0', count: 0, percentage: 0 }
-  ],
-  rejection_rate: 0,
-  total_signals: 0,
-  accepted_signals: 0,
-  rejected_signals: 0,
-  average_quality_trend: []
-}
-
-const mockSignalSources: SignalSourceResponse = {
-  sources: [],
-  total_signals: 0
-}
-
-const mockSignalConsensus: SignalConsensusResponse = {
-  consensus_detection_rate: 0,
-  average_clustering: 0,
-  divergence_alerts: [],
-  consensus_signals: []
-}
-
 // Fetch Signal Quality
 export function useSignalQuality(timeRange?: string) {
   return useQuery({
     queryKey: ['signals', 'quality', timeRange],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<SignalQualityResponse>('/signals/quality', {
-          params: timeRange ? { range: timeRange } : undefined,
-        })
-        return response.data
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          console.warn('[Signals API] Quality endpoint not implemented, using mock data')
-          return mockSignalQuality
-        }
-        throw error
-      }
+      const response = await apiClient.get<SignalQualityResponse>('/signals/quality', {
+        params: timeRange ? { range: timeRange } : undefined,
+      })
+      return response.data
     },
     refetchInterval: 30000,
     staleTime: 10000,
+    retry: 3,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Signals API] Failed to fetch signal quality:', error)
+        // Signal quality is critical - show toast notification
+        toast.error('Failed to load signal quality. Please try again later.')
+      },
+    },
   })
 }
 
@@ -119,18 +91,17 @@ export function useSignalSources() {
   return useQuery({
     queryKey: ['signals', 'sources'],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<SignalSourceResponse>('/signals/sources')
-        return response.data
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          console.warn('[Signals API] Sources endpoint not implemented, using mock data')
-          return mockSignalSources
-        }
-        throw error
-      }
+      const response = await apiClient.get<SignalSourceResponse>('/signals/sources')
+      return response.data
     },
     staleTime: 60000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Signals API] Failed to fetch signal sources:', error)
+        // Signal sources are optional - console only
+      },
+    },
   })
 }
 
@@ -139,18 +110,17 @@ export function useSignalConsensus() {
   return useQuery({
     queryKey: ['signals', 'consensus'],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<SignalConsensusResponse>('/signals/consensus')
-        return response.data
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          console.warn('[Signals API] Consensus endpoint not implemented, using mock data')
-          return mockSignalConsensus
-        }
-        throw error
-      }
+      const response = await apiClient.get<SignalConsensusResponse>('/signals/consensus')
+      return response.data
     },
     refetchInterval: 15000,
     staleTime: 5000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Signals API] Failed to fetch signal consensus:', error)
+        // Consensus is optional - console only
+      },
+    },
   })
 }

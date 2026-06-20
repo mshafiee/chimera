@@ -67,6 +67,7 @@ pub struct PositionsQuery {
 pub struct PositionsResponse {
     pub positions: Vec<PositionDetail>,
     pub total: usize,
+    pub total_unrealized_pnl_sol: Option<f64>,  // Sum of unrealized PnL for all active positions
 }
 
 /// List all positions
@@ -80,7 +81,19 @@ pub async fn list_positions(
     let positions = db::get_positions(&state.db, params.state.as_deref()).await?;
     let total = positions.len();
 
-    Ok(Json(PositionsResponse { positions, total }))
+    // Calculate total unrealized PnL from active positions
+    let total_unrealized_pnl_sol: f64 = positions
+        .iter()
+        .filter(|p| p.state == "ACTIVE")
+        .filter_map(|p| p.unrealized_pnl_sol)
+        .map(|p| p.to_f64().unwrap_or(0.0))
+        .sum();
+
+    Ok(Json(PositionsResponse {
+        positions,
+        total,
+        total_unrealized_pnl_sol: Some(total_unrealized_pnl_sol),
+    }))
 }
 
 /// Get a single position by trade_uuid

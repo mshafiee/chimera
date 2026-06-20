@@ -6,6 +6,7 @@ export { useTrades, exportTrades } from './trades'
 export { useConfig, useUpdateConfig, useResetCircuitBreaker, useTripCircuitBreaker } from './config'
 export { useDeadLetterQueue, useConfigAudit } from './incidents'
 export { usePerformanceMetrics, useStrategyPerformance } from './metrics'
+export { useBalanceAndNAV } from './balance'
 
 // New API clients
 export {
@@ -65,6 +66,9 @@ export {
   useToggleWebhook,
   useRetryWebhook,
 } from './webhooks'
+export {
+  useWalletMonitoringStates,
+} from './walletMonitoring'
 
 // Type exports
 export type {
@@ -143,3 +147,7 @@ export type {
   ToggleWebhookRequest,
   WebhookAuditQuery,
 } from './webhooks'
+export type {
+  WalletMonitoringStateResponse,
+  WalletMonitoringStateItem,
+} from './walletMonitoring'

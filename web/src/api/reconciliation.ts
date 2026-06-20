@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiClient } from './client'
 
 // Reconciliation Status Response
@@ -63,54 +64,30 @@ export interface DiscrepancyTypeStats {
   percentage: number
 }
 
-// Mock data for when API is not available
-const mockReconciliationStatus: ReconciliationStatusResponse = {
-  last_reconciliation_at: null,
-  next_reconciliation_at: null,
-  status: 'pending',
-  checked_count: 0,
-  discrepancy_count: 0,
-  unresolved_count: 0,
-  duration_seconds: null,
-  recent_discrepancies: []
-}
-
-const mockReconciliationHistory: ReconciliationHistoryResponse = {
-  runs: [],
-  total_runs: 0,
-  success_rate: 0,
-  avg_duration_seconds: 0
-}
-
-const mockReconciliationStats: ReconciliationStatsResponse = {
-  total_reconciliations: 0,
-  successful_reconciliations: 0,
-  failed_reconciliations: 0,
-  total_checked: 0,
-  total_discrepancies: 0,
-  total_unresolved: 0,
-  avg_discrepancies_per_run: 0,
-  most_common_discrepancy_types: []
-}
-
 // Fetch Reconciliation Status
 export function useReconciliationStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'status'],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<ReconciliationStatusResponse>('/reconciliation/status')
-        return response.data
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          console.warn('[Reconciliation API] Status endpoint not implemented, using mock data')
-          return mockReconciliationStatus
-        }
-        throw error
-      }
+      const response = await apiClient.get<ReconciliationStatusResponse>('/reconciliation/status')
+      return response.data
     },
     refetchInterval,
     staleTime: 5000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Reconciliation API] Failed to fetch status:', error)
+        // Reconciliation requires authentication - handle 401 errors
+        if (error && typeof error === 'object' && 'response' in error) {
+          const err = error as { response?: { status?: number } }
+          if (err.response?.status === 401) {
+            toast.error('Authentication required for reconciliation data')
+          }
+        }
+        // Reconciliation is optional - console only for other errors
+      },
+    },
   })
 }
 
@@ -119,20 +96,26 @@ export function useReconciliationHistory(limit?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'history', limit],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<ReconciliationHistoryResponse>('/reconciliation/history', {
-          params: limit ? { limit } : undefined,
-        })
-        return response.data
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          console.warn('[Reconciliation API] History endpoint not implemented, using mock data')
-          return mockReconciliationHistory
-        }
-        throw error
-      }
+      const response = await apiClient.get<ReconciliationHistoryResponse>('/reconciliation/history', {
+        params: limit ? { limit } : undefined,
+      })
+      return response.data
     },
     staleTime: 60000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Reconciliation API] Failed to fetch history:', error)
+        // Reconciliation requires authentication - handle 401 errors
+        if (error && typeof error === 'object' && 'response' in error) {
+          const err = error as { response?: { status?: number } }
+          if (err.response?.status === 401) {
+            toast.error('Authentication required for reconciliation history')
+          }
+        }
+        // Reconciliation history is optional - console only for other errors
+      },
+    },
   })
 }
 
@@ -141,20 +124,26 @@ export function useReconciliationStats(timeRange?: string) {
   return useQuery({
     queryKey: ['reconciliation', 'stats', timeRange],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<ReconciliationStatsResponse>('/reconciliation/stats', {
-          params: timeRange ? { range: timeRange } : undefined,
-        })
-        return response.data
-      } catch (error: any) {
-        if (error.response?.status === 404) {
-          console.warn('[Reconciliation API] Stats endpoint not implemented, using mock data')
-          return mockReconciliationStats
-        }
-        throw error
-      }
+      const response = await apiClient.get<ReconciliationStatsResponse>('/reconciliation/stats', {
+        params: timeRange ? { range: timeRange } : undefined,
+      })
+      return response.data
     },
     staleTime: 300000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Reconciliation API] Failed to fetch stats:', error)
+        // Reconciliation requires authentication - handle 401 errors
+        if (error && typeof error === 'object' && 'response' in error) {
+          const err = error as { response?: { status?: number } }
+          if (err.response?.status === 401) {
+            toast.error('Authentication required for reconciliation stats')
+          }
+        }
+        // Reconciliation stats is optional - console only for other errors
+      },
+    },
   })
 }
 

@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiClient } from './client'
 
 // Trade Latency Response
@@ -135,6 +136,13 @@ export function useTradeLatency(timeRange?: string) {
     },
     refetchInterval: 30000,
     staleTime: 15000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Performance API] Failed to fetch trade latency:', error)
+        // Trade latency is optional - console only
+      },
+    },
   })
 }
 
@@ -157,6 +165,14 @@ export function useRPCLatency() {
     },
     refetchInterval: 10000,
     staleTime: 5000,
+    retry: 3,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Performance API] Failed to fetch RPC latency:', error)
+        // RPC latency is critical for monitoring - show toast notification
+        toast.error('Failed to load RPC latency metrics. Please try again later.')
+      },
+    },
   })
 }
 
@@ -194,6 +210,14 @@ export function useDatabasePerformance() {
     },
     refetchInterval: 30000,
     staleTime: 10000,
+    retry: 3,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Performance API] Failed to fetch database performance:', error)
+        // Database performance is critical for monitoring - show toast notification
+        toast.error('Failed to load database performance metrics. Please try again later.')
+      },
+    },
   })
 }
 
@@ -224,6 +248,13 @@ export function useRequestRate() {
     },
     refetchInterval: 5000,
     staleTime: 2000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Performance API] Failed to fetch request rate:', error)
+        // Request rate is optional - console only
+      },
+    },
   })
 }
 
@@ -283,5 +314,12 @@ export function useCostAnalysis(timeRange?: string) {
       } as CostAnalysisResponse
     },
     staleTime: 60000,
+    retry: 1,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Performance API] Failed to fetch cost analysis:', error)
+        // Cost analysis is optional - console only
+      },
+    },
   })
 }

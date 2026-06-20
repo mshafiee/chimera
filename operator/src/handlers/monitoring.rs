@@ -438,3 +438,125 @@ pub async fn disable_wallet_monitoring(
 
     StatusCode::OK
 }
+
+/// Wallet monitoring state response
+#[derive(Debug, Serialize)]
+pub struct WalletMonitoringStateResponse {
+    pub wallet_states: Vec<WalletMonitoringStateItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletMonitoringStateItem {
+    pub address: String,
+    pub method: String, // "webhook" or "polling"
+    pub status: String, // "active", "inactive", or "error"
+    pub last_activity: String,
+    pub last_fetch: Option<String>,
+    pub failed_fetches: i32,
+    pub success_rate: f64,
+    pub next_fetch: Option<String>,
+}
+
+/// Get all wallet monitoring states
+/// Requires: readonly+ role
+pub async fn get_wallet_monitoring_states(
+    State(state): State<Arc<MonitoringState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
+) -> Json<WalletMonitoringStateResponse> {
+    // Verify user has at least readonly access
+    if !auth.0.role.has_permission(Role::Readonly) {
+        tracing::warn!("Unauthorized attempt to access wallet monitoring states");
+        return Json(WalletMonitoringStateResponse {
+            wallet_states: vec![],
+        });
+    }
+
+    // Fetch all wallet monitoring records from database
+    let wallet_monitoring_records = match crate::db::get_all_wallet_monitoring(&state.db).await {
+        Ok(records) => records,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to fetch wallet monitoring states");
+            return Json(WalletMonitoringStateResponse {
+                wallet_states: vec![],
+            });
+        }
+    };
+
+    // Transform database records to frontend format
+    let wallet_states: Vec<WalletMonitoringStateItem> = wallet_monitoring_records
+        .into_iter()
+        .map(|wm| {
+            // Determine method: webhook if helius_webhook_id exists, otherwise polling
+            let method = if wm.helius_webhook_id.is_some() && wm.helius_webhook_id.as_ref().unwrap().len() > 0 {
+                "webhook".to_string()
+            } else {
+                "polling".to_string()
+            };
+
+            // Determine status based on monitoring_enabled and webhook_health_status
+            let status = if wm.monitoring_enabled == 0 {
+                "inactive".to_string()
+            } else if wm.webhook_health_status.as_deref() == Some("error") ||
+                     wm.webhook_health_status.as_deref() == Some("unhealthy") ||
+                     wm.webhook_status.as_deref() == Some("failed") {
+                "error".to_string()
+            } else {
+                "active".to_string()
+            };
+
+            // Calculate success rate based on registration attempts
+            // If no attempts, assume 100%, otherwise calculate based on failures
+            let success_rate = if wm.registration_attempts == 0 {
+                100.0
+            } else {
+                let base_rate = 100.0;
+                // Penalize for failed registration attempts
+                let failure_penalty = (wm.last_registration_error.as_ref().is_some() as i32 as f64) * 10.0;
+                (base_rate - failure_penalty).max(0.0)
+            };
+
+            // Use registration_attempts as failed_fetches indicator
+            let failed_fetches = wm.registration_attempts;
+
+            // Set last_activity from last_monitored_at, fallback to created_at
+            let last_activity = wm.last_monitored_at
+                .clone()
+                .or(Some(wm.created_at))
+                .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+            // Set last_fetch to last_monitored_at if available
+            let last_fetch = wm.last_monitored_at.clone();
+
+            // Calculate next_fetch: for webhooks it's null (real-time),
+            // for polling we'll estimate 15 minutes from last activity
+            let next_fetch = if method == "polling" {
+                Some(
+                    chrono::Utc::now()
+                        .checked_add_signed(chrono::Duration::minutes(15))
+                        .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::minutes(15))
+                        .to_rfc3339()
+                )
+            } else {
+                None
+            };
+
+            WalletMonitoringStateItem {
+                address: wm.wallet_address,
+                method,
+                status,
+                last_activity,
+                last_fetch,
+                failed_fetches,
+                success_rate,
+                next_fetch,
+            }
+        })
+        .collect();
+
+    tracing::info!(
+        count = wallet_states.len(),
+        "Fetched wallet monitoring states"
+    );
+
+    Json(WalletMonitoringStateResponse { wallet_states })
+}

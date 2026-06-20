@@ -5,6 +5,7 @@ import type { Position } from '../types'
 interface PositionsResponse {
   positions: Position[]
   total: number
+  total_unrealized_pnl_sol: number | null  // Sum of unrealized PnL for all active positions
 }
 
 export function usePositions(state?: string) {

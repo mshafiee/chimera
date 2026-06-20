@@ -582,8 +582,13 @@ export function Config() {
                   <span>Shield: {shieldPercent}%</span>
                   <span>Spear: {100 - shieldPercent}%</span>
                 </div>
+                <label htmlFor="strategy-allocation-slider" className="sr-only">
+                  Strategy Allocation Slider
+                </label>
                 <input
                   type="range"
+                  id="strategy-allocation-slider"
+                  name="strategy-allocation-slider"
                   min="0"
                   max="100"
                   value={shieldPercent}
@@ -1517,11 +1522,13 @@ export function Config() {
             </div>
           </div>
           <div className="bg-surface-light border border-loss/20 rounded-lg p-3">
-            <label className="block text-sm font-medium text-text mb-2">
+            <label htmlFor="kill-switch-confirm" className="block text-sm font-medium text-text mb-2">
               Type <span className="font-mono font-semibold text-loss">HALT</span> to confirm:
             </label>
             <input
               type="text"
+              id="kill-switch-confirm"
+              name="kill-switch-confirm"
               value={killSwitchConfirm}
               onChange={(e) => setKillSwitchConfirm(e.target.value)}
               className="w-full bg-surface border border-border rounded-lg px-3 py-2 text-text focus:outline-none focus:ring-2 focus:ring-loss font-mono"

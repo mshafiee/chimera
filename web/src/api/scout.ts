@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { apiClient } from './client'
 
 // Scout Status Response
@@ -52,59 +53,24 @@ export interface ScoutMetricsResponse {
   liquidity_validation_rate: number
 }
 
-// Mock data for when API is not available
-const mockScoutStatus: ScoutStatusResponse = {
-  last_run_at: new Date(Date.now() - 3600000).toISOString(),
-  next_run_at: new Date(Date.now() + 1800000).toISOString(),
-  wallets_analyzed: 0,
-  analysis_duration_seconds: 0,
-  status: 'idle',
-  wqs_distribution: [],
-  promotion_queue: [],
-  rejection_queue: []
-}
-
-const mockWQSDistribution: WQSDistributionResponse = {
-  distribution: [
-    { range: '0-20', count: 0, percentage: 0 },
-    { range: '20-40', count: 0, percentage: 0 },
-    { range: '40-60', count: 0, percentage: 0 },
-    { range: '60-80', count: 0, percentage: 0 },
-    { range: '80-100', count: 0, percentage: 0 }
-  ],
-  average_score: 0,
-  median_score: 0,
-  total_wallets: 0
-}
-
-const mockScoutMetrics: ScoutMetricsResponse = {
-  total_analyzed: 0,
-  rug_check_rejections: 0,
-  backtest_success_rate: 0,
-  validation_pass_rate: 0,
-  avg_analysis_time_seconds: 0,
-  liquidity_validation_rate: 0
-}
-
 // Fetch Scout Status
 export function useScoutStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['scout', 'status'],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<ScoutStatusResponse>('/scout/status')
-        return response.data
-      } catch (error: any) {
-        // Return mock data if endpoint not available
-        if (error.response?.status === 404) {
-          console.warn('[Scout API] Status endpoint not implemented, using mock data')
-          return mockScoutStatus
-        }
-        throw error
-      }
+      const response = await apiClient.get<ScoutStatusResponse>('/scout/status')
+      return response.data
     },
     refetchInterval,
     staleTime: 5000,
+    retry: 3,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Scout API] Failed to fetch status:', error)
+        // Scout status is critical - show toast notification
+        toast.error('Failed to load scout status. Please try again later.')
+      },
+    },
   })
 }
 
@@ -113,21 +79,20 @@ export function useWQSDistribution(timeRange?: string) {
   return useQuery({
     queryKey: ['scout', 'wqs-distribution', timeRange],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<WQSDistributionResponse>('/scout/wqs-distribution', {
-          params: timeRange ? { range: timeRange } : undefined,
-        })
-        return response.data
-      } catch (error: any) {
-        // Return mock data if endpoint not available
-        if (error.response?.status === 404) {
-          console.warn('[Scout API] WQS distribution endpoint not implemented, using mock data')
-          return mockWQSDistribution
-        }
-        throw error
-      }
+      const response = await apiClient.get<WQSDistributionResponse>('/scout/wqs-distribution', {
+        params: timeRange ? { range: timeRange } : undefined,
+      })
+      return response.data
     },
     staleTime: 30000,
+    retry: 3,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Scout API] Failed to fetch WQS distribution:', error)
+        // WQS distribution is important - show toast notification
+        toast.error('Failed to load WQS distribution. Please try again later.')
+      },
+    },
   })
 }
 
@@ -136,21 +101,20 @@ export function useScoutMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['scout', 'metrics', timeRange],
     queryFn: async () => {
-      try {
-        const response = await apiClient.get<ScoutMetricsResponse>('/scout/metrics', {
-          params: timeRange ? { range: timeRange } : undefined,
-        })
-        return response.data
-      } catch (error: any) {
-        // Return mock data if endpoint not available
-        if (error.response?.status === 404) {
-          console.warn('[Scout API] Metrics endpoint not implemented, using mock data')
-          return mockScoutMetrics
-        }
-        throw error
-      }
+      const response = await apiClient.get<ScoutMetricsResponse>('/scout/metrics', {
+        params: timeRange ? { range: timeRange } : undefined,
+      })
+      return response.data
     },
     staleTime: 60000,
+    retry: 3,
+    meta: {
+      onError: (error: unknown) => {
+        console.error('[Scout API] Failed to fetch metrics:', error)
+        // Scout metrics are important - show toast notification
+        toast.error('Failed to load scout metrics. Please try again later.')
+      },
+    },
   })
 }
 

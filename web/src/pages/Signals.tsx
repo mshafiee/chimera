@@ -2,6 +2,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { useSignalQuality, useSignalSources, useSignalConsensus } from '../api'
+import type { SignalConsensusItem, SignalDivergenceAlert } from '../api'
 import { SignalQualityChart } from '../components/signals/SignalQualityChart'
 import { SignalSourcesTable } from '../components/signals/SignalSourcesTable'
 import { MetricCard } from '../components/ui/MetricCard'
@@ -14,6 +15,11 @@ export function Signals() {
   const { data: signalQuality, isLoading: qualityLoading } = useSignalQuality(timeRange)
   const { data: signalSources, isLoading: sourcesLoading } = useSignalSources()
   const { data: signalConsensus, isLoading: consensusLoading } = useSignalConsensus()
+
+  // Type guards for proper TypeScript checking
+  const hasSignalQuality = signalQuality !== undefined
+  const hasSignalSources = signalSources !== undefined
+  const hasSignalConsensus = signalConsensus !== undefined
 
   return (
     <div className="space-y-6">
@@ -30,26 +36,26 @@ export function Signals() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
           label="Current Quality Score"
-          value={signalQuality?.current_quality_score?.toFixed(2) || '0.00'}
+          value={hasSignalQuality ? signalQuality.current_quality_score.toFixed(2) : '0.00'}
           loading={qualityLoading}
-          positive={(signalQuality?.current_quality_score || 0) >= 0.7}
+          positive={hasSignalQuality && signalQuality.current_quality_score >= 0.7}
           unit="★"
         />
         <MetricCard
           label="Total Signals"
-          value={signalQuality?.total_signals || 0}
+          value={hasSignalQuality ? signalQuality.total_signals : 0}
           loading={qualityLoading}
         />
         <MetricCard
           label="Accepted"
-          value={signalQuality?.accepted_signals || 0}
+          value={hasSignalQuality ? signalQuality.accepted_signals : 0}
           loading={qualityLoading}
           positive
           icon="✓"
         />
         <MetricCard
           label="Rejected"
-          value={signalQuality?.rejected_signals || 0}
+          value={hasSignalQuality ? signalQuality.rejected_signals : 0}
           loading={qualityLoading}
           positive={false}
           icon="✕"
@@ -80,7 +86,7 @@ export function Signals() {
         <CardContent>
           {sourcesLoading ? (
             <div className="text-center text-text-muted py-8">Loading signal sources...</div>
-          ) : signalSources ? (
+          ) : hasSignalSources ? (
             <SignalSourcesTable sources={signalSources.sources} />
           ) : (
             <div className="text-center text-text-muted py-8">No signal sources available</div>
@@ -93,17 +99,15 @@ export function Signals() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle>Signal Consensus</CardTitle>
-            <Badge variant={(signalConsensus?.consensus_detection_rate ?? 0) > 0.7 ? 'success' : 'warning'}>
-              {signalConsensus?.consensus_detection_rate !== null && signalConsensus?.consensus_detection_rate !== undefined
-                ? `${(signalConsensus.consensus_detection_rate * 100).toFixed(1)}%`
-                : 'N/A'}
+            <Badge variant={hasSignalConsensus && signalConsensus.consensus_detection_rate > 0.7 ? 'success' : 'warning'}>
+              {hasSignalConsensus ? `${(signalConsensus.consensus_detection_rate * 100).toFixed(1)}%` : 'N/A'}
             </Badge>
           </div>
         </CardHeader>
         <CardContent>
           {consensusLoading ? (
             <div className="text-center text-text-muted py-8">Loading consensus data...</div>
-          ) : signalConsensus ? (
+          ) : hasSignalConsensus ? (
             <div className="space-y-6">
               {/* Consensus Metrics */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -141,7 +145,7 @@ export function Signals() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {signalConsensus.consensus_signals.slice(0, 10).map((signal, index) => (
+                      {signalConsensus.consensus_signals.slice(0, 10).map((signal: SignalConsensusItem, index: number) => (
                         <TableRow key={index}>
                           <TableCell>
                             <div className="font-semibold">
@@ -171,7 +175,7 @@ export function Signals() {
                 <div>
                   <h3 className="text-sm font-medium mb-3 text-loss">Divergence Alerts</h3>
                   <div className="space-y-2">
-                    {signalConsensus.divergence_alerts.map((alert, index) => (
+                    {signalConsensus.divergence_alerts.map((alert: SignalDivergenceAlert, index: number) => (
                       <div key={index} className="bg-loss/10 border border-loss/30 rounded-lg p-3">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">

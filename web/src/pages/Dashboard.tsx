@@ -12,7 +12,7 @@ import { useLayoutContext } from '../components/layout/Layout'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { toast } from '../components/ui/Toast'
 import { MetricCard } from '../components/ui/MetricCard'
-import { usePortfolioRisk, useRPCLatency, useCostAnalysis } from '../api'
+import { usePortfolioRisk, useRPCLatency, useCostAnalysis, useBalanceAndNAV } from '../api'
 import { CostBreakdownChart } from '../components/dashboard/CostBreakdownChart'
 import { WalletAttribution } from '../components/dashboard/WalletAttribution'
 
@@ -31,6 +31,9 @@ export function Dashboard() {
   const { data: rpcLatency } = useRPCLatency()
   const { data: costAnalysis } = useCostAnalysis('24h')
   const { data: walletsData } = useWallets()
+
+  // Balance and NAV calculation
+  const { balance, nav, isLoading: balanceLoading } = useBalanceAndNAV()
   
   // Fetch trades for PnL chart (last 30 days)
   const thirtyDaysAgo = useMemo(() => {
@@ -239,16 +242,24 @@ export function Dashboard() {
               />
             </div>
 
-            {/* Balance - shows when wallet is connected */}
+            {/* Balance - shows actual wallet balance */}
             <div className="hidden xs:flex items-center gap-2 text-xs md:text-sm">
               <span className="text-text-muted">Balance:</span>
-              <span className="font-mono-numbers font-semibold text-text-muted">—</span>
+              <span className={`font-mono-numbers font-semibold ${
+                balanceLoading ? 'text-text-muted' : 'text-text'
+              }`}>
+                {balanceLoading ? '...' : `${balance.toFixed(4)} SOL`}
+              </span>
             </div>
 
-            {/* NAV - computed from positions */}
+            {/* NAV - computed from balance and unrealized PnL */}
             <div className="hidden sm:flex items-center gap-2 text-xs md:text-sm">
               <span className="text-text-muted">NAV:</span>
-              <span className="font-mono-numbers font-semibold text-text-muted">—</span>
+              <span className={`font-mono-numbers font-semibold ${
+                balanceLoading ? 'text-text-muted' : 'text-text'
+              }`}>
+                {balanceLoading ? '...' : `${nav.toFixed(4)} SOL`}
+              </span>
             </div>
           </div>
 
