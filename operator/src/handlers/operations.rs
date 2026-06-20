@@ -178,6 +178,7 @@ pub struct SecretRotationResponse {
     pub next_rotation_at: Option<String>,
     pub days_until_due: Option<i64>,
     pub status: RotationStatus,
+    pub is_initialized: bool,  // true if rotation tracking is configured
     pub rotation_history: Vec<RotationEvent>,
 }
 
@@ -188,7 +189,8 @@ pub enum RotationStatus {
     Active,
     DueSoon,
     Overdue,
-    Unknown,
+    NeverRotated,  // Fresh deployment with no rotation history
+    Unknown,       // Error state (data issue)
 }
 
 /// Rotation event
@@ -238,12 +240,15 @@ pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Js
         duration.num_days()
     });
 
-    // Determine status based on days until due
-    let status = match days_until_due {
-        Some(days) if days < 0 => RotationStatus::Overdue,
-        Some(days) if days <= 7 => RotationStatus::DueSoon,
-        Some(_) => RotationStatus::Active,
-        None => RotationStatus::Unknown,
+    // Determine status based on days until due and rotation history
+    let is_initialized = last_rotation_at.is_some();
+    let status = match (days_until_due, is_initialized) {
+        (Some(days), true) if days < 0 => RotationStatus::Overdue,
+        (Some(days), true) if days <= 7 => RotationStatus::DueSoon,
+        (Some(_days), true) => RotationStatus::Active,
+        (None, false) => RotationStatus::NeverRotated,  // No rotation history (fresh deployment)
+        (None, true) => RotationStatus::Unknown,        // Error: history exists but no days_until_due
+        (Some(_), false) => RotationStatus::Unknown,   // Error: inconsistent state
     };
 
     let response = SecretRotationResponse {
@@ -251,6 +256,7 @@ pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Js
         next_rotation_at,
         days_until_due,
         status,
+        is_initialized,
         rotation_history: rotation_events,
     };
 

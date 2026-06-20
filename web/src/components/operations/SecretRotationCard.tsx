@@ -16,6 +16,8 @@ export function SecretRotationCard({ data }: SecretRotationCardProps) {
         return { icon: Clock, color: 'text-spear', label: 'Due Soon', bgColor: 'bg-spear/10', borderColor: 'border-spear/20' }
       case 'overdue':
         return { icon: XCircle, color: 'text-loss', label: 'Overdue', bgColor: 'bg-loss/10', borderColor: 'border-loss/20' }
+      case 'never_rotated':
+        return { icon: Clock, color: 'text-text-muted', label: 'Never Rotated', bgColor: 'bg-gray-50', borderColor: 'border-gray-200' }
       default:
         return { icon: Clock, color: 'text-text-muted', label: 'Unknown', bgColor: 'bg-surface', borderColor: 'border-border' }
     }
@@ -34,7 +36,7 @@ export function SecretRotationCard({ data }: SecretRotationCardProps) {
         <div className="flex-1">
           <div className="text-sm text-text-muted mb-1">Current Rotation Status</div>
           <div className="flex items-center gap-2">
-            <Badge variant={data.status === 'active' ? 'success' : data.status === 'due_soon' ? 'warning' : data.status === 'overdue' ? 'danger' : 'default'} size="md">
+            <Badge variant={data.status === 'active' ? 'success' : data.status === 'due_soon' ? 'warning' : data.status === 'overdue' ? 'danger' : 'default'} size="md" className={data.status === 'never_rotated' ? 'bg-gray-200 text-gray-700' : ''}>
               {statusConfig.label}
             </Badge>
             {data.days_until_due !== null && (
@@ -56,6 +58,31 @@ export function SecretRotationCard({ data }: SecretRotationCardProps) {
           </div>
         )}
       </div>
+
+      {/* Helpful guidance for fresh deployments */}
+      {data.status === 'never_rotated' && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+          <div className="flex items-start gap-3">
+            <Clock className="w-5 h-5 text-blue-600 dark:text-blue-400 mt-0.5 flex-shrink-0" />
+            <div className="flex-1">
+              <h4 className="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1">
+                Fresh Deployment - No Rotation History
+              </h4>
+              <p className="text-sm text-blue-800 dark:text-blue-200 mb-2">
+                This is a fresh deployment where secret rotation has not been configured yet.
+              </p>
+              <div className="text-sm text-blue-700 dark:text-blue-300">
+                <p className="font-medium mb-1">Next steps:</p>
+                <ol className="list-decimal list-inside space-y-1 text-xs">
+                  <li>Run <code className="px-1 py-0.5 bg-blue-100 dark:bg-blue-800 rounded">./ops/initialize-secret-rotation.sh</code> to initialize rotation tracking</li>
+                  <li>Run <code className="px-1 py-0.5 bg-blue-100 dark:bg-blue-800 rounded">./ops/rotate-secrets.sh webhook</code> for first manual rotation</li>
+                  <li>Setup automated cron job with <code className="px-1 py-0.5 bg-blue-100 dark:bg-blue-800 rounded">./ops/install-crons.sh</code></li>
+                </ol>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Timeline */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

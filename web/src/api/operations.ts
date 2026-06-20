@@ -30,7 +30,8 @@ export interface SecretRotationResponse {
   last_rotation_at: string | null
   next_rotation_at: string | null
   days_until_due: number | null
-  status: 'active' | 'due_soon' | 'overdue' | 'unknown'
+  status: 'active' | 'due_soon' | 'overdue' | 'never_rotated' | 'unknown'
+  is_initialized: boolean  // true if rotation tracking is configured
   rotation_history: RotationEvent[]
 }
 
@@ -109,6 +110,7 @@ const mockSecretRotation: SecretRotationResponse = {
   next_rotation_at: null,
   days_until_due: null,
   status: 'unknown',
+  is_initialized: false,
   rotation_history: []
 }
 
