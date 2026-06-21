@@ -69,7 +69,11 @@ class RugCheckClient:
             await self._session.close()
             self._session = None
             self._own_session = False
-        
+
+    async def close(self):
+        """Close session if we own it (public method)."""
+        await self._close_session()
+
     async def get_token_risk(self, token_mint: str) -> Dict:
         """
         Get risk assessment for a token from RugCheck.

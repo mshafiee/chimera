@@ -47,12 +47,14 @@ async def cluster_and_dedup(
     # Fetch funders for all active wallets in batch
     funder_map: Dict[str, Optional[str]] = {}
     # Use existing HeliusClient if provided, otherwise create one
+    created_client = False
     try:
         from .helius_client import HeliusClient
         if helius_client is None:
             api_key = os.getenv("HELIUS_API_KEY")
             if api_key:
                 helius_client = HeliusClient(api_key=api_key)
+                created_client = True
         if helius_client:
             coros = [helius_client.get_wallet_funder(r.address) for r in active]
             results = await asyncio.gather(*coros, return_exceptions=True)
@@ -63,6 +65,12 @@ async def cluster_and_dedup(
                     funder_map[record.address] = funder
     except ImportError:
         pass
+    finally:
+        if created_client and helius_client:
+            try:
+                await helius_client.close()
+            except Exception:
+                pass  # Non-critical
 
     if not funder_map:
         return records  # No clustering possible without funder data

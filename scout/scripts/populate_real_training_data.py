@@ -50,6 +50,8 @@ async def populate_real_wallet_data(
 
     # Initialize Helius client
     helius = HeliusClient(api_key=api_key)
+    # Initialize WalletAnalyzer
+    analyzer = WalletAnalyzer(helius_api_key=api_key)
 
     # Discover wallets from recent swaps
     logger.info(f"Discovering wallets from last {hours_back} hours...")
@@ -63,6 +65,8 @@ async def populate_real_wallet_data(
         logger.error(f"Failed to discover wallets: {e}")
         logger.error("Check your Helius API key and network connection")
         return 0
+    finally:
+        await helius.close()
 
     logger.info(f"Discovered {len(discovered)} unique wallet addresses")
 
@@ -133,6 +137,9 @@ async def populate_real_wallet_data(
         if len(wallet_records) >= min_wallets:
             logger.info(f"Reached target of {min_wallets} wallets")
             break
+
+    # Cleanup analyzer
+    await analyzer.shutdown()
 
     # Write to database
     if len(wallet_records) == 0:
