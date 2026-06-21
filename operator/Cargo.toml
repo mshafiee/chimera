@@ -31,13 +31,15 @@ getrandom = "0.2"
 lru = "0.13"
 
 # Solana Interaction
-solana-client = "3.0"
+# Keep all at 3.x for consistency until stable 4.x versions are available
+# The -32020 error handling is forward-compatible and will work when we upgrade to 4.x
 solana-sdk = "3.0"
+solana-client = "3.0"
 solana-transaction-status = "3.0"
 solana-account-decoder = "3.0"
 solana-system-interface = { version = "2.0", features = ["bincode"] }
 solana-program = "3.0"
-# Solana 3.x split these into separate crates
+# Solana 3.x modular crates
 solana-commitment-config = "3.0"
 solana-transaction = "3.0"
 solana-message = "3.0"
@@ -79,7 +81,7 @@ prometheus = "0.14.0"
 printpdf = "0.8.2"
 
 # Random number generation
-rand = "0.8"
+rand = "0.9"
 
 # Memory Security
 zeroize = { version = "1.7", features = ["derive"] }

@@ -9,6 +9,7 @@ use crate::monitoring::rate_limiter::RequestPriority;
 use crate::monitoring::transaction_parser;
 use anyhow::{Context, Result};
 use lru::LruCache;
+use solana_client::client_error::ClientError;
 use rust_decimal::Decimal;
 use serde_json::Value;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -79,6 +80,17 @@ impl RpcPollingState {
     }
 }
 
+/// Check if an RPC error is the "filter transaction not found" error (-32020)
+///
+/// This error occurs in Solana 4.0+ when using getSignaturesForAddress with a
+/// `before` or `until` parameter that references a signature not found in the
+/// transaction history (expired, too old, or invalid).
+fn is_filter_transaction_not_found_error(error: &ClientError) -> bool {
+    // Check the error message for the specific error code
+    // This approach is version-agnostic and works across Solana versions
+    error.to_string().contains("-32020")
+}
+
 /// Poll wallet transactions using RPC
 ///
 /// # Arguments
@@ -123,10 +135,27 @@ pub async fn poll_wallet_transactions(
             ..Default::default()
         };
 
-        let page = rpc_client
+        // Handle Solana 4.0 RPC error -32020 (signature not found)
+        let page = match rpc_client
             .get_signatures_for_address_with_config(&pubkey, config)
             .await
-            .context("Failed to get signatures")?;
+        {
+            Ok(page) => page,
+            Err(e) => {
+                // In Solana 4.0, if the before/until signature is not found, we get error -32020
+                // Treat this as "no more signatures" (equivalent to previous empty array behavior)
+                if is_filter_transaction_not_found_error(&e) {
+                    tracing::debug!(
+                        wallet = %wallet_address,
+                        before = ?before_sig,
+                        "Filter signature not found (Solana 4.0 RPC error -32020), treating as no more signatures"
+                    );
+                    break;
+                }
+                // For other errors, propagate them
+                return Err(anyhow::Error::from(e).context("Failed to get signatures"));
+            }
+        };
 
         if page.is_empty() {
             break;

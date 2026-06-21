@@ -988,7 +988,7 @@ dependencies = [
  "parking_lot",
  "printpdf",
  "prometheus",
- "rand 0.8.6",
+ "rand 0.9.4",
  "reqwest",
  "rust_decimal",
  "rust_decimal_macros",
