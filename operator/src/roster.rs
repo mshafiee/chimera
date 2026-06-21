@@ -20,8 +20,8 @@
 //! 3. Update Python `RosterWriter.WALLETS_SCHEMA` to match
 //! 4. Test merge operation to ensure compatibility
 //!
-//! Schema validation: This function checks for table existence but does NOT
-//! validate column structure. Column mismatches will cause merge failures.
+//! Schema validation: This function validates both table existence and
+//! column structure. Column mismatches are logged as warnings and ignored.
 
 use crate::db::DbPool;
 use crate::error::AppResult;
@@ -48,6 +48,7 @@ const EXPECTED_WALLETS_COLUMNS: &[(&str, &str)] = &[
     ("address", "TEXT"),
     ("status", "TEXT"),
     ("wqs_score", "REAL"),
+    ("wqs_confidence", "REAL"),
     ("roi_7d", "REAL"),
     ("roi_30d", "REAL"),
     ("trade_count_30d", "INTEGER"),
@@ -317,29 +318,30 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
 
     // Define a struct to hold the row data (sqlx only supports tuples up to 9-16 elements)
     #[derive(sqlx::FromRow)]
-    struct RosterTransferRow {
-        address: String,
-        status: String,
-        wqs_score: Option<f64>,
-        roi_7d: Option<f64>,
-        roi_30d: Option<f64>,
-        trade_count_30d: Option<i64>,
-        win_rate: Option<f64>,
-        max_drawdown_30d: Option<f64>,
-        avg_trade_size_sol: Option<f64>,
-        avg_win_sol: Option<f64>,
-        avg_loss_sol: Option<f64>,
-        profit_factor: Option<f64>,
-        realized_pnl_30d_sol: Option<f64>,
-        last_trade_at: Option<String>, // Read as string to avoid parsing issues during transfer
-        promoted_at: Option<String>,
-        ttl_expires_at: Option<String>,
-        notes: Option<String>,
-        archetype: Option<String>,
-        avg_entry_delay_seconds: Option<f64>,
-        created_at: Option<String>,
-        updated_at: Option<String>, // Scout's updated_at timestamp
-    }
+struct RosterTransferRow {
+    address: String,
+    status: String,
+    wqs_score: Option<f64>,
+    wqs_confidence: Option<f64>,
+    roi_7d: Option<f64>,
+    roi_30d: Option<f64>,
+    trade_count_30d: Option<i64>,
+    win_rate: Option<f64>,
+    max_drawdown_30d: Option<f64>,
+    avg_trade_size_sol: Option<f64>,
+    avg_win_sol: Option<f64>,
+    avg_loss_sol: Option<f64>,
+    profit_factor: Option<f64>,
+    realized_pnl_30d_sol: Option<f64>,
+    last_trade_at: Option<String>,
+    promoted_at: Option<String>,
+    ttl_expires_at: Option<String>,
+    notes: Option<String>,
+    archetype: Option<String>,
+    avg_entry_delay_seconds: Option<f64>,
+    created_at: Option<String>,
+    updated_at: Option<String>,
+}
 
     // Collect all rows first (attached DB is on conn; we need conn for reads throughout)
     let mut all_rows: Vec<RosterTransferRow> = Vec::with_capacity(new_count as usize);
@@ -347,7 +349,7 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         let rows: Vec<RosterTransferRow> = sqlx::query_as(
             &format!(r#"
                 SELECT
-                    address, status, wqs_score, roi_7d, roi_30d,
+                    address, status, wqs_score, wqs_confidence, roi_7d, roi_30d,
                     trade_count_30d, win_rate, max_drawdown_30d,
                     avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                     last_trade_at, promoted_at,
@@ -395,12 +397,12 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
         sqlx::query(
             r#"
             INSERT INTO wallets (
-                address, status, wqs_score, roi_7d, roi_30d,
+                address, status, wqs_score, wqs_confidence, roi_7d, roi_30d,
                 trade_count_30d, win_rate, max_drawdown_30d,
                 avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
                 last_trade_at, promoted_at,
                 ttl_expires_at, notes, archetype, avg_entry_delay_seconds, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
             ON CONFLICT(address) DO UPDATE SET
                 status = CASE
                     WHEN wallets.updated_at > COALESCE(excluded.updated_at, '1970-01-01')
@@ -408,6 +410,7 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
                     ELSE excluded.status
                 END,
                 wqs_score = excluded.wqs_score,
+                wqs_confidence = excluded.wqs_confidence,
                 roi_7d = excluded.roi_7d,
                 roi_30d = excluded.roi_30d,
                 trade_count_30d = excluded.trade_count_30d,
@@ -431,7 +434,7 @@ pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeR
                 END
             "#
         )
-        .bind(&row.address).bind(&row.status).bind(row.wqs_score).bind(row.roi_7d).bind(row.roi_30d)
+        .bind(&row.address).bind(&row.status).bind(row.wqs_score).bind(row.wqs_confidence).bind(row.roi_7d).bind(row.roi_30d)
         .bind(row.trade_count_30d).bind(row.win_rate).bind(row.max_drawdown_30d)
         .bind(row.avg_trade_size_sol).bind(row.avg_win_sol).bind(row.avg_loss_sol).bind(row.profit_factor).bind(row.realized_pnl_30d_sol)
         .bind(&row.last_trade_at).bind(&row.promoted_at)
