@@ -1,0 +1,25 @@
+# Cargo audit configuration for accepted advisories
+# See https://github.com/rustsec/cargo-audit#configuration
+
+[advisories]
+# RUSTSEC-2023-0071: rsa 0.9.10 Marvin Attack
+# This is pulled in by sqlx-mysql which is a transitive dependency of sqlx-macros.
+# We ONLY use SQLite (not MySQL) in this project. The vulnerable RSA code path
+# is in the MySQL authentication protocol which we never execute.
+# No fixed upgrade is available from sqlx upstream yet.
+# Track: https://github.com/launchbadge/sqlx/issues/2951
+ignored = ["RUSTSEC-2023-0071"]
+
+[ informational ]
+# Unmaintained crates that are acceptable:
+# - bincode 1.3.3: Used by Solana SDK, no alternative available
+# - fxhash 0.2.1: Transitive dependency via printpdf, not directly used
+# - kuchiki 0.8.1: Transitive dependency via printpdf, used for PDF generation
+# - proc-macro-error 1.0.4: Transitive dependency via ouroboros, not directly used
+# - lru 0.13.0: We don't use the affected IterMut API
+# - rand 0.7.3: Transitive dependency via printpdf, we use rand 0.9 directly
+warn-unmaintained = false
+
+[output]
+# Only show vulnerabilities, not unmaintained warnings
+quiet = true

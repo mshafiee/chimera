@@ -45,7 +45,10 @@ solana-message = "3"
 solana-address-lookup-table-interface = "3" 
 
 # Database (SQLite + WAL) - upgraded to 0.8 to fix security advisories
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+# Note: sqlx-macros pulls in sqlx-mysql which has rsa 0.9.10 (RUSTSEC-2023-0071)
+# This is acceptable because we ONLY use SQLite, not MySQL. The vulnerable code path
+# is never executed. No fixed upgrade is available from sqlx upstream yet.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "chrono", "macros", "migrate"] }
 
 # Configuration
 config = "0.15"

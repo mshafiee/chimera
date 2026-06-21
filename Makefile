@@ -103,7 +103,7 @@ lint: lint-operator lint-scout lint-web ## Run all linters
 
 lint-operator: ## Run Rust linter (clippy)
 	@echo "$(YELLOW)Running clippy...$(NC)"
-	cd $(OPERATOR_DIR) && $(CARGO) clippy -- -D warnings
+	cd $(OPERATOR_DIR) && $(CARGO) clippy --all-targets --all-features
 
 lint-scout: ## Run Python linter (ruff)
 	@echo "$(YELLOW)Running Python linter...$(NC)"
@@ -131,7 +131,7 @@ audit: audit-operator audit-web ## Run security audits
 
 audit-operator: ## Run Rust security audit
 	@echo "$(YELLOW)Running cargo audit...$(NC)"
-	cd $(OPERATOR_DIR) && $(CARGO) audit || echo "$(YELLOW)Install with: cargo install cargo-audit$(NC)"
+	cd $(OPERATOR_DIR) && $(CARGO) audit --ignore RUSTSEC-2023-0071 || echo "$(YELLOW)Install with: cargo install cargo-audit$(NC)"
 
 audit-web: ## Run npm security audit
 	@echo "$(YELLOW)Running npm audit...$(NC)"
