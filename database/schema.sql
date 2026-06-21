@@ -93,6 +93,7 @@ CREATE TABLE IF NOT EXISTS wallets (
     status TEXT NOT NULL DEFAULT 'CANDIDATE'
         CHECK(status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')),
     wqs_score REAL,
+    wqs_confidence REAL,  -- Sample confidence 0-1, unbundled from wqs_score
     roi_7d REAL,
     roi_30d REAL,
     trade_count_30d INTEGER,
