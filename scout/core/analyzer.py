@@ -10,6 +10,8 @@ In production, this connects to:
 - On-chain token data for position tracking
 """
 
+from collections import OrderedDict
+
 import asyncio
 import os
 import time
@@ -333,9 +335,9 @@ class WalletAnalyzer:
         self._metrics_cache: Dict[str, WalletMetrics] = {}
         self._trades_cache: Dict[str, List[HistoricalTrade]] = {}
         self._candidate_wallets: List[str] = []
-        self._token_meta_cache: Dict[str, Dict[str, Any]] = {}
-        self._token_creation_cache: Dict[str, Optional[float]] = {}
-        self._price_cache: Dict[str, float] = {}  # Cache for token prices
+        self._token_meta_cache: OrderedDict = OrderedDict()
+        self._token_creation_cache: OrderedDict = OrderedDict()
+        self._price_cache: OrderedDict = OrderedDict()  # Cache for token prices
         self._sol_price_usd: Optional[float] = None  # Cached SOL price
         self._safety_check_total: int = 0  # Cumulative token safety check count
         self._safety_check_failures: int = 0  # Cumulative safety check failures
@@ -344,7 +346,8 @@ class WalletAnalyzer:
         self._safety_cache_lock = asyncio.Lock()
 
         # Parse cache for improved reliability - cache successful parse results by tx signature
-        self._parse_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+        # Bounded with maxlen to prevent unbounded growth (worst offender for memory leaks)
+        self._parse_cache: OrderedDict = OrderedDict()
         self._parse_cache_hits = 0
         self._parse_cache_misses = 0
         
@@ -473,7 +476,33 @@ class WalletAnalyzer:
         self._metrics_cache.pop(address, None)
         self._trades_cache.pop(address, None)
         # Note: We keep _token_meta_cache as that is reusable across wallets
-    
+
+    def clear_all_caches(self):
+        """Clear all cached data to free memory."""
+        self._metrics_cache.clear()
+        self._trades_cache.clear()
+        self._token_meta_cache.clear()
+        self._token_creation_cache.clear()
+        self._price_cache.clear()
+        self._parse_cache.clear()
+
+    def _parse_cache_set(self, key: str, value: Optional[Dict[str, Any]], maxlen: int = 5000):
+        """Helper to set parse cache with automatic eviction (move to end on insertion)."""
+        self._parse_cache[key] = value
+        # If cache exceeds maxlen, evict oldest entries (FIFO)
+        if len(self._parse_cache) > maxlen:
+            for _ in range(len(self._parse_cache) - maxlen):
+                self._parse_cache.popitem(last=False)
+
+    def _ordered_cache_set(self, cache: OrderedDict, key: str, value: Any, maxlen: int = 500):
+        """Helper to set ordered cache with automatic eviction (move to end on insertion)."""
+        cache[key] = value
+        cache.move_to_end(key)
+        # If cache exceeds maxlen, evict oldest entries (FIFO)
+        if len(cache) > maxlen:
+            for _ in range(len(cache) - maxlen):
+                cache.popitem(last=False)
+
     async def _try_discover_wallets_async(self):
         """Try to discover wallets asynchronously, fall back to sample data if fails."""
         if self._discover_wallets and self.helius_client.api_key:
@@ -487,7 +516,10 @@ class WalletAnalyzer:
                 _multi_timeframe = os.getenv("SCOUT_MULTI_TIMEFRAME_DISCOVERY", "true").lower() == "true"
 
                 if _multi_timeframe and CONFIG_AVAILABLE and ScoutConfig:
-                    deep_hours = ScoutConfig.get_discovery_deep_hours()
+                    # Cap deep_hours at user_hours * 4 (max 720h default)
+                    # This respects user intent while still allowing established-wallet discovery
+                    user_hours_cap = hours_back * 4
+                    deep_hours = min(ScoutConfig.get_discovery_deep_hours(), max(user_hours_cap, 24))
                     fast_hours = ScoutConfig.get_discovery_fast_hours()
                     trending_hours = ScoutConfig.get_discovery_trending_hours()
                     tier1_max = ScoutConfig.get_max_wallets_tier1()
@@ -508,34 +540,55 @@ class WalletAnalyzer:
                     _multi_timeframe = False
 
                 # When profitability pre-screen is enabled, discover 2x wallets
+                # Only apply multiplier when max_wallets >= 50 (avoid explosion for small targets)
                 _profit_filter = os.getenv("SCOUT_DISCOVERY_PROFITABILITY_FILTER", "true").lower() == "true"
 
                 discovered_all: List[str] = []
 
                 # --- Deep scan: established wallets ---
                 if deep_hours > 0 or not _multi_timeframe:
-                    _discover_deep = self._max_wallets * 2 if _profit_filter and not _multi_timeframe else tier1_max * 2 if _profit_filter else tier1_max
+                    # Only apply 2x multiplier when max_wallets >= 50
+                    profit_multiplier = 2 if _profit_filter and self._max_wallets >= 50 else 1
+                    _discover_deep = self._max_wallets * profit_multiplier if not _multi_timeframe else tier1_max * profit_multiplier
                     print(f"[Analyzer] Running deep scan ({deep_hours}h window, max={_discover_deep})...")
-                    deep_discovered = await self.helius_client.discover_wallets_from_recent_swaps(
-                        limit=1000,
-                        min_trade_count=min_trade_count + 2,  # Higher bar for deep — need more trades
-                        max_wallets=_discover_deep if _discover_deep else tier1_max,
-                        hours_back=deep_hours if deep_hours > 0 else hours_back,
-                    )
+                    deep_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
+                    try:
+                        deep_discovered = await asyncio.wait_for(
+                            self.helius_client.discover_wallets_from_recent_swaps(
+                                limit=1000,
+                                min_trade_count=min_trade_count + 2,
+                                max_wallets=_discover_deep if _discover_deep else tier1_max,
+                                hours_back=deep_hours if deep_hours > 0 else hours_back,
+                            ),
+                            timeout=deep_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"[Analyzer] Deep scan timeout after {deep_timeout}s, using partial results")
+                        deep_discovered = []
                     if deep_discovered:
                         print(f"[Analyzer] Deep scan found {len(deep_discovered)} wallets")
                         discovered_all.extend(deep_discovered)
 
                 # --- Fast scan: emerging wallets ---
                 if _multi_timeframe and fast_hours > 0:
-                    _discover_fast = tier2_max * 2 if _profit_filter else tier2_max
+                    # Only apply 2x multiplier when max_wallets >= 50
+                    profit_multiplier = 2 if _profit_filter and self._max_wallets >= 50 else 1
+                    _discover_fast = tier2_max * profit_multiplier
                     print(f"[Analyzer] Running fast scan ({fast_hours}h window, max={_discover_fast})...")
-                    fast_discovered = await self.helius_client.discover_wallets_from_recent_swaps(
-                        limit=1000,
-                        min_trade_count=min_trade_count,
-                        max_wallets=_discover_fast if _discover_fast else tier2_max,
-                        hours_back=fast_hours,
-                    )
+                    fast_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
+                    try:
+                        fast_discovered = await asyncio.wait_for(
+                            self.helius_client.discover_wallets_from_recent_swaps(
+                                limit=1000,
+                                min_trade_count=min_trade_count,
+                                max_wallets=_discover_fast if _discover_fast else tier2_max,
+                                hours_back=fast_hours,
+                            ),
+                            timeout=fast_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"[Analyzer] Fast scan timeout after {fast_timeout}s, using partial results")
+                        fast_discovered = []
                     if fast_discovered:
                         print(f"[Analyzer] Fast scan found {len(fast_discovered)} wallets")
                         # Append new wallets not already in deep scan
@@ -548,12 +601,20 @@ class WalletAnalyzer:
                 if _multi_timeframe and trending_hours > 0:
                     _discover_trending = min(50, tier2_max)
                     print(f"[Analyzer] Running trending scan ({trending_hours}h window, max={_discover_trending})...")
-                    trending_discovered = await self.helius_client.discover_wallets_from_recent_swaps(
-                        limit=500,
-                        min_trade_count=1,
-                        max_wallets=_discover_trending,
-                        hours_back=trending_hours,
-                    )
+                    trending_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
+                    try:
+                        trending_discovered = await asyncio.wait_for(
+                            self.helius_client.discover_wallets_from_recent_swaps(
+                                limit=500,
+                                min_trade_count=1,
+                                max_wallets=_discover_trending,
+                                hours_back=trending_hours,
+                            ),
+                            timeout=trending_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"[Analyzer] Trending scan timeout after {trending_timeout}s, using partial results")
+                        trending_discovered = []
                     if trending_discovered:
                         print(f"[Analyzer] Trending scan found {len(trending_discovered)} wallets")
                         existing = set(discovered_all)
@@ -920,8 +981,8 @@ class WalletAnalyzer:
             if i % 25 == 0 and i > 0:
                 print(f"  [{address[:8]}] Progress: {i}/{len(transactions)} txs, {len(trades)} trades, {parse_failures} parse fails, {trade_failures} trade fails")
             
-            # Log first transaction completely for debugging
-            if i == 0:
+            # Log first transaction completely for debugging (SCOUT_DEBUG_TX_DUMP env var)
+            if i == 0 and os.getenv("SCOUT_DEBUG_TX_DUMP", "false").lower() == "true":
                 import json
                 print(f"  [{address[:8]}] ━━━ FIRST TRANSACTION STRUCTURE ━━━")
                 tx_json = json.dumps(tx, indent=2, default=str)
@@ -1807,47 +1868,61 @@ class WalletAnalyzer:
         print(f"  [{address[:8]}] Checking token safety with RugCheck...")
         # Filter out unsafe tokens using RugCheck if enabled
         if self.rugcheck_client:
-            safe_trades = []
+            # Dedupe tokens to avoid redundant API calls
+            unique_tokens = {t.token_address for t in trades}
+            print(f"  [{address[:8]}] Checking {len(unique_tokens)} unique tokens (from {len(trades)} trades)...")
+            
+            safe_tokens = set()
             risky_tokens = []
-            for i, t in enumerate(trades):
-                if i % 20 == 0 and i > 0:
-                    print(f"  [{address[:8]}] Checked {i}/{len(trades)} tokens")
-                token_addr = t.token_address
-                # Add timeout to rugcheck
-                try:
-                    is_safe = await asyncio.wait_for(  # noqa: F823 — imported at module level
-                        self.rugcheck_client.is_token_safe(token_addr),
-                        timeout=5.0  # 5 second timeout per token
-                    )
-                    if is_safe:
-                        safe_trades.append(t)
-                    else:
-                        risky_tokens.append(token_addr)
-                except asyncio.TimeoutError:
-                    print(f"  [{address[:8]}] RugCheck timeout for token {token_addr[:8]}, marking as risky")
-                    risky_tokens.append(token_addr)  # Assume unsafe on timeout
-                except Exception as e:
-                    print(f"  [{address[:8]}] RugCheck error for token {token_addr[:8]}: {e}, marking as risky")
-                    risky_tokens.append(token_addr)  # Assume unsafe on error
-
-            risky_ratio = len(risky_tokens) / max(1, len(trades)) if risky_tokens else 0.0
+            
+            # Parallel RugCheck with semaphore for rate limiting
+            semaphore = asyncio.Semaphore(10)
+            
+            async def check_token(token_addr: str) -> Tuple[str, bool]:
+                async with semaphore:
+                    try:
+                        is_safe = await asyncio.wait_for(
+                            self.rugcheck_client.is_token_safe(token_addr),
+                            timeout=5.0
+                        )
+                        return (token_addr, is_safe)
+                    except asyncio.TimeoutError:
+                        print(f"  [{address[:8]}] RugCheck timeout for token {token_addr[:8]}, marking as risky")
+                        return (token_addr, False)
+                    except Exception as e:
+                        print(f"  [{address[:8]}] RugCheck error for token {token_addr[:8]}: {e}, marking as risky")
+                        return (token_addr, False)
+            
+            # Run all token checks in parallel
+            token_list = list(unique_tokens)
+            results = await asyncio.gather(*[check_token(t) for t in token_list])
+            
+            # Process results and check for circuit breaker condition
+            for token_addr, is_safe in results:
+                if is_safe:
+                    safe_tokens.add(token_addr)
+                else:
+                    risky_tokens.append(token_addr)
+            
+            # Proactive circuit breaker: if >50% risky after checking tokens, abort
+            risky_ratio = len(risky_tokens) / max(1, len(token_list)) if risky_tokens else 0.0
             if risky_tokens:
                 if risky_ratio > 0.5:
-                    # Circuit breaker: RugCheck API is likely degraded — too many
-                    # tokens classified as risky. Fall back to safe-on-error behavior
-                    # to avoid draining the roster.
                     logger.warning(
                         "RugCheck degraded: %.0f%% tokens flagged risky (%d/%d). "
                         "Falling back to assume-safe to prevent roster drain.",
-                        risky_ratio * 100, len(risky_tokens), len(trades),
+                        risky_ratio * 100, len(risky_tokens), len(token_list),
                     )
                     print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — keeping all trades")
                 else:
-                    print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens")
-                    trades = safe_trades
+                    print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens ({risky_ratio*100:.0f}% of unique tokens)")
+                    # Filter trades to only those with safe tokens
+                    trades = [t for t in trades if t.token_address in safe_tokens]
                     if not trades:
                         print(f"  [{address[:8]}] All trades filtered as risky")
                         return None
+            else:
+                print(f"  [{address[:8]}] All {len(safe_tokens)} tokens passed RugCheck")
         else:
             print(f"  [{address[:8]}] RugCheck disabled, using all trades")
         
@@ -3059,6 +3134,24 @@ class WalletAnalyzer:
             logger.warning(f"[Prefetch] Failed to prefetch wallet ages: {e}")
 
         logger.info("[Prefetch] Complete")
+
+    async def shutdown(self):
+        """Cleanup and shutdown (close HTTP sessions)."""
+        if self.helius_client:
+            try:
+                await self.helius_client.close()
+            except Exception:
+                pass  # Non-critical
+        if self.rugcheck_client:
+            try:
+                await self.rugcheck_client.close()
+            except Exception:
+                pass  # Non-critical
+        if self.liquidity_provider:
+            try:
+                await self.liquidity_provider.close()
+            except Exception:
+                pass  # Non-critical
 
 # Example usage
 if __name__ == "__main__":

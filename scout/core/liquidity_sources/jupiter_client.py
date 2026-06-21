@@ -119,10 +119,14 @@ class JupiterLiquidityClient:
             return liq_data.price_usd
         return None
     
+    async def close(self):
+        """Public method to close session if we own it."""
+        await self._close_session()
+
     async def __aenter__(self):
         """Async context manager entry."""
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async context manager exit."""
         await self._close_session()

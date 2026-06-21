@@ -131,6 +131,7 @@ class HeliusClient:
         self._discovery_cache_time = 0.0
         self._token_list_cache: Optional[List[str]] = None
         self._token_list_cache_time: Optional[float] = None
+        self._cached_active_token_wallets: Optional[Dict[str, int]] = None  # Cache Strategy 1 for Strategy 5
 
         # Circuit breaker with configurable threshold
         self._circuit_breaker_failures = 0
@@ -206,6 +207,10 @@ class HeliusClient:
             await self._session.close()
             self._session = None
             self._own_session = False
+
+    async def close(self):
+        """Close all resources (sessions, etc.). Call this before exiting."""
+        await self._close_session()
 
     # ------------------------------------------------------------------
     # Redis-backed discovery cache & persistent dedup (Items 3 & 7)
@@ -736,22 +741,35 @@ class HeliusClient:
         return None
 
     async def _rate_limit_async(self):
-        """Async rate limiting with adaptive delay and jitter.
+        """Lock-free rate limiting using token-bucket approach.
+
+        Instead of holding a lock during sleep (which serializes all requests),
+        we read the last_request_time atomically, compute local wait time,
+        sleep locally, then update the timestamp atomically. This restores
+        true concurrent execution for the 50-slot semaphore.
 
         Adds ±10% jitter to the delay to prevent synchronized requests
         across multiple instances following Helius best practices.
         """
         current_time = time.time()
+        
+        # Read last request time atomically (no lock held)
+        time_since_last = current_time - self.last_request_time
+        base_delay = self._current_delay if self._adaptive_enabled else self.rate_limit_delay
+        
+        # Add ±10% jitter to avoid synchronized requests
+        jitter = random.uniform(-0.10, 0.10)
+        delay_to_use = base_delay * (1 + jitter)
+        
+        # Compute local wait time
+        wait_time = max(0.0, delay_to_use - time_since_last)
+        
+        # Sleep locally WITHOUT holding the lock (restores true concurrency)
+        if wait_time > 0:
+            await asyncio.sleep(wait_time)
+        
+        # Update last_request_time atomically
         async with self._lock:
-            time_since_last = current_time - self.last_request_time
-            base_delay = self._current_delay if self._adaptive_enabled else self.rate_limit_delay
-
-            # Add ±10% jitter to avoid synchronized requests
-            jitter = random.uniform(-0.10, 0.10)
-            delay_to_use = base_delay * (1 + jitter)
-
-            if time_since_last < delay_to_use:
-                await asyncio.sleep(delay_to_use - time_since_last)
             self.last_request_time = time.time()
 
     def _is_retryable_error(self, status_code: int, error: Optional[Exception] = None) -> bool:
@@ -1751,15 +1769,18 @@ class HeliusClient:
         token_addresses: Optional[List[str]] = None,
         hours_back: int = 24,
         limit_per_token: int = 200,
-        use_parallel: bool = True
+        use_parallel: bool = True,
+        max_wallets: int = 200
     ) -> Dict[str, int]:
         """
         Discover wallets from active token swap transactions.
-        
+
         Args:
             token_addresses: List of token addresses to query (None to use defaults)
             hours_back: Number of hours to look back
             limit_per_token: Maximum transactions per token
+            use_parallel: Whether to use parallel queries
+            max_wallets: Maximum number of wallets to discover (for early termination)
             use_parallel: Whether to use parallel processing (respects rate limits)
             
         Returns:
@@ -1796,6 +1817,10 @@ class HeliusClient:
             for coro in asyncio.as_completed(tasks):
                 if self._api_calls_made >= self._max_api_calls:
                     break
+                # Early termination: stop if we already have enough wallets
+                if len(wallet_counts) >= max_wallets:
+                    print(f"[Helius] Early termination: found {len(wallet_counts)} wallets, stopping token queries")
+                    break
 
                 try:
                     token_addr, transactions = await coro
@@ -1824,6 +1849,10 @@ class HeliusClient:
             for token_addr in token_addresses:
                 if self._api_calls_made >= self._max_api_calls:
                     print("[Helius] Reached max API calls, stopping token queries")
+                    break
+                # Early termination: stop if we already have enough wallets
+                if len(wallet_counts) >= max_wallets:
+                    print(f"[Helius] Early termination: found {len(wallet_counts)} wallets, stopping token queries")
                     break
                 
                 token_addr, transactions = await self._query_token_transactions(token_addr, cutoff_time, limit_per_token)
@@ -2167,20 +2196,29 @@ class HeliusClient:
         """
         Discover wallets from top performing/trending tokens (Strategy 5).
         Falls back to using active tokens if trending data is unavailable.
+        Uses cached results from Strategy 1 to avoid redundant queries.
 
         Returns:
             List of discovered wallet addresses
         """
-        try:
-            # Use active tokens as the data source for trending token analysis
-            # In production, could integrate with Birdeye/DexScreener for real trending tokens
-            wallet_counts = await self._discover_from_active_tokens(hours_back=12, limit_per_token=100)
-            # Take top N wallets by trade count
-            top_wallets = sorted(wallet_counts.items(), key=lambda x: x[1], reverse=True)[:50]
-            return [wallet for wallet, _count in top_wallets]
-        except Exception as e:
-            print(f"[Helius] discover_from_top_performing_tokens failed: {e}")
-            return []
+        # Check if Strategy 1 already ran and cached active token results
+        if hasattr(self, '_cached_active_token_wallets'):
+            print("[Helius] Using cached active token results (Strategy 5 reusing Strategy 1 data)")
+            wallet_counts = self._cached_active_token_wallets
+        else:
+            try:
+                # Use active tokens as the data source for trending token analysis
+                # In production, could integrate with Birdeye/DexScreener for real trending tokens
+                wallet_counts = await self._discover_from_active_tokens(hours_back=12, limit_per_token=100)
+                # Cache for potential reuse
+                self._cached_active_token_wallets = wallet_counts
+            except Exception as e:
+                print(f"[Helius] discover_from_top_performing_tokens failed: {e}")
+                return []
+        
+        # Take top N wallets by trade count
+        top_wallets = sorted(wallet_counts.items(), key=lambda x: x[1], reverse=True)[:50]
+        return [wallet for wallet, _count in top_wallets]
 
     async def discover_wallets_from_recent_swaps(
         self,
@@ -2275,8 +2313,10 @@ class HeliusClient:
         try:
             print("[Helius] Strategy 1: Querying active tokens...")
             token_wallets = await self._discover_from_active_tokens(
-                hours_back=hours_back, limit_per_token=limit_per_token
+                hours_back=hours_back, limit_per_token=limit_per_token, max_wallets=max_wallets
             )
+            # Cache for Strategy 5 to avoid redundant queries
+            self._cached_active_token_wallets = token_wallets
             for wallet, count in token_wallets.items():
                 wallet_counts[wallet] += count
             strategy_used = "tokens"

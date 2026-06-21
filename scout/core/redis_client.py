@@ -8,6 +8,7 @@ if Redis is unavailable. This ensures graceful degradation.
 import logging
 from typing import Optional, Dict
 from datetime import datetime, timedelta
+from collections import OrderedDict
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,8 @@ class RedisClient:
         self.redis_url = redis_url or "redis://localhost:6379"
         
         self.redis_client = None
-        self._fallback_cache: Dict[str, tuple] = {}  # key -> (value, expiry_time)
+        self._fallback_cache: OrderedDict[str, tuple] = OrderedDict()  # key -> (value, expiry_time)
+        self._fallback_max_size = 1000  # Max entries before eviction
         
         if self.enabled and REDIS_AVAILABLE:
             try:
@@ -131,21 +133,16 @@ class RedisClient:
                 logger.debug(f"Redis set failed for key {key}: {e}, using fallback")
                 # Fall through to fallback
         
-        # Fallback: in-memory cache
+        # Fallback: in-memory cache with bounded size
         expiry = None
         if ttl_seconds:
             expiry = datetime.utcnow() + timedelta(seconds=ttl_seconds)
         self._fallback_cache[key] = (value, expiry)
-        
-        # Cleanup expired entries periodically (simple implementation)
-        if len(self._fallback_cache) > 1000:
-            now = datetime.utcnow()
-            expired_keys = [
-                k for k, (_, exp) in self._fallback_cache.items()
-                if exp is not None and now >= exp
-            ]
-            for k in expired_keys:
-                del self._fallback_cache[k]
+        self._fallback_cache.move_to_end(key)
+        # Evict oldest entries when exceeding max size (FIFO)
+        if len(self._fallback_cache) > self._fallback_max_size:
+            for _ in range(len(self._fallback_cache) - self._fallback_max_size):
+                self._fallback_cache.popitem(last=False)
     
     def delete(self, key: str):
         """Delete key from cache."""

@@ -29,6 +29,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 import asyncio
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / '.env')
+
+# Fix stdout buffering so output is visible when piped or in long-running processes
+sys.stdout.reconfigure(line_buffering=True)
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -365,15 +371,15 @@ async def analyze_wallets(
                     # Get ML prediction
                     prediction = optimizer.predict_profitability(wallet_features)
 
-                    print(f"[Scout] ML Prediction: {prediction.get('profitability_class', 'UNKNOWN')} "
-                          f"(expected: {prediction.get('expected_return_pct', 0):.1f}%, "
-                          f"confidence: {prediction.get('confidence', 0):.1f}, "
-                          f"risk: {prediction.get('risk_score', 0):.1f})")
+                    print(f"[Scout] ML Prediction: {prediction.profitability_class.value} "
+                          f"(expected: {prediction.expected_return_pct:.1f}%, "
+                          f"confidence: {prediction.confidence:.1f}, "
+                          f"risk: {prediction.risk_score:.1f})")
 
                     # Apply growth optimization WQS boost
                     if ScoutConfig.get_growth_optimized():
-                        expected_return = prediction.get('expected_return_pct', 0)
-                        prediction_confidence = prediction.get('confidence', 0)
+                        expected_return = prediction.expected_return_pct
+                        prediction_confidence = prediction.confidence
 
                         # Boost for high expected returns with good confidence
                         if expected_return > 15 and prediction_confidence > 0.6:
@@ -547,15 +553,10 @@ async def analyze_wallets(
                 "ml_prediction": ml_prediction,
             }
             
-            # MEMORY FIX: Clear analyzer cache for this wallet immediately
-            # We have extracted everything we need into 'result'
-            analyzer.clear_wallet_cache(wallet_address)
             print(f"[Scout] ✓ Completed {wallet_address[:8]}... (WQS={wqs_score:.1f}, Status={final_status})")
             return result
         except Exception as e:
             print(f"[Scout] ✗ ERROR processing {wallet_address[:8]}...: {e}")
-            # Ensure cleanup happens even on error
-            analyzer.clear_wallet_cache(wallet_address)
             return None
 
     # Run in parallel using asyncio (with semaphore for rate limiting)
@@ -1243,6 +1244,7 @@ async def main_async():
 
             # Fetch dynamic fees from Helius if available (overrides static values)
             if helius_api_key and os.getenv("SCOUT_USE_DYNAMIC_FEES", "true").lower() == "true":
+                fee_estimator = None
                 try:
                     fee_estimator = CostEstimator(helius_api_key=helius_api_key)
                     dyn_prio, dyn_jito = await fee_estimator.get_all_estimates(strategy="SHIELD")
@@ -1256,9 +1258,14 @@ async def main_async():
                         print(f"[Scout] Dynamic Jito tip: {dyn_jito_float:.8f} SOL")
                     backtest_config.use_dynamic_fees = True
                     print("[Scout] Dynamic fee estimation enabled (source: Helius getPriorityFeeEstimate)")
-                    await fee_estimator.close()
                 except Exception as e:
                     print(f"[Scout] Warning: Dynamic fee fetch failed ({e}), using static fees")
+                finally:
+                    if fee_estimator:
+                        try:
+                            await fee_estimator.close()
+                        except Exception:
+                            pass  # Non-critical
             promotion_criteria = PromotionCriteria(
                 # Keep WQS threshold aligned with ACTIVE gate (validator only runs for ACTIVE candidates)
                 # Note: min_wqs_score should match min_wqs_active (rescaled 0-100 range)
@@ -1273,6 +1280,7 @@ async def main_async():
                 liquidity_provider=liquidity_provider,
                 backtest_config=backtest_config,
                 promotion_criteria=promotion_criteria,
+                rugcheck_client=analyzer.rugcheck_client,  # Share RugCheck client to reuse cache
             )
             print("[Scout] Backtest validation enabled")
             print(f"  Min liquidity (Shield): ${args.min_liquidity_shield:,.0f}")
@@ -1520,12 +1528,29 @@ async def main_async():
                 health = optimizer.check_production_health()
                 print(f"\nProduction Health Status: {health.get('overall_status', 'UNKNOWN')}")
                 if health.get('overall_status') != 'healthy':
-                    print("  ⚠ Production issues detected - review monitoring data")
+                    print("  WARNING: Production issues detected - review monitoring data")
 
             print("=" * 70)
 
         except Exception as e:
-            print(f"[Scout] ⚠ Optimization report generation failed: {e}")
+            print(f"[Scout] WARNING: Optimization report generation failed: {e}")
+
+    # Clean up resources
+    try:
+        if analyzer and hasattr(analyzer, 'shutdown'):
+            await analyzer.shutdown()
+            print("[Scout] Cleaned up all resources")
+        if liquidity_provider:
+            try:
+                await liquidity_provider.close()
+            except Exception:
+                pass  # Non-critical
+    except Exception as e:
+        if args.verbose:
+            print(f"[Scout] Warning during cleanup: {e}")
+
+    print(f"\n[Scout] Finished at: {utcnow().isoformat()}")
+    print("=" * 70)
 
 
 def main():
@@ -1540,9 +1565,6 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
-    
-    print(f"\n[Scout] Finished at: {utcnow().isoformat()}")
-    print("=" * 70)
 
 
 if __name__ == "__main__":

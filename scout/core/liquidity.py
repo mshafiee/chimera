@@ -975,6 +975,19 @@ class LiquidityProvider:
                 logger.debug(f"Redis cache clear failed: {e}")
         self._cache.clear()
 
+    async def close(self) -> None:
+        """Close all underlying client sessions."""
+        if self.birdeye_client:
+            try:
+                await self.birdeye_client.close()
+            except Exception as e:
+                logger.debug(f"Failed to close Birdeye client: {e}")
+        if self.jupiter_client:
+            try:
+                await self.jupiter_client.close()
+            except Exception as e:
+                logger.debug(f"Failed to close Jupiter client: {e}")
+
 
 # Example usage
 if __name__ == "__main__":
