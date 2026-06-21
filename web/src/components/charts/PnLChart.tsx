@@ -71,25 +71,3 @@ export function PnLChart({ data }: PnLChartProps) {
     </ResponsiveContainer>
   )
 }
-
-// Generate sample data for demo
-export function generateSamplePnLData(days: number = 30): PnLDataPoint[] {
-  const data: PnLDataPoint[] = []
-  let cumPnl = 0
-
-  for (let i = days; i >= 0; i--) {
-    const date = new Date()
-    date.setDate(date.getDate() - i)
-    
-    // Random daily change between -50 and +100
-    const dailyChange = (Math.random() - 0.4) * 150
-    cumPnl += dailyChange
-
-    data.push({
-      date: date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-      pnl: Math.round(cumPnl * 100) / 100,
-    })
-  }
-
-  return data
-}

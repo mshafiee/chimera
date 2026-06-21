@@ -1,10 +1,11 @@
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
-import { useSignalQuality, useSignalSources, useSignalConsensus } from '../api'
+import { useSignalQuality, useSignalSources, useSignalConsensus, useConsensus } from '../api'
 import type { SignalConsensusItem, SignalDivergenceAlert } from '../api'
 import { SignalQualityChart } from '../components/signals/SignalQualityChart'
 import { SignalSourcesTable } from '../components/signals/SignalSourcesTable'
+import { ConsensusMatrix } from '../components/signals/ConsensusMatrix'
 import { MetricCard } from '../components/ui/MetricCard'
 import { TimeRangePicker, TimeRange } from '../components/ui/TimeRangePicker'
 import { useState } from 'react'
@@ -15,11 +16,13 @@ export function Signals() {
   const { data: signalQuality, isLoading: qualityLoading } = useSignalQuality(timeRange)
   const { data: signalSources, isLoading: sourcesLoading } = useSignalSources()
   const { data: signalConsensus, isLoading: consensusLoading } = useSignalConsensus()
+  const { data: consensusData, isLoading: consensusMatrixLoading } = useConsensus()
 
   // Type guards for proper TypeScript checking
   const hasSignalQuality = signalQuality !== undefined
   const hasSignalSources = signalSources !== undefined
   const hasSignalConsensus = signalConsensus !== undefined
+  const hasConsensusData = consensusData !== undefined
 
   return (
     <div className="space-y-6">
@@ -90,6 +93,22 @@ export function Signals() {
             <SignalSourcesTable sources={signalSources.sources} />
           ) : (
             <div className="text-center text-text-muted py-8">No signal sources available</div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Consensus Matrix */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Consensus Matrix</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {consensusMatrixLoading ? (
+            <div className="text-center text-text-muted py-8">Loading consensus matrix...</div>
+          ) : hasConsensusData ? (
+            <ConsensusMatrix data={consensusData} />
+          ) : (
+            <div className="text-center text-text-muted py-8">No consensus data available</div>
           )}
         </CardContent>
       </Card>
