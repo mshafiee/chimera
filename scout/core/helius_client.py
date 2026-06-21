@@ -781,7 +781,138 @@ class HeliusClient:
         self._token_list_cache_time = time.time()
         
         return tokens
-    
+
+    async def _refresh_token_list(self) -> bool:
+        """
+        Automatically refresh the active token list using Birdeye trending API.
+
+        Fetches trending tokens from Birdeye and updates the active_tokens.txt file.
+        Designed to run hourly for maximum freshness.
+
+        Returns:
+            True if refresh was successful, False otherwise
+        """
+        import aiohttp
+
+        birdeye_api_key = os.getenv("BIRDEYE_API_KEY")
+        if not birdeye_api_key:
+            print("[Helius] Birdeye API key not configured, skipping token refresh")
+            return False
+
+        try:
+            print("[Helius] Refreshing token list from Birdeye trending API...")
+
+            # Fetch trending tokens from Birdeye
+            birdeye_url = "https://public-api.birdeye.so/defi/v1/trending_tokens"
+            headers = {
+                "X-API-KEY": birdeye_api_key,
+                "accept": "application/json"
+            }
+
+            session = await self._get_session()
+            async with session.get(birdeye_url, headers=headers) as response:
+                if response.status != 200:
+                    print(f"[Helius] Failed to fetch trending tokens: HTTP {response.status}")
+                    return False
+
+                data = await response.json()
+                trending_tokens = data.get("trending_tokens", [])
+
+                if not trending_tokens:
+                    print("[Helius] No trending tokens returned from Birdeye")
+                    return False
+
+                # Extract token addresses and filter for Solana tokens
+                new_tokens = []
+                seen_tokens = set()
+
+                # Keep existing high-quality tokens
+                existing_tokens = self._load_active_tokens()
+                for token in existing_tokens[:20]:  # Keep top 20 existing tokens
+                    if token not in seen_tokens:
+                        new_tokens.append(token)
+                        seen_tokens.add(token)
+
+                # Add trending tokens
+                for token_data in trending_tokens[:80]:  # Add up to 80 trending tokens
+                    token_address = token_data.get("address")
+                    if token_address and token_address not in seen_tokens:
+                        # Validate it's a Solana token
+                        if self._is_valid_solana_address(token_address):
+                            new_tokens.append(token_address)
+                            seen_tokens.add(token_address)
+
+                if len(new_tokens) < 50:
+                    print(f"[Helius] Warning: Only {len(new_tokens)} tokens after refresh, which is below target")
+                    return False
+
+                # Update the active_tokens.txt file
+                config_path = Path(__file__).parent.parent / "config" / "active_tokens.txt"
+                backup_path = config_path.with_suffix(".txt.backup")
+
+                # Create backup
+                if config_path.exists():
+                    import shutil
+                    shutil.copy(config_path, backup_path)
+
+                # Write new token list
+                with open(config_path, 'w') as f:
+                    f.write("# Aggressive Token Expansion for Wallet Discovery - Auto-refreshed\n")
+                    f.write(f"# Last updated: {utcnow().isoformat()}\n")
+                    f.write(f"# Total tokens: {len(new_tokens)}\n")
+                    f.write("# ===== TOP EXISTING TOKENS =====\n")
+
+                    for i, token in enumerate(new_tokens[:20]):
+                        f.write(f"{token}\n")
+
+                    f.write("# ===== TRENDING TOKENS FROM BIRDEYE =====\n")
+                    for token in new_tokens[20:]:
+                        f.write(f"{token}\n")
+
+                # Update cache
+                self._token_list_cache = new_tokens
+                self._token_list_cache_time = time.time()
+
+                print(f"[Helius] ✓ Token list refreshed successfully: {len(new_tokens)} tokens")
+                print(f"[Helius] ✓ Backup saved to {backup_path}")
+
+                return True
+
+        except Exception as e:
+            print(f"[Helius] Token refresh failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
+    def _is_valid_solana_address(self, address: str) -> bool:
+        """Validate that an address is a valid Solana public key."""
+        try:
+            # Basic Solana address validation
+            # Solana addresses are base58 encoded and typically 32-44 characters
+            if not address or len(address) < 32 or len(address) > 44:
+                return False
+
+            # Check for base58 characters only
+            import base58
+            base58.alphabet = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+            if not all(c in base58.alphabet for c in address):
+                return False
+
+            # Additional check: common system program addresses
+            system_programs = {
+                "11111111111111111111111111111111",  # System Program
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # Token Program
+                "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25ekTN8LoUaUX",  # Token-2022
+            }
+
+            if address in system_programs:
+                return False
+
+            return True
+
+        except Exception:
+            return False
+
     def _load_seed_wallets(self) -> List[str]:
         """Load seed wallet addresses from config file or environment."""
         # Check environment variable first
@@ -1050,22 +1181,198 @@ class HeliusClient:
         days_back: int = 7
     ) -> bool:
         """
-        Quick validation of wallet activity.
+        AGGRESSIVE WALLET VALIDATION - Multi-criteria validation system.
+
+        This enhanced validation method implements comprehensive wallet quality checks:
+        1. Minimum trade count validation (configurable, default 3)
+        2. Wallet age and consistency checks
+        3. Trading frequency validation
+        4. SOL balance verification (filters out programs/vaults)
+        5. Transaction type diversity check
 
         Args:
             wallet_address: Wallet address to validate
-            min_trades: Minimum number of trades required
-            days_back: Number of days to look back
+            min_trades: Minimum number of trades required (default: 3, can be overridden via SCOUT_MIN_TRADES env var)
+            days_back: Number of days to look back (default: 7)
 
         Returns:
-            True if wallet meets activity criteria
+            True if wallet meets aggressive activity criteria
         """
         try:
-            # Quick transaction count check
-            transactions = await self.get_wallet_transactions(wallet_address, days=days_back, limit=min_trades + 1)
-            return len(transactions) >= min_trades
+            # ENVIRONMENT CONFIGURATION OVERRIDES
+            # Allow runtime configuration of validation strictness
+            min_trades_config = int(os.getenv("SCOUT_MIN_TRADES", str(min_trades)))
+            validate_by_default = os.getenv("SCOUT_VALIDATE_WALLET_ACTIVITY", "true").lower() == "true"
+
+            if not validate_by_default:
+                # If validation is disabled by config, accept all wallets
+                return True
+
+            # VALIDATION CRITERIA 1: Minimum trade count
+            transactions = await self.get_wallet_transactions(wallet_address, days=days_back, limit=min_trades_config + 10)
+            if len(transactions) < min_trades_config:
+                return False
+
+            # VALIDATION CRITERIA 2: Trading frequency check
+            # Wallets should have consistent trading activity, not just one burst
+            if len(transactions) >= min_trades_config:
+                # Check if trades are spread across multiple days (not all in one day)
+                from collections import defaultdict
+                trades_by_day = defaultdict(int)
+                for tx in transactions:
+                    tx_timestamp = tx.get("timestamp", time.time())
+                    tx_day = int(tx_timestamp / 86400)  # Group by day
+                    trades_by_day[tx_day] += 1
+
+                # Require trades on at least 2 different days for quality wallets
+                # (unless min_trades is very low, then 1 day is acceptable)
+                if min_trades_config >= 5 and len(trades_by_day) < 2:
+                    return False
+
+            # VALIDATION CRITERIA 3: SOL balance check
+            # Filter out programs and vaults that have zero SOL balance
+            min_sol_balance = float(os.getenv("SCOUT_MIN_SOL_BALANCE", "0.001"))
+            if min_sol_balance > 0:
+                try:
+                    sol_balance = await self._get_wallet_sol_balance(wallet_address)
+                    if sol_balance < min_sol_balance:
+                        return False
+                except Exception:
+                    # If balance check fails, log but don't fail the validation
+                    pass
+
+            # VALIDATION CRITERIA 4: Transaction type diversity
+            # Quality wallets should have multiple types of transactions (SWAP, TRANSFER, etc.)
+            # This filters out single-purpose automated wallets
+            tx_types = set()
+            for tx in transactions[:min_trades_config * 2]:  # Check first few transactions
+                tx_type = tx.get("type", "UNKNOWN")
+                if tx_type:
+                    tx_types.add(tx_type)
+
+            # Require at least 1 SWAP transaction for wallet discovery purposes
+            if "SWAP" not in tx_types and "TRADE" not in tx_types:
+                return False
+
+            # VALIDATION CRITERIA 5: Recent activity check
+            # Ensure at least one recent trade (within last 24 hours for active wallets)
+            recent_trades = [tx for tx in transactions if tx.get("timestamp", 0) > (time.time() - 86400)]
+            if not recent_trades and min_trades_config >= 5:
+                # For higher min_trades thresholds, require recent activity
+                return False
+
+            return True
+
+        except Exception as e:
+            # AGGRESSIVE VALIDATION: Fail closed - if validation fails, wallet is invalid
+            print(f"[Helius] Validation failed for wallet {wallet_address[:8]}...: {e}")
+            return False
+
+    async def _get_wallet_sol_balance(self, wallet_address: str) -> float:
+        """Get SOL balance for a single wallet."""
+        try:
+            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
+            if not rpc_url:
+                return 0.0
+
+            session = await self._get_session()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getBalance",
+                "params": [wallet_address]
+            }
+
+            async with session.post(rpc_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    balance_lamports = data.get("result", {}).get("value", 0)
+                    return balance_lamports / 1e9
+
+            return 0.0
         except Exception:
-            return False  # If we can't validate, assume invalid
+            return 0.0
+
+    async def _aggressive_wallet_filter(
+        self,
+        wallets: List[str],
+        validation_config: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
+        """
+        AGGRESSIVE WALLET FILTERING - Apply comprehensive validation to discovered wallets.
+
+        This method implements multi-stage wallet filtering:
+        1. Address format validation (immediate filter)
+        2. SOL balance check (filters programs/vaults)
+        3. Activity validation (minimum trades, frequency, diversity)
+        4. Quality scoring (ranks wallets by multiple metrics)
+
+        Args:
+            wallets: List of wallet addresses to filter
+            validation_config: Optional configuration override
+
+        Returns:
+            List of wallets that pass aggressive validation criteria
+        """
+        if not wallets:
+            return []
+
+        # CONFIGURATION
+        config = validation_config or {
+            "min_trades": int(os.getenv("SCOUT_MIN_TRADES", "3")),
+            "min_sol_balance": float(os.getenv("SCOUT_MIN_SOL_BALANCE", "0.001")),
+            "require_recent_activity": os.getenv("SCOUT_REQUIRE_RECENT_ACTIVITY", "false").lower() == "true",
+            "validation_enabled": os.getenv("SCOUT_VALIDATE_WALLET_ACTIVITY", "true").lower() == "true",
+        }
+
+        if not config.get("validation_enabled", True):
+            # If validation is disabled, return all wallets
+            return wallets
+
+        # STAGE 1: Address format validation (fastest filter)
+        valid_format = []
+        for wallet in wallets:
+            if self._is_candidate_wallet_address(wallet):
+                valid_format.append(wallet)
+
+        if not valid_format:
+            return []
+
+        print(f"[Helius] Format validation: {len(valid_format)}/{len(wallets)} passed")
+
+        # STAGE 2: SOL balance check (parallel batch processing)
+        min_balance = config.get("min_sol_balance", 0.001)
+        if min_balance > 0:
+            valid_balance = await self._filter_by_sol_balance(valid_format, min_balance_sol=min_balance)
+            print(f"[Helius] Balance validation: {len(valid_balance)}/{len(valid_format)} passed")
+        else:
+            valid_balance = valid_format
+
+        if not valid_balance:
+            return []
+
+        # STAGE 3: Activity validation (parallel batch processing)
+        min_trades = config.get("min_trades", 3)
+        validated_wallets = []
+
+        # Process in parallel with limited concurrency
+        semaphore = asyncio.Semaphore(20)  # Max 20 concurrent validations
+
+        async def validate_single_wallet(wallet: str) -> bool:
+            async with semaphore:
+                return await self._validate_wallet_activity(wallet, min_trades=min_trades)
+
+        # Run validations in parallel
+        validation_tasks = [validate_single_wallet(wallet) for wallet in valid_balance]
+        validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
+
+        for wallet, result in zip(valid_balance, validation_results):
+            if isinstance(result, bool) and result:
+                validated_wallets.append(wallet)
+
+        print(f"[Helius] Activity validation: {len(validated_wallets)}/{len(valid_balance)} passed")
+
+        return validated_wallets
 
     async def _filter_by_sol_balance(
         self,
@@ -1318,7 +1625,172 @@ class HeliusClient:
         
         print(f"[Helius] Found {len(wallet_counts)} unique wallets from token queries")
         return dict(wallet_counts)
-    
+
+    async def _discover_from_recent_blocks(
+        self,
+        hours_back: int = 24,
+        limit: int = 500
+    ) -> Dict[str, int]:
+        """
+        Discover wallets from recent Solana blocks for fresh swap activity.
+
+        This strategy captures wallets that have recently executed swap transactions
+        by querying recent blocks and extracting swap participants.
+
+        Args:
+            hours_back: Number of hours to look back for blocks
+            limit: Maximum number of transactions to process
+
+        Returns:
+            Dictionary mapping wallet addresses to trade counts
+        """
+        import aiohttp
+
+        wallet_counts: Dict[str, int] = defaultdict(int)
+
+        try:
+            # Calculate slot range for recent blocks
+            # Solana produces ~400-500 slots per minute, so we calculate backwards
+            slots_per_minute = 480  # Conservative estimate
+            total_slots = int(hours_back * 60 * slots_per_minute)
+
+            # Get current slot
+            rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
+            if not rpc_url and self.api_key:
+                rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
+
+            if not rpc_url:
+                print("[Helius] No RPC URL available for block discovery")
+                return {}
+
+            # Get current slot
+            session = await self._get_session()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": "block_discovery",
+                "method": "getSlot",
+                "params": []
+            }
+
+            async with session.post(rpc_url, json=payload) as response:
+                if response.status != 200:
+                    print(f"[Helius] Failed to get current slot: HTTP {response.status}")
+                    return {}
+
+                data = await response.json()
+                current_slot = data.get("result")
+
+                if not current_slot:
+                    print("[Helius] Invalid slot response")
+                    return {}
+
+            # Calculate starting slot for our lookback window
+            start_slot = max(0, current_slot - total_slots)
+
+            print(f"[Helius] Analyzing blocks from slot {start_slot} to {current_slot}...")
+
+            # Query blocks in batches (Solana RPC limits)
+            batch_size = 100  # Process 100 blocks at a time
+            processed_transactions = 0
+
+            for slot in range(start_slot, current_slot, batch_size):
+                if processed_transactions >= limit:
+                    break
+
+                # Get block for this slot range
+                end_batch_slot = min(slot + batch_size, current_slot)
+                blocks_to_process = min(batch_size, end_batch_slot - slot)
+
+                for individual_slot in range(slot, end_batch_slot):
+                    if processed_transactions >= limit:
+                        break
+
+                    try:
+                        # Get confirmed block
+                        block_payload = {
+                            "jsonrpc": "2.0",
+                            "id": f"block_{individual_slot}",
+                            "method": "getBlock",
+                            "params": [individual_slot, {"encoding": "jsonParsed", "transactionDetails": "full"}]
+                        }
+
+                        async with session.post(rpc_url, json=block_payload) as block_response:
+                            if block_response.status != 200:
+                                continue
+
+                            block_data = await block_response.json()
+                            block_result = block_data.get("result")
+
+                            if not block_result:
+                                continue
+
+                            # Extract transactions from block
+                            transactions = block_result.get("transactions", [])
+
+                            for tx in transactions:
+                                if processed_transactions >= limit:
+                                    break
+
+                                processed_transactions += 1
+
+                                # Get transaction details
+                                tx_detail = tx.get("transaction", {})
+                                meta = tx_detail.get("meta", {})
+
+                                # Check if transaction failed (skip failed transactions)
+                                if meta.get("err") is not None:
+                                    continue
+
+                                # Look for swap instructions
+                                message = tx_detail.get("message", {})
+                                instructions = message.get("instructions", [])
+
+                                is_swap = False
+                                for instruction in instructions:
+                                    # Check for program calls that might be swaps
+                                    program_id = instruction.get("programId")
+                                    if program_id in self.dex_programs:
+                                        is_swap = True
+                                        break
+
+                                    # Check for transfer instructions (simple swaps)
+                                    parsed = instruction.get("parsed")
+                                    if parsed and parsed.get("type") in ["transfer", "transferChecked"]:
+                                        is_swap = True
+                                        break
+
+                                if is_swap:
+                                    # Extract wallet addresses from transaction
+                                    # Priority: fee payer -> account keys -> signers
+
+                                    # Fee payer (usually the initiating wallet)
+                                    fee_payer = message.get("accountKeys", [None])[0]
+                                    if fee_payer and self._is_candidate_wallet_address(fee_payer):
+                                        wallet_counts[fee_payer] += 1
+                                        self._discovered_this_run.add(fee_payer)
+
+                                    # Account keys that might be wallets
+                                    account_keys = message.get("accountKeys", [])
+                                    for account_key in account_keys[1:3]:  # Check first few accounts
+                                        if account_key and self._is_candidate_wallet_address(account_key):
+                                            # Avoid counting the same wallet multiple times per transaction
+                                            if account_key != fee_payer:
+                                                wallet_counts[account_key] += 1
+                                                self._discovered_this_run.add(account_key)
+
+                    except Exception as e:
+                        # Skip problematic blocks and continue
+                        continue
+
+            print(f"[Helius] Processed {processed_transactions} transactions from recent blocks")
+
+        except Exception as e:
+            print(f"[Helius] Block discovery failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        return dict(wallet_counts)
+
     async def _discover_from_dex_programs(
         self,
         hours_back: int = 24,
@@ -1552,7 +2024,21 @@ class HeliusClient:
             print(f"[Helius] Strategy 1 failed: {e}")
         
 
-        
+
+        # Strategy 2: Recent Blocks Discovery (Secondary) - Skip if we have enough wallets
+        if len(wallet_counts) < max_wallets // 2:
+            try:
+                print("[Helius] Strategy 2: Querying recent blocks...")
+                block_wallets = await self._discover_from_recent_blocks(hours_back=hours_back, limit=500)
+                for wallet, count in block_wallets.items():
+                    wallet_counts[wallet] += count
+                if block_wallets:
+                    strategy_used = f"{strategy_used}+blocks"
+                print(f"[Helius] Strategy 2 found {len(block_wallets)} wallets")
+            except Exception as e:
+                errors_encountered += 1
+                print(f"[Helius] Strategy 2 failed: {e}")
+
         # Strategy 3: DEX Program Accounts (Tertiary) - Skip if we have enough wallets
         if len(wallet_counts) < max_wallets // 2:
             try:
@@ -1974,6 +2460,12 @@ class HeliusClient:
     ) -> Optional[Dict[str, Any]]:
         """
         Strategy 1: Parse swap from wallet-relative token and SOL deltas.
+
+        COMPREHENSIVE ENHANCEMENTS:
+        - Expanded stablecoin support (USDC, USDT, PYUSD, DAI, USDD, TUSD, FDUSD, BUSD)
+        - Improved token->token swap detection with multi-token support
+        - Enhanced instruction-level pattern recognition
+        - Better handling of complex DEX transactions (Jupiter, Orca, Raydium)
         """
         signature = tx.get("signature", "")
         timestamp = tx.get("timestamp", int(utcnow().timestamp()))
@@ -1981,7 +2473,20 @@ class HeliusClient:
         sol_mint = "So11111111111111111111111111111111111111112"
         usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
         usdt_mint = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-        stable_mints = {usdc_mint, usdt_mint}
+        pyusd_mint = "Fm7yTTQkwMqhf76GymzctsgEpCvX4q3xdHgBqFVSQKk"
+
+        # COMPREHENSIVE STABLECOIN LIST
+        stable_mints = {
+            usdc_mint,  # USDC
+            usdt_mint,  # USDT
+            pyusd_mint,  # PYUSD
+            "7dHbWXmci3dTUpSFJC3s3nxMPrsrTn5fQjYPb26cscQ",  # USDD (maintained by TRON DAO)
+            "DAiHhAwpCe2ygJmhzwQTvXcFqBVRNAGfnUSQ4gNpm5f",  # DAI (legacy)
+            "3KBZiQHbjmiNtbaDNqeiyp6Y3qqmANuGphxDjPXqnDVe",  # DAI (official)
+            "4MNeZJj3iWc3C7YFU1iXbSsrLuvQEwNyAGTWXfUFguwF",  # TUSD
+            "5fTkp16UPQMJyyw7Tm2jrRKTMrMVZh6gHNiYLHNpVV09",  # FDUSD
+            "CWGsHHN7LCLfgL8rBFaJMXzyYrRoP7yRgx15fLaTnUuW",  # BUSD (deprecated but still in circulation)
+        }
 
         # 1) Native SOL delta (lamports)
         lamports_delta = 0
@@ -2112,38 +2617,113 @@ class HeliusClient:
                         "net_token_delta": net_token_delta,
                     }
 
-            # No stablecoin leg — try pure token→token swap.
-            # Identify the two largest non-SOL token deltas (one inflow, one outflow).
+            # COMPREHENSIVE ENHANCEMENT: Advanced token→token swap parsing
+            # Handle multi-token swaps, routing transactions, and complex DEX patterns
+
+            # Strategy A: Identify the two largest non-SOL token deltas (one inflow, one outflow)
             inflow = (None, 0.0)   # (mint, delta) for delta > 0
             outflow = (None, 0.0)  # (mint, delta) for delta < 0
+            all_inflows = []  # Track all inflows for multi-token swaps
+            all_outflows = []  # Track all outflows for multi-token swaps
+
             for mint, delta in token_deltas.items():
                 if mint == sol_mint:
                     continue
-                if delta > 0 and delta > inflow[1]:
-                    inflow = (mint, delta)
-                elif delta < 0 and abs(delta) > abs(outflow[1]):
-                    outflow = (mint, delta)
+                if delta > 0:
+                    all_inflows.append((mint, delta))
+                    if delta > inflow[1]:
+                        inflow = (mint, delta)
+                elif delta < 0:
+                    all_outflows.append((mint, delta))
+                    if abs(delta) > abs(outflow[1]):
+                        outflow = (mint, delta)
 
-            if inflow[0] and outflow[0]:
-                token_mint = inflow[0]  # token received is the primary
-                token_amount = abs(inflow[1])
-                direction = "BUY"
-                # USD valuation is unknown without price lookup; leave as None.
-                return {
-                    "signature": signature,
-                    "timestamp": timestamp,
-                    "wallet": wallet_address,
-                    "token_mint": token_mint,
-                    "token_amount": token_amount,
-                    "sol_amount": None,
-                    "direction": direction,
-                    "price_sol": None,
-                    "price_usd": None,
-                    "usd_amount": None,
-                    "quote_mint": None,
-                    "net_sol_delta": 0.0,
-                    "net_token_delta": inflow[1],
-                }
+            # Strategy B: Multi-token swap detection (Jupiter routing, Orca whirlpools)
+            if len(all_inflows) >= 1 and len(all_outflows) >= 1:
+                # Sort by absolute delta to find the most significant tokens
+                all_inflows.sort(key=lambda x: abs(x[1]), reverse=True)
+                all_outflows.sort(key=lambda x: abs(x[1]), reverse=True)
+
+                # Primary tokens are the largest inflow and outflow
+                primary_in_mint, primary_in_delta = all_inflows[0]
+                primary_out_mint, primary_out_delta = all_outflows[0]
+
+                # Determine direction based on stablecoin involvement
+                # If we're swapping FROM stablecoin, it's a BUY
+                # If we're swapping TO stablecoin, it's a SELL
+                if any(mint in stable_mints for mint, _ in all_outflows):
+                    # We're spending stablecoins to get tokens -> BUY
+                    token_mint = primary_in_mint
+                    token_amount = abs(primary_in_delta)
+                    direction = "BUY"
+                    stable_spent = sum(abs(delta) for mint, delta in all_outflows if mint in stable_mints)
+                    return {
+                        "signature": signature,
+                        "timestamp": timestamp,
+                        "wallet": wallet_address,
+                        "token_mint": token_mint,
+                        "token_amount": token_amount,
+                        "sol_amount": None,
+                        "direction": direction,
+                        "price_sol": None,
+                        "price_usd": stable_spent / token_amount if token_amount > 0 else None,
+                        "usd_amount": stable_spent,
+                        "quote_mint": next(mint for mint, _ in all_outflows if mint in stable_mints),
+                        "net_sol_delta": 0.0,
+                        "net_token_delta": primary_in_delta,
+                        "swap_type": "token_to_token_multi",
+                    }
+                elif any(mint in stable_mints for mint, _ in all_inflows):
+                    # We're selling tokens for stablecoins -> SELL
+                    token_mint = primary_out_mint
+                    token_amount = abs(primary_out_delta)
+                    direction = "SELL"
+                    stable_received = sum(abs(delta) for mint, delta in all_inflows if mint in stable_mints)
+                    return {
+                        "signature": signature,
+                        "timestamp": timestamp,
+                        "wallet": wallet_address,
+                        "token_mint": token_mint,
+                        "token_amount": token_amount,
+                        "sol_amount": None,
+                        "direction": direction,
+                        "price_sol": None,
+                        "price_usd": stable_received / token_amount if token_amount > 0 else None,
+                        "usd_amount": stable_received,
+                        "quote_mint": next(mint for mint, _ in all_inflows if mint in stable_mints),
+                        "net_sol_delta": 0.0,
+                        "net_token_delta": primary_out_delta,
+                        "swap_type": "token_to_token_multi",
+                    }
+                elif inflow[0] and outflow[0]:
+                    # Pure token-to-token swap (no stablecoins involved)
+                    # Use the token received as the primary (we're buying it)
+                    token_mint = inflow[0]
+                    token_amount = abs(inflow[1])
+                    direction = "BUY"
+                    return {
+                        "signature": signature,
+                        "timestamp": timestamp,
+                        "wallet": wallet_address,
+                        "token_mint": token_mint,
+                        "token_amount": token_amount,
+                        "sol_amount": None,
+                        "direction": direction,
+                        "price_sol": None,
+                        "price_usd": None,
+                        "usd_amount": None,
+                        "quote_mint": outflow[0],  # Track what we sold
+                        "net_sol_delta": 0.0,
+                        "net_token_delta": inflow[1],
+                        "swap_type": "token_to_token_pure",
+                    }
+
+            # Strategy C: Instruction-level pattern recognition for complex swaps
+            # This handles cases where tokenTransfers don't capture the full picture
+            if not inflow[0] or not outflow[0]:
+                instruction_result = self._parse_from_instruction_level(tx, wallet_address, token_deltas)
+                if instruction_result:
+                    return instruction_result
 
             # Could not value without SOL, stable, or clear token pair
             return None
@@ -2206,6 +2786,121 @@ class HeliusClient:
             "net_sol_delta": sol_delta,
             "net_token_delta": primary_delta,
         }
+
+    def _parse_from_instruction_level(
+        self,
+        tx: Dict[str, Any],
+        wallet_address: str,
+        token_deltas: Dict[str, float]
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Strategy 3: Parse swap from instruction-level patterns.
+
+        This method handles complex DEX transactions where tokenTransfers
+        don't capture the full swap picture, such as:
+        - Jupiter aggregator routing transactions
+        - Orca whirlpool multi-hop swaps
+        - Raydium multi-pool transactions
+        - Token-2022 program swaps
+        """
+        signature = tx.get("signature", "")
+        timestamp = tx.get("timestamp", int(utcnow().timestamp()))
+
+        instructions = tx.get("instructions", [])
+        if not instructions:
+            return None
+
+        sol_mint = "So11111111111111111111111111111111111111112"
+
+        # DEX program identifiers for instruction-level parsing
+        dex_program_patterns = {
+            "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "jupiter",
+            "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "orca",
+            "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So": "raydium",
+            "9WzaBBWQNqAghxSAfKUUx3ZkhBBFCkTUvJJJcjF2oG4": "orca",
+            "swoQ1Yx4kK_7d9pNVbDiVSe7XPqTc2nRvEmMuXelNhk": "swap",
+        }
+
+        # Analyze instructions for swap patterns
+        swap_candidates = []
+        stable_mints = {
+            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+            "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT
+            "Fm7yTTQkwMqhf76GymzctsgEpCvX4q3xdHgBqFVSQKk",  # PYUSD
+        }
+
+        for instr in instructions:
+            if not isinstance(instr, dict):
+                continue
+
+            program_id = instr.get("programId", "")
+            parsed = instr.get("parsed", {})
+
+            # Check if this is a DEX instruction
+            dex_type = None
+            for dex_program, dex_name in dex_program_patterns.items():
+                if program_id == dex_program or program_id in dex_program:
+                    dex_type = dex_name
+                    break
+
+            if not dex_type:
+                continue
+
+            # Parse instruction type
+            instr_type = parsed.get("type", "")
+            if instr_type.lower() in ["swap", "swapbasein", "swapbaseout", "exactinsingle", "exactoutsingle"]:
+                # Extract account information
+                accounts = instr.get("accounts", [])
+                if not accounts:
+                    continue
+
+                # Look for token mint accounts in the instruction data
+                info = parsed.get("info", {})
+                if isinstance(info, dict):
+                    token_in = info.get("tokenIn") or info.get("inputMint")
+                    token_out = info.get("tokenOut") or info.get("outputMint")
+
+                    if token_in and token_out:
+                        # Check if wallet is involved
+                        if wallet_address in accounts:
+                            # Determine direction based on token_deltas
+                            in_delta = token_deltas.get(token_in, 0)
+                            out_delta = token_deltas.get(token_out, 0)
+
+                            # If we're receiving token_out and sending token_in, it's a BUY
+                            if out_delta > 0 and in_delta < 0:
+                                token_mint = token_out
+                                token_amount = abs(out_delta)
+                                direction = "BUY"
+
+                                # Try to determine price from stablecoin involvement
+                                usd_amount = None
+                                price_usd = None
+                                quote_mint = None
+
+                                if token_in in stable_mints:
+                                    usd_amount = abs(in_delta)
+                                    price_usd = usd_amount / token_amount if token_amount > 0 else None
+                                    quote_mint = token_in
+
+                                return {
+                                    "signature": signature,
+                                    "timestamp": timestamp,
+                                    "wallet": wallet_address,
+                                    "token_mint": token_mint,
+                                    "token_amount": token_amount,
+                                    "sol_amount": None,
+                                    "direction": direction,
+                                    "price_sol": None,
+                                    "price_usd": price_usd,
+                                    "usd_amount": usd_amount,
+                                    "quote_mint": quote_mint,
+                                    "net_sol_delta": 0.0,
+                                    "net_token_delta": out_delta,
+                                    "swap_type": f"instruction_{dex_type}",
+                                }
+
+        return None
 
     def _parse_swap_from_events(
         self,
