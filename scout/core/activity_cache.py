@@ -18,17 +18,12 @@ Features:
 - Scheduled cleanup of inactive entries
 """
 
-import os
 import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Set
+from typing import Dict, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-import json
-from pathlib import Path
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
