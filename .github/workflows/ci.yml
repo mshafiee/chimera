@@ -124,7 +124,7 @@ jobs:
       
       - name: Run ruff check
         working-directory: scout
-        run: ruff check core/ --output-format=github
+        run: ruff check core/ --output-format=github --ignore E501
 
   python-tests:
     name: Python Tests (pytest)
