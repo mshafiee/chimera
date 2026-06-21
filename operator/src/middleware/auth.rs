@@ -243,7 +243,7 @@ pub async fn bearer_auth(
 
         tracing::info!("Extracted query token: {:?}", query_token);
 
-        if query_token.is_none() || query_token.as_ref().map_or(true, |t| t.is_empty()) {
+        if query_token.is_none() || query_token.as_ref().is_none_or(|t| t.is_empty()) {
             // No auth in header or query - check if anonymous readonly is allowed
             if state.allow_anonymous_readonly {
                 let anon_user = AuthenticatedUser {

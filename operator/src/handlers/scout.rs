@@ -210,7 +210,7 @@ async fn get_wallet_statistics(db: &DbPool) -> Result<WalletStatistics, AppError
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     // Get last update time from the most recently updated wallet
     let last_time: Option<String> = sqlx::query_scalar(
@@ -218,7 +218,7 @@ async fn get_wallet_statistics(db: &DbPool) -> Result<WalletStatistics, AppError
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     Ok(WalletStatistics {
         total_wallets,
@@ -242,7 +242,7 @@ async fn calculate_wqs_distribution(db: &DbPool) -> Result<Vec<WQSBucket>, AppEr
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     for (range_name, min, max) in ranges {
         let count: i64 = sqlx::query_scalar(
@@ -252,7 +252,7 @@ async fn calculate_wqs_distribution(db: &DbPool) -> Result<Vec<WQSBucket>, AppEr
         .bind(max)
         .fetch_one(db)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         let percentage = if total_count > 0 {
             (count as f64 / total_count as f64) * 100.0
@@ -282,7 +282,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     if total_count == 0 {
         return Ok(WQSStatistics {
@@ -298,7 +298,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     // Calculate median using OFFSET
     let median = if total_count % 2 == 0 {
@@ -309,7 +309,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
         .bind(total_count / 2 - 1)
         .fetch_one(db)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         let mid2: f64 = sqlx::query_scalar(
             "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
@@ -317,7 +317,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
         .bind(total_count / 2)
         .fetch_one(db)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         (mid1 + mid2) / 2.0
     } else {
@@ -328,7 +328,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
         .bind(total_count / 2)
         .fetch_one(db)
         .await
-        .map_err(|e| AppError::Database(e))?
+        .map_err(AppError::Database)?
     };
 
     Ok(WQSStatistics {
@@ -344,7 +344,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     // Get rejected wallets (rug check equivalent)
     let rug_check_rejections: i64 = sqlx::query_scalar(
@@ -352,7 +352,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     // Calculate backtest success rate (from ACTIVE wallets that passed validation)
     let backtest_passed: i64 = sqlx::query_scalar(
@@ -360,7 +360,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     let backtest_success_rate = if total_analyzed > 0 {
         (backtest_passed as f64 / total_analyzed as f64) * 100.0
@@ -374,7 +374,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     )
     .fetch_one(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     let validation_pass_rate = if total_analyzed > 0 {
         (validation_passed as f64 / total_analyzed as f64) * 100.0
@@ -400,7 +400,7 @@ async fn get_promotion_queue(db: &DbPool) -> Result<Vec<PromotionItem>, AppError
     )
     .fetch_all(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     let items = rows.into_iter().map(|(address, wqs_score, notes, promoted_at)| {
         // Determine backtest success from notes
@@ -426,7 +426,7 @@ async fn get_rejection_queue(db: &DbPool) -> Result<Vec<RejectionItem>, AppError
     )
     .fetch_all(db)
     .await
-    .map_err(|e| AppError::Database(e))?;
+    .map_err(AppError::Database)?;
 
     let items = rows.into_iter().map(|(address, wqs_score, notes, updated_at)| {
         RejectionItem {

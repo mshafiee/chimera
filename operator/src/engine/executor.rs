@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::commitment_config::CommitmentConfig;
+use solana_commitment_config::CommitmentConfig;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
 use std::time::Duration;

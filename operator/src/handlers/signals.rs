@@ -237,7 +237,7 @@ pub async fn get_consensus(
     for row in recent_signals {
         consensus_signals
             .entry(row.token_address.clone())
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(row);
     }
 
@@ -664,7 +664,7 @@ async fn get_active_clusters(
             .unwrap_or(50.0);
 
             clusters.push(Cluster {
-                id: format!("cluster_{}", wallet[..8.min(wallet.len())].to_string()),
+                id: format!("cluster_{}", &wallet[..8.min(wallet.len())]),
                 wallets: cluster_wallets,
                 signal_count: 2, // Placeholder
                 avg_wqs,

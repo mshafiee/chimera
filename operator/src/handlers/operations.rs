@@ -546,7 +546,7 @@ async fn check_rpc_health(engine: &Option<Arc<EngineHandle>>) -> HealthCheck {
         Some(_health) => HealthCheck {
             name: "rpc".to_string(),
             status: CheckStatus::Failing,
-            message: Some(format!("RPC unhealthy: latency high or unavailable")),
+            message: Some("RPC unhealthy: latency high or unavailable".to_string()),
             last_check: Utc::now().to_rfc3339(),
             response_time_ms,
         },

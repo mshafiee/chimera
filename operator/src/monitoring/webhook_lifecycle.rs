@@ -118,27 +118,21 @@ impl WebhookLifecycleManager {
 
         // Check if webhook already exists
         if let Ok(Some(existing_webhook)) = db::get_wallet_monitoring_by_address(&self.db, wallet).await {
-            if existing_webhook
-                .helius_webhook_id
-                .is_some()
-                && !existing_webhook
-                    .helius_webhook_id
-                    .as_ref()
-                    .unwrap()
-                    .is_empty()
-            {
-                info!(
-                    wallet = %wallet,
-                    webhook_id = %existing_webhook.helius_webhook_id.as_ref().unwrap(),
-                    "Webhook already exists"
-                );
-                return Ok(WebhookRegistrationResult {
-                    wallet_address: wallet.to_string(),
-                    webhook_id: existing_webhook.helius_webhook_id.clone().unwrap_or_default(),
-                    success: true,
-                    error_message: None,
-                    duration_ms: start.elapsed().as_millis() as i32,
-                });
+            if let Some(webhook_id) = &existing_webhook.helius_webhook_id {
+                if !webhook_id.is_empty() {
+                    info!(
+                        wallet = %wallet,
+                        webhook_id = %webhook_id,
+                        "Webhook already exists"
+                    );
+                    return Ok(WebhookRegistrationResult {
+                        wallet_address: wallet.to_string(),
+                        webhook_id: webhook_id.clone(),
+                        success: true,
+                        error_message: None,
+                        duration_ms: start.elapsed().as_millis() as i32,
+                    });
+                }
             }
         }
 

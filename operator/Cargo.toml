@@ -27,22 +27,24 @@ aes-gcm = "0.10"
 base64 = "0.22"
 getrandom = "0.2"
 
-# Caching
-lru = "0.12"
+# Caching - upgraded to fix RUSTSEC-2021-0145 and RUSTSEC-2026-0002
+lru = "0.13"
 
 # Solana Interaction
-# Solana Interaction
-solana-client = "2.0.0"
-solana-sdk = "2.0.0"
-solana-transaction-status = "2.0.0"
-solana-account-decoder = "2.0.0"
-solana-system-interface = { version = "1.0", features = ["bincode"] }
-solana-program = "2.0.0"
-# Note: You will need the specific Jito searcher crate or build from their SDK
-# jito-searcher-client = { git = "..." } 
+solana-client = "3.0"
+solana-sdk = "3.0"
+solana-transaction-status = "3.0"
+solana-account-decoder = "3.0"
+solana-system-interface = { version = "2.0", features = ["bincode"] }
+solana-program = "3.0"
+# Solana 3.x split these into separate crates
+solana-commitment-config = "3.0"
+solana-transaction = "3.0"
+solana-message = "3.0"
+solana-address-lookup-table-interface = "3.0" 
 
-# Database (SQLite + WAL)
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+# Database (SQLite + WAL) - upgraded to 0.8 to fix security advisories
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
 
 # Configuration
 config = "0.15"
@@ -67,11 +69,13 @@ futures-util = "0.3"
 
 # HTTP Client for Telegram notifications and RPC
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+hyper = { version = "0.14", features = ["full"] }
+hyper-rustls = "0.27"
 
 # Prometheus metrics
 prometheus = "0.14.0"
 
-# PDF generation
+# PDF generation - upgraded to eliminate kuchiki security advisory
 printpdf = "0.8.2"
 
 # Random number generation

@@ -1695,9 +1695,9 @@ pub async fn get_reconciliation_status(
     let (last_at, last_ts) = latest_row.unwrap_or((None, None));
 
     // Calculate next reconciliation (4 AM UTC daily)
-    let next_at = last_ts.and_then(|ts| {
+    let next_at = last_ts.map(|ts| {
         let next = ts + 86400 - (ts % 86400) + 14400; // 4 AM UTC = 14400 seconds
-        Some(datetime_from_timestamp(next as f64))
+        datetime_from_timestamp(next as f64)
     });
 
     // Get counts
@@ -2980,6 +2980,7 @@ pub async fn update_webhook_url(
 }
 
 /// Log webhook lifecycle event with comprehensive tracking
+#[allow(clippy::too_many_arguments)]
 pub async fn log_webhook_lifecycle_event(
     pool: &DbPool,
     wallet_address: &str,
@@ -3134,21 +3135,21 @@ pub async fn get_webhook_audit_log(
     let mut params = Vec::new();
 
     if let Some(addr) = wallet_address {
-        query.push_str(&format!(" AND wallet_address = ?"));
+        query.push_str(" AND wallet_address = ?");
         params.push(addr.to_string());
     }
 
     if let Some(act) = action {
-        query.push_str(&format!(" AND action = ?"));
+        query.push_str(" AND action = ?");
         params.push(act.to_string());
     }
 
     if let Some(st) = status {
-        query.push_str(&format!(" AND status = ?"));
+        query.push_str(" AND status = ?");
         params.push(st.to_string());
     }
 
-    query.push_str(&format!(" ORDER BY created_at DESC"));
+    query.push_str(" ORDER BY created_at DESC");
 
     if let Some(lim) = limit {
         query.push_str(&format!(" LIMIT {}", lim));

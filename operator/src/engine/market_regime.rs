@@ -246,6 +246,7 @@ impl MarketRegimeDetector {
     ///
     /// Returns a cloned Arc to the internal price history, allowing read access
     /// without exposing mutable state.
+    #[allow(clippy::type_complexity)]
     pub fn get_price_history(
         &self,
     ) -> Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>> {

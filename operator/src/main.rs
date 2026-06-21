@@ -1144,7 +1144,7 @@ async fn main() -> anyhow::Result<()> {
     // Run startup webhook management check
     // This ensures all ACTIVE wallets have registered webhooks before server starts
     if config.monitoring.as_ref().map(|m| m.enabled).unwrap_or(false) {
-        if let Some(ref webhook_lifecycle_config) = config.monitoring
+        if let Some(webhook_lifecycle_config) = config.monitoring
             .as_ref()
             .and_then(|m| m.webhook_lifecycle.as_ref())
         {

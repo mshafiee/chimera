@@ -487,7 +487,7 @@ pub async fn get_wallet_monitoring_states(
         .into_iter()
         .map(|wm| {
             // Determine method: webhook if helius_webhook_id exists, otherwise polling
-            let method = if wm.helius_webhook_id.is_some() && wm.helius_webhook_id.as_ref().unwrap().len() > 0 {
+            let method = if wm.helius_webhook_id.is_some() && !wm.helius_webhook_id.as_ref().unwrap().is_empty() {
                 "webhook".to_string()
             } else {
                 "polling".to_string()

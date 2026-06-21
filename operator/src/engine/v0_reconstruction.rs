@@ -4,10 +4,10 @@
 //! with updated blockhashes, allowing client-side blockhash updates for V0 transactions.
 
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_program::address_lookup_table::state::AddressLookupTable;
+use solana_address_lookup_table_interface::state::AddressLookupTable;
+use solana_message::AddressLookupTableAccount;
+use solana_transaction::CompiledInstruction;
 use solana_sdk::{
-    address_lookup_table::AddressLookupTableAccount,
-    instruction::CompiledInstruction,
     message::{
         v0::{self, MessageAddressTableLookup},
         VersionedMessage,
