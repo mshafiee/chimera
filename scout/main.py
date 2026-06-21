@@ -1540,7 +1540,7 @@ async def main_async():
         if analyzer and hasattr(analyzer, 'shutdown'):
             await analyzer.shutdown()
             print("[Scout] Cleaned up all resources")
-        if liquidity_provider:
+        if 'liquidity_provider' in locals() and liquidity_provider:
             try:
                 await liquidity_provider.close()
             except Exception:
