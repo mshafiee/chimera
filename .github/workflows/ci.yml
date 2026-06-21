@@ -87,9 +87,19 @@ jobs:
           key: \${{ runner.os }}-cargo-\${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             \${{ runner.os }}-cargo-
-      
+
+      - name: Set up database for SQLx
+        working-directory: operator
+        run: |
+          mkdir -p ../data
+          # Create SQLite database and apply schema
+          sqlite3 ../data/chimera.db < ../database/schema.sql || echo "Schema may have been applied"
+          echo "DATABASE_URL=sqlite:../data/chimera.db" >> $GITHUB_ENV
+
       - name: Run unit tests
         working-directory: operator
+        env:
+          DATABASE_URL: sqlite:../data/chimera.db
         run: cargo test --lib --bins
       
       - name: Run integration tests
@@ -150,7 +160,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
       
       - name: Install dependencies
         working-directory: web
@@ -169,7 +179,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
       
       - name: Install dependencies
         working-directory: web
@@ -188,7 +198,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
       
       - name: Install dependencies
         working-directory: web
