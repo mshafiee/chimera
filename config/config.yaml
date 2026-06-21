@@ -120,7 +120,7 @@ notifications:
 # Monitoring configuration
 monitoring:
   enabled: true
-  helius_api_key: "609cb910-17a5-4a76-9d1b-2ca9c42f759e"
+  helius_api_key: "${HELIUS_API_KEY}"
   helius_webhook_url: "https://captivity-grunge-curtsy.ngrok-free.dev/api/v1/monitoring/helius-webhook"
   webhook_registration_batch_size: 10
   webhook_registration_delay_ms: 200

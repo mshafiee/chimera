@@ -1,6 +1,6 @@
 # Environment files (local overrides)
 .env
-.env.*
+.env.*.backup
 !.env.example
 docker/env.*.local
 
@@ -45,3 +45,4 @@ temp/
 /scout/.hypothesis
 /.claude
 .crush.json
+.env.backup

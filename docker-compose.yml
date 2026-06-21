@@ -50,7 +50,7 @@ services:
       - CHIMERA_API_URL=http://chimera-operator:8080
       - CHIMERA_OPERATOR_CONTAINER=chimera-operator
       # Helius API Key for wallet discovery
-      - HELIUS_API_KEY=609cb910-17a5-4a76-9d1b-2ca9c42f759e
+      - HELIUS_API_KEY=${HELIUS_API_KEY}
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
       - SCOUT_MAX_WALLETS=10                                     # Testing with 10 wallets

@@ -15,7 +15,7 @@ from typing import List, Dict, Optional
 from datetime import datetime
 
 # Configuration
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "609cb910-17a5-4a76-9d1b-2ca9c42f759e")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY", "")
 HELIUS_BASE_URL = "https://api.helius.xyz"
 WEBHOOK_URL = os.getenv("CHIMERA_MONITORING__HELIUS_WEBHOOK_URL",
                       "https://chimera.example.com/api/v1/monitoring/helius-webhook")
