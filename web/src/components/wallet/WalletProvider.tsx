@@ -5,7 +5,8 @@ import {
   useWallet,
 } from '@solana/wallet-adapter-react'
 import { WalletModalProvider, WalletMultiButton } from '@solana/wallet-adapter-react-ui'
-import { PhantomWalletAdapter, SolflareWalletAdapter } from '@solana/wallet-adapter-wallets'
+import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom'
+import { SolflareWalletAdapter } from '@solana/wallet-adapter-solflare'
 import { clusterApiUrl } from '@solana/web3.js'
 import { useAuthStore } from '../../stores/authStore'
 import { apiClient } from '../../api/client'

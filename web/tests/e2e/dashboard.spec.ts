@@ -156,11 +156,10 @@ test.describe('Dashboard - Real-time Updates', () => {
     // Wait a bit for WebSocket to connect
     await page.waitForTimeout(1000);
 
-    const hasLiveIndicator = await liveIndicator.isVisible().catch(() => false) ||
-                             await liveText.isVisible().catch(() => false);
+    await liveIndicator.isVisible().catch(() => false);
+    await liveText.isVisible().catch(() => false);
 
     // WebSocket may not be available in test environment, so this is optional
-    // expect(hasLiveIndicator).toBe(true);
   });
 });
 

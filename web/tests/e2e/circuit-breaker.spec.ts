@@ -114,7 +114,7 @@ test.describe('Circuit Breaker Status', () => {
     // Look for reason text
     const reasonText = page.getByText(/exceeded|threshold|loss/i).first();
     
-    const hasReason = await reasonText.isVisible().catch(() => false);
+    await await reasonText.isVisible().catch(() => false);
     expect(hasReason).toBe(true);
   });
 
@@ -142,7 +142,7 @@ test.describe('Circuit Breaker Status', () => {
     // Look for cooldown indicator
     const cooldownText = page.getByText(/cooldown|minutes|remaining/i).first();
     
-    const hasCooldown = await cooldownText.isVisible().catch(() => false);
+    await await cooldownText.isVisible().catch(() => false);
     expect(hasCooldown).toBe(true);
   });
 
@@ -171,7 +171,7 @@ test.describe('Circuit Breaker Status', () => {
     const resetButton = page.getByRole('button', { name: /reset|restore|resume/i });
     
     // Button should be visible but may require admin auth
-    const hasResetButton = await resetButton.isVisible().catch(() => false);
+    await await resetButton.isVisible().catch(() => false);
     expect(hasResetButton).toBe(true);
   });
 
@@ -274,8 +274,8 @@ test.describe('Circuit Breaker Alerts', () => {
 
     // Look for toast notification
     const toast = page.locator('.toast, .notification, [role="alert"]').first();
-    
-    const hasToast = await toast.isVisible().catch(() => false);
+
+    await toast.isVisible().catch(() => false);
     // Toast may or may not appear depending on implementation
   });
 });
@@ -325,7 +325,7 @@ test.describe('Circuit Breaker Configuration', () => {
       // Look for validation error
       const errorMessage = page.getByText(/invalid|positive|must be/i).first();
       
-      const hasError = await errorMessage.isVisible().catch(() => false);
+      await await errorMessage.isVisible().catch(() => false);
       expect(hasError).toBe(true);
     }
   });
@@ -387,7 +387,7 @@ test.describe('Circuit Breaker Reset Flow', () => {
 
       // Verify state changed to ACTIVE
       const activeStatus = page.getByText(/active|healthy|running/i).first();
-      const hasActive = await activeStatus.isVisible().catch(() => false);
+      await await activeStatus.isVisible().catch(() => false);
       
       expect(hasActive).toBe(true);
     }
@@ -480,7 +480,7 @@ test.describe('Circuit Breaker Reset Flow', () => {
 
       // Should show error message
       const errorMessage = page.getByText(/error|failed|try again/i).first();
-      const hasError = await errorMessage.isVisible().catch(() => false);
+      await await errorMessage.isVisible().catch(() => false);
       
       expect(hasError).toBe(true);
     }

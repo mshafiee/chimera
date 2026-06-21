@@ -175,7 +175,7 @@ test.describe('Wallet Management', () => {
         await promoteButton.click();
         
         // Should show auth warning or login prompt
-        const hasAuthWarning = await authWarning.isVisible().catch(() => false);
+        await await authWarning.isVisible().catch(() => false);
         // This depends on auth implementation
       }
     }
@@ -189,12 +189,11 @@ test.describe('Wallet TTL Behavior', () => {
     // Look for TTL indicator
     const ttlIndicator = page.locator('[data-testid="ttl"], .ttl, .expires').first();
     const ttlText = page.getByText(/expires|remaining|hours left/i).first();
-    
-    const hasTtl = await ttlIndicator.isVisible().catch(() => false) ||
-                   await ttlText.isVisible().catch(() => false);
-    
+
+    await ttlIndicator.isVisible().catch(() => false);
+    await ttlText.isVisible().catch(() => false);
+
     // Some wallets may have TTL, some may be permanent
-    // expect(hasTtl).toBe(true);
   });
 
   test('should differentiate permanent vs temporary promotions', async ({ page }) => {
@@ -203,11 +202,11 @@ test.describe('Wallet TTL Behavior', () => {
     // Look for permanent/temporary indicators
     const permanentBadge = page.getByText(/permanent/i).first();
     const temporaryBadge = page.getByText(/temporary|ttl|expires/i).first();
-    
+
     // At least one type should exist
-    const hasTypeIndicator = await permanentBadge.isVisible().catch(() => false) ||
-                             await temporaryBadge.isVisible().catch(() => false);
-    
+    await permanentBadge.isVisible().catch(() => false);
+    await temporaryBadge.isVisible().catch(() => false);
+
     // expect(hasTypeIndicator).toBe(true);
   });
 
@@ -263,12 +262,11 @@ test.describe('Wallet TTL Behavior', () => {
       // Look for backtest results or validation status
       const backtestResults = page.getByText(/backtest|simulation|validation/i).first();
       const validationStatus = page.locator('[data-testid="backtest-status"], .backtest-result').first();
-      
-      const hasBacktest = await backtestResults.isVisible().catch(() => false) ||
-                          await validationStatus.isVisible().catch(() => false);
-      
+
+      await backtestResults.isVisible().catch(() => false);
+      await validationStatus.isVisible().catch(() => false);
+
       // Backtest info may or may not be visible depending on implementation
-      // expect(hasBacktest).toBe(true);
     }
   });
 
@@ -313,7 +311,7 @@ test.describe('Wallet TTL Behavior', () => {
       
       // Look for bulk action menu
       const bulkMenu = page.locator('.bulk-actions, [data-testid="bulk-menu"]').first();
-      const hasMenu = await bulkMenu.isVisible().catch(() => false);
+      await await bulkMenu.isVisible().catch(() => false);
       
       // expect(hasMenu).toBe(true);
     }

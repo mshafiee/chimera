@@ -55,9 +55,6 @@ test.describe('Configuration', () => {
     const maxLossInput = page.locator('input[name*="max_loss"], input[data-testid="max-loss"]').first();
     
     if (await maxLossInput.isVisible()) {
-      // Get current value
-      const currentValue = await maxLossInput.inputValue();
-      
       // Update value
       await maxLossInput.clear();
       await maxLossInput.fill('750');
@@ -153,8 +150,8 @@ test.describe('Configuration', () => {
         
         // Should show validation error
         const errorMessage = page.getByText(/must.*sum.*100|allocation.*invalid/i).first();
-        const hasError = await errorMessage.isVisible().catch(() => false);
-        
+        await errorMessage.isVisible().catch(() => false);
+
         // Either error shown or save prevented
         expect(hasError || (await shieldInput.inputValue() !== '60')).toBe(true);
       }
@@ -211,8 +208,7 @@ test.describe('Configuration', () => {
       
       // Should show confirmation dialog
       const confirmDialog = page.getByRole('dialog').first();
-      const confirmButton = page.getByRole('button', { name: /confirm|yes|activate/i }).first();
-      
+
       if (await confirmDialog.isVisible()) {
         expect(await confirmDialog.isVisible()).toBe(true);
         
