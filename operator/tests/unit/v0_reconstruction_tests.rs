@@ -3,7 +3,6 @@ use chimera_operator::engine::v0_reconstruction::{
 };
 use solana_sdk::{
     hash::Hash,
-    instruction::CompiledInstruction,
     message::{
         v0::{self, MessageAddressTableLookup},
         MessageHeader, VersionedMessage,
@@ -11,6 +10,7 @@ use solana_sdk::{
     pubkey::Pubkey,
     transaction::VersionedTransaction,
 };
+use solana_transaction::CompiledInstruction;
 use std::sync::Arc;
 
 #[test]
