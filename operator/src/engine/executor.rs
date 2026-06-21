@@ -207,7 +207,7 @@ impl Executor {
     /// - Maximum capped at 30 seconds
     fn calculate_retry_backoff(attempt: u32) -> Duration {
         let base = 2u64.pow(attempt.min(4)); // Cap at 16s base (2^4)
-        let jitter = rand::thread_rng().gen_range(-0.25..0.25); // ±25%
+        let jitter = rand::rng().random_range(-0.25..0.25); // ±25%
         let millis = ((base as f64) * (1.0 + jitter) * 1000.0) as u64;
         Duration::from_millis(millis.min(30000)) // Cap at 30s
     }

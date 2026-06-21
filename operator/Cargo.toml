@@ -31,19 +31,18 @@ getrandom = "0.2"
 lru = "0.13"
 
 # Solana Interaction
-# Keep all at 3.x for consistency until stable 4.x versions are available
-# The -32020 error handling is forward-compatible and will work when we upgrade to 4.x
-solana-sdk = "3.0"
-solana-client = "3.0"
-solana-transaction-status = "3.0"
-solana-account-decoder = "3.0"
+# Stay on Solana 3.x for stable dependencies (Solana 4.0 has version conflicts)
+solana-sdk = "3"
+solana-client = "3"
+solana-transaction-status = { version = "3", features = ["agave-unstable-api"] }
+solana-account-decoder = "3"
 solana-system-interface = { version = "2.0", features = ["bincode"] }
-solana-program = "3.0"
-# Solana 3.x modular crates
-solana-commitment-config = "3.0"
-solana-transaction = "3.0"
-solana-message = "3.0"
-solana-address-lookup-table-interface = "3.0" 
+solana-program = "3"
+# Solana modular crates
+solana-commitment-config = "3"
+solana-transaction = "3"
+solana-message = "3"
+solana-address-lookup-table-interface = "3" 
 
 # Database (SQLite + WAL) - upgraded to 0.8 to fix security advisories
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }

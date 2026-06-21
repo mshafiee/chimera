@@ -52,8 +52,8 @@ impl MevProtection {
     /// Add random delay to avoid predictable patterns (50-200ms)
     pub async fn add_random_delay(&self) {
         use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let delay_ms = rng.gen_range(50..=200);
+        let mut rng = rand::rng();
+        let delay_ms = rng.random_range(50..=200);
         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
     }
 }

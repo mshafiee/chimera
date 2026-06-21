@@ -56,8 +56,8 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
     let base = 2_u64.pow(attempt.min(4));
 
     // Add ±25% jitter (random value between -0.25 and +0.25)
-    let mut rng = rand::thread_rng();
-    let jitter = rng.gen_range(-0.25..0.25);
+    let mut rng = rand::rng();
+    let jitter = rng.random_range(-0.25..0.25);
 
     // Calculate final duration with jitter, ensure at least 1 second minimum
     let with_jitter = base as f64 * (1.0 + jitter);
