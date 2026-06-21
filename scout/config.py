@@ -246,7 +246,62 @@ class ScoutConfig:
     def get_wallet_tx_max_pages() -> int:
         """Get maximum pagination pages per wallet transaction fetch."""
         return int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", "20"))
-    
+
+    @staticmethod
+    def get_discovery_limit_per_token() -> int:
+        """Get maximum transactions to query per token during active-token discovery."""
+        return int(os.getenv("SCOUT_DISCOVERY_LIMIT_PER_TOKEN", "200"))
+
+    @staticmethod
+    def get_discovery_block_limit() -> int:
+        """Get maximum transactions to scan during recent-blocks discovery."""
+        return int(os.getenv("SCOUT_DISCOVERY_BLOCK_LIMIT", "500"))
+
+    @staticmethod
+    def get_discovery_program_limit() -> int:
+        """Get maximum accounts to scan during DEX-program discovery."""
+        return int(os.getenv("SCOUT_DISCOVERY_PROGRAM_LIMIT", "500"))
+
+    @staticmethod
+    def get_discovery_seed_limit_per_wallet() -> int:
+        """Get maximum transactions to fetch per seed wallet during seed-wallet discovery."""
+        return int(os.getenv("SCOUT_DISCOVERY_SEED_LIMIT", "50"))
+
+    @staticmethod
+    def get_discovery_fallback_threshold_pct() -> float:
+        """Fraction of max_wallets below which fallback strategies are triggered (0.0-1.0)."""
+        return float(os.getenv("SCOUT_DISCOVERY_FALLBACK_THRESHOLD", "0.5"))
+
+    @staticmethod
+    def get_balance_batch_size() -> int:
+        """Get batch size for batch RPC balance-check calls."""
+        return int(os.getenv("SCOUT_BALANCE_BATCH_SIZE", "20"))
+
+    @staticmethod
+    def get_activity_validation_concurrency() -> int:
+        """Get max concurrent activity validation checks."""
+        return int(os.getenv("SCOUT_ACTIVITY_VALIDATION_CONCURRENCY", "20"))
+
+    @staticmethod
+    def get_discovery_cache_ttl() -> int:
+        """Get TTL for discovery result cache (seconds)."""
+        return int(os.getenv("SCOUT_DISCOVERY_CACHE_TTL", "3600"))
+
+    @staticmethod
+    def get_max_api_calls_per_run() -> int:
+        """Get maximum API calls allowed per discovery run."""
+        return int(os.getenv("SCOUT_MAX_API_CALLS_PER_RUN", "500"))
+
+    @staticmethod
+    def get_balance_fail_mode() -> str:
+        """Get balance validation fail mode: 'open' (include all on error) or 'closed' (exclude batch)."""
+        return os.getenv("SCOUT_BALANCE_FAIL_MODE", "open").lower()
+
+    @staticmethod
+    def get_dedup_ttl() -> int:
+        """Get TTL for persistent wallet deduplication set (seconds)."""
+        return int(os.getenv("SCOUT_DEDUP_TTL", str(6 * 3600)))
+
     # ========================================================================
     # Optimization Configuration
     # ========================================================================

@@ -357,6 +357,8 @@ class WalletAnalyzer:
                 self._redis_client = RedisClient(redis_url=redis_url, enabled=True)
                 if self._redis_client.is_available():
                     logger.info("Redis cache enabled for token metadata and creation times")
+                    # Share Redis client with HeliusClient for discovery cache & dedup
+                    self.helius_client._redis = self._redis_client
                 else:
                     logger.warning("Redis enabled but unavailable, using in-memory cache")
                     self._redis_client = None

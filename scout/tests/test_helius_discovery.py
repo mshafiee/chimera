@@ -116,11 +116,15 @@ class TestHeliusDiscovery:
         with patch.object(
             helius_client, 'get_wallet_transactions',
             new_callable=AsyncMock
-        ) as mock_get_txns:
+        ) as mock_get_txns, \
+             patch.object(
+            helius_client, '_get_wallet_sol_balance',
+            new_callable=AsyncMock, return_value=1.0
+        ):
             mock_get_txns.return_value = [
-                {"signature": "tx1"},
-                {"signature": "tx2"},
-                {"signature": "tx3"},
+                {"signature": "tx1", "type": "SWAP", "timestamp": int(time.time())},
+                {"signature": "tx2", "type": "SWAP", "timestamp": int(time.time())},
+                {"signature": "tx3", "type": "SWAP", "timestamp": int(time.time())},
             ]
             assert await helius_client._validate_wallet_activity("test_wallet", min_trades=3, days_back=7)
 

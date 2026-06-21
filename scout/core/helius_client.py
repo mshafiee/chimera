@@ -37,16 +37,31 @@ class DiscoveryStats:
     time_taken_seconds: float
 
 
+class DiscoveryError(Exception):
+    """Raised when wallet discovery cannot proceed due to a hard failure.
+
+    Currently used when strict=True and the Helius API key is missing.
+    """
+    pass
+
+
 class HeliusClient:
     """Client for Helius API to discover wallets and fetch transactions."""
     
-    def __init__(self, api_key: Optional[str] = None, session: Optional[aiohttp.ClientSession] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        session: Optional[aiohttp.ClientSession] = None,
+        redis_client: Optional[Any] = None,
+    ):
         """
         Initialize the Helius client.
 
         Args:
             api_key: Helius API key (optional, falls back to env var)
             session: Optional aiohttp session (for connection pooling)
+            redis_client: Optional RedisClient for persistent discovery caching
+                          and wallet deduplication across runs.
         """
         # Load DEX programs from config
         if ScoutConfig:
@@ -126,7 +141,10 @@ class HeliusClient:
         
         # API call tracking
         self._api_calls_made = 0
-        self._max_api_calls = int(os.getenv("SCOUT_MAX_API_CALLS_PER_RUN", "500"))
+        if ScoutConfig:
+            self._max_api_calls = ScoutConfig.get_max_api_calls_per_run()
+        else:
+            self._max_api_calls = int(os.getenv("SCOUT_MAX_API_CALLS_PER_RUN", "500"))
         
         # Known wallets (for deduplication)
         self._known_wallets_cache: Set[str] = set()
@@ -143,6 +161,9 @@ class HeliusClient:
         # Async session management
         self._session = session
         self._own_session = False
+
+        # Redis client for persistent caching (discovery cache, dedup set)
+        self._redis = redis_client
 
     @staticmethod
     def _redact_api_key(s: str) -> str:
@@ -185,6 +206,108 @@ class HeliusClient:
             await self._session.close()
             self._session = None
             self._own_session = False
+
+    # ------------------------------------------------------------------
+    # Redis-backed discovery cache & persistent dedup (Items 3 & 7)
+    # ------------------------------------------------------------------
+
+    _DEDUP_KEY = "scout:discovery:seen_wallets"
+
+    def _redis_available(self) -> bool:
+        """Return True if a Redis client is configured and reachable."""
+        return self._redis is not None and self._redis.is_available()
+
+    def _get_discovery_cache(
+        self, hours_back: int, max_wallets: int
+    ) -> Optional[List[str]]:
+        """Try to read discovery results from Redis, then in-memory cache.
+
+        Returns the cached wallet list or ``None`` on miss.
+        """
+        import json as _json
+
+        # Try Redis first (persistent across processes)
+        if self._redis_available():
+            key = f"scout:discovery:{hours_back}:{max_wallets}"
+            try:
+                cached = self._redis.get(key)
+                if cached:
+                    wallets = _json.loads(cached)
+                    if isinstance(wallets, list):
+                        print("[Helius] Using Redis-cached discovery results")
+                        return wallets[:max_wallets]
+            except Exception as e:
+                logging.getLogger(__name__).debug(
+                    f"Redis discovery cache read failed: {e}"
+                )
+
+        # Fallback: in-memory cache
+        if self._discovery_cache and self._discovery_cache_time:
+            if ScoutConfig:
+                ttl = ScoutConfig.get_discovery_cache_ttl()
+            else:
+                ttl = int(os.getenv("SCOUT_DISCOVERY_CACHE_TTL", "3600"))
+            if time.time() - self._discovery_cache_time < ttl:
+                print("[Helius] Using in-memory cached discovery results")
+                return self._discovery_cache.get("wallets", [])[:max_wallets]
+
+        return None
+
+    def _set_discovery_cache(
+        self, wallets: List[str], hours_back: int, max_wallets: int
+    ) -> None:
+        """Store discovery results in both Redis and in-memory cache."""
+        import json as _json
+
+        # Always update in-memory cache
+        self._discovery_cache = {"wallets": wallets}
+        self._discovery_cache_time = time.time()
+
+        # Also persist to Redis for cross-process sharing
+        if self._redis_available():
+            if ScoutConfig:
+                ttl = ScoutConfig.get_discovery_cache_ttl()
+            else:
+                ttl = int(os.getenv("SCOUT_DISCOVERY_CACHE_TTL", "3600"))
+            key = f"scout:discovery:{hours_back}:{max_wallets}"
+            try:
+                self._redis.set(key, _json.dumps(wallets), ttl_seconds=ttl)
+            except Exception as e:
+                logging.getLogger(__name__).debug(
+                    f"Redis discovery cache write failed: {e}"
+                )
+
+    def _get_persistent_seen_wallets(self) -> Set[str]:
+        """Retrieve the set of wallets seen in recent runs from Redis."""
+        if not self._redis_available():
+            return set()
+        try:
+            members = self._redis.redis_client.smembers(self._DEDUP_KEY)
+            if members:
+                return set(members)
+        except Exception as e:
+            logging.getLogger(__name__).debug(
+                f"Redis dedup read failed: {e}"
+            )
+        return set()
+
+    def _mark_wallets_seen(self, wallets: List[str]) -> None:
+        """Add wallets to the persistent dedup set in Redis with TTL."""
+        if not self._redis_available() or not wallets:
+            return
+        try:
+            if ScoutConfig:
+                ttl = ScoutConfig.get_dedup_ttl()
+            else:
+                ttl = int(os.getenv("SCOUT_DEDUP_TTL", str(6 * 3600)))
+            pipe = self._redis.redis_client.pipeline()
+            pipe.sadd(self._DEDUP_KEY, *wallets)
+            pipe.expire(self._DEDUP_KEY, ttl)
+            pipe.execute()
+        except Exception as e:
+            logging.getLogger(__name__).debug(
+                f"Redis dedup write failed: {e}"
+            )
 
     async def get_wallet_first_transaction(self, wallet_address: str) -> Optional[float]:
         """
@@ -419,11 +542,20 @@ class HeliusClient:
             self.last_request_time = time.time()
     
     def _check_circuit_breaker(self) -> bool:
-        """Check if circuit breaker should prevent requests."""
+        """Check if circuit breaker should prevent requests.
+
+        Returns True (closed) if requests are allowed, False (open) otherwise.
+        Automatically resets the breaker if the cooldown period has elapsed.
+        """
         if self._circuit_breaker_reset_time and time.time() > self._circuit_breaker_reset_time:
+            logger = logging.getLogger(__name__)
+            logger.info(
+                f"[Circuit Breaker] Resetting after cooldown "
+                f"(was open with {self._circuit_breaker_failures} failures)"
+            )
             self._circuit_breaker_failures = 0
             self._circuit_breaker_reset_time = None
-        
+
         if self._circuit_breaker_failures >= self._circuit_breaker_threshold:
             return False  # Circuit is open, don't make requests
         return True  # Circuit is closed, allow requests
@@ -439,6 +571,11 @@ class HeliusClient:
             if ScoutConfig:
                 reset_seconds = ScoutConfig.get_circuit_breaker_reset_seconds()
             self._circuit_breaker_reset_time = time.time() + reset_seconds
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"[Circuit Breaker] OPENED after {self._circuit_breaker_failures} consecutive failures. "
+                f"Requests paused for {reset_seconds}s."
+            )
 
     async def _record_failure(self):
         """Record a failure for circuit breaker (async with lock for thread safety)."""
@@ -452,6 +589,11 @@ class HeliusClient:
                 if ScoutConfig:
                     reset_seconds = ScoutConfig.get_circuit_breaker_reset_seconds()
                 self._circuit_breaker_reset_time = time.time() + reset_seconds
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"[Circuit Breaker] OPENED after {self._circuit_breaker_failures} consecutive failures. "
+                    f"Requests paused for {reset_seconds}s."
+                )
 
     async def _record_success(self):
         """Record a success, reset circuit breaker if needed (async with lock for thread safety)."""
@@ -514,6 +656,10 @@ class HeliusClient:
 
     async def get_rate_limit_stats(self) -> Dict[str, Any]:
         """Get current rate limit statistics (async with lock for thread safety)."""
+        # Call _check_circuit_breaker first so that an expired breaker
+        # is reset before we report its state (avoids stale "open" reports).
+        self._check_circuit_breaker()
+
         async with self._lock:
             avg_latency = sum(self._latency_samples) / len(self._latency_samples) if self._latency_samples else None
             total_requests = self._success_count + self._failure_count
@@ -735,7 +881,9 @@ class HeliusClient:
                     for line in f:
                         line = line.strip()
                         if line and not line.startswith('#'):
-                            tokens.append(line)
+                            token = line.split('#')[0].strip()
+                            if token:
+                                tokens.append(token)
             except Exception as e:
                 print(f"[Helius] Warning: Failed to load token list: {e}")
         
@@ -1293,6 +1441,61 @@ class HeliusClient:
         except Exception:
             return 0.0
 
+    async def _batch_validate_activity(
+        self,
+        wallets: List[str],
+        min_trades: int = 3,
+        days_back: int = 7,
+        max_wallets: int = 0,
+    ) -> List[str]:
+        """
+        Validate wallet activity in parallel with bounded concurrency.
+
+        Wraps ``_validate_wallet_activity`` for each wallet, running them
+        concurrently via ``asyncio.gather`` with a semaphore to respect
+        rate limits.  Returns only wallets that pass validation, preserving
+        the input order.
+
+        Args:
+            wallets: Wallet addresses to validate.
+            min_trades: Minimum trades required (forwarded to validator).
+            days_back: Lookback window in days (forwarded to validator).
+            max_wallets: If > 0, stop accepting once this many have passed.
+
+        Returns:
+            List of validated wallet addresses (subset of *wallets*).
+        """
+        if not wallets:
+            return []
+
+        if ScoutConfig:
+            max_concurrent = ScoutConfig.get_activity_validation_concurrency()
+        else:
+            max_concurrent = 20
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        validated: List[str] = []
+
+        async def _check(wallet: str) -> Tuple[str, bool]:
+            async with semaphore:
+                ok = await self._validate_wallet_activity(
+                    wallet, min_trades=min_trades, days_back=days_back
+                )
+                return wallet, ok
+
+        results = await asyncio.gather(
+            *[_check(w) for w in wallets], return_exceptions=True
+        )
+
+        for result in results:
+            if isinstance(result, tuple) and result[1]:
+                validated.append(result[0])
+                if max_wallets > 0 and len(validated) >= max_wallets:
+                    break
+
+        print(f"[Helius] Activity validation: {len(validated)}/{len(wallets)} passed")
+        return validated
+
     async def _aggressive_wallet_filter(
         self,
         wallets: List[str],
@@ -1351,26 +1554,11 @@ class HeliusClient:
         if not valid_balance:
             return []
 
-        # STAGE 3: Activity validation (parallel batch processing)
+        # STAGE 3: Activity validation (delegates to _batch_validate_activity)
         min_trades = config.get("min_trades", 3)
-        validated_wallets = []
-
-        # Process in parallel with limited concurrency
-        semaphore = asyncio.Semaphore(20)  # Max 20 concurrent validations
-
-        async def validate_single_wallet(wallet: str) -> bool:
-            async with semaphore:
-                return await self._validate_wallet_activity(wallet, min_trades=min_trades)
-
-        # Run validations in parallel
-        validation_tasks = [validate_single_wallet(wallet) for wallet in valid_balance]
-        validation_results = await asyncio.gather(*validation_tasks, return_exceptions=True)
-
-        for wallet, result in zip(valid_balance, validation_results):
-            if isinstance(result, bool) and result:
-                validated_wallets.append(wallet)
-
-        print(f"[Helius] Activity validation: {len(validated_wallets)}/{len(valid_balance)} passed")
+        validated_wallets = await self._batch_validate_activity(
+            valid_balance, min_trades=min_trades, days_back=7
+        )
 
         return validated_wallets
 
@@ -1382,11 +1570,20 @@ class HeliusClient:
         """
         Batch-check SOL balances to filter out programs, vaults, and system accounts.
         Addresses with zero (or near-zero) SOL balance are almost certainly not user wallets.
+
+        On per-batch RPC failure, behaviour is governed by SCOUT_BALANCE_FAIL_MODE:
+          - 'open' (default): include the entire batch (fail-open, avoids dropping wallets on transient errors).
+          - 'closed': exclude the batch (fail-closed, stricter filtering at the cost of potential false negatives).
         """
         if not wallets:
             return []
 
-        batch_size = 20  # Batch RPC calls for efficiency
+        if ScoutConfig:
+            batch_size = ScoutConfig.get_balance_batch_size()
+            fail_mode = ScoutConfig.get_balance_fail_mode()
+        else:
+            batch_size = 20  # Batch RPC calls for efficiency
+            fail_mode = os.getenv("SCOUT_BALANCE_FAIL_MODE", "open").lower()
         rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
         if not rpc_url:
             return wallets  # Can't validate without RPC
@@ -1394,6 +1591,7 @@ class HeliusClient:
         total_checked = 0
         valid_wallets = []
         session = await self._get_session()
+        logger = logging.getLogger(__name__)
 
         for i in range(0, len(wallets), batch_size):
             batch = wallets[i:i + batch_size]
@@ -1424,8 +1622,20 @@ class HeliusClient:
                             balance_lamports = results["result"].get("value", 0)
                             if balance_lamports / 1e9 > min_balance_sol:
                                 valid_wallets.append(batch[0])
-            except Exception:
-                valid_wallets.extend(batch)
+                    else:
+                        logger.warning(
+                            f"[Helius] Balance check batch {i//batch_size} got HTTP {response.status}, "
+                            f"fail_mode={fail_mode}"
+                        )
+                        if fail_mode != "closed":
+                            valid_wallets.extend(batch)
+            except Exception as e:
+                logger.warning(
+                    f"[Helius] Balance check batch {i//batch_size} failed ({e}), "
+                    f"fail_mode={fail_mode}"
+                )
+                if fail_mode != "closed":
+                    valid_wallets.extend(batch)
 
         self._discovery_stats["balance_checked"] = total_checked
         self._discovery_stats["balance_filtered"] = total_checked - len(valid_wallets)
@@ -1442,7 +1652,10 @@ class HeliusClient:
         if not wallets:
             return {}
 
-        batch_size = 20
+        if ScoutConfig:
+            batch_size = ScoutConfig.get_balance_batch_size()
+        else:
+            batch_size = 20
         rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL", "") or os.getenv("SOLANA_RPC_URL", "")
         if not rpc_url:
             return {w: 0.0 for w in wallets}
@@ -1475,7 +1688,11 @@ class HeliusClient:
                         elif isinstance(results, dict) and "result" in results:
                             if batch:
                                 balances[batch[0]] = results["result"].get("value", 0) / 1e9
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    f"[Helius] Balance fetch batch {i//batch_size} failed ({e}), "
+                    f"defaulting {len(batch)} wallets to 0.0 SOL"
+                )
                 for addr in batch:
                     balances.setdefault(addr, 0.0)
 
@@ -1558,7 +1775,10 @@ class HeliusClient:
 
         if use_parallel and len(token_addresses) > 1:
             # Limit concurrent RPC requests to avoid overwhelming the API.
-            max_concurrent = int(os.getenv("SCOUT_DISCOVERY_CONCURRENCY", "50"))
+            if ScoutConfig:
+                max_concurrent = ScoutConfig.get_discovery_concurrency()
+            else:
+                max_concurrent = int(os.getenv("SCOUT_DISCOVERY_CONCURRENCY", "50"))
             semaphore = asyncio.Semaphore(max_concurrent)
 
             async def _bounded_query(token_addr: str) -> Tuple[str, List[Dict[str, Any]]]:
@@ -1968,53 +2188,95 @@ class HeliusClient:
         min_trade_count: int = 2,
         max_wallets: int = 200,
         hours_back: int = 24,
+        strict: bool = False,
     ) -> List[str]:
         """
-        Discover wallet addresses from recent swap transactions using multiple strategies.
+        Discover wallet addresses from recent swap transactions using a multi-strategy pipeline.
 
-        This method uses a fallback chain:
-        1. Active token queries (primary)
-        2. Recent blocks (secondary)
-        3. DEX program accounts (tertiary)
-        4. Seed wallets (fallback)
+        Strategy execution:
+        1. **Active tokens** (Strategy 1) runs first — cheapest, most reliable.
+        2. If results < fallback threshold (default 50% of max_wallets), **strategies
+           2-4 run in parallel** via ``asyncio.gather``:
+             - Recent blocks analysis
+             - DEX program account queries
+             - Seed wallet expansion
+        3. If still < max_wallets, **trending tokens** (Strategy 5) runs as a final pass.
+
+        Results pass through a validation pipeline (balance check, optional activity
+        validation, persistent dedup) and are cached in Redis + in-memory.
 
         Args:
             limit: Maximum number of transactions to query (deprecated, kept for compatibility)
             min_trade_count: Minimum number of trades a wallet must have to be included
             max_wallets: Maximum number of wallets to return
             hours_back: Number of hours to look back for transactions
+            strict: If True, raise DiscoveryError when the API key is missing instead
+                    of returning an empty list. Default is False (backward-compatible).
 
         Returns:
-            List of unique wallet addresses, sorted by activity
+            List of unique wallet addresses, sorted by activity (most active first)
+
+        Raises:
+            DiscoveryError: If strict=True and no Helius API key is configured.
+
+        See also:
+            ``scout/docs/wallet-discovery.md`` for full architecture documentation.
         """
         start_time = time.time()
         strategy_used = "none"
         errors_encountered = 0
-        
+
         # Reset discovery state
         self._discovered_this_run.clear()
         self._api_calls_made = 0
-        
+
         if not self.api_key:
-            print("[Helius] Warning: No Helius API key configured, cannot discover wallets")
+            logger = logging.getLogger(__name__)
+            logger.error(
+                "[Helius] No API key configured. Wallet discovery cannot proceed.\n"
+                "[Helius]   Remediation:\n"
+                "[Helius]     1. Set HELIUS_API_KEY environment variable, or\n"
+                "[Helius]     2. Set CHIMERA_RPC__PRIMARY_URL with an embedded api-key query param, or\n"
+                "[Helius]     3. Provide api_key=<key> when constructing HeliusClient."
+            )
+            if strict:
+                raise DiscoveryError(
+                    "No Helius API key configured. Set HELIUS_API_KEY or pass strict=False."
+                )
             return []
 
         print("[Helius] Discovering wallets from recent swaps...")
         print(f"[Helius] Config: min_trades={min_trade_count}, max_wallets={max_wallets}, hours_back={hours_back}")
 
-        # Check discovery cache
-        cache_ttl = int(os.getenv("SCOUT_DISCOVERY_CACHE_TTL", "3600"))
-        if self._discovery_cache and self._discovery_cache_time:
-            if time.time() - self._discovery_cache_time < cache_ttl:
-                print("[Helius] Using cached discovery results")
-                return self._discovery_cache.get("wallets", [])[:max_wallets]
+        # Check discovery cache (Redis first, then in-memory)
+        cached = self._get_discovery_cache(hours_back, max_wallets)
+        if cached is not None:
+            return cached
 
         wallet_counts: Dict[str, int] = defaultdict(int)
-        
-        # Strategy 1: Active Token Discovery (Primary)
+
+        # Load configurable limits (Item 6 — centralized config)
+        if ScoutConfig:
+            limit_per_token = ScoutConfig.get_discovery_limit_per_token()
+            block_limit = ScoutConfig.get_discovery_block_limit()
+            program_limit = ScoutConfig.get_discovery_program_limit()
+            seed_limit_per_wallet = ScoutConfig.get_discovery_seed_limit_per_wallet()
+            fallback_threshold = max(
+                1, int(max_wallets * ScoutConfig.get_discovery_fallback_threshold_pct())
+            )
+        else:
+            limit_per_token = int(os.getenv("SCOUT_DISCOVERY_LIMIT_PER_TOKEN", "200"))
+            block_limit = int(os.getenv("SCOUT_DISCOVERY_BLOCK_LIMIT", "500"))
+            program_limit = int(os.getenv("SCOUT_DISCOVERY_PROGRAM_LIMIT", "500"))
+            seed_limit_per_wallet = int(os.getenv("SCOUT_DISCOVERY_SEED_LIMIT", "50"))
+            fallback_threshold = max(1, max_wallets // 2)
+
+        # Strategy 1: Active Token Discovery (Primary) — runs first (cheapest, most reliable)
         try:
             print("[Helius] Strategy 1: Querying active tokens...")
-            token_wallets = await self._discover_from_active_tokens(hours_back=hours_back, limit_per_token=200)
+            token_wallets = await self._discover_from_active_tokens(
+                hours_back=hours_back, limit_per_token=limit_per_token
+            )
             for wallet, count in token_wallets.items():
                 wallet_counts[wallet] += count
             strategy_used = "tokens"
@@ -2022,50 +2284,53 @@ class HeliusClient:
         except Exception as e:
             errors_encountered += 1
             print(f"[Helius] Strategy 1 failed: {e}")
-        
 
+        # Strategies 2-4: Run in parallel if strategy 1 didn't yield enough wallets
+        if len(wallet_counts) < fallback_threshold:
+            print(
+                f"[Helius] Running strategies 2-4 in parallel "
+                f"(have {len(wallet_counts)}, need {fallback_threshold})..."
+            )
 
-        # Strategy 2: Recent Blocks Discovery (Secondary) - Skip if we have enough wallets
-        if len(wallet_counts) < max_wallets // 2:
-            try:
-                print("[Helius] Strategy 2: Querying recent blocks...")
-                block_wallets = await self._discover_from_recent_blocks(hours_back=hours_back, limit=500)
-                for wallet, count in block_wallets.items():
-                    wallet_counts[wallet] += count
-                if block_wallets:
-                    strategy_used = f"{strategy_used}+blocks"
-                print(f"[Helius] Strategy 2 found {len(block_wallets)} wallets")
-            except Exception as e:
-                errors_encountered += 1
-                print(f"[Helius] Strategy 2 failed: {e}")
+            async def _safe_strategy(
+                tag: str, coro: "Any"
+            ) -> Tuple[str, Dict[str, int]]:
+                """Wrap a strategy coroutine so exceptions are caught and logged."""
+                try:
+                    result = await coro
+                    print(f"[Helius] Strategy ({tag}) found {len(result)} wallets")
+                    return tag, result
+                except Exception as e:
+                    print(f"[Helius] Strategy ({tag}) failed: {e}")
+                    return tag, {}
 
-        # Strategy 3: DEX Program Accounts (Tertiary) - Skip if we have enough wallets
-        if len(wallet_counts) < max_wallets // 2:
-            try:
-                print("[Helius] Strategy 3: Querying DEX program accounts...")
-                program_wallets = await self._discover_from_dex_programs(hours_back=hours_back, limit=500)
-                for wallet, count in program_wallets.items():
-                    wallet_counts[wallet] += count
-                if program_wallets:
-                    strategy_used = f"{strategy_used}+programs"
-                print(f"[Helius] Strategy 3 found {len(program_wallets)} wallets")
-            except Exception as e:
-                errors_encountered += 1
-                print(f"[Helius] Strategy 3 failed: {e}")
-        
-        # Strategy 4: Seed Wallets (Fallback) - Skip if we have enough wallets
-        if len(wallet_counts) < max_wallets // 2:
-            try:
-                print("[Helius] Strategy 4: Querying seed wallets...")
-                seed_wallets = await self._discover_from_seed_wallets(hours_back=hours_back, limit_per_wallet=50)
-                for wallet, count in seed_wallets.items():
-                    wallet_counts[wallet] += count
-                if seed_wallets:
-                    strategy_used = f"{strategy_used}+seeds"
-                print(f"[Helius] Strategy 4 found {len(seed_wallets)} wallets")
-            except Exception as e:
-                errors_encountered += 1
-                print(f"[Helius] Strategy 4 failed: {e}")
+            parallel_results = await asyncio.gather(
+                _safe_strategy(
+                    "blocks",
+                    self._discover_from_recent_blocks(
+                        hours_back=hours_back, limit=block_limit
+                    ),
+                ),
+                _safe_strategy(
+                    "programs",
+                    self._discover_from_dex_programs(
+                        hours_back=hours_back, limit=program_limit
+                    ),
+                ),
+                _safe_strategy(
+                    "seeds",
+                    self._discover_from_seed_wallets(
+                        hours_back=hours_back,
+                        limit_per_wallet=seed_limit_per_wallet,
+                    ),
+                ),
+            )
+
+            for tag, result in parallel_results:
+                if result:
+                    strategy_used = f"{strategy_used}+{tag}"
+                    for wallet, count in result.items():
+                        wallet_counts[wallet] += count
 
         # Strategy 5: Reverse Token Analysis (Trending Tokens)
         # Runs whenever we still need wallets. If BIRDEYE_API_KEY is set, a Birdeye-based
@@ -2112,30 +2377,39 @@ class HeliusClient:
             except Exception as e:
                 print(f"[Helius]   Balance validation skipped (error: {e})")
 
-        # Optional: Validate wallet activity (can be slow, so make it optional)
+        # Optional: Validate wallet activity in parallel (Item 8 — batch validation)
         validate_activity = os.getenv("SCOUT_VALIDATE_WALLET_ACTIVITY", "false").lower() == "true"
         if validate_activity:
-            print("[Helius] Validating wallet activity...")
-            validated_wallets = []
-            for wallet in candidate_wallets:
-                if await self._validate_wallet_activity(wallet, min_trades=min_trade_count, days_back=7):
-                    validated_wallets.append(wallet)
-                if len(validated_wallets) >= max_wallets:
-                    break
-            candidate_wallets = validated_wallets
+            print("[Helius] Validating wallet activity (batch)...")
+            candidate_wallets = await self._batch_validate_activity(
+                candidate_wallets,
+                min_trades=min_trade_count,
+                days_back=7,
+                max_wallets=max_wallets,
+            )
         
         # Sort by trade count (most active first)
         candidate_wallets.sort(key=lambda w: wallet_counts[w], reverse=True)
         
         # Limit to max_wallets
         candidate_wallets = candidate_wallets[:max_wallets]
-        
-        # Cache results
-        self._discovery_cache = {
-            "wallets": candidate_wallets,
-            "wallet_counts": dict(wallet_counts),
-        }
-        self._discovery_cache_time = time.time()
+
+        # Persistent deduplication: filter out wallets seen in recent runs (Item 7)
+        seen = self._get_persistent_seen_wallets()
+        if seen:
+            before = len(candidate_wallets)
+            candidate_wallets = [w for w in candidate_wallets if w not in seen]
+            deduped = before - len(candidate_wallets)
+            if deduped > 0:
+                print(f"[Helius] Dedup: filtered {deduped} recently-seen wallets")
+            # Re-sort remaining by trade count after dedup
+            candidate_wallets.sort(key=lambda w: wallet_counts[w], reverse=True)
+
+        # Cache results in Redis + in-memory (Item 3)
+        self._set_discovery_cache(candidate_wallets, hours_back, max_wallets)
+
+        # Mark discovered wallets as seen for future dedup
+        self._mark_wallets_seen(candidate_wallets)
         
         time_taken = time.time() - start_time
         
