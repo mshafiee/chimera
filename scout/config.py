@@ -359,27 +359,27 @@ class ScoutConfig:
     @staticmethod
     def get_target_rps() -> int:
         """Get target requests per second for adaptive rate limiting (safe operating target)."""
-        return int(os.getenv("SCOUT_TARGET_RPS", "45"))
-
+        return int(os.getenv("SCOUT_TARGET_RPS", "25"))  # Reduced from 45 to 25 for developer tier stability
+    
     @staticmethod
     def get_rate_limit_adaptive() -> bool:
         """Get whether adaptive rate limiting is enabled."""
         return os.getenv("SCOUT_RATE_LIMIT_ADAPTIVE", "true").lower() == "true"
-
+    
     @staticmethod
     def get_rate_limit_min_delay_ms() -> int:
-        """Get minimum rate limit delay in milliseconds (floor for adaptive control)."""
-        return int(os.getenv("SCOUT_RATE_LIMIT_MIN_DELAY_MS", "15"))
-
+        """Get minimum delay between requests in milliseconds."""
+        return int(os.getenv("SCOUT_RATE_LIMIT_MIN_DELAY_MS", "30"))  # Increased from 15 to 30ms
+    
     @staticmethod
     def get_rate_limit_max_delay_ms() -> int:
-        """Get maximum rate limit delay in milliseconds (ceiling for adaptive control)."""
-        return int(os.getenv("SCOUT_RATE_LIMIT_MAX_DELAY_MS", "100"))
+        """Get maximum delay between requests in milliseconds."""
+        return int(os.getenv("SCOUT_RATE_LIMIT_MAX_DELAY_MS", "200"))  # Increased from 100 to 200ms
 
     @staticmethod
     def get_discovery_concurrency() -> int:
         """Get maximum concurrent requests during wallet discovery."""
-        return int(os.getenv("SCOUT_DISCOVERY_CONCURRENCY", "50"))
+        return int(os.getenv("SCOUT_DISCOVERY_CONCURRENCY", "30"))  # Reduced from 50 to 30 for better rate limit handling
 
     @staticmethod
     def get_circuit_breaker_threshold() -> int:
