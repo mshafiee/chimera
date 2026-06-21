@@ -645,7 +645,7 @@ async fn get_active_clusters(
         let related = aggregator.get_wallet_cluster(&wallet).await;
 
         if !related.is_empty() {
-            let mut cluster_wallets = vec![wallet.clone()];
+            let mut cluster_wallets = vec![wallet.to_string()];
             cluster_wallets.extend(related);
 
             // Get average WQS for the cluster - use COALESCE to handle NULL

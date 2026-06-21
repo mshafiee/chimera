@@ -71,12 +71,14 @@ jobs:
   rust-tests:
     name: Rust Unit & Integration Tests
     runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: sqlite:./data/chimera.db
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      
+
       - name: Cache cargo registry
         uses: actions/cache@v3
         with:
@@ -91,15 +93,12 @@ jobs:
       - name: Set up database for SQLx
         working-directory: operator
         run: |
-          mkdir -p ../data
+          mkdir -p data
           # Create SQLite database and apply schema
-          sqlite3 ../data/chimera.db < ../database/schema.sql || echo "Schema may have been applied"
-          echo "DATABASE_URL=sqlite:../data/chimera.db" >> $GITHUB_ENV
+          sqlite3 data/chimera.db < ../database/schema.sql || echo "Schema may have been applied"
 
       - name: Run unit tests
         working-directory: operator
-        env:
-          DATABASE_URL: sqlite:../data/chimera.db
         run: cargo test --lib --bins
       
       - name: Run integration tests
