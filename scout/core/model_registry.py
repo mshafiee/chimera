@@ -18,9 +18,9 @@ import json
 import logging
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, asdict
 from enum import Enum
 import hashlib
@@ -371,7 +371,7 @@ class ModelRegistry:
         metadata_b = self.get_model(model_name, version_b)
 
         if not metadata_a or not metadata_b:
-            logger.error(f"One or both models not found for A/B test")
+            logger.error("One or both models not found for A/B test")
             return False
 
         # Store A/B test configuration
@@ -532,7 +532,7 @@ class ModelRegistry:
 
         # Check if in production
         if metadata.status == ModelStatus.PRODUCTION.value and not force:
-            logger.error(f"Cannot delete production model without force=True")
+            logger.error("Cannot delete production model without force=True")
             return False
 
         # Delete files
@@ -592,6 +592,4 @@ def get_model_registry() -> ModelRegistry:
         _global_registry = ModelRegistry()
     return _global_registry
 
-
 # Import timedelta for A/B test
-from datetime import timedelta

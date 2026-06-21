@@ -2089,7 +2089,6 @@ class WalletAnalyzer:
         
         # Pre-fetch creation times (this will cache them) — sniper tokens first, then all remaining
         print(f"  [{address[:8]}] Fetching token creation times for {len(all_token_addresses)} tokens...")
-        import asyncio
         tasks = [self._fetch_token_creation_time(token) for token in all_token_addresses]
         await asyncio.gather(*tasks, return_exceptions=True)
         print(f"  [{address[:8]}] Token creation times fetched")

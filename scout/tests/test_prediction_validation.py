@@ -6,10 +6,8 @@ Tests the prediction logger, matcher, metrics calculator, and reporter.
 
 import json
 import os
-import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timedelta
 from pathlib import Path
 
 import sys
@@ -17,8 +15,8 @@ import sys
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scout.core.prediction_logger import PredictionLogger, PredictionRecord
-from scout.core.prediction_matcher import PredictionMatcher, MatchingResults
+from scout.core.prediction_logger import PredictionLogger
+from scout.core.prediction_matcher import PredictionMatcher
 from scout.core.validation_metrics import ValidationMetricsCalculator
 from scout.core.validation_reporter import ValidationReporter
 

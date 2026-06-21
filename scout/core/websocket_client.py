@@ -25,13 +25,12 @@ import json
 import logging
 import asyncio
 import threading
-from datetime import datetime
-from typing import Dict, List, Optional, Tuple, Any, Callable
+from typing import Dict, Optional, Any, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from collections import deque
 import websockets
-from websockets.exceptions import ConnectionClosed, ConnectionClosedError
+from websockets.exceptions import ConnectionClosed
 
 logger = logging.getLogger(__name__)
 
@@ -510,18 +509,18 @@ class HeliusWebSocketClient:
         print("HELIUS WEBSOCKET CLIENT - STATUS")
         print("="*70)
 
-        print(f"\nConnection Status:")
+        print("\nConnection Status:")
         print(f"  Connected: {self._connected}")
         print(f"  Uptime: {stats.uptime_seconds:.0f} seconds")
         print(f"  Reconnections: {stats.reconnection_count}")
 
-        print(f"\nMessage Statistics:")
+        print("\nMessage Statistics:")
         print(f"  Received: {stats.messages_received:,} ({stats.messages_per_second:.1f} msg/s)")
         print(f"  Sent: {stats.messages_sent:,}")
         print(f"  Bytes received: {stats.bytes_received:,}")
         print(f"  Bytes sent: {stats.bytes_sent:,}")
 
-        print(f"\nLatency:")
+        print("\nLatency:")
         print(f"  Current: {stats.latency_ms:.1f} ms")
 
         print(f"\nActive Subscriptions: {len(self._subscriptions)}")

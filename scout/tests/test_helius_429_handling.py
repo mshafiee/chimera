@@ -10,9 +10,7 @@ Tests that the Python Helius client properly handles HTTP 429 responses:
 """
 
 import pytest
-import asyncio
 import random
-from unittest.mock import AsyncMock, MagicMock, patch
 
 
 @pytest.mark.asyncio
@@ -41,7 +39,6 @@ async def test_exponential_backoff_with_jitter():
 async def test_connection_pooling_configuration():
     """Test that connection pooling is configured correctly."""
     from scout.core.helius_client import HeliusClient
-    from aiohttp import TCPConnector
 
     client = HeliusClient(api_key="test_key")
 
@@ -83,9 +80,6 @@ async def test_session_reuse():
 @pytest.mark.asyncio
 async def test_retry_with_backoff_pattern():
     """Test the retry backoff pattern calculation."""
-    from scout.core.helius_client import HeliusClient
-
-    client = HeliusClient(api_key="test_key")
 
     # Verify backoff calculation follows expected pattern
     # Pattern: 1s, 2s, 4s, 8s, 16s with ±25% jitter

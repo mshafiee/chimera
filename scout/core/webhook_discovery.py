@@ -20,19 +20,15 @@ Configuration:
 """
 
 import os
-import json
 import time
 import hmac
 import hashlib
 import asyncio
 import logging
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from collections import defaultdict, deque
 from enum import Enum
-import aiohttp
-from fastapi import FastAPI, Request, HTTPException, Header, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)

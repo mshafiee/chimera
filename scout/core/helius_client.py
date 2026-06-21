@@ -8,7 +8,7 @@ import re
 import asyncio
 import logging
 import random
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import List, Optional, Dict, Any, Set, Tuple
 
 from .utils import utcnow
@@ -337,7 +337,7 @@ class HeliusClient:
             if not rpc_url:
                 rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
                 # Redact API key before potential logging
-                rpc_url_redacted = self._redact_api_key(rpc_url)
+                self._redact_api_key(rpc_url)
 
             session = await self._get_session()
 
@@ -958,7 +958,6 @@ class HeliusClient:
         Returns:
             True if refresh was successful, False otherwise
         """
-        import aiohttp
 
         birdeye_api_key = os.getenv("BIRDEYE_API_KEY")
         if not birdeye_api_key:
@@ -1893,7 +1892,6 @@ class HeliusClient:
         Returns:
             Dictionary mapping wallet addresses to trade counts
         """
-        import aiohttp
 
         wallet_counts: Dict[str, int] = defaultdict(int)
 
@@ -1948,7 +1946,7 @@ class HeliusClient:
 
                 # Get block for this slot range
                 end_batch_slot = min(slot + batch_size, current_slot)
-                blocks_to_process = min(batch_size, end_batch_slot - slot)
+                min(batch_size, end_batch_slot - slot)
 
                 for individual_slot in range(slot, end_batch_slot):
                     if processed_transactions >= limit:
@@ -2027,7 +2025,7 @@ class HeliusClient:
                                                 wallet_counts[account_key] += 1
                                                 self._discovered_this_run.add(account_key)
 
-                    except Exception as e:
+                    except Exception:
                         # Skip problematic blocks and continue
                         continue
 
@@ -2463,14 +2461,14 @@ class HeliusClient:
         # Print rate limit stats if adaptive mode is enabled
         if self._adaptive_enabled:
             stats = await self.get_rate_limit_stats()
-            print(f"[Helius]   Rate Limit Stats:")
+            print("[Helius]   Rate Limit Stats:")
             print(f"[Helius]     Current RPS: {stats['current_rps']}/{stats['target_rps']} (target)")
             print(f"[Helius]     Current Delay: {stats['current_delay_ms']}ms")
             if stats['avg_latency_ms']:
                 print(f"[Helius]     Avg Latency: {stats['avg_latency_ms']}ms")
             print(f"[Helius]     Success Rate: {stats['success_ratio']:.1%}")
             if stats['circuit_breaker_open']:
-                print(f"[Helius]     ⚠️  Circuit Breaker: OPEN")
+                print("[Helius]     ⚠️  Circuit Breaker: OPEN")
         
         if candidate_wallets:
             top_wallet = candidate_wallets[0]
@@ -3124,7 +3122,6 @@ class HeliusClient:
         if not instructions:
             return None
 
-        sol_mint = "So11111111111111111111111111111111111111112"
 
         # DEX program identifiers for instruction-level parsing
         dex_program_patterns = {
@@ -3136,7 +3133,6 @@ class HeliusClient:
         }
 
         # Analyze instructions for swap patterns
-        swap_candidates = []
         stable_mints = {
             "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
             "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",  # USDT

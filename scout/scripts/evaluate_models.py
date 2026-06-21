@@ -13,7 +13,6 @@ import argparse
 import json
 import logging
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 
@@ -23,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 import numpy as np
 
 try:
-    from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    from sklearn.metrics import r2_score
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -31,7 +30,6 @@ except ImportError:
 
 from scout.core.training_data_loader import TrainingDataLoader
 from scout.core.gradient_boost_predictor import GradientBoostPredictor
-from scout.core.model_registry import ModelRegistry
 
 # Configure logging
 logging.basicConfig(

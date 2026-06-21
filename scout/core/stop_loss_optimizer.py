@@ -26,16 +26,12 @@ Features:
 - Stop-loss alerting
 """
 
-import os
 import time
 import logging
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-import json
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -401,18 +397,18 @@ class StopLossOptimizer:
         print(f"Stop Type: {summary['stop_type'].upper()}")
         print(f"Market Regime: {summary['regime'].upper()}")
 
-        print(f"\nRisk Metrics:")
+        print("\nRisk Metrics:")
         print(f"  Distance: {summary['distance_pct']:.2f}%")
         print(f"  Risk Amount: ${summary['risk_amount']:.4f}")
         print(f"  Risk %: {summary['risk_pct']:.2f}%")
 
         if summary['reward_target']:
-            print(f"\nTarget:")
+            print("\nTarget:")
             print(f"  Target Price: ${summary['reward_target']:.4f}")
             print(f"  Risk/Reward: 1:{summary['risk_reward_ratio']:.2f}")
 
         if summary['is_trailing']:
-            print(f"\nTrailing:")
+            print("\nTrailing:")
             print(f"  Trailing High: ${summary['trailing_high']:.4f}")
 
         print("="*70 + "\n")

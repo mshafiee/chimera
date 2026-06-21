@@ -15,15 +15,13 @@ Usage:
 
 import logging
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any, Union
-from collections import deque
-from datetime import datetime, timedelta
+from typing import Dict, List, Tuple, Any
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 # Try to import scipy for advanced features
 try:
-    from scipy import signal, stats
     from scipy.fft import fft, fftfreq
     SCIPY_AVAILABLE = True
 except ImportError:

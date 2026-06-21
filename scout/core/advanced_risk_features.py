@@ -15,9 +15,7 @@ Usage:
 
 import logging
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
-from collections import deque
+from typing import Dict, List, Any
 
 logger = logging.getLogger(__name__)
 

@@ -31,7 +31,6 @@ import time
 import logging
 import asyncio
 import threading
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -485,7 +484,7 @@ class LaserStreamClient:
         elif self._reconnect_attempts < self._config.MAX_RECONNECT_ATTEMPTS:
             await self._reconnect()
         else:
-            logger.error(f"Max LaserStream reconnection attempts reached")
+            logger.error("Max LaserStream reconnection attempts reached")
 
     async def _resubscribe_all(self):
         """Resubscribe to all previous streams after reconnection."""
@@ -547,17 +546,17 @@ class LaserStreamClient:
         print("LASERSTREAM gRPC CLIENT - STATUS")
         print("="*70)
 
-        print(f"\nConnection Status:")
+        print("\nConnection Status:")
         print(f"  Connected: {self._connected}")
         print(f"  Uptime: {stats.uptime_seconds:.0f} seconds")
         print(f"  Reconnections: {stats.reconnection_count}")
 
-        print(f"\nMessage Statistics:")
+        print("\nMessage Statistics:")
         print(f"  Received: {stats.messages_received:,}")
         print(f"  Rate: {stats.messages_per_second:.1f} msg/s")
         print(f"  Bytes received: {stats.bytes_received:,}")
 
-        print(f"\nLatency:")
+        print("\nLatency:")
         print(f"  Average: {stats.average_latency_ms:.2f} ms")
         print(f"  Peak: {stats.peak_latency_ms:.2f} ms")
 

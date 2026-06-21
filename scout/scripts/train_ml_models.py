@@ -12,7 +12,6 @@ Usage:
 import argparse
 import logging
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 
@@ -149,7 +148,7 @@ def train_all_models(
             if 'error' in meta_results:
                 logger.error(f"Meta-Learner training failed: {meta_results['error']}")
             else:
-                logger.info(f"Meta-Learner training completed")
+                logger.info("Meta-Learner training completed")
                 logger.info(f"  Training samples: {meta_results.get('training_samples')}")
 
         except Exception as e:

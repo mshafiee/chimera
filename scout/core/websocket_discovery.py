@@ -30,11 +30,9 @@ import time
 import logging
 import asyncio
 import websockets
-from typing import Dict, List, Optional, Set, Any, Callable
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from enum import Enum
-from collections import defaultdict, deque
 
 logger = logging.getLogger(__name__)
 
@@ -382,10 +380,10 @@ class WebSocketDiscoveryClient:
         """Handle account notification (wallet activity)."""
         try:
             params = data.get("params", {})
-            result = params.get("result", {})
+            params.get("result", {})
 
             # Extract account address
-            subscription = params.get("subscription", 0)
+            params.get("subscription", 0)
             # Would need to maintain subscription->address mapping
 
         except Exception as e:

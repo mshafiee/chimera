@@ -19,9 +19,9 @@ import os
 import time
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, asdict
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
 from enum import Enum
 import threading
 
@@ -184,7 +184,7 @@ class HeliusCreditTracker:
         # Load previous state if available
         self._load_state()
 
-        logger.info(f"Helius Credit Tracker initialized")
+        logger.info("Helius Credit Tracker initialized")
         logger.info(f"  Daily budget: {self._daily_budget:,.0f} credits")
         logger.info(f"  Discovery budget: {self._discovery_budget:,.0f} credits")
         logger.info(f"  Analysis budget: {self._analysis_budget:,.0f} credits")
@@ -531,20 +531,20 @@ class HeliusCreditTracker:
         print(f"\nTime: {datetime.fromtimestamp(snapshot.timestamp).strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"Status: {snapshot.budget_status.upper()}")
 
-        print(f"\nDaily Usage:")
+        print("\nDaily Usage:")
         print(f"  Credits used: {snapshot.credits_used:,.0f} / {self._daily_budget:,.0f}")
         print(f"  Credits remaining: {snapshot.credits_remaining:,.0f}")
         print(f"  Requests made: {snapshot.requests_made}")
         print(f"  Request rate: {snapshot.requests_per_second:.1f} / {self._budget.MAX_REQUESTS_PER_SECOND} req/s")
 
-        print(f"\nCategory Breakdown:")
+        print("\nCategory Breakdown:")
         print(f"  Discovery: {self._discovery_spent:,.0f} / {self._discovery_budget:,.0f} credits")
         print(f"  Analysis: {self._analysis_spent:,.0f} / {self._analysis_budget:,.0f} credits")
         print(f"  Validation: {self._validation_spent:,.0f} / {self._validation_budget:,.0f} credits")
         print(f"  Reserve: {self._reserve_spent:,.0f} / {self._reserve_budget:,.0f} credits")
 
         # ROI tracking
-        print(f"\nROI Tracking (Value per Credit):")
+        print("\nROI Tracking (Value per Credit):")
         for category in ['discovery', 'analysis', 'validation']:
             roi = self.get_category_roi(category)
             credits = (
@@ -559,13 +559,13 @@ class HeliusCreditTracker:
             last_rebalance = datetime.fromtimestamp(self._budget_adjustments['timestamp'])
             print(f"\nLast Budget Rebalance: {last_rebalance.strftime('%Y-%m-%d %H:%M')}")
 
-        print(f"\nProjections:")
+        print("\nProjections:")
         print(f"  Projected monthly: {snapshot.projected_monthly:,.0f} / {self._budget.MONTHLY_CREDITS:,.0f}")
 
         # Optimization suggestions
         suggestions = self.get_optimization_suggestions()
         if suggestions:
-            print(f"\nOptimization Suggestions:")
+            print("\nOptimization Suggestions:")
             for i, suggestion in enumerate(suggestions, 1):
                 print(f"  {i}. {suggestion}")
 

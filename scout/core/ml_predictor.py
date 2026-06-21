@@ -13,10 +13,9 @@ Usage:
     prediction = predictor.predict_profitability(wallet_features)
 """
 
-import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import pickle

@@ -15,7 +15,7 @@ Usage:
 
 import logging
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -155,7 +155,7 @@ class MarketContextFeatures:
 
                 if closest_time and i > 0:
                     prev_trade = sorted_trades[i - 1]
-                    prev_time = datetime.fromisoformat(prev_trade.get('timestamp', trade_time))
+                    datetime.fromisoformat(prev_trade.get('timestamp', trade_time))
 
                     # Get SOL return
                     sol_price_now = sol_prices.get(closest_time, 0)

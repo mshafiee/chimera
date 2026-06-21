@@ -18,6 +18,8 @@ The Scout writes to roster_new.db atomically. The Rust Operator then
 merges this into the main database via SIGHUP or API call.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -27,8 +29,11 @@ import sys
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, TYPE_CHECKING
 import asyncio
+
+if TYPE_CHECKING:
+    from core.scout_optimizer import ScoutOptimizer
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent / '.env')
@@ -39,6 +44,7 @@ sys.stdout.reconfigure(line_buffering=True)
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+# ruff: noqa: E402
 from core.utils import utcnow
 
 from core.db_writer import WalletRecord, write_roster_atomic
@@ -54,7 +60,7 @@ from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
 from core.correlation_reader import CorrelationReader
 from core.feature_store import FeatureStore
-from core.ml_predictor import ProfitabilityPredictor, predict_wallet_profitability
+from core.ml_predictor import predict_wallet_profitability
 
 # Import optimization modules
 try:

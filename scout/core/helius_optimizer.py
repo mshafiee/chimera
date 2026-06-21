@@ -21,7 +21,6 @@ import os
 import time
 import asyncio
 import logging
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -163,7 +162,7 @@ class HeliusOptimizer:
             'batches_processed': 0,
         }
 
-        logger.info(f"Helius Optimizer initialized")
+        logger.info("Helius Optimizer initialized")
         logger.info(f"  Growth optimized: {self._growth_optimized}")
         logger.info(f"  Current capital: ${self._current_capital:.0f}")
         logger.info(f"  Target capital: ${self._target_capital:.0f}")
@@ -288,9 +287,9 @@ class HeliusOptimizer:
 
                 # Execute request
                 if asyncio.iscoroutinefunction(request.callback):
-                    result = await request.callback(*request.args, **request.kwargs)
+                    await request.callback(*request.args, **request.kwargs)
                 else:
-                    result = request.callback(*request.args, **request.kwargs)
+                    request.callback(*request.args, **request.kwargs)
 
                 # Update credits used
                 self._credits_used_today += request.credit_cost
@@ -511,7 +510,7 @@ class HeliusOptimizer:
 
         # Growth optimization
         if self._growth_optimized:
-            suggestions.append(f"Growth mode: Focus on top 20 high-conviction wallets")
+            suggestions.append("Growth mode: Focus on top 20 high-conviction wallets")
             suggestions.append(f"Target: ${self._current_capital:.0f} → ${self._target_capital:.0f}")
 
         # Performance suggestions
@@ -533,17 +532,17 @@ class HeliusOptimizer:
         budget_remaining = self.DAILY_CREDIT_TARGET - budget_used
         budget_ratio = budget_remaining / self.DAILY_CREDIT_TARGET
 
-        print(f"\nCredit Budget:")
+        print("\nCredit Budget:")
         print(f"  Used today: {budget_used:,.0f} / {self.DAILY_CREDIT_TARGET:,.0f}")
         print(f"  Remaining: {budget_remaining:,.0f} ({budget_ratio*100:.1f}%)")
         print(f"  Monthly target: {self.MAX_CREDITS_PER_MONTH:,.0f}")
 
         # Queue status
-        print(f"\nRequest Queue:")
+        print("\nRequest Queue:")
         print(f"  Pending requests: {len(self._request_queue)}")
 
         # Performance stats
-        print(f"\nPerformance:")
+        print("\nPerformance:")
         print(f"  Requests processed: {self._stats['requests_processed']}")
         print(f"  Requests failed: {self._stats['requests_failed']}")
         print(f"  Batches processed: {self._stats['batches_processed']}")
@@ -551,7 +550,7 @@ class HeliusOptimizer:
         # Growth status
         if self._growth_optimized:
             growth_progress = (self._current_capital / self._target_capital) * 100
-            print(f"\nGrowth Goal:")
+            print("\nGrowth Goal:")
             print(f"  Current: ${self._current_capital:.0f}")
             print(f"  Target: ${self._target_capital:.0f}")
             print(f"  Progress: {growth_progress:.1f}%")
@@ -559,7 +558,7 @@ class HeliusOptimizer:
         # Optimization suggestions
         suggestions = self.get_optimization_suggestions()
         if suggestions:
-            print(f"\nOptimization Suggestions:")
+            print("\nOptimization Suggestions:")
             for i, suggestion in enumerate(suggestions, 1):
                 print(f"  {i}. {suggestion}")
 

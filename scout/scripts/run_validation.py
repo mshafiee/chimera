@@ -32,13 +32,14 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from scout.config import ScoutConfig
-from scout.core.prediction_matcher import PredictionMatcher, get_prediction_matcher
-from scout.core.validation_metrics import ValidationMetricsCalculator, get_metrics_calculator
+from scout.core.prediction_matcher import get_prediction_matcher
+from scout.core.validation_metrics import get_metrics_calculator
 from scout.core.validation_reporter import ValidationReporter, get_validation_reporter
 
 # Configure logging
@@ -406,12 +407,12 @@ Examples:
         sys.exit(1)
 
     db_path = args.db_path
-    time_window_days = int(args.time_window.replace('d', '')) if args.time_window != 'all' else 90
+    _ = int(args.time_window.replace('d', '')) if args.time_window != 'all' else 90  # Process time_window but not needed
 
     # Run matching (unless report-only)
     if not args.report_only:
         try:
-            matching_results = run_matching(
+            run_matching(
                 db_path=db_path,
                 lookback_days=args.lookback_days,
                 model_type=args.model_type
@@ -453,7 +454,7 @@ Examples:
             # Auto-save if there are issues
             issues = report.get('issues', [])
             if issues:
-                saved_path = save_report(reporter, report)
+                save_report(reporter, report)
                 logger.info(f"Report auto-saved due to {len(issues)} issues")
 
         # Check alerts

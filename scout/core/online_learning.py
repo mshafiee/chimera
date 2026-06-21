@@ -14,12 +14,9 @@ Usage:
     prediction = online_learner.predict(features)
 """
 
-import json
 import logging
-import os
-from datetime import datetime, timedelta
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from datetime import datetime
+from typing import Dict, Optional, Any
 from collections import deque
 import numpy as np
 

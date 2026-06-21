@@ -14,7 +14,6 @@ Usage:
 
 import logging
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -251,7 +250,6 @@ class TrainingFeatureExtractor:
                 return dict(zip(feature_names, importances))
             elif hasattr(model, 'get_booster'):
                 # XGBoost
-                import xgboost as xgb
                 booster = model.get_booster()
                 importance_dict = booster.get_score(importance_type='weight')
                 # Normalize to feature_names

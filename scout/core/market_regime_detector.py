@@ -26,16 +26,12 @@ Features:
 - Historical regime performance tracking
 """
 
-import os
 import time
 import logging
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-import json
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -452,11 +448,11 @@ class MarketRegimeDetector:
         print(f"Transition: {summary['transition']}")
         print(f"Reason: {summary['reason']}")
 
-        print(f"\nProbabilities:")
+        print("\nProbabilities:")
         for regime, prob in summary['probabilities'].items():
             print(f"  {regime.capitalize()}: {prob:.0f}%")
 
-        print(f"\nFeatures:")
+        print("\nFeatures:")
         print(f"  SOL Momentum: {summary['features']['momentum']:+.1f}%")
         print(f"  Volatility: {summary['features']['volatility']:.1f}%")
         print(f"  Volume Ratio: {summary['features']['volume_ratio']:.2f}x")

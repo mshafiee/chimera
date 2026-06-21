@@ -15,9 +15,7 @@ Usage:
 """
 
 import logging
-import os
 from typing import Dict, Any, Optional, List
-from datetime import datetime
 
 from scout.config import ScoutConfig
 from scout.core.wqs import calculate_wqs_with_confidence, WqsResult
@@ -33,35 +31,35 @@ except ImportError:
     logger.warning("GradientBoostPredictor not available")
 
 try:
-    from scout.core.meta_learner import MetaLearner, create_meta_learner
+    from scout.core.meta_learner import MetaLearner
     META_LEARNER_AVAILABLE = True
 except ImportError:
     META_LEARNER_AVAILABLE = False
     logger.warning("MetaLearner not available")
 
 try:
-    from scout.core.time_series_features import TimeSeriesFeatures, extract_time_series_features
+    from scout.core.time_series_features import TimeSeriesFeatures
     TIME_SERIES_AVAILABLE = True
 except ImportError:
     TIME_SERIES_AVAILABLE = False
     logger.warning("TimeSeriesFeatures not available")
 
 try:
-    from scout.core.market_context_features import MarketContextFeatures, extract_market_context_features
+    from scout.core.market_context_features import MarketContextFeatures
     MARKET_CONTEXT_AVAILABLE = True
 except ImportError:
     MARKET_CONTEXT_AVAILABLE = False
     logger.warning("MarketContextFeatures not available")
 
 try:
-    from scout.core.model_monitoring import ModelMonitor, get_monitor
+    from scout.core.model_monitoring import get_monitor
     MONITORING_AVAILABLE = True
 except ImportError:
     MONITORING_AVAILABLE = False
     logger.warning("ModelMonitor not available")
 
 try:
-    from scout.core.prediction_logger import PredictionLogger, get_prediction_logger
+    from scout.core.prediction_logger import get_prediction_logger
     PREDICTION_LOGGER_AVAILABLE = True
 except ImportError:
     PREDICTION_LOGGER_AVAILABLE = False

@@ -18,16 +18,14 @@ State Schema:
 - configuration_state: Persistent configuration
 """
 
-import os
 import time
 import logging
 import sqlite3
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
-from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass
 from enum import Enum
 import threading
-import json
 from pathlib import Path
 from contextlib import contextmanager
 

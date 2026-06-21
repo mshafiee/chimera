@@ -14,9 +14,8 @@ Usage:
 """
 
 import logging
-from typing import Dict, List, Optional, Tuple, Any
-from collections import defaultdict, Counter
-from datetime import datetime
+from typing import Dict, List, Optional, Any
+from collections import Counter
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -191,7 +190,7 @@ class NetworkFeatures:
 
         if overlaps:
             features['avg_coholding_with_successful'] = float(np.mean(overlaps))
-            features['max_coholding_with_successful'] = float(np.max(overcomes))
+            features['max_coholding_with_successful'] = float(np.max(overlaps))
             features['successful_wallets_analyzed'] = len(overlaps)
 
         return features
@@ -216,14 +215,11 @@ class NetworkFeatures:
             # Community detection (Louvain)
             if G.number_of_nodes() < 500:
                 try:
-                    import networkx.algorithms.community as nx_comm
-                    communities = nx_community.greedy_modularity_communities(G)
+                    communities = nx.algorithms.community.greedy_modularity_communities(G)
 
                     # Find which community this wallet is in
-                    wallet_community = None
                     for i, community in enumerate(communities):
                         if wallet_address in community:
-                            wallet_community = i
                             features['community_id'] = int(i)
                             features['community_size'] = len(community)
                             break

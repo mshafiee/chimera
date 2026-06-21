@@ -14,8 +14,7 @@ Usage:
 """
 
 import logging
-import os
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from datetime import datetime
 from enum import Enum
 

@@ -20,15 +20,13 @@ Features:
 - Signal aging and decay calculation
 """
 
-import os
 import time
 import logging
-from datetime import datetime, timedelta, time as dt_time
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -432,7 +430,7 @@ class SignalTimingOptimizer:
         elif summary['delay_seconds'] < 0:
             print("Action: DO NOT EXECUTE")
 
-        print(f"\nComponent Scores:")
+        print("\nComponent Scores:")
         print(f"  Time Quality: {summary['time_quality'].capitalize()}")
         print(f"  Wallet Momentum: {summary['momentum_score']:+.2f}")
         print(f"  Volume Spike: {summary['volume_score']*100:.0f}%")

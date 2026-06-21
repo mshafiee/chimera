@@ -17,10 +17,10 @@ import os
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, List
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
 from scout.core.validation_metrics import ValidationMetricsCalculator, ValidationMetrics
-from scout.core.prediction_matcher import PredictionMatcher, MatchedPrediction
+from scout.core.prediction_matcher import PredictionMatcher
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,7 @@ class ValidationReporter:
         recommendations = []
 
         summary = report.get('summary', {})
-        issues = report.get('issues', [])
+        report.get('issues', [])
 
         # Analyze RMSE
         avg_rmse = summary.get('avg_rmse', 0)

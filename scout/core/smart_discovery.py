@@ -29,11 +29,9 @@ Features:
 - Automatic strategy health monitoring
 """
 
-import os
 import time
 import logging
 import asyncio
-from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
@@ -41,7 +39,6 @@ import threading
 import json
 from pathlib import Path
 from collections import defaultdict
-import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -769,7 +766,7 @@ class StrategyCoordinator:
     def perform_health_checks(self) -> None:
         """Perform health checks on all strategies and disable failing ones."""
         with self._lock:
-            current_time = time.time()
+            time.time()
 
             for strategy, performance in self._performance.items():
                 # Check if strategy should be disabled

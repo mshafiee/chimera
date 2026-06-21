@@ -11,12 +11,11 @@ Usage:
     X_train, y_train, X_val, y_val, feature_names = loader.create_training_dataset()
 """
 
-import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
 
@@ -322,7 +321,7 @@ class TrainingDataLoader:
         if wallets:
             feature_names = [
                 k for k in wallets[0].keys()
-                if k not in exclude_columns and wallets[0][get] is not None
+                if k not in exclude_columns and wallets[0][k] is not None
             ]
         else:
             feature_names = []

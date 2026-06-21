@@ -17,7 +17,6 @@ import logging
 import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime
-from functools import lru_cache
 
 from scout.config import ScoutConfig
 
@@ -25,13 +24,13 @@ logger = logging.getLogger(__name__)
 
 # Import feature extractors
 try:
-    from scout.core.time_series_features import TimeSeriesFeatures, extract_time_series_features
+    from scout.core.time_series_features import TimeSeriesFeatures
     TIME_SERIES_AVAILABLE = True
 except ImportError:
     TIME_SERIES_AVAILABLE = False
 
 try:
-    from scout.core.market_context_features import MarketContextFeatures, extract_market_context_features
+    from scout.core.market_context_features import MarketContextFeatures
     MARKET_CONTEXT_AVAILABLE = True
 except ImportError:
     MARKET_CONTEXT_AVAILABLE = False

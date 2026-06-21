@@ -18,10 +18,9 @@ import logging
 import os
 import pickle
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
-from collections import defaultdict
+from typing import Dict, List, Optional, Any
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -29,7 +28,6 @@ logger = logging.getLogger(__name__)
 # Try to import sklearn for meta-learner
 try:
     from sklearn.linear_model import LogisticRegression, Ridge
-    from sklearn.model_selection import cross_val_score, KFold
     from sklearn.metrics import mean_squared_error, mean_absolute_error
     SKLEARN_AVAILABLE = True
 except ImportError:
@@ -635,8 +633,8 @@ class MetaLearner:
             )
             model.fit(X_train, y_train_binary)
 
-            train_preds = model.predict_proba(X_train)[:, 1]
-            val_preds = model.predict_proba(X_val)[:, 1]
+            model.predict_proba(X_train)[:, 1]
+            model.predict_proba(X_val)[:, 1]
 
             return {
                 'model': model,

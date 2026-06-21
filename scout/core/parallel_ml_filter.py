@@ -15,13 +15,11 @@ Approaches:
 Each approach runs independently and contributes to the final wallet ranking.
 """
 
-import os
 import time
 import asyncio
 import logging
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Tuple, Any
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from collections import defaultdict
 from enum import Enum
 
@@ -29,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # Import existing ML components
 try:
-    from .ensemble_predictor import EnsemblePredictor, EnsembleConfig
+    from .ensemble_predictor import EnsemblePredictor
     ENSEMBLE_AVAILABLE = True
 except ImportError:
     ENSEMBLE_AVAILABLE = False

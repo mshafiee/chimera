@@ -15,7 +15,7 @@ WQS v2 improvements:
 
 from dataclasses import dataclass
 from typing import Optional, Dict
-from datetime import datetime, timezone
+from datetime import datetime
 
 from .utils import utcnow
 
@@ -831,7 +831,6 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     if penalty_cap_enabled and tracker.negative > 0:
         # Calculate total negative before capping
         total_negative_before = tracker.negative
-        total_positive = tracker.positive
 
         # Apply total penalty cap if negative would exceed threshold
         if tracker.negative > max_total_penalty:

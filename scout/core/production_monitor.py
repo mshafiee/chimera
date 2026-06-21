@@ -23,12 +23,10 @@ import json
 import time
 import psutil
 import logging
-import asyncio
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, asdict
 from enum import Enum
-from pathlib import Path
 import threading
 import sqlite3
 
@@ -371,7 +369,7 @@ class ProductionMonitor:
                     result = HealthCheck(
                         name=name,
                         status=HealthStatus.HEALTHY,
-                        message=f"Check completed",
+                        message="Check completed",
                         timestamp=time.time(),
                         details={},
                         response_time_ms=response_time
@@ -657,7 +655,7 @@ class ProductionMonitor:
         while self._monitoring_active:
             try:
                 # Run health checks
-                health_results = self.run_health_checks()
+                self.run_health_checks()
 
                 # Collect metrics
                 metrics = self.collect_metrics()
@@ -775,7 +773,7 @@ class ProductionMonitor:
 
         # Metrics
         metrics = status['metrics']
-        print(f"\nSystem Metrics:")
+        print("\nSystem Metrics:")
         print(f"  CPU: {metrics['cpu_percent']:.1f}%")
         print(f"  Memory: {metrics['memory_percent']:.1f}% ({metrics['memory_used_mb']:.1f} MB)")
         print(f"  Disk: {metrics['disk_usage_percent']:.1f}%")
@@ -1326,31 +1324,31 @@ class GrowthTracker:
         print("GROWTH TRACKING - $200 → $1000 TARGET")
         print("="*70)
 
-        print(f"\nCapital Status:")
+        print("\nCapital Status:")
         print(f"  Current:   ${metrics.current_capital:.2f}")
         print(f"  Target:    ${metrics.target_capital:.2f}")
         print(f"  Progress:  {metrics.progress_percentage:.1f}%")
         print(f"  Multiple:  {metrics.capital_multiplier:.2f}x")
 
-        print(f"\nROI Performance:")
+        print("\nROI Performance:")
         print(f"  Daily:   {metrics.roi_daily:+.2f}%")
         print(f"  Weekly:  {metrics.roi_weekly:+.2f}%")
         print(f"  Monthly: {metrics.roi_monthly:+.2f}%")
 
-        print(f"\nGrowth Velocity:")
+        print("\nGrowth Velocity:")
         print(f"  Daily Rate:   {metrics.growth_rate_daily:.2f}%")
         print(f"  Weekly Rate:  {metrics.growth_rate_weekly:.2f}%/day")
         print(f"  Monthly Rate: {metrics.growth_rate_monthly:.2f}%/day")
 
         if metrics.days_to_target:
-            print(f"\nTarget Projection:")
+            print("\nTarget Projection:")
             print(f"  Days to Target:  {metrics.days_to_target:.1f}")
             if metrics.date_to_target:
                 print(f"  Target Date:     {metrics.date_to_target}")
         else:
-            print(f"\nTarget Projection: Insufficient growth rate")
+            print("\nTarget Projection: Insufficient growth rate")
 
-        print(f"\nCapital Efficiency:")
+        print("\nCapital Efficiency:")
         print(f"  Efficiency:      {metrics.capital_efficiency:.4f}% per $/day")
         print(f"  Compounding:     {metrics.compounding_effect:+.2f}%")
 

@@ -18,8 +18,8 @@ Features:
 import os
 import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Callable, Any
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
@@ -141,7 +141,7 @@ class CircuitBreaker:
         # Load previous state if available
         self._load_state()
 
-        logger.info(f"Circuit Breaker initialized")
+        logger.info("Circuit Breaker initialized")
         logger.info(f"  Aggressive mode: {self._config.AGGRESSIVE_MODE}")
         logger.info(f"  Starting capital: ${self._config.STARTING_CAPITAL:.0f}")
         logger.info(f"  Current capital: ${self._config.CURRENT_CAPITAL:.0f}")
@@ -254,7 +254,6 @@ class CircuitBreaker:
 
     def _trigger(self, level: ProtectionLevel, reason: str):
         """Trigger circuit breaker at specified level."""
-        old_level = self._state.current_level
         self._state.current_level = level
         self._state.triggered_at = time.time()
         self._state.last_state_change = time.time()
@@ -458,7 +457,7 @@ class CircuitBreaker:
                 self._state.spear_allocation = spear
                 self._state.last_adjustment_time = time.time()
 
-                logger.info(f"Growth stage allocation adjusted:")
+                logger.info("Growth stage allocation adjusted:")
                 logger.info(f"  Capital: ${self._config.CURRENT_CAPITAL:.0f}")
                 logger.info(f"  Shield: {old_shield*100:.0f}% → {shield*100:.0f}%")
                 logger.info(f"  Spear: {old_spear*100:.0f}% → {spear*100:.0f}%")
@@ -501,23 +500,23 @@ class CircuitBreaker:
         print(f"\nProtection Level: {status['current_level']}")
         print(f"State: {status['current_state']}")
 
-        print(f"\nCapital:")
+        print("\nCapital:")
         print(f"  Starting: ${status['starting_capital']:.2f}")
         print(f"  Current: ${status['current_capital']:.2f}")
         print(f"  Peak: ${status['peak_capital']:.2f}")
         print(f"  Drawdown: {status['drawdown_pct']:.1f}%")
 
-        print(f"\nStrategy Allocation:")
+        print("\nStrategy Allocation:")
         print(f"  Shield: {status['shield_allocation']:.0f}%")
         print(f"  Spear: {status['spear_allocation']:.0f}%")
 
-        print(f"\nTrading Statistics:")
+        print("\nTrading Statistics:")
         print(f"  Daily trades: {status['daily_trades']}")
         print(f"  Success: {status['daily_success']}")
         print(f"  Failures: {status['daily_failures']}")
         print(f"  Success rate: {status['success_rate']*100:.1f}%")
 
-        print(f"\nProtection:")
+        print("\nProtection:")
         print(f"  Blacklisted wallets: {status['blacklisted_wallets']}")
         print(f"  Volatility multiplier: {status['volatility_multiplier']:.2f}x")
         print(f"  Events today: {status['events_today']}")

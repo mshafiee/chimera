@@ -19,7 +19,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Callable, Union
+from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
 import numpy as np
 
@@ -37,7 +37,6 @@ except ImportError:
 
 # Try to import sklearn for cross-validation
 try:
-    from sklearn.model_selection import TimeSeriesSplit
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False

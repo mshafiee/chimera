@@ -33,11 +33,9 @@ import asyncio
 import hashlib
 from typing import Dict, List, Optional, Set, Tuple, Any
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
 from enum import Enum
-from collections import defaultdict, OrderedDict
+from collections import OrderedDict
 import sqlite3
-from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
@@ -527,7 +525,7 @@ class QueryOptimizer:
             cursor.execute(query, params)
             result = cursor.fetchall()
 
-            query_time = (time.time() - start_time) * 1000
+            (time.time() - start_time) * 1000
 
             # Cache result
             if use_cache and result:

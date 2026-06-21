@@ -19,7 +19,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Any
 from collections import defaultdict
 import numpy as np
 
@@ -35,7 +35,6 @@ except ImportError:
 
 # Try to import sklearn for counterfactuals
 try:
-    from sklearn.preprocessing import StandardScaler
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
@@ -142,6 +141,7 @@ class ModelExplainer:
 
         try:
             import lightgbm as lgb
+            _ = lgb  # Mark as used
             if hasattr(self.model, 'booster_'):
                 return "tree"
         except ImportError:

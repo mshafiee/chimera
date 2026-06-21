@@ -19,7 +19,7 @@ import os
 import logging
 import time
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import random
 

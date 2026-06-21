@@ -14,15 +14,12 @@ Key optimizations demonstrated:
 """
 
 import sys
-import os
 from pathlib import Path
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from core.scout_optimizer import ScoutOptimizer, get_scout_optimizer
-from core.analyzer import WalletAnalyzer
-from core.wqs import WalletMetrics
+from core.scout_optimizer import get_scout_optimizer
 
 
 def example_optimized_analysis():
@@ -59,12 +56,12 @@ def example_optimized_analysis():
         'insider_probability': 0.1,
     }
 
-    print(f"\n1. Caching Wallet Metrics")
+    print("\n1. Caching Wallet Metrics")
     # Cache the metrics for future use
     optimizer.cache_wallet_metrics(wallet_metrics['address'], wallet_metrics)
     print(f"✓ Cached metrics for {wallet_metrics['address'][:8]}...")
 
-    print(f"\n2. Checking Analysis Permissions")
+    print("\n2. Checking Analysis Permissions")
     # Check if we can analyze this wallet given budget
     can_analyze, reason = optimizer.can_analyze_wallet(
         wallet_metrics['address'],
@@ -73,7 +70,7 @@ def example_optimized_analysis():
     print(f"✓ Can analyze: {can_analyze} ({reason})")
 
     if can_analyze:
-        print(f"\n3. Predicting Profitability")
+        print("\n3. Predicting Profitability")
         # Predict profitability using ML model
         prediction = optimizer.predict_profitability(wallet_metrics)
         print(f"✓ Expected return: {prediction.expected_return_pct:.1f}%")
@@ -81,7 +78,7 @@ def example_optimized_analysis():
         print(f"✓ Risk score: {prediction.risk_score:.1f}")
         print(f"✓ Profitability class: {prediction.profitability_class.value}")
 
-        print(f"\n4. Optimizing Capital Allocation")
+        print("\n4. Optimizing Capital Allocation")
         # If we have multiple predictions, optimize allocation
         test_predictions = [
             ("wallet1", prediction),
@@ -90,17 +87,17 @@ def example_optimized_analysis():
         allocation = optimizer.get_investment_allocation(test_predictions)
         print(f"✓ Optimized allocation: {allocation}")
 
-    print(f"\n5. Production Health Check")
+    print("\n5. Production Health Check")
     # Check system health
     health_status = optimizer.check_production_health()
     print(f"✓ System status: {health_status['overall_status']}")
     print(f"✓ Active alerts: {health_status['active_alerts']}")
 
-    print(f"\n6. Optimization Report")
+    print("\n6. Optimization Report")
     # Print comprehensive report
     optimizer.print_optimization_report()
 
-    print(f"\n7. Optimization Suggestions")
+    print("\n7. Optimization Suggestions")
     # Get optimization suggestions
     suggestions = optimizer.get_optimization_suggestions()
     if suggestions:
@@ -127,12 +124,12 @@ def example_batch_analysis():
 
     print(f"\n1. Discovered {len(discovered_wallets)} wallets")
 
-    print(f"\n2. Optimizing Analysis Count")
+    print("\n2. Optimizing Analysis Count")
     # Optimize how many wallets we can actually analyze
     optimized_count = optimizer.optimize_wallet_count(len(discovered_wallets))
     print(f"✓ Can analyze {optimized_count} wallets (down from {len(discovered_wallets)})")
 
-    print(f"\n3. Optimizing Discovery Depth")
+    print("\n3. Optimizing Discovery Depth")
     # Optimize discovery depth for budget
     original_depth = 168  # 1 week
     optimized_depth = optimizer.optimize_discovery_depth(original_depth)
@@ -151,7 +148,7 @@ def example_cache_usage():
     if not optimizer.initialize():
         return
 
-    print(f"\n1. Caching Token Metadata")
+    print("\n1. Caching Token Metadata")
     # Cache token metadata
     token_address = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
     token_metadata = {
@@ -163,7 +160,7 @@ def example_cache_usage():
     optimizer.set_cached_data("token", token_address, token_metadata, category="token_metadata")
     print(f"✓ Cached metadata for {token_metadata['symbol']}")
 
-    print(f"\n2. Retrieving Cached Data")
+    print("\n2. Retrieving Cached Data")
     # Retrieve cached data
     cached = optimizer.get_cached_data("token", token_address, category="token_metadata")
     if cached:
@@ -171,7 +168,7 @@ def example_cache_usage():
     else:
         print("✗ Cache miss")
 
-    print(f"\n3. Cache Invalidation")
+    print("\n3. Cache Invalidation")
     # Invalidate specific cache entry
     optimizer.invalidate_cache("token", token_address)
     print(f"✓ Invalidated cache for {token_address[:8]}...")
@@ -189,7 +186,7 @@ def example_production_monitoring():
     if not optimizer.initialize():
         return
 
-    print(f"\n1. Checking Production Readiness")
+    print("\n1. Checking Production Readiness")
     is_ready, issues = optimizer.is_production_ready()
     print(f"✓ Production ready: {is_ready}")
     if issues:
@@ -197,7 +194,7 @@ def example_production_monitoring():
         for issue in issues[:3]:
             print(f"    - {issue}")
 
-    print(f"\n2. Creating Test Alert")
+    print("\n2. Creating Test Alert")
     # Create a test alert
     optimizer.create_alert(
         severity="warning",
@@ -208,7 +205,7 @@ def example_production_monitoring():
     )
     print("✓ Test alert created")
 
-    print(f"\n3. Health Status")
+    print("\n3. Health Status")
     # Get health status
     health = optimizer.check_production_health()
     print(f"✓ Overall status: {health['overall_status']}")
@@ -224,7 +221,7 @@ def main():
     print("="*70)
     print("\nThese examples demonstrate how to use the new optimization systems")
     print("to maximize profitability while staying within Helius Developer Plan constraints.")
-    print(f"\nGrowth Goal: $200 → $1,000 (5x)")
+    print("\nGrowth Goal: $200 → $1,000 (5x)")
     print("Helius Plan: Developer (10M credits, 50 req/s)")
     print("="*70)
 

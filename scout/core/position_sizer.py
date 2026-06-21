@@ -28,17 +28,12 @@ Features:
 - Integration with strategy allocator
 """
 
-import os
 import time
 import logging
-import math
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-import json
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -361,17 +356,17 @@ class PositionSizer:
         print(f"Growth Stage: {summary['growth_stage'].capitalize()}")
         print(f"Growth Multiplier: {summary['growth_multiplier']:.1f}x")
 
-        print(f"\nSafety Limits:")
+        print("\nSafety Limits:")
         print(f"  Max Position: {summary['max_position_pct']:.0f}% of capital")
         print(f"  Min Position: {summary['min_position_pct']:.0f}% of capital")
         print(f"  Kelly Cap: {summary['kelly_cap']:.0f}%")
 
-        print(f"\nExample Position Sizes:")
-        print(f"  High Confidence (65% win rate, 80% confidence):")
+        print("\nExample Position Sizes:")
+        print("  High Confidence (65% win rate, 80% confidence):")
         print(f"    Size: ${summary['high_confidence_example']['size_usd']:.2f} ({summary['high_confidence_example']['size_pct']:.1f}%)")
-        print(f"  Medium Confidence (55% win rate, 60% confidence):")
+        print("  Medium Confidence (55% win rate, 60% confidence):")
         print(f"    Size: ${summary['medium_confidence_example']['size_usd']:.2f} ({summary['medium_confidence_example']['size_pct']:.1f}%)")
-        print(f"  Low Confidence (45% win rate, 40% confidence):")
+        print("  Low Confidence (45% win rate, 40% confidence):")
         print(f"    Size: ${summary['low_confidence_example']['size_usd']:.2f} ({summary['low_confidence_example']['size_pct']:.1f}%)")
 
         print("="*70 + "\n")

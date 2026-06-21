@@ -27,18 +27,14 @@ from datetime import datetime
 from .helius_credit_tracker import (
     get_credit_tracker,
     HeliusCreditTracker,
-    can_fetch_wallet_transactions,
-    can_analyze_wallet,
-    can_validate_backtest
+    can_analyze_wallet
 )
 from .advanced_cache import (
     get_cache,
     AdvancedCache,
     CacheCategory,
     get_wallet_metrics,
-    set_wallet_metrics,
-    get_token_metadata,
-    set_token_metadata
+    set_wallet_metrics
 )
 from .profitability_predictor import (
     get_profitability_predictor,
@@ -47,14 +43,11 @@ from .profitability_predictor import (
 )
 from .helius_optimizer import (
     get_helius_optimizer,
-    HeliusOptimizer,
-    RequestType,
-    GrowthPriority
+    HeliusOptimizer
 )
 from .production_monitor import (
     get_production_monitor,
     ProductionMonitor,
-    HealthStatus,
     AlertSeverity
 )
 
@@ -305,22 +298,22 @@ class ScoutOptimizer:
 
         # Credit tracker status
         if self._credit_tracker:
-            print(f"\n--- Credit Tracking ---")
+            print("\n--- Credit Tracking ---")
             self._credit_tracker.print_status_report()
 
         # Cache status
         if self._cache:
-            print(f"\n--- Cache Status ---")
+            print("\n--- Cache Status ---")
             self._cache.print_stats()
 
         # Production monitoring status
         if self._production_monitor:
-            print(f"\n--- Production Monitoring ---")
+            print("\n--- Production Monitoring ---")
             self._production_monitor.print_status_report()
 
         # Helius optimizer status
         if self._helius_optimizer:
-            print(f"\n--- Helius Optimization ---")
+            print("\n--- Helius Optimization ---")
             self._helius_optimizer.print_status_report()
 
         print("="*80 + "\n")

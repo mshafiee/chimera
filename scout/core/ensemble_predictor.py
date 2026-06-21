@@ -18,8 +18,7 @@ Expected Impact: 25-35% improvement in prediction accuracy through ensemble
 import os
 import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -382,21 +381,21 @@ class EnsemblePredictor:
         print("ENSEMBLE PREDICTION REPORT")
         print("="*70)
 
-        print(f"\nPrediction:")
+        print("\nPrediction:")
         print(f"  Expected PnL: ${summary['predicted_pnl']:.4f}")
         print(f"  Confidence: {summary['confidence']:.0f}%")
         print(f"  Consensus: {summary['consensus_score']:.0f}%")
         print(f"  Execute: {summary['should_execute']}")
 
-        print(f"\nModel Weights:")
+        print("\nModel Weights:")
         for model, weight in summary['model_weights'].items():
             print(f"  {model}: {weight:.0f}%")
 
-        print(f"\nModel Predictions:")
+        print("\nModel Predictions:")
         for model_type, pred in prediction.model_predictions.items():
             print(f"  {model_type.value}: {pred.predicted_pnl:.4f} (conf: {pred.confidence:.2f})")
 
-        print(f"\nPerformance:")
+        print("\nPerformance:")
         print(f"  Inference Time: {summary['inference_time_ms']:.1f}ms")
         print(f"  Models Used: {summary['model_count']}")
 

@@ -8,7 +8,6 @@ import pytest
 import time
 import os
 import tempfile
-from datetime import datetime, timedelta
 
 from core.production_monitor import (
     GrowthTracker,
@@ -114,7 +113,6 @@ class TestGrowthTracker:
 
     def test_record_capital_update(self, growth_tracker):
         """Test recording a capital update."""
-        old_capital = growth_tracker.current_capital
         new_capital = 250.0
 
         metrics = growth_tracker.record_capital(

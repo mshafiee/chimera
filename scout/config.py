@@ -926,7 +926,7 @@ class ScoutConfig:
         print(f"Database Path: {ScoutConfig.get_db_path()}")
 
         # Optimization Configuration
-        print(f"\nOptimization Settings:")
+        print("\nOptimization Settings:")
         print(f"  Optimization Enabled: {ScoutConfig.get_optimization_enabled()}")
         print(f"  Credit Tracking: {ScoutConfig.get_credit_tracking_enabled()}")
         print(f"  ML Prediction: {ScoutConfig.get_ml_prediction_enabled()}")
@@ -935,7 +935,7 @@ class ScoutConfig:
         print(f"  Current Capital: ${ScoutConfig.get_current_capital():,.0f}")
         print(f"  Target Capital: ${ScoutConfig.get_target_capital():,.0f}")
         print(f"  Monthly Credits: {ScoutConfig.get_monthly_credits():,}")
-        print(f"\nML Model Settings:")
+        print("\nML Model Settings:")
         print(f"  ML Enabled: {ScoutConfig.get_ml_enabled()}")
         print(f"  Ensemble Methods: {ScoutConfig.get_ensemble_enabled()}")
         print(f"  XGBoost: {ScoutConfig.get_xgboost_enabled()}")
@@ -956,7 +956,7 @@ class ScoutConfig:
         print(f"  SHAP Explainability: {ScoutConfig.get_shap_enabled()}")
         print(f"  Hyperopt: {ScoutConfig.get_hyperopt_enabled()}")
         print(f"  A/B Testing: {ScoutConfig.get_ab_testing_enabled()}")
-        print(f"\nRate Limiting:")
+        print("\nRate Limiting:")
         print(f"  Max Requests/sec: {ScoutConfig.get_max_requests_per_second()}")
         print(f"  Target RPS: {ScoutConfig.get_target_rps()}")
         print(f"  Adaptive Rate Limiting: {ScoutConfig.get_rate_limit_adaptive()}")

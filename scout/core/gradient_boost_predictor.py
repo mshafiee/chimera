@@ -16,9 +16,8 @@ Usage:
 import json
 import logging
 import os
-import pickle
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
 from collections import defaultdict
@@ -516,90 +515,6 @@ class GradientBoostPredictor:
             'validation_metrics': self.validation_metrics,
         }
 
-    def train_from_history(
-        self,
-        X_train: np.ndarray,
-        y_train: np.ndarray,
-        X_val: np.ndarray,
-        y_val: np.ndarray,
-        feature_names: List[str],
-        early_stopping_rounds: int = 10
-    ) -> Dict[str, Any]:
-        """
-        Train the gradient boosting models from pre-split numpy arrays.
-
-        Args:
-            X_train: Training features array
-            y_train: Training targets array
-            X_val: Validation features array
-            y_val: Validation targets array
-            feature_names: List of feature names
-            early_stopping_rounds: Early stopping rounds for training
-
-        Returns:
-            Dictionary with training metrics
-        """
-        has_model, missing = self._check_dependencies()
-        if not has_model:
-            logger.error(f"Cannot train - missing dependencies: {missing}")
-            return {'error': 'missing_dependencies', 'missing': missing}
-
-        if len(X_train) < 10:
-            logger.warning(f"Insufficient training data: {len(X_train)} < 10")
-            return {'error': 'insufficient_data', 'min_required': 10}
-
-        # Set feature names
-        self.feature_names = feature_names
-        self.training_samples = len(X_train) + len(X_val)
-
-        # Train both models if available
-        metrics = {}
-
-        if XGBOOST_AVAILABLE:
-            xgb_metrics = self._train_xgboost(
-                X_train, y_train, X_val, y_val, early_stopping_rounds
-            )
-            metrics['xgboost'] = xgb_metrics
-
-        if LIGHTGBM_AVAILABLE:
-            lgb_metrics = self._train_lightgbm(
-                X_train, y_train, X_val, y_val, early_stopping_rounds
-            )
-            metrics['lightgbm'] = lgb_metrics
-
-        # Select best model
-        if 'xgboost' in metrics and 'lightgbm' in metrics:
-            # Select based on validation RMSE
-            if metrics['xgboost'].get('val_rmse', float('inf')) <= metrics['lightgbm'].get('val_rmse', float('inf')):
-                self.best_model_type = 'xgboost'
-            else:
-                self.best_model_type = 'lightgbm'
-        elif 'xgboost' in metrics:
-            self.best_model_type = 'xgboost'
-        elif 'lightgbm' in metrics:
-            self.best_model_type = 'lightgbm'
-
-        self.last_trained = datetime.utcnow().isoformat()
-
-        # Calculate feature importance
-        self._calculate_feature_importance()
-
-        # Apply pruning if enabled
-        if self.enable_pruning:
-            self._prune_model_for_latency()
-
-        # Save models
-        self._save_models()
-
-        return {
-            'best_model_type': self.best_model_type,
-            'training_samples': self.training_samples,
-            'last_trained': self.last_trained,
-            'metrics': metrics,
-            'feature_importance': self.feature_importance,
-            'validation_metrics': self.validation_metrics,
-        }
-
     def train_from_arrays(
         self,
         X_train: np.ndarray,
@@ -685,24 +600,6 @@ class GradientBoostPredictor:
             'feature_importance': self.feature_importance,
             'validation_metrics': self.validation_metrics,
         }
-
-    def train_from_history(
-        self,
-        historical_data: List[Dict[str, Any]],
-        validation_split: float = 0.2,
-        early_stopping_rounds: int = 10
-    ) -> Dict[str, Any]:
-        """
-        Train the gradient boosting models from historical data.
-
-        Args:
-            historical_data: List of dicts with features and actual_pnl_sol
-            validation_split: Fraction of data to use for validation
-            early_stopping_rounds: Early stopping rounds for training
-
-        Returns:
-            Dictionary with training metrics
-        """
 
     def _prepare_training_data(
         self,

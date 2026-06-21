@@ -14,11 +14,9 @@ Features:
 Target: Grow from $200 to $1,000 to afford Helius Business Plan upgrade
 """
 
-import os
 import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 import threading

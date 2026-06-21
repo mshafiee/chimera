@@ -17,9 +17,9 @@ Usage:
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Any
 from enum import Enum
 import numpy as np
 
@@ -378,7 +378,7 @@ class RegimeSpecificModels:
         """Prepare feature array."""
         # Get feature names from first model's metadata
         if self.model_metadata:
-            first_regime = next(iter(self.model_metadata.keys()))
+            next(iter(self.model_metadata.keys()))
             # Assume same features for all regimes
             feature_names = list(features.keys())
             X = [[float(features.get(name, 0.0)) for name in feature_names]]

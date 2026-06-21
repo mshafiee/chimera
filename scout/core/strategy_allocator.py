@@ -22,7 +22,7 @@ Features:
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass, field
 from enum import Enum
@@ -252,7 +252,7 @@ class StrategyAllocator:
                 self._last_rebalance = time.time()
                 self._save_allocation()
 
-                logger.info(f"Strategy allocation updated:")
+                logger.info("Strategy allocation updated:")
                 logger.info(f"  Capital: ${capital:.0f} ({self._allocation.growth_stage} stage)")
                 logger.info(f"  Regime: {regime.value}")
                 logger.info(f"  Shield: {shield*100:.0f}%")
@@ -399,16 +399,16 @@ class StrategyAllocator:
         print("STRATEGY ALLOCATOR - ALLOCATION REPORT")
         print("="*70)
 
-        print(f"\nGrowth Progress:")
+        print("\nGrowth Progress:")
         print(f"  Current Capital: ${summary['capital']:.2f}")
         print(f"  Target Capital: ${summary['target_capital']:.2f}")
         print(f"  Progress: {summary['progress_to_target']:.1f}%")
         print(f"  Growth Stage: {summary['growth_stage'].capitalize()}")
 
-        print(f"\nMarket Conditions:")
+        print("\nMarket Conditions:")
         print(f"  Regime: {summary['regime'].upper()}")
 
-        print(f"\nStrategy Allocation:")
+        print("\nStrategy Allocation:")
         print(f"  Shield: {summary['shield_allocation_pct']:.0f}% (${summary['shield_amount']:.2f})")
         print(f"  Spear: {summary['spear_allocation_pct']:.0f}% (${summary['spear_amount']:.2f})")
 
@@ -417,7 +417,7 @@ class StrategyAllocator:
             print(f"\nLast rebalance: {rebalance_ago:.0f} minutes ago")
 
         # Growth targets
-        print(f"\nGrowth Targets:")
+        print("\nGrowth Targets:")
         print(f"  Early ($300): {100 * min(summary['capital'] / 300, 1.0):.0f}%")
         print(f"  Mid ($500): {100 * min(summary['capital'] / 500, 1.0):.0f}%")
         print(f"  Growth ($800): {100 * min(summary['capital'] / 800, 1.0):.0f}%")

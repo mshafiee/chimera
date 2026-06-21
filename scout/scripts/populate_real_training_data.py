@@ -15,7 +15,6 @@ import asyncio
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -161,7 +160,7 @@ async def populate_real_wallet_data(
             trade_counts = [r.trade_count_30d for r in wallet_records if r.trade_count_30d is not None]
 
             if wqs_scores:
-                logger.info(f"\nData Statistics:")
+                logger.info("\nData Statistics:")
                 logger.info(f"  WQS Score: {sum(wqs_scores)/len(wqs_scores):.1f} avg (min={min(wqs_scores):.1f}, max={max(wqs_scores):.1f})")
             if roi_values:
                 logger.info(f"  ROI 30d: {sum(roi_values)/len(roi_values):.2f} avg (min={min(roi_values):.2f}, max={max(roi_values):.2f})")

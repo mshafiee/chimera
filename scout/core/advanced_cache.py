@@ -687,18 +687,18 @@ class AdvancedCache:
         print("ADVANCED CACHE - STATISTICS")
         print("="*70)
 
-        print(f"\nHit Rates:")
+        print("\nHit Rates:")
         print(f"  Overall: {stats.hit_rate:.1f}%")
         print(f"  L1: {stats.l1_hit_rate:.1f}%")
 
-        print(f"\nCache Operations:")
+        print("\nCache Operations:")
         print(f"  Total hits: {stats.total_hits:,}")
         print(f"  Total misses: {stats.total_misses:,}")
         print(f"  L1 hits: {stats.l1_hits:,}")
         print(f"  L2 hits: {stats.l2_hits:,}")
         print(f"  L3 hits: {stats.l3_hits:,}")
 
-        print(f"\nMemory Usage:")
+        print("\nMemory Usage:")
         print(f"  L1 entries: {len(self._l1_cache):,}")
         print(f"  L1 size: {stats.l1_size_bytes:,} bytes / {self._l1_max_memory:,} bytes")
         print(f"  L1 usage: {(stats.l1_size_bytes/self._l1_max_memory*100):.1f}%")

@@ -8,10 +8,15 @@ This module wraps WalletAnalyzer with optimization features:
 - Production monitoring
 """
 
+from __future__ import annotations
+
 import logging
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, TYPE_CHECKING
 from .analyzer import WalletAnalyzer
 from .wqs import WalletMetrics
+
+if TYPE_CHECKING:
+    from .scout_optimizer import ScoutOptimizer
 
 logger = logging.getLogger(__name__)
 

@@ -18,10 +18,9 @@ Usage:
 import json
 import logging
 import os
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Any
 from collections import defaultdict, deque
 from dataclasses import dataclass, asdict
 import numpy as np
@@ -30,8 +29,6 @@ logger = logging.getLogger(__name__)
 
 # Try to import scipy for statistical tests
 try:
-    from scipy import stats
-    from scipy.spatial.distance import jensenshannon
     SCIPY_AVAILABLE = True
 except ImportError:
     SCIPY_AVAILABLE = False

@@ -16,7 +16,6 @@ A wallet FAILS backtest if:
 - Too many trades would be rejected due to liquidity
 """
 
-from datetime import datetime
 
 from .utils import utcnow
 

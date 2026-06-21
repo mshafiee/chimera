@@ -6,7 +6,7 @@ if Redis is unavailable. This ensures graceful degradation.
 """
 
 import logging
-from typing import Optional, Dict
+from typing import Optional
 from datetime import datetime, timedelta
 from collections import OrderedDict
 
