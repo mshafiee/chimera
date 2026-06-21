@@ -266,6 +266,8 @@ Real-time monitoring and management interface with:
 
 ### Running the System
 
+#### Quick Start (Individual Components)
+
 **Terminal 1: Start the Operator**
 ```bash
 cd operator
@@ -291,6 +293,232 @@ npm run dev
 ```
 
 The dashboard will be available at `http://localhost:5173` (or your configured port).
+
+---
+
+### 🚀 Running the Full Stack (Development)
+
+For a complete development environment, run all components simultaneously:
+
+#### Method 1: Using Make (Recommended)
+
+The simplest way to start all development services:
+
+```bash
+# Start all components in background
+make dev
+
+# Or start individual components:
+make dev-operator    # Rust Operator (port 8080)
+make dev-scout       # Python Scout
+make dev-web         # Web Dashboard (port 5173)
+```
+
+#### Method 2: Using Tmux (All Services in One Session)
+
+For a unified development experience using tmux:
+
+```bash
+# Create a new tmux session named "chimera"
+tmux new-session -d -s chimera
+
+# Start Operator in window 0
+tmux send-keys -t chimera:0 'cd /Users/mohammad/Documents/GitHub/chimera/operator' C-m
+tmux send-keys -t chimera:0 'RUST_LOG=chimera_operator=debug cargo run' C-m
+
+# Start Scout in window 1
+tmux new-window -t chimera:1
+tmux send-keys -t chimera:1 'cd /Users/mohammad/Documents/GitHub/chimera/scout' C-m
+tmux send-keys -t chimera:1 'python main.py --verbose' C-m
+
+# Start Web Dashboard in window 2
+tmux new-window -t chimera:2
+tmux send-keys -t chimera:2 'cd /Users/mohammad/Documents/GitHub/chimera/web' C-m
+tmux send-keys -t chimera:2 'npm run dev' C-m
+
+# Attach to the session
+tmux attach-session -t chimera
+```
+
+**Tmux Navigation:**
+- `Ctrl+B 0/1/2` - Switch between windows (Operator/Scout/Web)
+- `Ctrl+B D` - Detach from session (services keep running)
+- `tmux attach -t chimera` - Reattach to session
+- `Ctrl+C` - Stop service in current window
+
+#### Method 3: Using Terminal Tabs
+
+Open 3 separate terminal tabs and run:
+
+**Tab 1 - Operator (Hot Path):**
+```bash
+cd ~/Documents/GitHub/chimera/operator
+RUST_LOG=chimera_operator=debug,info cargo run
+```
+
+**Tab 2 - Scout (Cold Path):**
+```bash
+cd ~/Documents/GitHub/chimera/scout
+python main.py --verbose --min-wqs-active 60 --max-wallets 200
+```
+
+**Tab 3 - Web Dashboard:**
+```bash
+cd ~/Documents/GitHub/chimera/web
+npm run dev
+```
+
+#### Method 4: Development with Hot Reload
+
+For the best development experience with automatic reloading:
+
+```bash
+# Terminal 1: Operator with hot reload
+cd operator
+cargo watch -x run
+
+# Terminal 2: Scout with file watching
+cd scout
+watchmedo auto-restart --directory=./ --pattern=*.py --recursive -- python main.py
+
+# Terminal 3: Web with Vite hot reload (already enabled by default)
+cd web
+npm run dev
+```
+
+---
+
+### 🔧 Development Configuration
+
+**Operator `.env` for Development:**
+```bash
+cd operator/config
+cat > .env << 'EOF'
+# Security
+CHIMERA_SECURITY__WEBHOOK_SECRET=development_secret_only_for_testing
+
+# RPC (use Helius DevNet for testing)
+CHIMERA_RPC__PRIMARY_URL=https://devnet.helius-rpc.com/?api-key=YOUR_DEV_KEY
+
+# Database
+CHIMERA_DEV_MODE=1
+
+# Logging
+RUST_LOG=chimera_operator=debug,chimera_engine=debug
+EOF
+```
+
+**Scout Configuration for Development:**
+```bash
+cd scout
+cat > .env << 'EOF'
+# Helius API
+HELIUS_API_KEY=your_helius_api_key
+
+# Scout settings
+SCOUT_MIN_WQS_ACTIVE=50
+SCOUT_MIN_WQS_CANDIDATE=20
+SCOUT_DISCOVERY_MAX_WALLETS=100
+SCOUT_VALIDATE_WALLET_ACTIVITY=false
+EOF
+```
+
+---
+
+### 📊 Access Points (Development)
+
+Once all services are running:
+
+| Service | URL | Port | Description |
+|---------|-----|------|-------------|
+| **Operator API** | http://localhost:8080 | 8080 | REST API & Webhook |
+| **Web Dashboard** | http://localhost:5173 | 5173 | React Dashboard |
+| **Health Check** | http://localhost:8080/api/v1/health | 8080 | System Health |
+| **Prometheus Metrics** | http://localhost:8080/metrics | 8080 | Performance Metrics |
+| **WebSocket** | ws://localhost:8080/api/v1/ws | 8080 | Real-time Updates |
+
+---
+
+### 🛑 Stopping the Development Stack
+
+**Stop Individual Services:**
+```bash
+# Stop Operator (Ctrl+C in terminal or kill process)
+pkill -f "cargo run.*chimera"
+
+# Stop Scout
+pkill -f "python.*scout"
+
+# Stop Web Dashboard
+pkill -f "vite"
+```
+
+**Stop All Chimera Services:**
+```bash
+# Kill all Chimera-related processes
+pkill -f "chimera" && pkill -f "vite" && echo "All Chimera services stopped"
+```
+
+**Stop Tmux Session (if using Method 2):**
+```bash
+tmux kill-session -t chimera
+```
+
+---
+
+### 🐛 Development Tips
+
+**1. Check Logs in Real-Time:**
+```bash
+# Operator logs
+tail -f operator.log
+
+# Scout logs (if logging to file)
+tail -f scout/scout.log
+```
+
+**2. Test Individual Components:**
+```bash
+# Test Scout wallet discovery
+cd scout
+python main.py --dry-run --max-wallets 10
+
+# Test Operator health
+curl http://localhost:8080/api/v1/health | jq
+
+# Test Web Dashboard connection
+curl http://localhost:5173
+```
+
+**3. Run Tests While Developing:**
+```bash
+# Operator tests
+cd operator
+cargo test
+
+# Scout tests
+cd scout
+pytest tests/ -v
+
+# Web tests
+cd web
+npm run test:unit
+```
+
+**4. Monitor Performance:**
+```bash
+# Check CPU/memory usage
+htop
+
+# Monitor port usage
+lsof -i :8080  # Operator
+lsof -i :5173  # Web Dashboard
+
+# Check logs for errors
+grep -i "error\|warning" operator.log
+```
+
+---
 
 ### Testing the Webhook
 
