@@ -104,6 +104,7 @@ class PrePromotionValidator:
         liquidity_provider: Optional[LiquidityProvider] = None,
         backtest_config: Optional[BacktestConfig] = None,
         promotion_criteria: Optional[PromotionCriteria] = None,
+        rugcheck_client: Optional["RugCheckClient"] = None,  # Shared client to avoid duplicate checks
     ):
         """
         Initialize the validator.
@@ -112,6 +113,7 @@ class PrePromotionValidator:
             liquidity_provider: Provider for liquidity data
             backtest_config: Configuration for backtesting
             promotion_criteria: Criteria for promotion decision
+            rugcheck_client: Optional shared RugCheckClient (reuses cache from analyzer)
         """
         self.liquidity = liquidity_provider or LiquidityProvider()
         self.backtest_config = backtest_config or BacktestConfig()
@@ -119,13 +121,14 @@ class PrePromotionValidator:
 
         self.simulator = BacktestSimulator(self.liquidity, self.backtest_config)
 
-        # Initialize RugCheck client if enabled
-        self.rugcheck_client = None
-        if SECURITY_AVAILABLE and ScoutConfig and ScoutConfig.get_rugcheck_enabled():
-            try:
-                self.rugcheck_client = RugCheckClient()
-            except Exception as e:
-                logger.warning(f"Failed to initialize RugCheck client: {e}")
+        # Initialize RugCheck client (use shared client if provided, else create new)
+        self.rugcheck_client = rugcheck_client
+        if self.rugcheck_client is None:
+            if SECURITY_AVAILABLE and ScoutConfig and ScoutConfig.get_rugcheck_enabled():
+                try:
+                    self.rugcheck_client = RugCheckClient()
+                except Exception as e:
+                    logger.warning(f"Failed to initialize RugCheck client: {e}")
 
     def _get_archetype_threshold(self, archetype: Optional[str]) -> float:
         """

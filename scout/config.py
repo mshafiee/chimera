@@ -204,7 +204,12 @@ class ScoutConfig:
     def get_discovery_trending_hours() -> int:
         """Trending scan lookback (wallets riding current narratives)."""
         return int(os.getenv("SCOUT_DISCOVERY_TRENDING_HOURS", "4"))
-    
+
+    @staticmethod
+    def get_discovery_timeout_seconds() -> int:
+        """Timeout per discovery strategy (deep/fast/trending)."""
+        return int(os.getenv("SCOUT_DISCOVERY_TIMEOUT_SECONDS", "300"))
+
     @staticmethod
     def get_discovery_profitability_filter() -> bool:
         """

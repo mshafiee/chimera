@@ -185,10 +185,59 @@ class OptimizedWalletAnalyzer:
             except Exception as e:
                 print(f"[Optimized] Cache invalidation failed: {e}")
 
+    async def clear_all_caches(self):
+        """Clear all cached data."""
+        # Clear base analyzer cache
+        if hasattr(self._analyzer, 'clear_all_caches'):
+            self._analyzer.clear_all_caches()
+
+        # Clear optimization cache - invalidate all wallet entries
+        if self._optimization_enabled and self._optimizer:
+            try:
+                self._optimizer.invalidate_cache("wallet", "*")
+            except Exception as e:
+                print(f"[Optimized] Cache invalidation failed: {e}")
+
+    def close(self):
+        """Close resources (HTTP sessions, etc.)."""
+        if hasattr(self._analyzer, 'close'):
+            # Close base analyzer resources
+            if hasattr(self._analyzer, 'helius_client') and self._analyzer.helius_client:
+                return self._analyzer.helius_client.close()
+
+    @property
+    def rugcheck_client(self):
+        """Delegate rugcheck_client to base analyzer."""
+        return getattr(self._analyzer, 'rugcheck_client', None)
+
+    @property
+    def helius_client(self):
+        """Delegate helius_client to base analyzer."""
+        return getattr(self._analyzer, 'helius_client', None)
+
     async def shutdown(self):
         """Cleanup and shutdown."""
+        try:
+            # Close base analyzer resources
+            if hasattr(self._analyzer, 'helius_client') and self._analyzer.helius_client:
+                await self._analyzer.helius_client.close()
+                print("[Optimized] Closed HTTP sessions")
+        except Exception as e:
+            print(f"[Optimized] Shutdown error: {e}")
         if hasattr(self._analyzer, 'shutdown'):
             try:
                 await self._analyzer.shutdown()
             except Exception:
                 pass  # Non-critical
+
+    def determine_archetype(self, metrics, trades):
+        """Delegate determine_archetype to base analyzer."""
+        if hasattr(self._analyzer, 'determine_archetype'):
+            return self._analyzer.determine_archetype(metrics, trades)
+        return {}
+
+    def _calculate_alpha_decay(self, trades):
+        """Delegate _calculate_alpha_decay to base analyzer."""
+        if hasattr(self._analyzer, '_calculate_alpha_decay'):
+            return self._analyzer._calculate_alpha_decay(trades)
+        return {}
