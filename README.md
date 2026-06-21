@@ -271,9 +271,9 @@ Real-time monitoring and management interface with:
 **Terminal 1: Start the Operator**
 ```bash
 cd operator
-cargo run --release
+cargo run --release --bin chimera_operator
 # Or for development with debug logging:
-RUST_LOG=chimera_operator=debug cargo run
+RUST_LOG=chimera_operator=debug,info cargo run --bin chimera_operator
 ```
 
 The Operator will start on `http://0.0.0.0:8080` by default.
