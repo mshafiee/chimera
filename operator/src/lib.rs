@@ -6,7 +6,7 @@
 pub mod circuit_breaker;
 pub mod config;
 pub mod constants;
-pub mod db;
+pub mod db_abstraction;
 pub mod engine;
 pub mod error;
 pub mod handlers;
@@ -25,7 +25,7 @@ pub mod vault;
 // Re-export commonly used types for tests
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState, TripReason};
 pub use config::{AppConfig, CircuitBreakerConfig, JitoConfig};
-pub use db::DbPool;
+pub use db_abstraction::*;
 pub use engine::recovery::{RecoveryAction, DEFAULT_STUCK_THRESHOLD_SECS};
 pub use engine::{Engine, EngineHandle, PriorityQueue, TipManager};
 pub use error::{AppError, AppResult};

@@ -28,14 +28,14 @@ pub use webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::engine::{EngineHandle, PortfolioHeat};
 use crate::token::{TokenMetadataFetcher, TokenParser};
 use std::sync::Arc;
 
 /// Main monitoring state
 pub struct MonitoringState {
-    pub db: DbPool,
+    pub db: Arc<dyn Database>,
     pub engine: EngineHandle,
     pub config: Arc<AppConfig>,
     pub webhook_rate_limiter: Arc<RateLimiter>,
@@ -55,7 +55,7 @@ pub struct MonitoringState {
 
 impl MonitoringState {
     pub fn new(
-        db: DbPool,
+        db: Arc<dyn Database>,
         engine: EngineHandle,
         config: Arc<AppConfig>,
         token_fetcher: Option<Arc<TokenMetadataFetcher>>,

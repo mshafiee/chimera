@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import {
@@ -51,11 +51,11 @@ export function Webhooks() {
   })
 
   // Update last update time
-  useState(() => {
+  useEffect(() => {
     if (stats || auditLog) {
       setLastUpdate(new Date())
     }
-  })
+  }, [stats, auditLog, setLastUpdate])
 
   // Mutations
   const bulkRegister = useBulkRegisterWebhooks()

@@ -3,7 +3,7 @@
 //! Continuous background task for webhook health monitoring,
 //! reconciliation, and automatic cleanup of stale/orphaned webhooks.
 
-use crate::db::{self, DbPool};
+use crate::db_abstraction::Database;
 use crate::monitoring::helius::{HeliusClient, WebhookReconciliationResult};
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
@@ -29,7 +29,7 @@ pub struct WebhookHealthConfig {
 /// 3. Cleanup of stale/unhealthy webhooks
 /// 4. URL change detection and bulk updates
 pub async fn start_webhook_health_task(
-    db: DbPool,
+    db: Arc<dyn Database>,
     helius_client: Arc<HeliusClient>,
     rate_limiter: Arc<RateLimiter>,
     config: WebhookHealthConfig,
@@ -104,8 +104,7 @@ pub async fn start_webhook_health_task(
                 }
 
                 // 3. Update configuration tracking
-                if let Err(e) = db::update_webhook_configuration(
-                    &db,
+                if let Err(e) = db.update_webhook_configuration(
                     "current_webhook_url",
                     &config.webhook_url,
                     "health_task"
@@ -126,7 +125,7 @@ pub async fn start_webhook_health_task(
 /// This can be called via API endpoint to manually trigger
 /// webhook reconciliation outside of the scheduled interval.
 pub async fn manual_reconcile_webhooks(
-    db: &DbPool,
+    db: Arc<dyn Database>,
     helius_client: &Arc<HeliusClient>,
     rate_limiter: &Arc<RateLimiter>,
     webhook_url: &str,
@@ -143,7 +142,7 @@ pub async fn manual_reconcile_webhooks(
     };
 
     let manager = WebhookLifecycleManager::new(
-        db.clone(),
+        db,
         helius_client.clone(),
         rate_limiter.clone(),
         lifecycle_config,
@@ -167,7 +166,7 @@ pub async fn manual_reconcile_webhooks(
 /// This can be called via API endpoint to manually trigger
 /// webhook health checks outside of the scheduled interval.
 pub async fn manual_health_check(
-    db: &DbPool,
+    db: Arc<dyn Database>,
     helius_client: &Arc<HeliusClient>,
     rate_limiter: &Arc<RateLimiter>,
     webhook_url: &str,
@@ -185,7 +184,7 @@ pub async fn manual_health_check(
     };
 
     let manager = WebhookLifecycleManager::new(
-        db.clone(),
+        db,
         helius_client.clone(),
         rate_limiter.clone(),
         lifecycle_config,
@@ -205,9 +204,19 @@ pub async fn manual_health_check(
 }
 
 /// Get webhook statistics for monitoring
-pub async fn get_webhook_statistics(db: &DbPool) -> Result<crate::db::WebhookStats> {
-    let stats = db::get_webhook_stats(db).await?;
-    Ok(stats)
+pub async fn get_webhook_statistics(db: &dyn Database) -> Result<crate::db_abstraction::WebhookStats> {
+    let all_monitoring = db.get_all_wallet_monitoring().await?;
+    let total = all_monitoring.len();
+    let active = all_monitoring.iter().filter(|m| m.webhook_status.as_deref() == Some("active")).count();
+    let failed = all_monitoring.iter().filter(|m| {
+        m.webhook_health_status.as_deref() == Some("error") || m.webhook_health_status.as_deref() == Some("unhealthy")
+    }).count();
+    Ok(crate::db_abstraction::WebhookStats {
+        total_webhooks: total,
+        active_webhooks: active,
+        stale_webhooks: 0,
+        failed_registrations: failed,
+    })
 }
 
 /// Startup webhook check result
@@ -229,7 +238,7 @@ pub struct StartupWebhookResult {
 /// 2. Cleanup of orphaned webhooks
 /// 3. Optional cleanup of stale webhooks
 pub async fn run_startup_webhook_check(
-    db: DbPool,
+    db: Arc<dyn Database>,
     helius_client: Arc<HeliusClient>,
     rate_limiter: Arc<RateLimiter>,
     config: WebhookHealthConfig,
@@ -260,7 +269,7 @@ pub async fn run_startup_webhook_check(
     let mut failed = 0;
 
     // 1. Register webhooks for ACTIVE wallets that need them
-    let wallets_needing_webhooks = db::get_wallets_needing_webhook_registration(&db).await?;
+    let wallets_needing_webhooks = db.get_wallets_needing_webhook_registration().await?;
     let wallets_checked = wallets_needing_webhooks.len();
 
     info!(
@@ -349,7 +358,7 @@ pub async fn run_startup_webhook_check(
 /// It discovers all webhooks in Helius dashboard and assesses profitability
 /// of each wallet to determine which webhooks to keep or delete.
 pub async fn reconcile_helius_webhooks_async(
-    db: DbPool,
+    db: Arc<dyn Database>,
     helius_client: Arc<HeliusClient>,
     rate_limiter: Arc<RateLimiter>,
     config: WebhookHealthConfig,

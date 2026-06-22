@@ -6,14 +6,14 @@
 //! - Average return per trade
 //! - Exit timing accuracy
 
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Wallet performance tracker
 pub struct WalletPerformanceTracker {
-    db: DbPool,
+    db: Arc<dyn Database>,
     /// Cache of recent metrics (wallet -> metrics)
     metrics_cache: Arc<RwLock<std::collections::HashMap<String, WalletCopyMetrics>>>,
     /// Whether auto-demotion is enabled
@@ -37,7 +37,7 @@ pub struct WalletCopyMetrics {
 }
 
 impl WalletPerformanceTracker {
-    pub fn new(db: DbPool) -> Self {
+    pub fn new(db: Arc<dyn Database>) -> Self {
         Self {
             db,
             metrics_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -46,7 +46,7 @@ impl WalletPerformanceTracker {
     }
 
     /// Create with auto-demotion enabled
-    pub fn with_auto_demotion(db: DbPool, enabled: bool) -> Self {
+    pub fn with_auto_demotion(db: Arc<dyn Database>, enabled: bool) -> Self {
         Self {
             db,
             metrics_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -90,15 +90,14 @@ impl WalletPerformanceTracker {
         let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
         let from_date_str = seven_days_ago.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-        let trades = crate::db::get_trades(
-            &self.db,
+        let trades = self.db.get_trades_filtered(
             Some(&from_date_str),
             None,
             Some("CLOSED"),
             None,
             Some(wallet_address),
-            None,
-            None,
+            1000,
+            0,
         )
         .await
         .map_err(|e| format!("Failed to query trades: {}", e))?;
@@ -157,13 +156,13 @@ impl WalletPerformanceTracker {
         metrics: &WalletCopyMetrics,
     ) -> Result<(), String> {
         // Get current wallet from database
-        let wallet = crate::db::get_wallet_by_address(&self.db, wallet_address)
+        let wallet = self.db.get_wallet(wallet_address)
             .await
             .map_err(|e| format!("Failed to get wallet: {}", e))?;
 
         if let Some(mut wallet) = wallet {
             // Get original wallet WQS (from Scout analysis)
-            let original_wqs = wallet.wqs_score.unwrap_or(50.0);
+            let original_wqs = wallet.wqs_score.unwrap_or(rust_decimal::Decimal::from_f64_retain(50.0).unwrap_or(rust_decimal::Decimal::ZERO));
 
             // Calculate copy performance factor
             // If copy PnL < original PnL * 0.7 for 7 days, reduce WQS
@@ -177,16 +176,16 @@ impl WalletPerformanceTracker {
             };
 
             // Adjust WQS (but don't go below 40% of original)
-            let adjusted_wqs = (original_wqs * copy_performance_factor).max(original_wqs * 0.4);
+            let factor = rust_decimal::Decimal::from_f64_retain(copy_performance_factor).unwrap_or(rust_decimal::Decimal::ONE);
+            let min_wqs = original_wqs * rust_decimal::Decimal::from_f64_retain(0.4).unwrap_or(rust_decimal::Decimal::ZERO);
+            let adjusted_wqs = (original_wqs * factor).max(min_wqs);
 
             // Persist adjusted WQS back to the wallets table
             wallet.wqs_score = Some(adjusted_wqs);
 
-            if let Err(e) = crate::db::upsert_wallet(
-                &self.db,
+            if let Err(e) = self.db.upsert_wallet(
                 wallet_address,
                 Some(adjusted_wqs),
-                None,
                 None,
                 None,
                 None,
@@ -206,8 +205,8 @@ impl WalletPerformanceTracker {
 
             tracing::info!(
                 wallet_address = %wallet_address,
-                original_wqs = original_wqs,
-                adjusted_wqs = adjusted_wqs,
+                original_wqs = ?original_wqs,
+                adjusted_wqs = ?adjusted_wqs,
                 copy_success_rate = metrics.signal_success_rate,
                 "WQS adjusted based on copy performance"
             );
@@ -225,8 +224,7 @@ impl WalletPerformanceTracker {
                     metrics.copy_pnl_7d
                 );
 
-                match crate::db::update_wallet_status(
-                    &self.db,
+                match self.db.update_wallet_status_ext(
                     wallet_address,
                     "CANDIDATE",
                     None, // No TTL
@@ -277,15 +275,15 @@ impl WalletPerformanceTracker {
     /// `breach_started_at`; it is NOT reset on every trade close (that was the old bug).
     pub async fn should_demote(&self, wallet_address: &str) -> bool {
         // Get wallet from database to compare copy vs original performance
-        if let Ok(Some(wallet)) = crate::db::get_wallet_by_address(&self.db, wallet_address).await {
+        if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
             if let Some(metrics) = self.get_metrics(wallet_address).await {
                 // Get original wallet ROI (from Scout analysis)
-                let original_roi_7d = wallet.roi_7d.unwrap_or(0.0);
+                let original_roi_7d = wallet.roi_7d.unwrap_or(rust_decimal::Decimal::ZERO);
 
                 // Calculate expected copy PnL (simplified: assume same ROI)
                 // In reality, we'd need to track original wallet's actual PnL
                 let expected_copy_pnl =
-                    Decimal::from_f64_retain(original_roi_7d * 0.01).unwrap_or(Decimal::ZERO); // Rough estimate
+                    (original_roi_7d * rust_decimal::Decimal::from_f64_retain(0.01).unwrap_or(rust_decimal::Decimal::ZERO)); // Rough estimate
 
                 // If copy PnL is significantly worse than expected (less than 70% of expected)
                 let threshold =

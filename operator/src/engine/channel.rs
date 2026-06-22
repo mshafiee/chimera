@@ -11,6 +11,8 @@ use crate::models::{Signal, Strategy};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use tokio::sync::Notify;
 
 /// Priority queue for trading signals
 pub struct PriorityQueue {
@@ -32,6 +34,8 @@ pub struct PriorityQueue {
     load_shed_threshold: u32,
     /// Maximum capacity for high-WQS SPEAR queue (smaller to prevent starvation)
     spear_high_wqs_capacity: usize,
+    /// Wakes a waiting worker when a new signal is pushed
+    push_notify: Arc<Notify>,
 }
 
 impl PriorityQueue {
@@ -49,6 +53,7 @@ impl PriorityQueue {
             capacity,
             load_shed_threshold: load_shed_threshold_percent,
             spear_high_wqs_capacity,
+            push_notify: Arc::new(Notify::new()),
         }
     }
 
@@ -84,6 +89,7 @@ impl PriorityQueue {
             Strategy::Exit => {
                 self.high.lock().push_back(signal);
                 self.total_len.fetch_add(1, Ordering::AcqRel);
+                self.push_notify.notify_one();
                 return Ok(());
             }
             Strategy::Shield => {
@@ -93,6 +99,7 @@ impl PriorityQueue {
                 }
                 medium.push_back(signal);
                 self.total_len.fetch_add(1, Ordering::AcqRel);
+                self.push_notify.notify_one();
             }
             Strategy::Spear => {
                 // Route high-WQS SPEAR signals (WQS >= 70) to dedicated high-priority queue
@@ -114,6 +121,7 @@ impl PriorityQueue {
                                 wallet_wqs = wqs,
                                 "Routed high-WQS SPEAR signal to dedicated queue"
                             );
+                            self.push_notify.notify_one();
                             return Ok(());
                         }
 
@@ -155,13 +163,17 @@ impl PriorityQueue {
                 // Add to regular SPEAR queue
                 low.push_back(signal);
                 self.total_len.fetch_add(1, Ordering::AcqRel);
+                self.push_notify.notify_one();
             }
         }
 
         Ok(())
     }
 
-    /// Pop the highest priority signal
+    /// Pop the highest priority signal.
+    ///
+    /// Returns `None` if the queue is empty without waiting. Callers should
+    /// subscribe to `push_notify` to avoid busy-waiting.
     pub async fn pop(&self) -> Option<Signal> {
         // Try high priority first (EXIT signals)
         if let Some(signal) = self.high.lock().pop_front() {
@@ -188,6 +200,18 @@ impl PriorityQueue {
         }
 
         None
+    }
+
+    /// Wait for the next signal, sleeping until one arrives.
+    ///
+    /// Uses the internal `Notify` to avoid busy-waiting when the queue is empty.
+    pub async fn pop_wait(&self) -> Option<Signal> {
+        loop {
+            if let Some(signal) = self.pop().await {
+                return Some(signal);
+            }
+            self.push_notify.notified().await;
+        }
     }
 
     /// Get queue depths by priority

@@ -5,7 +5,7 @@
 //! - Divergence: Some wallets exiting while others hold
 //! - Clusters: Wallets that trade together
 
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,7 +16,7 @@ use tokio::time::Instant;
 /// Signal aggregator state
 pub struct SignalAggregator {
     #[allow(dead_code)]
-    db: DbPool,
+    db: Arc<dyn Database>,
     /// Recent signals by token (for consensus detection)
     recent_signals: Arc<RwLock<HashMap<String, Vec<TokenSignal>>>>,
     /// Wallet clusters (wallets that trade together)
@@ -46,7 +46,7 @@ pub struct ConsensusSignal {
 }
 
 impl SignalAggregator {
-    pub fn new(db: DbPool) -> Self {
+    pub fn new(db: Arc<dyn Database>) -> Self {
         Self {
             db,
             recent_signals: Arc::new(RwLock::new(HashMap::new())),

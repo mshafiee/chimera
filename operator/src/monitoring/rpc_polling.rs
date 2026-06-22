@@ -3,7 +3,7 @@
 //! Used when webhooks fail or for validation. Implements signature caching
 //! and prioritized polling to minimize credit usage.
 
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::monitoring::rate_limiter::RateLimiter;
 use crate::monitoring::rate_limiter::RequestPriority;
 use crate::monitoring::transaction_parser;
@@ -104,7 +104,7 @@ pub async fn poll_wallet_transactions(
     wallet_address: &str,
     last_signature: Option<&str>,
     rate_limiter: Arc<RateLimiter>,
-    db: Option<&DbPool>,
+    db: Option<&dyn Database>,
 ) -> Result<Vec<WalletTransaction>> {
     // Rate limit before polling
     rate_limiter
@@ -292,8 +292,7 @@ pub async fn poll_wallet_transactions(
     // Update last signature in database if we have new transactions and database access
     if let (Some(latest_sig), Some(db_pool)) = (latest_signature, db) {
         if let Err(e) =
-            crate::db::update_wallet_monitoring_signature(db_pool, wallet_address, &latest_sig)
-                .await
+            db_pool.update_wallet_monitoring_signature(wallet_address, &latest_sig).await
         {
             tracing::warn!(
                 wallet = wallet_address,
@@ -314,7 +313,7 @@ pub async fn poll_wallets_batch(
     batch_size: usize,
     rate_limiter: Arc<RateLimiter>,
     polling_state: Arc<RpcPollingState>,
-    db: Option<&DbPool>,
+    db: Option<&dyn Database>,
 ) -> Result<Vec<WalletTransaction>> {
     let mut all_transactions = Vec::new();
 
@@ -330,7 +329,7 @@ pub async fn poll_wallets_batch(
             // Get last signature from database if available
             // Store in a variable to extend lifetime
             let last_sig_opt = if let Some(db_pool) = db {
-                match crate::db::get_wallet_monitoring(db_pool, wallet).await {
+                match db_pool.get_wallet_monitoring(wallet).await {
                     Ok(Some(monitoring)) => monitoring.last_transaction_signature.clone(),
                     _ => None,
                 }

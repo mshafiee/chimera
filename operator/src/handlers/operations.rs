@@ -9,7 +9,7 @@ use std::sync::Arc;
 use sysinfo::{Networks, System};
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
-use crate::db::{ConfigAuditItem, DbPool};
+use crate::db_abstraction::{ConfigAuditItem, Database};
 use crate::engine::EngineHandle;
 use crate::error::AppError;
 
@@ -57,7 +57,7 @@ pub struct NetworkMetric {
 
 /// Shared state for operations handlers
 pub struct OperationsState {
-    pub db: DbPool,
+    pub db: Arc<dyn Database>,
     pub engine: Option<Arc<EngineHandle>>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub price_cache: Arc<crate::price_cache::PriceCache>,
@@ -264,31 +264,16 @@ pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Js
 }
 
 /// Get rotation history from config audit table
-async fn get_rotation_history(pool: &DbPool) -> Result<Vec<RotationEvent>, AppError> {
-    let query = r#"
-        SELECT
-            id,
-            key,
-            old_value,
-            new_value,
-            changed_by,
-            change_reason,
-            changed_at
-        FROM config_audit
-        WHERE key LIKE 'secret_rotation%'
-        ORDER BY changed_at DESC
-        LIMIT 10
-    "#;
+async fn get_rotation_history(db: &Arc<dyn Database>) -> Result<Vec<RotationEvent>, AppError> {
+    let items: Vec<ConfigAuditItem> = db.get_config_audit_entries(10, 0).await?;
 
-    let items: Vec<ConfigAuditItem> = sqlx::query_as(query)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to query rotation history");
-            AppError::Database(e)
-        })?;
+    // Filter to only secret_rotation entries
+    let rotation_items: Vec<ConfigAuditItem> = items
+        .into_iter()
+        .filter(|item| item.key.starts_with("secret_rotation"))
+        .collect();
 
-    let events: Vec<RotationEvent> = items
+    let events: Vec<RotationEvent> = rotation_items
         .into_iter()
         .map(|item| {
             let status = if item.new_value.contains("success") {
@@ -502,9 +487,9 @@ pub async fn get_health_check_details(State(state): State<Arc<OperationsState>>)
 }
 
 /// Check database health
-async fn check_database_health(pool: &DbPool) -> HealthCheck {
+async fn check_database_health(db: &Arc<dyn Database>) -> HealthCheck {
     let start = std::time::Instant::now();
-    let result = sqlx::query("SELECT 1").fetch_one(pool).await;
+    let result = db.get_trade_statistics().await;
     let response_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match result {

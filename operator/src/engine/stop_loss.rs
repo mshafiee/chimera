@@ -6,18 +6,17 @@
 //! - Portfolio-level stop (pause all trading if daily loss >5%)
 
 use crate::config::ProfitManagementConfig;
-use crate::db::{get_wallet_by_address, DbPool};
+use crate::db_abstraction::{Database, DbPool};
 use crate::monitoring::SignalAggregator;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
-use sqlx;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Stop-loss manager
 pub struct StopLossManager {
-    db: DbPool,
+    db: Arc<dyn Database>,
     config: Arc<ProfitManagementConfig>,
     price_cache: Arc<PriceCache>,
     /// Optional in-memory consensus cache (avoids per-position DB query every 5 s).
@@ -36,7 +35,7 @@ pub enum StopLossAction {
 
 impl StopLossManager {
     pub fn new(
-        db: DbPool,
+        db: Arc<dyn Database>,
         config: Arc<ProfitManagementConfig>,
         price_cache: Arc<PriceCache>,
     ) -> Self {
@@ -123,9 +122,9 @@ impl StopLossManager {
         };
 
         // Get wallet WQS for dynamic stop calculation
-        let wallet_opt = get_wallet_by_address(&self.db, wallet_address).await;
-        let wqs = match wallet_opt {
-            Ok(Some(w)) => w.wqs_score.unwrap_or(50.0),
+        let wallet_opt = self.db.get_wallet(wallet_address).await;
+        let wqs: f64 = match wallet_opt {
+            Ok(Some(w)) => w.wqs_score.map(|s| s.to_f64().unwrap_or(50.0)).unwrap_or(50.0),
             _ => 50.0,
         };
 
@@ -136,19 +135,21 @@ impl StopLossManager {
             if let Some(ref agg) = *agg_guard {
                 agg.is_consensus_token(token_address).await
             } else {
-                // Fallback DB query when aggregator not wired (startup window or tests)
-                let count: i64 = sqlx::query_scalar(
-                    r#"SELECT COUNT(DISTINCT wallet_address)
-                       FROM signal_aggregation
-                       WHERE token_address = ?
-                         AND direction = 'BUY'
-                         AND created_at > datetime('now', '-5 minutes')"#,
-                )
-                .bind(token_address)
-                .fetch_one(&self.db)
-                .await
-                .unwrap_or(0);
-                count >= 2
+                // Fallback: DB query when in-memory aggregator is not wired
+                let count = match self.db.pool() {
+                    crate::db_abstraction::DbPool::SQLite(ref pool) => {
+                        let c: i64 = sqlx::query_scalar(
+                            "SELECT COUNT(DISTINCT wallet_address) FROM signal_aggregation WHERE token_address = ? AND created_at >= datetime('now', '-5 minutes')",
+                        )
+                        .bind(token_address)
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+                        c >= 2
+                    }
+                    _ => false,
+                };
+                count
             }
         };
 

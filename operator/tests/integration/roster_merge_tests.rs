@@ -2,27 +2,30 @@
 //!
 //! Tests ATTACH DATABASE pattern, integrity checks, and atomic writes
 
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool,
+};
 use chimera_operator::roster;
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Pool, Sqlite};
+use std::sync::Arc;
 use tempfile::TempDir;
 
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
+
 /// Create a test database pool
-async fn create_test_pool() -> (Pool<Sqlite>, TempDir) {
+async fn create_test_pool() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
-                .filename(&db_path)
-                .create_if_missing(true)
-                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-                .busy_timeout(std::time::Duration::from_secs(5)),
-        )
-        .await
-        .unwrap();
+    let config = DatabaseConfig::sqlite(db_path);
+    let db = create_database(&config).await.unwrap();
+    let pool = sqlite_pool(&db);
 
     // Create wallets table (must match database/schema/wallets.sql)
     sqlx::query(
@@ -76,13 +79,13 @@ async fn create_test_pool() -> (Pool<Sqlite>, TempDir) {
     .await
     .unwrap();
 
-    (pool, temp_dir)
+    (db, temp_dir)
 }
 
 /// Test roster merge with valid database
 #[tokio::test]
 async fn test_roster_merge_valid() {
-    let (pool, temp_dir) = create_test_pool().await;
+    let (db, temp_dir) = create_test_pool().await;
 
     // Create a test roster_new.db file
     let roster_path = temp_dir.path().join("roster_new.db");
@@ -142,13 +145,14 @@ async fn test_roster_merge_valid() {
     drop(roster_pool);
 
     // Merge roster
-    let result = roster::merge_roster(&pool, &roster_path).await;
+    let result = roster::merge_roster(&db, &roster_path).await;
     assert!(result.is_ok(), "Merge should succeed");
 
     let merge_result = result.unwrap();
     assert_eq!(merge_result.wallets_merged, 1);
 
     // Verify wallet was merged
+    let pool = sqlite_pool(&db);
     let wallet: (String, String, Option<f64>) =
         sqlx::query_as("SELECT address, status, wqs_score FROM wallets WHERE address = ?")
             .bind("test_wallet_123")
@@ -164,21 +168,21 @@ async fn test_roster_merge_valid() {
 /// Test roster merge with integrity check failure
 #[tokio::test]
 async fn test_roster_merge_integrity_failure() {
-    let (pool, temp_dir) = create_test_pool().await;
+    let (db, temp_dir) = create_test_pool().await;
 
     // Create a corrupted roster file (empty file)
     let roster_path = temp_dir.path().join("roster_new.db");
     std::fs::write(&roster_path, b"corrupted").unwrap();
 
     // Merge should fail integrity check
-    let result = roster::merge_roster(&pool, &roster_path).await;
+    let result = roster::merge_roster(&db, &roster_path).await;
     assert!(result.is_err(), "Merge should fail on corrupted database");
 }
 
 /// Test roster merge with missing wallets table
 #[tokio::test]
 async fn test_roster_merge_missing_table() {
-    let (pool, temp_dir) = create_test_pool().await;
+    let (db, temp_dir) = create_test_pool().await;
 
     // Create empty database (no wallets table)
     let roster_path = temp_dir.path().join("roster_new.db");
@@ -195,7 +199,7 @@ async fn test_roster_merge_missing_table() {
     drop(roster_pool);
 
     // Merge should fail - no wallets table
-    let result = roster::merge_roster(&pool, &roster_path).await;
+    let result = roster::merge_roster(&db, &roster_path).await;
     assert!(
         result.is_err(),
         "Merge should fail when wallets table missing"
@@ -205,7 +209,7 @@ async fn test_roster_merge_missing_table() {
 /// Test roster merge with schema mismatch
 #[tokio::test]
 async fn test_roster_merge_schema_mismatch() {
-    let (pool, temp_dir) = create_test_pool().await;
+    let (db, temp_dir) = create_test_pool().await;
 
     // Create roster with missing column
     let roster_path = temp_dir.path().join("roster_new.db");
@@ -236,7 +240,7 @@ async fn test_roster_merge_schema_mismatch() {
     drop(roster_pool);
 
     // Merge should fail with schema validation error
-    let result = roster::merge_roster(&pool, &roster_path).await;
+    let result = roster::merge_roster(&db, &roster_path).await;
     assert!(result.is_err(), "Merge should fail on schema mismatch");
 
     let error_msg = format!("{}", result.unwrap_err());

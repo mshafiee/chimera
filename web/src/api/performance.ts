@@ -128,7 +128,7 @@ export interface OptimizationOpportunity {
 export function useTradeLatency(timeRange?: string) {
   return useQuery({
     queryKey: ['performance', 'trade-latency', timeRange],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<TradeLatencyResponse>('/metrics/trade-latency', {
         params: timeRange ? { range: timeRange } : undefined,
       })
@@ -150,7 +150,7 @@ export function useTradeLatency(timeRange?: string) {
 export function useRPCLatency() {
   return useQuery({
     queryKey: ['performance', 'rpc-latency'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<any>('/metrics/rpc-latency')
       // Transform response to match expected format
       const data = response.data
@@ -180,7 +180,7 @@ export function useRPCLatency() {
 export function useDatabasePerformance() {
   return useQuery({
     queryKey: ['performance', 'database'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<any>('/metrics/database-performance')
       // Transform response to match expected format
       const data = response.data
@@ -225,7 +225,7 @@ export function useDatabasePerformance() {
 export function useRequestRate() {
   return useQuery({
     queryKey: ['performance', 'request-rate'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<any>('/metrics/request-rate')
       // Transform response to match expected format
       const data = response.data
@@ -262,7 +262,7 @@ export function useRequestRate() {
 export function useCostAnalysis(timeRange?: string) {
   return useQuery({
     queryKey: ['performance', 'cost-analysis', timeRange],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<{
         avg_jito_tip_sol: string
         avg_dex_fee_sol: string
@@ -278,34 +278,25 @@ export function useCostAnalysis(timeRange?: string) {
       const avgSlippage = parseFloat(response.data.avg_slippage_cost_sol || '0')
 
       return {
-        per_trade_costs: [{
-          trade_uuid: 'sample-trade',
-          timestamp: new Date().toISOString(),
-          token_symbol: 'SOL',
-          jito_tip_sol: avgTip,
-          dex_fee_sol: avgDex,
-          slippage_cost_sol: avgSlippage,
-          total_cost_sol: avgTip + avgDex + avgSlippage,
-          execution_time_ms: 50
-        }],
+        per_trade_costs: [],
         cost_by_type: [
           {
             type: 'jito_tip' as const,
             total_sol: parseFloat(response.data.total_costs_30d_sol || '0'),
             average_sol: avgTip,
-            percentage: avgTip / (avgTip + avgDex + avgSlippage) * 100 || 0
+            percentage: avgTip > 0 ? (avgTip + avgDex + avgSlippage > 0 ? avgTip / (avgTip + avgDex + avgSlippage) * 100 : 0) : 0
           },
           {
             type: 'dex_fee' as const,
-            total_sol: parseFloat(response.data.total_costs_30d_sol || '0') * 0.3,
+            total_sol: parseFloat(response.data.total_costs_30d_sol || '0'),
             average_sol: avgDex,
-            percentage: avgDex / (avgTip + avgDex + avgSlippage) * 100 || 0
+            percentage: avgDex > 0 ? (avgTip + avgDex + avgSlippage > 0 ? avgDex / (avgTip + avgDex + avgSlippage) * 100 : 0) : 0
           },
           {
             type: 'slippage' as const,
-            total_sol: parseFloat(response.data.total_costs_30d_sol || '0') * 0.2,
+            total_sol: parseFloat(response.data.total_costs_30d_sol || '0'),
             average_sol: avgSlippage,
-            percentage: avgSlippage / (avgTip + avgDex + avgSlippage) * 100 || 0
+            percentage: avgSlippage > 0 ? (avgTip + avgDex + avgSlippage > 0 ? avgSlippage / (avgTip + avgDex + avgSlippage) * 100 : 0) : 0
           }
         ],
         optimization_opportunities: [],

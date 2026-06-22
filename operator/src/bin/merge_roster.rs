@@ -1,10 +1,10 @@
 //! Simple binary to trigger roster merge
 //! Usage: cargo run --bin merge_roster [--roster-path /path/to/roster_new.db] [--db-path /path/to/chimera.db]
 
-use chimera_operator::config;
-use chimera_operator::db;
+use chimera_operator::db_abstraction::{self, Database};
 use chimera_operator::roster;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn parse_args() -> (PathBuf, PathBuf) {
     let args: Vec<String> = std::env::args().collect();
@@ -68,16 +68,13 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // Initialize database pool
-    let db_config = config::DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-    let pool = db::init_pool(&db_config).await?;
+    // Initialize database pool via db_abstraction
+    let db_config = db_abstraction::types::DatabaseConfig::sqlite(db_path.clone());
+    let db: Arc<dyn Database> = db_abstraction::create_database(&db_config).await?;
 
     // Perform merge
     println!("Starting roster merge...");
-    match roster::merge_roster(&pool, &roster_path).await {
+    match roster::merge_roster(&db, &roster_path).await {
         Ok(result) => {
             println!("✓ Merge completed successfully!");
             println!("  Wallets merged: {}", result.wallets_merged);

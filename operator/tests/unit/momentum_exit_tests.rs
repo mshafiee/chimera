@@ -2,8 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-    use chimera_operator::config::DatabaseConfig;
-    use chimera_operator::db;
+    use chimera_operator::db_abstraction::{
+        create_database, Database, DatabaseConfig,
+    };
     use chimera_operator::engine::momentum_exit::{MomentumExit, MomentumExitAction};
     use chimera_operator::price_cache::{PriceCache, PriceSource};
     use rust_decimal::prelude::*;
@@ -11,17 +12,12 @@ mod tests {
     use std::time::{Duration, SystemTime};
     use tempfile::TempDir;
 
-    async fn setup_test_db() -> (db::DbPool, TempDir) {
+    async fn setup_test_db() -> Arc<dyn Database> {
         let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let pool = db::init_pool(&DatabaseConfig {
-            path: db_path,
-            max_connections: 5,
-        })
-        .await
-        .unwrap();
-        db::run_migrations(&pool).await.unwrap();
-        (pool, temp_dir)
+        let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+        let db = create_database(&config).await.unwrap();
+        db.run_migrations().await.unwrap();
+        db
     }
 
     #[test]
@@ -33,7 +29,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_exit_when_price_stable() {
         // Price unchanged from entry: no momentum exit triggered.
-        let (pool, _dir) = setup_test_db().await;
+        let db = setup_test_db().await;
         let price_cache = Arc::new(PriceCache::new().unwrap());
 
         let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
@@ -42,7 +38,7 @@ mod tests {
         // Current price same as entry price
         price_cache.set_price(token, entry_price, PriceSource::Jupiter);
 
-        let detector = MomentumExit::new(pool, price_cache, 30);
+        let detector = MomentumExit::new(db, price_cache, 30);
         let action = detector
             .check_momentum("uuid-stable", token, entry_price, SystemTime::now())
             .await;
@@ -59,7 +55,7 @@ mod tests {
         // For positions < 16 minutes old (before RSI is available), the base threshold is 5%
         // so a 6% drop SHOULD trigger exit — tighter guard while RSI protection is absent.
         // Once the position is ≥16 min old, the base rises to 8%.
-        let (pool, _dir) = setup_test_db().await;
+        let db = setup_test_db().await;
         let price_cache = Arc::new(PriceCache::new().unwrap());
 
         let token = "So11111111111111111111111111111111111111112";
@@ -69,7 +65,7 @@ mod tests {
         let entry_time_new = SystemTime::now() - Duration::from_secs(120);
         let price_4pct = Decimal::from_str("0.96").unwrap();
         price_cache.set_price(token, price_4pct, PriceSource::Jupiter);
-        let detector = MomentumExit::new(pool.clone(), price_cache.clone(), 30);
+        let detector = MomentumExit::new(db.clone(), price_cache.clone(), 30);
         let action_4pct = detector
             .check_momentum("uuid-drop-4", token, entry_price, entry_time_new)
             .await;
@@ -82,7 +78,7 @@ mod tests {
         // 6% drop on a 2-minute-old position: should trigger (above 5% early threshold)
         let price_6pct = Decimal::from_str("0.94").unwrap();
         price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
-        let detector2 = MomentumExit::new(pool.clone(), price_cache.clone(), 30);
+        let detector2 = MomentumExit::new(db.clone(), price_cache.clone(), 30);
         let action_6pct = detector2
             .check_momentum("uuid-drop-6", token, entry_price, entry_time_new)
             .await;
@@ -95,7 +91,7 @@ mod tests {
         // 6% drop on a 20-minute-old position: should NOT trigger (base is back to 8%)
         let entry_time_old = SystemTime::now() - Duration::from_secs(1200);
         price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
-        let detector3 = MomentumExit::new(pool, price_cache, 30);
+        let detector3 = MomentumExit::new(db, price_cache, 30);
         let action_6pct_old = detector3
             .check_momentum("uuid-drop-6-old", token, entry_price, entry_time_old)
             .await;
@@ -109,14 +105,14 @@ mod tests {
     #[tokio::test]
     async fn test_no_exit_when_no_price_data() {
         // If price cache has no data for the token, check_momentum should return None.
-        let (pool, _dir) = setup_test_db().await;
+        let db = setup_test_db().await;
         let price_cache = Arc::new(PriceCache::new().unwrap());
 
         // Do NOT set any price for this token
         let token = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
         let entry_price = Decimal::from_str("1.0").unwrap();
 
-        let detector = MomentumExit::new(pool, price_cache, 30);
+        let detector = MomentumExit::new(db, price_cache, 30);
         let action = detector
             .check_momentum("uuid-noprice", token, entry_price, SystemTime::now())
             .await;

@@ -7,13 +7,14 @@
 //! for exceptionally high-edge wallets. Uses conservative fraction (default 25%)
 //! of full Kelly for actual sizing.
 
-use crate::db::{self, DbPool};
+use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 
 /// Kelly position sizer
 pub struct KellySizer {
-    db: DbPool,
+    db: Arc<dyn Database>,
     /// Conservative multiplier (use 25% of full Kelly, using Decimal for precision)
     conservative_multiplier: Decimal,
 }
@@ -41,7 +42,7 @@ pub struct KellyResult {
 
 impl KellySizer {
     /// Create a new Kelly sizer
-    pub fn new(db: DbPool) -> Self {
+    pub fn new(db: Arc<dyn Database>) -> Self {
         Self {
             db,
             conservative_multiplier: dec!(0.25), // Use 25% of full Kelly
@@ -49,7 +50,7 @@ impl KellySizer {
     }
 
     /// Create with custom conservative multiplier
-    pub fn with_conservative_multiplier(db: DbPool, multiplier: f64) -> Self {
+    pub fn with_conservative_multiplier(db: Arc<dyn Database>, multiplier: f64) -> Self {
         let mult = Decimal::from_f64_retain(multiplier.clamp(0.0, 1.0)).unwrap_or(Decimal::ZERO);
         Self {
             db,
@@ -76,18 +77,18 @@ impl KellySizer {
         let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let strategy_str = strategy.to_string();
 
-        let trades = db::get_trades(
-            &self.db,
-            Some(&from_date_str),
-            None,
-            Some("CLOSED"), // Only closed trades
-            Some(&strategy_str),
-            Some(wallet_address),
-            None,
-            None,
-        )
-        .await
-        .map_err(|e| format!("Failed to query trades: {}", e))?;
+        let trades = self.db
+            .get_trades_filtered(
+                Some(&from_date_str),
+                None,
+                Some("CLOSED"),
+                Some(&strategy_str),
+                Some(wallet_address),
+                i64::MAX,
+                0,
+            )
+            .await
+            .map_err(|e| format!("Failed to query trades: {}", e))?;
 
         if trades.is_empty() {
             return Err("No historical trades found for Kelly calculation".to_string());

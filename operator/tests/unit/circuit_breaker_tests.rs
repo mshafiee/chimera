@@ -7,24 +7,34 @@
 //! - Cooldown duration calculation
 
 use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState, TripReason};
-use chimera_operator::config::{CircuitBreakerConfig, DatabaseConfig};
-use chimera_operator::db::init_pool;
+use chimera_operator::config::CircuitBreakerConfig;
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool,
+};
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
+use std::sync::Arc;
 use tempfile::TempDir;
+
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
 
 /// Create a test circuit breaker with custom config
 async fn create_test_circuit_breaker(config: CircuitBreakerConfig) -> (CircuitBreaker, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let db_config = DatabaseConfig {
-        path: db_path,
-        max_connections: 5,
-    };
+    let db_config = DatabaseConfig::sqlite(db_path);
+    let db = create_database(&db_config).await.unwrap();
 
-    let pool = init_pool(&db_config).await.unwrap();
+    let pool = sqlite_pool(&db);
 
     // Create config_audit table for circuit breaker
     sqlx::query(
@@ -44,7 +54,7 @@ async fn create_test_circuit_breaker(config: CircuitBreakerConfig) -> (CircuitBr
     .await
     .unwrap();
 
-    let cb = CircuitBreaker::new(config, pool, Decimal::from(100));
+    let cb = CircuitBreaker::new(config, db, Decimal::from(100));
     (cb, temp_dir)
 }
 

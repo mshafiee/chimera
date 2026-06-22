@@ -49,3 +49,6 @@ mod position_lifecycle_tests;
 
 #[path = "integration/execution_proof_tests.rs"]
 mod execution_proof_tests;
+
+#[path = "integration/parallel_execution_test.rs"]
+mod parallel_execution_test;

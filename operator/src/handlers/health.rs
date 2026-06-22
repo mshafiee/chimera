@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::engine::EngineHandle;
 use crate::price_cache::PriceCache;
 
@@ -74,7 +74,7 @@ pub struct PriceCacheHealth {
 /// Shared application state for health checks
 pub struct AppState {
     /// Database connection pool
-    pub db: DbPool,
+    pub db: Arc<dyn Database>,
     /// Engine handle for queue status
     pub engine: EngineHandle,
     /// Application start time
@@ -95,13 +95,13 @@ pub async fn health_check(
     let uptime = (now - state.started_at).num_seconds();
 
     // Check database health
-    let db_health = check_database(&state.db).await;
+    let db_health = check_database(state.db.as_ref()).await;
 
     // Get queue depth from engine
     let queue_depth = state.engine.queue_depth();
 
     // Get last trade timestamp
-    let last_trade_at = get_last_trade_time(&state.db).await;
+    let last_trade_at = get_last_trade_time(state.db.as_ref()).await;
 
     // Get RPC health from executor
     let rpc_health_result = state.engine.get_rpc_health().await;
@@ -194,8 +194,8 @@ pub async fn health_simple() -> StatusCode {
 }
 
 /// Check database health
-async fn check_database(pool: &DbPool) -> ComponentHealth {
-    match sqlx::query("SELECT 1").fetch_one(pool).await {
+async fn check_database(db: &dyn Database) -> ComponentHealth {
+    match db.get_trade_statistics().await {
         Ok(_) => ComponentHealth {
             status: HealthStatus::Healthy,
             message: None,
@@ -211,11 +211,7 @@ async fn check_database(pool: &DbPool) -> ComponentHealth {
 }
 
 /// Get the timestamp of the last trade
-async fn get_last_trade_time(pool: &DbPool) -> Option<String> {
-    let result: Result<(String,), _> =
-        sqlx::query_as("SELECT created_at FROM trades ORDER BY created_at DESC LIMIT 1")
-            .fetch_one(pool)
-            .await;
-
-    result.ok().map(|(ts,)| ts)
+async fn get_last_trade_time(db: &dyn Database) -> Option<String> {
+    db.get_recent_trades(1, 0).await.ok()
+        .and_then(|trades| trades.first().map(|t| t.created_at.to_rfc3339()))
 }

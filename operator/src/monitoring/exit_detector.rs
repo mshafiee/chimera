@@ -2,6 +2,7 @@
 //!
 //! Detects when tracked wallets exit positions and generates EXIT signals.
 
+use crate::db_abstraction::Database;
 use crate::monitoring::transaction_parser::{ParsedSwap, SwapDirection};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -18,7 +19,7 @@ pub struct ExitDetector {
         >,
     >,
     /// Database pool for position lookup (used to detect partial vs full exit)
-    db: Option<crate::db::DbPool>,
+    db: Option<Arc<dyn Database>>,
 }
 
 /// Exit signal
@@ -47,7 +48,7 @@ impl ExitDetector {
         }
     }
 
-    pub fn with_db(mut self, db: crate::db::DbPool) -> Self {
+    pub fn with_db(mut self, db: Arc<dyn Database>) -> Self {
         self.db = Some(db);
         self
     }
@@ -122,30 +123,30 @@ impl ExitDetector {
         token_address: &str,
         amount_in: rust_decimal::Decimal,
     ) -> ExitType {
-        let Some(ref pool) = self.db else {
+        let Some(ref db) = self.db else {
             return ExitType::Full;
         };
 
-        let row: Option<(f64, f64)> = sqlx::query_as(
-            "SELECT entry_amount_sol, entry_price FROM positions \
-             WHERE wallet_address = ? AND token_address = ? AND state IN ('ACTIVE', 'EXITING') \
-             ORDER BY id DESC LIMIT 1",
-        )
-        .bind(wallet_address)
-        .bind(token_address)
-        .fetch_optional(pool)
-        .await
-        .unwrap_or(None);
+        // Find matching active position via the trait
+        let positions = match db.get_active_positions().await {
+            Ok(positions) => positions,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query active positions for exit classification");
+                return ExitType::Full;
+            }
+        };
 
-        if let Some((entry_amount_sol, entry_price)) = row {
-            if entry_price > 0.0 && entry_amount_sol > 0.0 {
+        for pos in &positions {
+            if pos.wallet_address == wallet_address && pos.token_address == token_address {
                 use rust_decimal::prelude::*;
-                let est_tokens = Decimal::from_f64_retain(entry_amount_sol / entry_price)
-                    .unwrap_or(Decimal::ZERO);
-                let threshold = est_tokens * Decimal::from_str("0.9").unwrap_or(Decimal::ONE);
-                if amount_in < threshold {
-                    return ExitType::Partial;
+                if pos.entry_price > Decimal::ZERO && pos.entry_amount_sol > Decimal::ZERO {
+                    let est_tokens = pos.entry_amount_sol / pos.entry_price;
+                    let threshold = est_tokens * Decimal::from_str("0.9").unwrap_or(Decimal::ONE);
+                    if amount_in < threshold {
+                        return ExitType::Partial;
+                    }
                 }
+                return ExitType::Full;
             }
         }
 

@@ -1,3 +1,3 @@
--- Add wqs_confidence column to wallets table
--- This stores the sample confidence 0-1, unbundled from wqs_score
-ALTER TABLE wallets ADD COLUMN wqs_confidence REAL;
+-- Column already exists in base schema (20230101000000_init.sql)
+-- Kept as a no-op for databases that already applied this migration.
+SELECT 1;

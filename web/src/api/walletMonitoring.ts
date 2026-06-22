@@ -21,7 +21,7 @@ export interface WalletMonitoringStateItem {
 export function useWalletMonitoringStates() {
   return useQuery({
     queryKey: ['wallet-monitoring', 'states'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<WalletMonitoringStateResponse>('/monitoring/wallets/states')
       return response.data
     },

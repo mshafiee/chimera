@@ -2,17 +2,35 @@
 
 use super::types::PostgresPool;
 use super::{
-    decimal_to_f64, f64_to_decimal, opt_decimal_to_f64, opt_f64_to_decimal,
-    CircuitBreakerState, Database, InsertPosition, InsertTrade, KillSwitchState,
-    Position, Trade, TradeStatistics, UpdatePosition, UpdateTradeStatus, Wallet,
-    WalletPerformance,
+    ActivePositionEntry, ActivePositionSummary, CircuitBreakerState, ConfigAuditItem,
+    Database, DbPool, DeadLetterItem, ExitTargetData, InsertPosition, InsertTrade,
+    KillSwitchState, LatencyBucket, Position, PositionDetail, PositionRecord,
+    ReconciliationRun, ReconciliationStats, ReconciliationStatus, Trade, TradeDetail,
+    TradeLatencyStats, TradeStatistics, UpdatePosition, UpdateTradeStatus, Wallet,
+    WalletCopyPerformance, WalletDetail, WalletMonitoring, WalletPerformance,
+    WebhookAuditLog,
 };
-use crate::config::DatabaseConfig;
+use super::types::DatabaseConfig;
 use crate::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Pool, Postgres, Row};
+use sqlx::Row;
+use std::str::FromStr;
 use tracing::info;
+
+// Legacy f64 helpers — PostgreSQL still uses REAL columns (not yet migrated to TEXT)
+fn f64_to_decimal(val: f64) -> Decimal {
+    Decimal::from_f64_retain(val).unwrap_or(Decimal::ZERO)
+}
+fn decimal_to_f64(val: Decimal) -> f64 {
+    val.to_f64().unwrap_or(0.0)
+}
+fn opt_f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
+    val.and_then(|v| Decimal::from_f64_retain(v))
+}
+fn opt_decimal_to_f64(val: Option<Decimal>) -> Option<f64> {
+    val.and_then(|d| d.to_f64())
+}
 
 /// PostgreSQL backend implementation
 pub struct PostgresBackend {
@@ -35,14 +53,12 @@ impl PostgresBackend {
 
         let connect_options = PgConnectOptions::from_str(db_url)
             .map_err(AppError::Database)?
-            // Enable prepared statements
-            .prepare_statement(true)
             // Application name for monitoring
             .application_name("chimera-operator");
 
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)
-            .acquire_timeout(std::time::Duration::from_secs(config.acquire_timeout_seconds))
+            .acquire_timeout(std::time::Duration::from_secs(30))
             .connect_with(connect_options)
             .await?;
 
@@ -370,48 +386,49 @@ impl Database for PostgresBackend {
     }
 
     async fn update_position(&self, update: &UpdatePosition) -> AppResult<()> {
-        let mut set_clauses = Vec::new();
-        let mut binds = Vec::new();
+        let mut set_clauses: Vec<String> = Vec::new();
+        let mut f64_binds: Vec<f64> = Vec::new();
+        let mut str_binds: Vec<String> = Vec::new();
         let mut param_idx = 1;
 
         if let Some(price) = update.current_price {
             set_clauses.push(format!("current_price = ${}", param_idx));
-            binds.push(decimal_to_f64(price));
+            f64_binds.push(decimal_to_f64(price));
             param_idx += 1;
         }
         if let Some(pnl) = update.unrealized_pnl_sol {
             set_clauses.push(format!("unrealized_pnl_sol = ${}", param_idx));
-            binds.push(decimal_to_f64(pnl));
+            f64_binds.push(decimal_to_f64(pnl));
             param_idx += 1;
         }
         if let Some(pnl_pct) = update.unrealized_pnl_percent {
             set_clauses.push(format!("unrealized_pnl_percent = ${}", param_idx));
-            binds.push(decimal_to_f64(pnl_pct));
+            f64_binds.push(decimal_to_f64(pnl_pct));
             param_idx += 1;
         }
         if let Some(state) = &update.state {
             set_clauses.push(format!("state = ${}", param_idx));
-            binds.push(state.clone());
+            str_binds.push(state.clone());
             param_idx += 1;
         }
         if let Some(exit_price) = update.exit_price {
             set_clauses.push(format!("exit_price = ${}", param_idx));
-            binds.push(decimal_to_f64(exit_price));
+            f64_binds.push(decimal_to_f64(exit_price));
             param_idx += 1;
         }
         if let Some(exit_sig) = &update.exit_tx_signature {
             set_clauses.push(format!("exit_tx_signature = ${}", param_idx));
-            binds.push(exit_sig.clone());
+            str_binds.push(exit_sig.clone());
             param_idx += 1;
         }
         if let Some(pnl) = update.realized_pnl_sol {
             set_clauses.push(format!("realized_pnl_sol = ${}", param_idx));
-            binds.push(decimal_to_f64(pnl));
+            f64_binds.push(decimal_to_f64(pnl));
             param_idx += 1;
         }
         if let Some(pnl_usd) = update.realized_pnl_usd {
             set_clauses.push(format!("realized_pnl_usd = ${}", param_idx));
-            binds.push(decimal_to_f64(pnl_usd));
+            f64_binds.push(decimal_to_f64(pnl_usd));
             param_idx += 1;
         }
 
@@ -426,7 +443,10 @@ impl Database for PostgresBackend {
         );
 
         let mut query = sqlx::query(&sql);
-        for bind in binds {
+        for bind in f64_binds {
+            query = query.bind(bind);
+        }
+        for bind in str_binds {
             query = query.bind(bind);
         }
         query = query.bind(&update.trade_uuid);
@@ -578,58 +598,13 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
-    async fn merge_roster(&self, roster_db_path: &str) -> AppResult<u32> {
-        // PostgreSQL doesn't support ATTACH DATABASE
-        // For production, use COPY command or direct import
-        // This is a simplified implementation - in production, use:
-        // 1. COPY FROM CSV export
-        // 2. pg_restore
-        // 3. Direct INSERT with data from API
-
-        // For now, this loads from a CSV export
-        let reader = std::fs::File::open(roster_db_path)
-            .map_err(|e| AppError::Internal(format!("Failed to open roster: {}", e)))?;
-
-        let mut csv_reader = csv::Reader::from_reader(reader);
-
-        let mut count = 0u32;
-        for result in csv_reader.deserialize() {
-            let record: serde_json::Value = result
-                .map_err(|e| AppError::Internal(format!("CSV parse error: {}", e)))?;
-
-            sqlx::query(
-                r#"
-                INSERT INTO wallets (
-                    address, status, wqs_score, wqs_confidence, roi_7d, roi_30d,
-                    trade_count_30d, win_rate, max_drawdown_30d, avg_trade_size_sol,
-                    avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
-                    last_trade_at, promoted_at, ttl_expires_at, notes, archetype,
-                    avg_entry_delay_seconds, created_at, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-                ON CONFLICT (address) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    wqs_score = EXCLUDED.wqs_score,
-                    wqs_confidence = EXCLUDED.wqs_confidence,
-                    roi_7d = EXCLUDED.roi_7d,
-                    roi_30d = EXCLUDED.roi_30d,
-                    updated_at = EXCLUDED.updated_at
-                "#,
-            )
-            .bind(record["address"].as_str().unwrap_or(""))
-            .bind(record["status"].as_str().unwrap_or("CANDIDATE"))
-            .bind(record["wqs_score"].as_str().and_then(|s| s.parse::<f64>().ok()))
-            .bind(record["wqs_confidence"].as_str().and_then(|s| s.parse::<f64>().ok()))
-            .bind(record["roi_7d"].as_str().and_then(|s| s.parse::<f64>().ok()))
-            .bind(record["roi_30d"].as_str().and_then(|s| s.parse::<f64>().ok()))
-            .bind(record["trade_count_30d"].as_i64())
-            .bind(record["win_rate"].as_str().and_then(|s| s.parse::<f64>().ok()))
-            .execute(&self.pool)
-            .await?;
-
-            count += 1;
-        }
-
-        Ok(count)
+    async fn merge_roster(&self, _roster_db_path: &str) -> AppResult<u32> {
+        // PostgreSQL roster merge: not yet implemented.
+        // Use the SQLite backend for roster operations.
+        // TODO: implement via pg_bulkload or COPY
+        Err(AppError::Internal(
+            "Roster merge not yet supported on PostgreSQL backend".to_string(),
+        ))
     }
 
     async fn get_wallets_by_status(&self, status: &str) -> AppResult<Vec<Wallet>> {
@@ -870,6 +845,363 @@ impl Database for PostgresBackend {
             })),
             None => Ok(None),
         }
+    }
+
+    // ========================================================================
+    // NEW METHODS — STUBS (PostgreSQL migration pending)
+    // ========================================================================
+
+    async fn insert_jito_tip(&self, _tip: &Decimal, _bsig: Option<&str>, _strat: Option<&str>, _success: bool) -> AppResult<i64> {
+        Err(AppError::Internal("insert_jito_tip not implemented for PostgreSQL".into()))
+    }
+    async fn get_recent_jito_tips(&self, _limit: i32) -> AppResult<Vec<Decimal>> {
+        Err(AppError::Internal("get_recent_jito_tips not implemented for PostgreSQL".into()))
+    }
+    async fn get_jito_tip_count(&self) -> AppResult<u32> {
+        Err(AppError::Internal("get_jito_tip_count not implemented for PostgreSQL".into()))
+    }
+    async fn prune_old_jito_tips(&self) -> AppResult<u64> {
+        Err(AppError::Internal("prune_old_jito_tips not implemented for PostgreSQL".into()))
+    }
+    async fn get_pnl_window(&self, _from: &str, _to: Option<&str>) -> AppResult<Decimal> {
+        Err(AppError::Internal("get_pnl_window not implemented for PostgreSQL".into()))
+    }
+    async fn get_pnl_24h(&self) -> AppResult<Decimal> {
+        Err(AppError::Internal("get_pnl_24h not implemented for PostgreSQL".into()))
+    }
+    async fn get_pnl_7d(&self) -> AppResult<Decimal> {
+        Err(AppError::Internal("get_pnl_7d not implemented for PostgreSQL".into()))
+    }
+    async fn get_pnl_30d(&self) -> AppResult<Decimal> {
+        Err(AppError::Internal("get_pnl_30d not implemented for PostgreSQL".into()))
+    }
+    async fn get_strategy_performance(&self, _strat: &str, _days: i32) -> AppResult<(f64, Decimal, u32)> {
+        Err(AppError::Internal("get_strategy_performance not implemented for PostgreSQL".into()))
+    }
+    async fn get_consecutive_losses(&self) -> AppResult<u32> {
+        Err(AppError::Internal("get_consecutive_losses not implemented for PostgreSQL".into()))
+    }
+    async fn get_max_drawdown_percent(&self, _cap: Decimal) -> AppResult<Decimal> {
+        Err(AppError::Internal("get_max_drawdown_percent not implemented for PostgreSQL".into()))
+    }
+    async fn activate_trade_and_open_position(&self, _uuid: &str, _wallet: &str, _token: &str, _sym: Option<&str>, _strat: &str, _amt: Decimal, _price: Decimal, _sig: &str, _heat: Option<Decimal>, _sol_price: Option<Decimal>) -> AppResult<()> {
+        Err(AppError::Internal("activate_trade_and_open_position not implemented for PostgreSQL".into()))
+    }
+    async fn atomic_portfolio_heat_check_and_open_position(&self, _uuid: &str, _wallet: &str, _token: &str, _sym: Option<&str>, _strat: &str, _amt: Decimal, _price: Decimal, _sig: &str, _heat: Option<Decimal>, _sol_price: Option<Decimal>) -> AppResult<()> {
+        Err(AppError::Internal("atomic_portfolio_heat_check_and_open_position not implemented for PostgreSQL".into()))
+    }
+    async fn close_position_full(&self, _uuid: &str, _wallet: &str, _token: &str, _price: Decimal, _sig: &str, _sol_price: Option<Decimal>, _frac: Decimal, _confirmed: bool) -> AppResult<()> {
+        Err(AppError::Internal("close_position_full not implemented for PostgreSQL".into()))
+    }
+    async fn revert_position_exit(&self, _uuid: &str) -> AppResult<()> {
+        Err(AppError::Internal("revert_position_exit not implemented for PostgreSQL".into()))
+    }
+    async fn get_stuck_positions(&self, _secs: i64) -> AppResult<Vec<PositionRecord>> {
+        Err(AppError::Internal("get_stuck_positions not implemented for PostgreSQL".into()))
+    }
+    async fn update_position_state(&self, _uuid: &str, _state: &str) -> AppResult<()> {
+        Err(AppError::Internal("update_position_state not implemented for PostgreSQL".into()))
+    }
+    async fn update_position_unrealized_pnl(&self, _uuid: &str, _price: Decimal, _pnl: Decimal, _pct: Decimal) -> AppResult<()> {
+        Err(AppError::Internal("update_position_unrealized_pnl not implemented for PostgreSQL".into()))
+    }
+    async fn get_active_positions_with_entry(&self) -> AppResult<Vec<ActivePositionEntry>> {
+        Err(AppError::Internal("get_active_positions_with_entry not implemented for PostgreSQL".into()))
+    }
+    async fn get_active_position_tokens(&self) -> AppResult<Vec<ActivePositionSummary>> {
+        Err(AppError::Internal("get_active_position_tokens not implemented for PostgreSQL".into()))
+    }
+    async fn get_position_peak_price(&self, _uuid: &str) -> AppResult<Option<String>> {
+        Err(AppError::Internal("get_position_peak_price not implemented for PostgreSQL".into()))
+    }
+    async fn upsert_wallet(&self, _addr: &str, _wqs: Option<Decimal>, _r7: Option<Decimal>, _r30: Option<Decimal>, _tc: Option<i32>, _wr: Option<Decimal>, _mdd: Option<Decimal>, _ats: Option<Decimal>, _notes: Option<&str>) -> AppResult<bool> {
+        Err(AppError::Internal("upsert_wallet not implemented for PostgreSQL".into()))
+    }
+    async fn update_wallet_status_ext(&self, _addr: &str, _status: &str, _ttl: Option<i32>, _reason: Option<&str>) -> AppResult<bool> {
+        Err(AppError::Internal("update_wallet_status_ext not implemented for PostgreSQL".into()))
+    }
+    async fn get_expired_ttl_wallets(&self) -> AppResult<Vec<String>> {
+        Err(AppError::Internal("get_expired_ttl_wallets not implemented for PostgreSQL".into()))
+    }
+    async fn demote_wallet(&self, _addr: &str, _reason: &str) -> AppResult<()> {
+        Err(AppError::Internal("demote_wallet not implemented for PostgreSQL".into()))
+    }
+    async fn get_wallet_monitoring(&self, _addr: &str) -> AppResult<Option<WalletMonitoring>> {
+        Err(AppError::Internal("get_wallet_monitoring not implemented for PostgreSQL".into()))
+    }
+    async fn upsert_wallet_monitoring(&self, _addr: &str, _wid: Option<&str>, _enabled: bool) -> AppResult<()> {
+        Err(AppError::Internal("upsert_wallet_monitoring not implemented for PostgreSQL".into()))
+    }
+    async fn update_wallet_monitoring_signature(&self, _addr: &str, _sig: &str) -> AppResult<()> {
+        Err(AppError::Internal("update_wallet_monitoring_signature not implemented for PostgreSQL".into()))
+    }
+    async fn get_wallets_needing_webhook_registration(&self) -> AppResult<Vec<String>> {
+        Err(AppError::Internal("get_wallets_needing_webhook_registration not implemented for PostgreSQL".into()))
+    }
+    async fn get_stale_webhook_wallets(&self, _days: i32) -> AppResult<Vec<String>> {
+        Err(AppError::Internal("get_stale_webhook_wallets not implemented for PostgreSQL".into()))
+    }
+    async fn get_all_wallet_monitoring(&self) -> AppResult<Vec<WalletMonitoring>> {
+        Err(AppError::Internal("get_all_wallet_monitoring not implemented for PostgreSQL".into()))
+    }
+    async fn update_webhook_health_status(&self, _addr: &str, _status: &str, _wid: Option<&str>) -> AppResult<()> {
+        Err(AppError::Internal("update_webhook_health_status not implemented for PostgreSQL".into()))
+    }
+    async fn update_webhook_status(&self, _addr: &str, _status: &str) -> AppResult<()> {
+        Err(AppError::Internal("update_webhook_status not implemented for PostgreSQL".into()))
+    }
+    async fn log_webhook_lifecycle_event(&self, _addr: &str, _action: &str, _status: &str, _wid: Option<&str>, _details: Option<&str>, _err: Option<&str>, _dur: Option<i32>) -> AppResult<()> {
+        Err(AppError::Internal("log_webhook_lifecycle_event not implemented for PostgreSQL".into()))
+    }
+    async fn get_webhook_audit_log(
+        &self,
+        _wallet_address: Option<&str>,
+        _action: Option<&str>,
+        _status: Option<&str>,
+        _limit: Option<i64>,
+    ) -> AppResult<Vec<WebhookAuditLog>> {
+        Err(AppError::Internal("get_webhook_audit_log not implemented for PostgreSQL".into()))
+    }
+    async fn increment_webhook_registration_attempts(&self, _addr: &str, _err: Option<&str>) -> AppResult<()> {
+        Err(AppError::Internal("increment_webhook_registration_attempts not implemented for PostgreSQL".into()))
+    }
+    async fn get_webhook_configuration(&self, _key: &str) -> AppResult<Option<String>> {
+        Err(AppError::Internal("get_webhook_configuration not implemented for PostgreSQL".into()))
+    }
+    async fn update_webhook_configuration(&self, _key: &str, _val: &str, _by: &str) -> AppResult<()> {
+        Err(AppError::Internal("update_webhook_configuration not implemented for PostgreSQL".into()))
+    }
+    async fn get_orphaned_webhooks(&self, _ids: &[String]) -> AppResult<Vec<String>> {
+        Err(AppError::Internal("get_orphaned_webhooks not implemented for PostgreSQL".into()))
+    }
+    async fn upsert_exit_target(&self, _uuid: &str, _ep: Decimal, _eas: Decimal, _pp: Decimal, _ppp: Decimal, _th: &str, _tsa: bool, _tsp: Decimal, _rf: Decimal) -> AppResult<()> {
+        Err(AppError::Internal("upsert_exit_target not implemented for PostgreSQL".into()))
+    }
+    async fn load_exit_target(&self, _uuid: &str) -> AppResult<Option<ExitTargetData>> {
+        Err(AppError::Internal("load_exit_target not implemented for PostgreSQL".into()))
+    }
+    async fn delete_exit_target(&self, _uuid: &str) -> AppResult<()> {
+        Err(AppError::Internal("delete_exit_target not implemented for PostgreSQL".into()))
+    }
+    async fn insert_reconciliation_log(&self, _uuid: &str, _exp: &str, _actual: Option<&str>, _disc: &str, _tx: Option<&str>, _notes: Option<&str>) -> AppResult<i64> {
+        Err(AppError::Internal("insert_reconciliation_log not implemented for PostgreSQL".into()))
+    }
+    async fn get_reconciliation_status(&self, _limit: i32) -> AppResult<ReconciliationStatus> {
+        Err(AppError::Internal("get_reconciliation_status not implemented for PostgreSQL".into()))
+    }
+    async fn get_reconciliation_history(&self, _limit: i32) -> AppResult<Vec<ReconciliationRun>> {
+        Err(AppError::Internal("get_reconciliation_history not implemented for PostgreSQL".into()))
+    }
+    async fn count_reconciliation_runs(&self) -> AppResult<i64> {
+        Err(AppError::Internal("count_reconciliation_runs not implemented for PostgreSQL".into()))
+    }
+    async fn get_reconciliation_stats(&self, _range: &str) -> AppResult<ReconciliationStats> {
+        Err(AppError::Internal("get_reconciliation_stats not implemented for PostgreSQL".into()))
+    }
+    async fn resolve_discrepancy(&self, _id: i64, _by: &str, _res: &str) -> AppResult<()> {
+        Err(AppError::Internal("resolve_discrepancy not implemented for PostgreSQL".into()))
+    }
+    async fn get_trades_filtered(&self, _from: Option<&str>, _to: Option<&str>, _status: Option<&str>, _strat: Option<&str>, _wallet: Option<&str>, _limit: i64, _offset: i64) -> AppResult<Vec<TradeDetail>> {
+        Err(AppError::Internal("get_trades_filtered not implemented for PostgreSQL".into()))
+    }
+    async fn count_trades_filtered(&self, _from: Option<&str>, _to: Option<&str>, _status: Option<&str>, _strat: Option<&str>, _wallet: Option<&str>) -> AppResult<i64> {
+        Err(AppError::Internal("count_trades_filtered not implemented for PostgreSQL".into()))
+    }
+    async fn update_trade_costs(&self, _uuid: &str, _jito: Decimal, _dex: Decimal, _slip: Decimal) -> AppResult<()> {
+        Err(AppError::Internal("update_trade_costs not implemented for PostgreSQL".into()))
+    }
+    async fn update_trade_net_pnl(&self, _uuid: &str, _pnl: Decimal) -> AppResult<()> {
+        Err(AppError::Internal("update_trade_net_pnl not implemented for PostgreSQL".into()))
+    }
+    async fn mark_trade_dead_letter(&self, _uuid: &str, _payload: &str, _err: &str) -> AppResult<()> {
+        Err(AppError::Internal("mark_trade_dead_letter not implemented for PostgreSQL".into()))
+    }
+    async fn log_config_change(&self, _key: &str, _old: Option<&str>, _new: &str, _by: &str, _reason: Option<&str>) -> AppResult<()> {
+        Err(AppError::Internal("log_config_change not implemented for PostgreSQL".into()))
+    }
+    async fn get_dead_letter_entries(&self, _limit: i32, _offset: i32) -> AppResult<Vec<DeadLetterItem>> {
+        Err(AppError::Internal("get_dead_letter_entries not implemented for PostgreSQL".into()))
+    }
+    async fn count_dead_letter_entries(&self) -> AppResult<i64> {
+        Err(AppError::Internal("count_dead_letter_entries not implemented for PostgreSQL".into()))
+    }
+    async fn get_config_audit_entries(&self, _limit: i32, _offset: i32) -> AppResult<Vec<ConfigAuditItem>> {
+        Err(AppError::Internal("get_config_audit_entries not implemented for PostgreSQL".into()))
+    }
+    async fn count_config_audit_entries(&self) -> AppResult<i64> {
+        Err(AppError::Internal("count_config_audit_entries not implemented for PostgreSQL".into()))
+    }
+    async fn count_trades_by_status(&self, _status: &str) -> AppResult<i64> {
+        Err(AppError::Internal("count_trades_by_status not implemented for PostgreSQL".into()))
+    }
+    async fn get_closed_trade_count_for_wallet(&self, _addr: &str) -> AppResult<i64> {
+        Err(AppError::Internal("get_closed_trade_count_for_wallet not implemented for PostgreSQL".into()))
+    }
+    async fn get_wallet_copy_performance(&self, _addr: &str) -> AppResult<Option<WalletCopyPerformance>> {
+        Err(AppError::Internal("get_wallet_copy_performance not implemented for PostgreSQL".into()))
+    }
+    async fn get_trade_latency_stats(&self, _hours: i32) -> AppResult<TradeLatencyStats> {
+        Err(AppError::Internal("get_trade_latency_stats not implemented for PostgreSQL".into()))
+    }
+    async fn get_trade_latency_histogram(&self, _hours: i32, _buckets: &[f64]) -> AppResult<Vec<LatencyBucket>> {
+        Err(AppError::Internal("get_trade_latency_histogram not implemented for PostgreSQL".into()))
+    }
+
+    async fn get_positions(&self, state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>> {
+        let rows = match state_filter {
+            Some(state) => {
+                sqlx::query(
+                    r#"SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+                           entry_amount_sol, entry_price, entry_tx_signature, current_price,
+                           unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
+                           exit_tx_signature, realized_pnl_sol, realized_pnl_usd,
+                           opened_at, last_updated, closed_at
+                    FROM positions WHERE state = $1 ORDER BY last_updated DESC"#,
+                )
+                .bind(state)
+                .fetch_all(&self.pool).await?
+            }
+            None => {
+                sqlx::query(
+                    r#"SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+                           entry_amount_sol, entry_price, entry_tx_signature, current_price,
+                           unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
+                           exit_tx_signature, realized_pnl_sol, realized_pnl_usd,
+                           opened_at, last_updated, closed_at
+                    FROM positions ORDER BY last_updated DESC"#,
+                )
+                .fetch_all(&self.pool).await?
+            }
+        };
+
+        let positions = rows.into_iter().map(|row| {
+            use sqlx::Row;
+            PositionDetail {
+                id: row.try_get("id").unwrap_or(0),
+                trade_uuid: row.try_get("trade_uuid").unwrap_or_default(),
+                wallet_address: row.try_get("wallet_address").unwrap_or_default(),
+                token_address: row.try_get("token_address").unwrap_or_default(),
+                token_symbol: row.try_get("token_symbol").ok(),
+                strategy: row.try_get("strategy").unwrap_or_default(),
+                entry_amount_sol: f64_to_decimal(row.try_get::<f64, _>("entry_amount_sol").unwrap_or(0.0)),
+                entry_price: f64_to_decimal(row.try_get::<f64, _>("entry_price").unwrap_or(0.0)),
+                entry_tx_signature: row.try_get("entry_tx_signature").unwrap_or_default(),
+                current_price: opt_f64_to_decimal(row.try_get::<f64, _>("current_price").ok()),
+                unrealized_pnl_sol: opt_f64_to_decimal(row.try_get::<f64, _>("unrealized_pnl_sol").ok()),
+                unrealized_pnl_percent: opt_f64_to_decimal(row.try_get::<f64, _>("unrealized_pnl_percent").ok()),
+                state: row.try_get("state").unwrap_or_default(),
+                exit_price: opt_f64_to_decimal(row.try_get::<f64, _>("exit_price").ok()),
+                exit_tx_signature: row.try_get("exit_tx_signature").ok(),
+                realized_pnl_sol: opt_f64_to_decimal(row.try_get::<f64, _>("realized_pnl_sol").ok()),
+                realized_pnl_usd: opt_f64_to_decimal(row.try_get::<f64, _>("realized_pnl_usd").ok()),
+                opened_at: row.try_get("opened_at").map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339()).unwrap_or_default(),
+                last_updated: row.try_get("last_updated").map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339()).unwrap_or_default(),
+                closed_at: row.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("closed_at").ok().flatten().map(|dt| dt.to_rfc3339()),
+            }
+        }).collect();
+        Ok(positions)
+    }
+
+    async fn get_wallets(&self, status_filter: Option<&str>) -> AppResult<Vec<WalletDetail>> {
+        let rows = match status_filter {
+            Some(status) => {
+                sqlx::query(
+                    r#"SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
+                           win_rate, max_drawdown_30d, avg_trade_size_sol,
+                           avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                           last_trade_at,
+                           promoted_at, ttl_expires_at, notes, archetype,
+                           avg_entry_delay_seconds, created_at, updated_at
+                    FROM wallets
+                    WHERE status = $1
+                    ORDER BY wqs_score DESC NULLS LAST
+                    LIMIT 1000"#,
+                )
+                .bind(status)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query(
+                    r#"SELECT id, address, status, wqs_score, roi_7d, roi_30d, trade_count_30d,
+                           win_rate, max_drawdown_30d, avg_trade_size_sol,
+                           avg_win_sol, avg_loss_sol, profit_factor, realized_pnl_30d_sol,
+                           last_trade_at,
+                           promoted_at, ttl_expires_at, notes, archetype,
+                           avg_entry_delay_seconds, created_at, updated_at
+                    FROM wallets
+                    ORDER BY wqs_score DESC NULLS LAST
+                    LIMIT 1000"#,
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
+        };
+        let wallets = rows.into_iter().map(|row| {
+            use sqlx::Row;
+            WalletDetail {
+                id: row.try_get("id").unwrap_or(0),
+                address: row.try_get("address").unwrap_or_default(),
+                status: row.try_get("status").unwrap_or_default(),
+                wqs_score: opt_f64_to_decimal(row.try_get::<f64, _>("wqs_score").ok()),
+                roi_7d: opt_f64_to_decimal(row.try_get::<f64, _>("roi_7d").ok()),
+                roi_30d: opt_f64_to_decimal(row.try_get::<f64, _>("roi_30d").ok()),
+                trade_count_30d: row.try_get("trade_count_30d").ok(),
+                win_rate: opt_f64_to_decimal(row.try_get::<f64, _>("win_rate").ok()),
+                max_drawdown_30d: opt_f64_to_decimal(row.try_get::<f64, _>("max_drawdown_30d").ok()),
+                avg_trade_size_sol: opt_f64_to_decimal(row.try_get::<f64, _>("avg_trade_size_sol").ok()),
+                avg_win_sol: opt_f64_to_decimal(row.try_get::<f64, _>("avg_win_sol").ok()),
+                avg_loss_sol: opt_f64_to_decimal(row.try_get::<f64, _>("avg_loss_sol").ok()),
+                profit_factor: opt_f64_to_decimal(row.try_get::<f64, _>("profit_factor").ok()),
+                realized_pnl_30d_sol: opt_f64_to_decimal(row.try_get::<f64, _>("realized_pnl_30d_sol").ok()),
+                last_trade_at: row.try_get("last_trade_at").ok(),
+                promoted_at: row.try_get("promoted_at").ok(),
+                ttl_expires_at: row.try_get("ttl_expires_at").ok(),
+                notes: row.try_get("notes").ok(),
+                archetype: row.try_get("archetype").ok(),
+                avg_entry_delay_seconds: opt_f64_to_decimal(row.try_get::<f64, _>("avg_entry_delay_seconds").ok()),
+                created_at: row.try_get("created_at").map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339()).unwrap_or_default(),
+                updated_at: row.try_get("updated_at").map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339()).unwrap_or_default(),
+            }
+        }).collect();
+        Ok(wallets)
+    }
+
+    fn pool(&self) -> DbPool {
+        DbPool::PostgreSQL(self.pool.clone())
+    }
+
+    async fn get_evaluation_data(&self) -> AppResult<(Decimal, Decimal, Decimal, Decimal)> {
+        // PostgreSQL uses NUMERIC columns — query_scalar maps directly to Decimal
+        let unrealized_sol: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0) FROM positions WHERE state IN ('ACTIVE', 'EXITING')"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let realized_pnl_sol: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours'"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let realized_usd: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(realized_pnl_usd), 0.0) FROM positions WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours' AND realized_pnl_usd IS NOT NULL"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let null_price_pnl_sol: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours' AND realized_pnl_usd IS NULL"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok((unrealized_sol, realized_pnl_sol, realized_usd, null_price_pnl_sol))
     }
 }
 

@@ -5,7 +5,7 @@ import type { HealthResponse } from '../types'
 export function useHealth() {
   return useQuery({
     queryKey: ['health'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<HealthResponse>('/health')
       return data
     },

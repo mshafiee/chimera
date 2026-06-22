@@ -10,7 +10,7 @@ interface DeadLetterResponse {
 export function useDeadLetterQueue() {
   return useQuery({
     queryKey: ['dead-letter-queue'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<DeadLetterResponse>('/incidents/dead-letter')
       return data
     },
@@ -29,7 +29,7 @@ export function useConfigAudit(params?: { limit?: number; offset?: number }) {
   
   return useQuery({
     queryKey: ['config-audit', limit, offset],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const searchParams = new URLSearchParams()
       if (limit) searchParams.set('limit', limit.toString())
       if (offset) searchParams.set('offset', offset.toString())

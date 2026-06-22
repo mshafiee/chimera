@@ -3,7 +3,7 @@
 //! Tracks total portfolio risk exposure and blocks new positions
 //! when heat limit (20% of capital) is reached.
 
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 /// Portfolio heat manager
 pub struct PortfolioHeat {
-    db: DbPool,
+    db: Arc<dyn Database>,
     /// Maximum portfolio heat as percentage of capital (default: 20%)
     max_heat_percent: Decimal,
     /// Total capital in SOL — wrapped in Arc<RwLock> so the background wallet-balance
@@ -33,7 +33,7 @@ pub struct HeatResult {
 }
 
 impl PortfolioHeat {
-    pub fn new(db: DbPool, total_capital_sol: Decimal) -> Self {
+    pub fn new(db: Arc<dyn Database>, total_capital_sol: Decimal) -> Self {
         Self {
             db,
             max_heat_percent: dec!(20),
@@ -43,7 +43,7 @@ impl PortfolioHeat {
 
     /// Create with custom max heat percentage
     pub fn with_max_heat(
-        db: DbPool,
+        db: Arc<dyn Database>,
         total_capital_sol: Decimal,
         max_heat_percent: Decimal,
     ) -> Self {
@@ -87,60 +87,52 @@ impl PortfolioHeat {
         // 1800s chosen because RPC confirmation can take 15-20 min under congestion;
         // 900s was too short — stuck EXITING positions were dropped from heat, allowing
         // new trades to open before the exit confirmed, creating up to 2× intended exposure.
-        let total_exposure_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(amount), 0.0) FROM (
-                SELECT entry_amount_sol as amount
-                FROM positions
-                WHERE state = 'ACTIVE'
-                   OR (state = 'EXITING' AND last_updated >= datetime('now', '-1800 seconds'))
-                UNION ALL
-                SELECT amount_sol as amount
-                FROM trades
-                WHERE status IN ('PENDING', 'QUEUED', 'EXECUTING', 'RETRY')
-                  AND side = 'BUY'
-            )
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
+        let now = chrono::Utc::now();
+        let heat_cutoff = now - chrono::Duration::seconds(1800);
 
-        // Warn when EXITING positions have been stuck longer than the recovery escalation
-        // threshold (5 min). These should have been reverted to ACTIVE by recovery.rs, but
-        // if they persist they lock capital. Alerting here lets operators catch recovery
-        // failures before they compound.
-        let stale_exiting_count: i64 = sqlx::query_scalar::<_, i64>(
-            r#"
-            SELECT COUNT(*)
-            FROM positions
-            WHERE state = 'EXITING'
-              AND last_updated < datetime('now', '-300 seconds')
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await
-        .unwrap_or(0);
+        // Get active positions for heat calculation
+        let positions = self.db.get_active_positions().await
+            .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
+
+        let mut total_exposure = rust_decimal::Decimal::ZERO;
+        let mut stale_exiting_count: i64 = 0;
+        let mut stale_exposure_sol = rust_decimal::Decimal::ZERO;
+
+        for pos in &positions {
+            if pos.state == "ACTIVE" {
+                total_exposure += pos.entry_amount_sol;
+            } else if pos.state == "EXITING" {
+                if pos.last_updated >= heat_cutoff {
+                    total_exposure += pos.entry_amount_sol;
+                }
+                // Warn when EXITING positions have been stuck longer than the recovery
+                // escalation threshold (5 min).
+                if pos.last_updated < now - chrono::Duration::seconds(300) {
+                    stale_exiting_count += 1;
+                    stale_exposure_sol += pos.entry_amount_sol;
+                }
+            }
+        }
+
         if stale_exiting_count > 0 {
-            let stale_sol: f64 = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(entry_amount_sol), 0.0)
-                FROM positions
-                WHERE state = 'EXITING'
-                  AND last_updated < datetime('now', '-300 seconds')
-                "#,
-            )
-            .fetch_one(&self.db)
-            .await
-            .unwrap_or(0.0);
             tracing::warn!(
                 stale_exiting_count,
-                stale_exposure_sol = stale_sol,
+                stale_exposure_sol = %stale_exposure_sol,
                 "STALE_EXITING: positions stuck >5 min are locking portfolio heat; \
                  check recovery.rs background task and RPC connectivity"
             );
         }
-        let total_exposure = Decimal::from_f64_retain(total_exposure_f64).unwrap_or(Decimal::ZERO);
+
+        // Get pending/queued/executing trades for heat calculation
+        for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
+            let trades = self.db.get_trades_by_status(status, i32::MAX).await
+                .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
+            for trade in &trades {
+                if trade.side == "BUY" {
+                    total_exposure += trade.amount_sol;
+                }
+            }
+        }
         let capital = *self.total_capital_sol.read();
 
         // Calculate heat percentage using Decimal for precision.
@@ -202,34 +194,38 @@ impl PortfolioHeat {
         // get_strategy_heat to drop EXITING positions from the strategy allocation check
         // before calculate_heat dropped them from the total heat, creating a window where
         // the strategy limit appeared to have headroom while total heat was still at cap.
-        let rows = sqlx::query_as::<_, (String, f64)>(
-            r#"
-            SELECT strategy, SUM(amount) as heat FROM (
-                SELECT strategy, entry_amount_sol as amount
-                FROM positions
-                WHERE state = 'ACTIVE'
-                   OR (state = 'EXITING' AND last_updated >= datetime('now', '-1800 seconds'))
-                UNION ALL
-                SELECT strategy, amount_sol as amount
-                FROM trades
-                WHERE status IN ('PENDING', 'QUEUED', 'EXECUTING', 'RETRY')
-                  AND side = 'BUY'
-            ) GROUP BY strategy
-            "#,
-        )
-        .fetch_all(&self.db)
-        .await
-        .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
+        let now = chrono::Utc::now();
+        let heat_cutoff = now - chrono::Duration::seconds(1800);
+
+        let positions = self.db.get_active_positions().await
+            .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
 
         let mut shield_heat = Decimal::ZERO;
         let mut spear_heat = Decimal::ZERO;
 
-        for (strategy, heat_val) in rows {
-            let heat = Decimal::from_f64_retain(heat_val).unwrap_or(Decimal::ZERO);
-            match strategy.as_str() {
-                "SHIELD" => shield_heat = heat,
-                "SPEAR" => spear_heat = heat,
-                _ => {}
+        for pos in &positions {
+            let include = pos.state == "ACTIVE"
+                || (pos.state == "EXITING" && pos.last_updated >= heat_cutoff);
+            if include {
+                match pos.strategy.as_str() {
+                    "SHIELD" => shield_heat += pos.entry_amount_sol,
+                    "SPEAR" => spear_heat += pos.entry_amount_sol,
+                    _ => {}
+                }
+            }
+        }
+
+        for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
+            let trades = self.db.get_trades_by_status(status, i32::MAX).await
+                .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
+            for trade in &trades {
+                if trade.side == "BUY" {
+                    match trade.strategy.as_str() {
+                        "SHIELD" => shield_heat += trade.amount_sol,
+                        "SPEAR" => spear_heat += trade.amount_sol,
+                        _ => {}
+                    }
+                }
             }
         }
 

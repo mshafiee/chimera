@@ -13,7 +13,7 @@
 //! 4. If confirmed on-chain: update to CLOSED
 //! 5. Log to reconciliation_log
 
-use crate::db::{self, DbPool, PositionRecord};
+use crate::db_abstraction::{Database, PositionRecord};
 use crate::error::{AppError, AppResult};
 use crate::handlers::{PositionUpdateData, WsEvent, WsState};
 use chrono::Utc;
@@ -31,8 +31,8 @@ const RECOVERY_CHECK_INTERVAL_SECS: u64 = 30;
 
 /// Stuck-state recovery manager
 pub struct RecoveryManager {
-    /// Database pool
-    db: DbPool,
+    /// Database
+    db: Arc<dyn Database>,
     /// Engine handle for dynamic RPC failover
     engine_handle: Option<crate::engine::EngineHandle>,
     /// Fallback static RPC client (for tests or legacy constructors)
@@ -47,17 +47,17 @@ pub struct RecoveryManager {
 
 impl RecoveryManager {
     /// Create a new recovery manager
-    pub fn new(db: DbPool, rpc_url: String) -> Self {
+    pub fn new(db: Arc<dyn Database>, rpc_url: String) -> Self {
         Self::new_with_ws(db, rpc_url, None)
     }
 
     /// Create with custom threshold
-    pub fn with_threshold(db: DbPool, rpc_url: String, stuck_threshold_secs: i64) -> Self {
+    pub fn with_threshold(db: Arc<dyn Database>, rpc_url: String, stuck_threshold_secs: i64) -> Self {
         Self::new_with_ws_and_threshold(db, rpc_url, stuck_threshold_secs, None)
     }
 
     /// Create with WebSocket support
-    pub fn new_with_ws(db: DbPool, rpc_url: String, ws_state: Option<Arc<WsState>>) -> Self {
+    pub fn new_with_ws(db: Arc<dyn Database>, rpc_url: String, ws_state: Option<Arc<WsState>>) -> Self {
         let rpc_client = Arc::new(RpcClient::new(rpc_url));
         Self {
             db,
@@ -76,7 +76,7 @@ impl RecoveryManager {
     /// to that client, and avoids creating a separate single-point-of-failure
     /// connection that has no fallback during an outage.
     pub fn new_with_rpc(
-        db: DbPool,
+        db: Arc<dyn Database>,
         engine_handle: crate::engine::EngineHandle,
         ws_state: Option<Arc<WsState>>,
     ) -> Self {
@@ -92,7 +92,7 @@ impl RecoveryManager {
 
     /// Create with custom threshold and WebSocket support
     pub fn new_with_ws_and_threshold(
-        db: DbPool,
+        db: Arc<dyn Database>,
         rpc_url: String,
         stuck_threshold_secs: i64,
         ws_state: Option<Arc<WsState>>,
@@ -148,7 +148,7 @@ impl RecoveryManager {
 
     /// Recover stuck positions
     pub async fn recover_stuck_positions(&self) -> AppResult<u32> {
-        let stuck_positions = db::get_stuck_positions(&self.db, self.stuck_threshold_secs).await?;
+        let stuck_positions = self.db.get_stuck_positions(self.stuck_threshold_secs).await?;
 
         if stuck_positions.is_empty() {
             return Ok(0);
@@ -222,15 +222,14 @@ impl RecoveryManager {
         match on_chain_state {
             OnChainState::TransactionConfirmed => {
                 // Exit transaction confirmed on-chain, mark CLOSED.
-                db::update_position_state(&self.db, &position.trade_uuid, "CLOSED").await?;
+                self.db.update_position_state(&position.trade_uuid, "CLOSED").await?;
 
                 let tx_sig = position
                     .exit_tx_signature
                     .as_deref()
                     .unwrap_or(tx_signature);
 
-                db::insert_reconciliation_log(
-                    &self.db,
+                self.db.insert_reconciliation_log(
                     &position.trade_uuid,
                     "EXITING",
                     Some("FOUND"),
@@ -271,8 +270,7 @@ impl RecoveryManager {
                         rpc_error = %rpc_err,
                         "Persistent RPC errors checking EXITING position — escalating to dead letter and reverting to ACTIVE"
                     );
-                    db::insert_dead_letter(
-                        &self.db,
+                    self.db.insert_dlq(
                         Some(&position.trade_uuid),
                         &position.trade_uuid,
                         "RPC_CHECK_FAILED",
@@ -280,8 +278,7 @@ impl RecoveryManager {
                         None,
                     )
                     .await?;
-                    db::insert_reconciliation_log(
-                        &self.db,
+                    self.db.insert_reconciliation_log(
                         &position.trade_uuid,
                         "EXITING",
                         None,
@@ -391,9 +388,8 @@ impl RecoveryManager {
                 trade_uuid = %position.trade_uuid,
                 "Position is stuck in EXITING but on-chain token balance is 0 — marking CLOSED directly to avoid zombie loop"
             );
-            db::update_position_state(&self.db, &position.trade_uuid, "CLOSED").await?;
-            db::insert_reconciliation_log(
-                &self.db,
+            self.db.update_position_state(&position.trade_uuid, "CLOSED").await?;
+            self.db.insert_reconciliation_log(
                 &position.trade_uuid,
                 "EXITING",
                 Some("ZERO_BALANCE"),
@@ -415,9 +411,8 @@ impl RecoveryManager {
                 trade_uuid = %position.trade_uuid,
                 "On-chain balance is non-zero — reverting position to ACTIVE so stop-loss can manage exit"
             );
-            db::revert_position_exit(&self.db, &position.trade_uuid).await?;
-            db::insert_reconciliation_log(
-                &self.db,
+            self.db.revert_position_exit(&position.trade_uuid).await?;
+            self.db.insert_reconciliation_log(
                 &position.trade_uuid,
                 "EXITING",
                 actual_on_chain,
@@ -427,8 +422,7 @@ impl RecoveryManager {
             )
             .await?;
 
-            db::log_config_change(
-                &self.db,
+            self.db.log_config_change(
                 &format!("position:{}", position.trade_uuid),
                 Some("EXITING"),
                 "ACTIVE",

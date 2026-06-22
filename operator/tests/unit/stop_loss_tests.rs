@@ -10,14 +10,25 @@
 //! - Portfolio stop trigger at 5% daily loss
 //! - Fail-open when price cache is unavailable
 
-use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
-use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::config::ProfitManagementConfig;
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool,
+};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
 
 /// Returns an entry_time sufficiently in the past to clear the 10-second wick-protection
 /// grace period, so stop-loss checks evaluate the threshold rather than bailing early.
@@ -27,15 +38,12 @@ fn past_entry() -> chrono::DateTime<chrono::Utc> {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("stop_loss_test.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("stop_loss_test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
 }
 
 fn default_config() -> Arc<ProfitManagementConfig> {
@@ -50,7 +58,7 @@ fn config_with_hard_stop(hard_stop_positive: &str) -> Arc<ProfitManagementConfig
 }
 
 /// Insert a wallet with a specific WQS score.
-async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: f64) {
+async fn insert_wallet(pool: &Pool<Sqlite>, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
          VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -63,7 +71,7 @@ async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: 
 }
 
 /// Insert a consensus BUY signal into signal_aggregation within the last 5 minutes.
-async fn insert_consensus_signal(pool: &chimera_operator::db::DbPool, token: &str, wallet: &str) {
+async fn insert_consensus_signal(pool: &Pool<Sqlite>, token: &str, wallet: &str) {
     sqlx::query(
         "INSERT INTO signal_aggregation \
          (token_address, wallet_address, direction, amount_sol, created_at) \
@@ -81,7 +89,7 @@ async fn insert_consensus_signal(pool: &chimera_operator::db::DbPool, token: &st
 /// (which reads trades.net_pnl_sol for accuracy) returns the correct value.
 #[allow(dead_code)]
 async fn insert_closed_position(
-    pool: &chimera_operator::db::DbPool,
+    pool: &Pool<Sqlite>,
     trade_uuid: &str,
     wallet: &str,
     token: &str,
@@ -136,7 +144,7 @@ async fn insert_closed_position(
 /// Insert an active position so exposure is > 0.
 #[allow(dead_code)]
 async fn insert_active_position(
-    pool: &chimera_operator::db::DbPool,
+    pool: &Pool<Sqlite>,
     trade_uuid: &str,
     wallet: &str,
     token: &str,
@@ -177,7 +185,8 @@ async fn test_zero_entry_price_forces_immediate_exit() {
     // We cannot calculate a valid loss percentage, so the safest action is to force
     // an immediate exit to recover capital rather than hold indefinitely.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
     insert_wallet(&pool, "wallet_a", 50.0).await;
 
@@ -188,7 +197,7 @@ async fn test_zero_entry_price_forces_immediate_exit() {
         PriceSource::Jupiter,
     );
 
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
+    let mgr = StopLossManager::new(db, default_config(), price_cache);
 
     let action = mgr
         .check_stop_loss("uuid-1", "wallet_a", Decimal::ZERO, TOKEN, past_entry())
@@ -212,7 +221,8 @@ async fn test_consensus_query_failure_no_stop_widening() {
     // This test uses hard_stop_loss=-100 to isolate dynamic threshold behavior from the
     // hard-stop sign-convention bug (where hard_stop_loss=15.0 would fire on ALL losses).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Insert wallet with WQS 80 → dynamic stop = -20%
@@ -230,7 +240,7 @@ async fn test_consensus_query_failure_no_stop_widening() {
     // The stop-loss threshold stays at -20% (not widened to -25%)
     // -17% > -20% → should NOT exit
     // Use hard_stop=-100 to prevent the buggy hard_stop sign convention from interfering
-    let mgr = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
+    let mgr = StopLossManager::new(db, config_with_hard_stop("-100.0"), price_cache);
 
     let action = mgr
         .check_stop_loss(
@@ -258,13 +268,15 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
     // Uses hard_stop=-100 to isolate dynamic threshold behavior (the sign-convention
     // bug in hard_stop_loss would otherwise fire for every negative loss_percent).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     insert_wallet(&pool, "wallet_c", 80.0).await;
 
     const TOKEN: &str = "token_consensus_wide";
-    // Insert 2 consensus signals
+    // Insert 2 consensus signals (both wallets must exist for FK constraint)
+    insert_wallet(&pool, "wallet_d", 80.0).await;
     insert_consensus_signal(&pool, TOKEN, "wallet_c").await;
     insert_consensus_signal(&pool, TOKEN, "wallet_d").await;
 
@@ -275,7 +287,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
         PriceSource::Jupiter,
     );
 
-    let mgr = StopLossManager::new(pool, config_with_hard_stop("-100.0"), price_cache);
+    let mgr = StopLossManager::new(db, config_with_hard_stop("-100.0"), price_cache);
 
     let action = mgr
         .check_stop_loss(
@@ -302,8 +314,8 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     // -20% × 2.0 = -40%, clamped to [-35%, -5%] → clamps to -35% (tightened from -50%).
     // -34% loss → None. -36% loss → Exit.
 
-    let (pool, _tmp) = create_test_db().await;
-
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     insert_wallet(&pool, "wallet_vol", 75.0).await;
 
     const TOKEN: &str = "token_high_vol";
@@ -339,7 +351,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         PriceSource::Jupiter,
     );
     let mgr = StopLossManager::new(
-        pool.clone(),
+        db.clone(),
         config_with_hard_stop("-25.0"),
         price_cache.clone(),
     );
@@ -364,7 +376,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
         Decimal::from_str("0.74").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-25.0"), price_cache);
+    let mgr2 = StopLossManager::new(db, config_with_hard_stop("-25.0"), price_cache);
     let action_over = mgr2
         .check_stop_loss(
             "uuid-vol-over",
@@ -390,7 +402,8 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     // A -6% loss must NOT exit (< 9% threshold).
     // A -10% loss MUST exit (exceeds -9% threshold).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     insert_wallet(&pool, "wallet_tight", 30.0).await;
 
     const TOKEN: &str = "token_low_vol";
@@ -415,7 +428,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
         assert!(v < 10.0, "Test setup requires low volatility, got {}", v);
     }
 
-    let mgr = StopLossManager::new(pool.clone(), default_config(), price_cache.clone());
+    let mgr = StopLossManager::new(db.clone(), default_config(), price_cache.clone());
 
     // -6% loss: below the -9% threshold → must NOT exit
     price_cache.set_price(
@@ -468,7 +481,8 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     // clamped to widest_stop -35%.  Effective threshold: -35%.
     // -34% loss → None. -36% loss → Exit.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     insert_wallet(&pool, "wallet_cv", 75.0).await;
 
     const TOKEN: &str = "token_cv";
@@ -485,7 +499,8 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     }
     assert!(price_cache.calculate_volatility(TOKEN).unwrap_or(0.0) > 30.0);
 
-    // Insert 2 consensus signals
+    // Insert 2 consensus signals (both wallets must exist for FK constraint)
+    insert_wallet(&pool, "wallet_other", 75.0).await;
     insert_consensus_signal(&pool, TOKEN, "wallet_cv").await;
     insert_consensus_signal(&pool, TOKEN, "wallet_other").await;
 
@@ -497,7 +512,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
         PriceSource::Jupiter,
     );
     let mgr = StopLossManager::new(
-        pool.clone(),
+        db.clone(),
         config_with_hard_stop("-25.0"),
         price_cache.clone(),
     );
@@ -522,7 +537,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
         Decimal::from_str("0.74").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, config_with_hard_stop("-25.0"), price_cache);
+    let mgr2 = StopLossManager::new(db, config_with_hard_stop("-25.0"), price_cache);
     let exit = mgr2
         .check_stop_loss(
             "uuid-cv-2",
@@ -548,7 +563,8 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     // At -13% loss: dynamic check -13 <= -20 = FALSE; hard stop -13 <= 12.0 = TRUE → Exit.
     // This confirms the hard stop fires before the dynamic -20% threshold is reached.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     insert_wallet(&pool, "wallet_hardstop", 75.0).await;
 
     const TOKEN: &str = "token_hardstop";
@@ -561,7 +577,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     );
 
     let cfg = config_with_hard_stop("12.0");
-    let mgr = StopLossManager::new(pool, cfg, price_cache);
+    let mgr = StopLossManager::new(db, cfg, price_cache);
 
     let action = mgr
         .check_stop_loss(
@@ -588,13 +604,14 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
     // check_stop_loss() early-returns StopLossAction::None (fail-open).
     // Documents that capital is unprotected when price data is unavailable.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // No price is set for the token
     insert_wallet(&pool, "wallet_nocache", 50.0).await;
 
-    let mgr = StopLossManager::new(pool, default_config(), price_cache);
+    let mgr = StopLossManager::new(db, default_config(), price_cache);
     let action = mgr
         .check_stop_loss(
             "uuid-nocache",
@@ -619,7 +636,8 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     // WQS 40–70 → dynamic threshold = -15%.
     // -14% → None. -15% → Exit.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     insert_wallet(&pool, "wallet_med", 55.0).await;
 
     const TOKEN: &str = "token_med_wqs";
@@ -631,7 +649,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
         Decimal::from_str("0.86").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr = StopLossManager::new(pool.clone(), default_config(), price_cache.clone());
+    let mgr = StopLossManager::new(db.clone(), default_config(), price_cache.clone());
     let none = mgr
         .check_stop_loss(
             "uuid-med-1",
@@ -653,7 +671,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
         Decimal::from_str("0.85").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr2 = StopLossManager::new(pool, default_config(), price_cache);
+    let mgr2 = StopLossManager::new(db, default_config(), price_cache);
     let exit = mgr2
         .check_stop_loss(
             "uuid-med-2",

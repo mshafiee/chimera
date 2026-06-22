@@ -10,7 +10,7 @@ interface WalletsResponse {
 export function useWallets(status?: string) {
   return useQuery({
     queryKey: ['wallets', status],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const params = new URLSearchParams()
       if (status) params.set('status', status)
       
@@ -23,7 +23,7 @@ export function useWallets(status?: string) {
 export function useWallet(address: string) {
   return useQuery({
     queryKey: ['wallet', address],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<Wallet>(`/wallets/${address}`)
       return data
     },

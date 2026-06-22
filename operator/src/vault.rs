@@ -12,7 +12,6 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use secrecy::Secret;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -25,14 +24,10 @@ pub struct VaultSecrets {
     /// Previous webhook secret (for rotation grace period)
     #[serde(default)]
     pub webhook_secret_previous: Option<String>,
-    /// Wallet private key (hex string)
-    #[serde(
-        default,
-        serialize_with = "serialize_secret",
-        deserialize_with = "deserialize_secret"
-    )]
-    #[zeroize(skip)] // Secrecy handles this internal zeroization
-    pub wallet_private_key: Option<Secret<String>>,
+    /// Wallet private key (hex string) — stored in an already-encrypted file,
+    /// so `Secret<String>` wrapping would be redundant here.
+    #[serde(default)]
+    pub wallet_private_key: Option<String>,
 
     /// RPC API key
     #[serde(default)]
@@ -40,25 +35,6 @@ pub struct VaultSecrets {
     /// Fallback RPC API key
     #[serde(default)]
     pub fallback_rpc_api_key: Option<String>,
-}
-
-fn serialize_secret<S>(secret: &Option<Secret<String>>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    use secrecy::ExposeSecret;
-    match secret {
-        Some(s) => serializer.serialize_str(s.expose_secret()),
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_secret<'de, D>(deserializer: D) -> Result<Option<Secret<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: Option<String> = Option::deserialize(deserializer)?;
-    Ok(s.map(Secret::new))
 }
 
 /// Vault for encrypted secrets
@@ -353,7 +329,7 @@ pub fn load_secrets_with_fallback() -> Result<VaultSecrets, VaultError> {
                 if trimmed.is_empty() {
                     None
                 } else {
-                    Some(Secret::new(trimmed.to_string()))
+                    Some(trimmed.to_string())
                 }
             });
 
@@ -381,7 +357,6 @@ impl std::fmt::Debug for VaultSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use secrecy::ExposeSecret;
 
     #[test]
     fn test_generate_key() {
@@ -397,9 +372,9 @@ mod tests {
         let secrets = VaultSecrets {
             webhook_secret: "test-secret-123".to_string(),
             webhook_secret_previous: Some("old-secret".to_string()),
-            wallet_private_key: Some(Secret::new(
+            wallet_private_key: Some(
                 "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20".repeat(2),
-            )), // 64 bytes hex
+            ), // 64 bytes hex
             rpc_api_key: Some("rpc-key".to_string()),
             fallback_rpc_api_key: None,
         };
@@ -412,17 +387,7 @@ mod tests {
             decrypted.webhook_secret_previous,
             secrets.webhook_secret_previous
         );
-        // Compare exposed secrets
-        assert_eq!(
-            decrypted
-                .wallet_private_key
-                .as_ref()
-                .map(|s| s.expose_secret()),
-            secrets
-                .wallet_private_key
-                .as_ref()
-                .map(|s| s.expose_secret())
-        );
+        assert_eq!(decrypted.wallet_private_key, secrets.wallet_private_key);
         assert_eq!(decrypted.rpc_api_key, secrets.rpc_api_key);
     }
 

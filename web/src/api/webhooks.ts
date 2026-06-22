@@ -100,7 +100,7 @@ export interface WebhookAuditQuery {
 export function useWebhookStats(refetchInterval: number = 30000) {
   return useQuery({
     queryKey: ['webhooks', 'stats'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ApiResponse<WebhookStats>>('/monitoring/webhooks/stats')
       if (response.data.success && response.data.data) {
         return response.data.data
@@ -118,7 +118,7 @@ export function useWebhookStats(refetchInterval: number = 30000) {
 export function useWebhookAuditLog(params: WebhookAuditQuery = {}) {
   return useQuery({
     queryKey: ['webhooks', 'audit', params],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ApiResponse<WebhookAuditLog[]>>('/monitoring/webhooks/audit', {
         params: {
           ...(params.wallet_address && { wallet_address: params.wallet_address }),

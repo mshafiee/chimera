@@ -12,8 +12,8 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
+use rust_decimal::prelude::*;
 use serde::Serialize;
-use sqlx;
 use std::sync::Arc;
 
 /// Helius webhook endpoint
@@ -49,7 +49,7 @@ pub async fn helius_webhook_handler(
 
         if !wallet_address.is_empty() {
             // Check if wallet exists in database
-            let wallet_opt = crate::db::get_wallet_by_address(&state.db, &wallet_address).await;
+            let wallet_opt = state.db.get_wallet(&wallet_address).await;
 
             // If wallet doesn't exist, automatically add it as CANDIDATE
             let wallet = if let Ok(Some(w)) = wallet_opt {
@@ -62,8 +62,7 @@ pub async fn helius_webhook_handler(
                 );
 
                 // Add wallet with minimal info (will be analyzed by Scout later)
-                let _ = crate::db::upsert_wallet(
-                    &state.db,
+                let _ = state.db.upsert_wallet(
                     &wallet_address,
                     None,                 // wqs_score - will be calculated by Scout
                     None,                 // roi_7d
@@ -72,13 +71,12 @@ pub async fn helius_webhook_handler(
                     None,                 // win_rate
                     None,                 // max_drawdown_30d
                     Some(swap.amount_in), // avg_trade_size_sol
-                    Some(&chrono::Utc::now().to_rfc3339()), // last_trade_at
                     Some("Auto-added from webhook detection"), // notes
                 )
                 .await;
 
                 // Fetch the newly added wallet
-                match crate::db::get_wallet_by_address(&state.db, &wallet_address).await {
+                match state.db.get_wallet(&wallet_address).await {
                     Ok(Some(w)) => w,
                     _ => {
                         tracing::warn!(
@@ -117,7 +115,7 @@ pub async fn helius_webhook_handler(
 
                 // FIX 2: Determine strategy, downgrading Spear to Shield when in RPC fallback
                 let in_fallback = state.engine.is_in_fallback();
-                let strategy = if wallet.wqs_score.unwrap_or(0.0) >= 70.0 {
+                let strategy = if wallet.wqs_score.map(|s| s >= rust_decimal::Decimal::from(70)).unwrap_or(false) {
                     Strategy::Shield
                 } else if in_fallback {
                     // Cannot run Spear when primary RPC is unavailable; use Shield
@@ -203,7 +201,7 @@ pub async fn helius_webhook_handler(
                 );
 
                 // Queue signal with wallet WQS
-                let wallet_wqs = wallet.wqs_score;
+                let wallet_wqs = wallet.wqs_score.map(|s| s.to_f64().unwrap_or(0.0));
                 if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
                     tracing::error!(error = %e, "Failed to queue signal from webhook");
                     return StatusCode::INTERNAL_SERVER_ERROR;
@@ -249,13 +247,8 @@ pub async fn get_monitoring_status(
         rpc_credits,
         active_wallets: {
             // Query active wallets count from database
-            match sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM wallet_monitoring WHERE monitoring_enabled = 1",
-            )
-            .fetch_one(&state.db)
-            .await
-            {
-                Ok(count) => count as usize,
+            match state.db.get_all_wallet_monitoring().await {
+                Ok(records) => records.iter().filter(|r| r.monitoring_enabled > 0).count(),
                 Err(e) => {
                     tracing::warn!(error = %e, "Failed to query active wallets count, returning 0");
                     0
@@ -288,7 +281,7 @@ pub async fn enable_wallet_monitoring(
     tracing::info!(wallet = %wallet_address, "Enable monitoring requested");
 
     // Check if wallet exists and is ACTIVE
-    let wallet = match crate::db::get_wallet_by_address(&state.db, &wallet_address).await {
+    let wallet = match state.db.get_wallet(&wallet_address).await {
         Ok(Some(w)) => w,
         Ok(None) => {
             tracing::warn!(wallet = %wallet_address, "Wallet not found");
@@ -346,7 +339,7 @@ pub async fn enable_wallet_monitoring(
 
     // Update database
     if let Err(e) =
-        crate::db::upsert_wallet_monitoring(&state.db, &wallet_address, Some(&webhook_id), true)
+        state.db.upsert_wallet_monitoring(&wallet_address, Some(&webhook_id), true)
             .await
     {
         tracing::error!(
@@ -381,7 +374,7 @@ pub async fn disable_wallet_monitoring(
     tracing::info!(wallet = %wallet_address, "Disable monitoring requested");
 
     // Get current monitoring record
-    let monitoring = match crate::db::get_wallet_monitoring_by_address(&state.db, &wallet_address)
+    let monitoring = match state.db.get_wallet_monitoring(&wallet_address)
         .await
     {
         Ok(Some(m)) => m,
@@ -415,8 +408,7 @@ pub async fn disable_wallet_monitoring(
     }
 
     // Update database to disable monitoring
-    if let Err(e) = crate::db::upsert_wallet_monitoring(
-        &state.db,
+    if let Err(e) = state.db.upsert_wallet_monitoring(
         &wallet_address,
         None,  // Clear webhook_id
         false, // Disable monitoring
@@ -472,7 +464,7 @@ pub async fn get_wallet_monitoring_states(
     }
 
     // Fetch all wallet monitoring records from database
-    let wallet_monitoring_records = match crate::db::get_all_wallet_monitoring(&state.db).await {
+    let wallet_monitoring_records = match state.db.get_all_wallet_monitoring().await {
         Ok(records) => records,
         Err(e) => {
             tracing::error!(error = %e, "Failed to fetch wallet monitoring states");

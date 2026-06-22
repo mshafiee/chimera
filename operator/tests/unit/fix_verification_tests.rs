@@ -9,15 +9,26 @@
 //!   F4    — Trailing stop ratchet: stop_price never updates after initial activation
 //!   F6    — Silent status update: update_trade_status returns Ok on non-existent UUID
 
-use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
-use chimera_operator::db::{init_pool, insert_trade, run_migrations, update_trade_status};
+use chimera_operator::config::ProfitManagementConfig;
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
+};
 use chimera_operator::engine::profit_targets::{ProfitTargetAction, ProfitTargetManager};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
 
 fn past_entry() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now() - chrono::TimeDelta::seconds(60)
@@ -25,15 +36,12 @@ fn past_entry() -> chrono::DateTime<chrono::Utc> {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("fix_verification_test.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("fix_verification_test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
 }
 
 #[allow(dead_code)]
@@ -45,7 +53,7 @@ fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
 }
 
 /// Insert a wallet row so stop_loss WQS lookup succeeds (returns WQS 70 → -20% threshold).
-async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: f64) {
+async fn insert_wallet(pool: &Pool<Sqlite>, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
          VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -58,18 +66,17 @@ async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: 
 }
 
 /// Insert a trade row so update_trade_status has something real to update.
-async fn seed_trade(pool: &chimera_operator::db::DbPool, trade_uuid: &str) {
-    insert_trade(
-        pool,
-        trade_uuid,
-        "wallet_fix",
-        "token_fix",
-        Some("FIX"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+async fn seed_trade(db: &Arc<dyn Database>, trade_uuid: &str) {
+    db.insert_trade(&InsertTrade {
+        trade_uuid: trade_uuid.to_string(),
+        wallet_address: "wallet_fix".to_string(),
+        token_address: "token_fix".to_string(),
+        token_symbol: Some("FIX".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 }
@@ -87,7 +94,8 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
     // This test asserts the CORRECT behavior: a 2% loss must NOT trigger the hard stop.
     // It FAILS while the bug exists, and PASSES after the fix.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_hard_stop_fix";
     const WALLET: &str = "wallet_hard_stop_fix";
@@ -96,7 +104,7 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
 
     // Use DEFAULT config (hard_stop_loss = 15.0 with the bug, should be -15.0 after fix)
     let cfg = Arc::new(ProfitManagementConfig::default());
-    let mgr = StopLossManager::new(pool, cfg, price_cache.clone());
+    let mgr = StopLossManager::new(db, cfg, price_cache.clone());
 
     // Entry = $100, Current = $98 → loss = -2%
     // Dynamic threshold at WQS=75: -20% (not hit at -2%)
@@ -141,7 +149,8 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
     // Scenario A: -16% loss → -16% > -20% → no exit (dynamic stop not yet reached)
     // Scenario B: -21% loss → -21% <= -20% → Exit   (dynamic stop fires correctly)
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_dynamic_stop_21";
     const WALLET: &str = "wallet_dynamic_stop_21";
@@ -149,7 +158,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
     insert_wallet(&pool, WALLET, 75.0).await; // High WQS → dynamic threshold = -20%
 
     let cfg = Arc::new(ProfitManagementConfig::default()); // hard_stop = -25%
-    let mgr = StopLossManager::new(pool, cfg, price_cache.clone());
+    let mgr = StopLossManager::new(db, cfg, price_cache.clone());
 
     // Scenario A: Entry = $100, Current = $84 → loss = -16% (not past -20% dynamic stop)
     price_cache.set_price(
@@ -211,7 +220,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
     // With bug: stop stays at $0.96 → $1.40 > $0.96 → no exit (loses $0.60/SOL of gain)
     // After fix: stop ratchets to $1.60 → $1.40 < $1.60 → Exit (correct capital protection)
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_ratchet_fix";
 
@@ -221,7 +230,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         trailing_stop_distance: Decimal::from_str("20.0").unwrap(),
         ..ProfitManagementConfig::default()
     });
-    let mgr = ProfitTargetManager::new(pool, cfg, price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, cfg, price_cache.clone());
 
     price_cache.set_price(
         TOKEN,
@@ -282,16 +291,16 @@ async fn should_return_error_on_status_update_for_missing_uuid() {
     // This test calls update_trade_status with a nonexistent UUID and asserts Err.
     // It FAILS while the bug exists (returns Ok), PASSES after the fix.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
 
-    let result = update_trade_status(
-        &pool,
-        "00000000-0000-0000-0000-nonexistent00",
-        "QUEUED",
-        None,
-        None,
-    )
-    .await;
+    let result = db
+        .update_trade_status(&UpdateTradeStatus {
+            trade_uuid: "00000000-0000-0000-0000-nonexistent00".to_string(),
+            status: "QUEUED".to_string(),
+            tx_signature: None,
+            error_message: None,
+        })
+        .await;
 
     assert!(
         result.is_err(),
@@ -305,11 +314,18 @@ async fn should_succeed_on_status_update_for_existing_trade() {
     // Complement to F6: verify the fix does not break the happy path.
     // A real UUID must still return Ok(()).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let uuid = "aaaabbbb-cccc-dddd-eeee-ffffffffffff";
-    seed_trade(&pool, uuid).await;
+    seed_trade(&db, uuid).await;
 
-    let result = update_trade_status(&pool, uuid, "QUEUED", None, None).await;
+    let result = db
+        .update_trade_status(&UpdateTradeStatus {
+            trade_uuid: uuid.to_string(),
+            status: "QUEUED".to_string(),
+            tx_signature: None,
+            error_message: None,
+        })
+        .await;
 
     assert!(
         result.is_ok(),
@@ -317,6 +333,7 @@ async fn should_succeed_on_status_update_for_existing_trade() {
     );
 
     // Verify status was actually changed
+    let pool = sqlite_pool(&db);
     let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE trade_uuid = ?")
         .bind(uuid)
         .fetch_one(&pool)

@@ -3,7 +3,7 @@
 //! Provides REST API endpoints for webhook lifecycle management including
 //! statistics, bulk operations, manual reconciliation, and audit logging.
 
-use crate::db;
+use crate::db_abstraction::{Database, WebhookAuditLog, WebhookStats};
 use crate::error::{AppError, AppResult};
 use crate::middleware::AuthExtension;
 use crate::monitoring::webhook_lifecycle::{
@@ -35,7 +35,7 @@ fn get_webhook_url(state: &MonitoringState) -> String {
 #[derive(Debug, Serialize)]
 pub struct WebhookStatsResponse {
     pub success: bool,
-    pub data: Option<db::WebhookStats>,
+    pub data: Option<WebhookStats>,
     pub error: Option<String>,
 }
 
@@ -105,8 +105,8 @@ impl<T> ApiResponse<T> {
 /// Get webhook lifecycle statistics
 pub async fn get_webhook_stats(
     State(state): State<Arc<MonitoringState>>,
-) -> AppResult<Json<ApiResponse<db::WebhookStats>>> {
-    let stats = get_webhook_statistics(&state.db).await.map_err(|e| {
+) -> AppResult<Json<ApiResponse<WebhookStats>>> {
+    let stats = get_webhook_statistics(state.db.as_ref()).await.map_err(|e| {
         AppError::Internal(format!("Failed to get webhook statistics: {}", e))
     })?;
 
@@ -232,7 +232,7 @@ pub async fn manual_reconcile_webhooks(
 
     let webhook_url = get_webhook_url(&state);
     let result = reconcile_internal(
-        &state.db,
+        state.db.clone(),
         &state.helius_client,
         &state.webhook_rate_limiter,
         &webhook_url,
@@ -283,7 +283,7 @@ pub async fn manual_health_check(
         .unwrap_or(7);
 
     let result = health_check_internal(
-        &state.db,
+        state.db.clone(),
         &state.helius_client,
         &state.webhook_rate_limiter,
         &webhook_url,
@@ -319,15 +319,16 @@ pub async fn get_webhook_audit_log(
     State(state): State<Arc<MonitoringState>>,
     Extension(auth): Extension<AuthExtension>,
     Query(params): Query<AuditQuery>,
-) -> AppResult<Json<ApiResponse<Vec<db::WebhookAuditLog>>>> {
+) -> AppResult<Json<ApiResponse<Vec<WebhookAuditLog>>>> {
     if !auth.0.role.has_permission(Role::Operator) {
         return Err(AppError::Forbidden(
             "Requires operator role or higher".to_string(),
         ));
     }
 
-    let logs = db::get_webhook_audit_log(
-        &state.db,
+    let logs = state
+        .db
+        .get_webhook_audit_log(
         params.wallet_address.as_deref(),
         params.action.as_deref(),
         params.status.as_deref(),

@@ -1,13 +1,12 @@
--- Chimera v7.1 Database Schema - PostgreSQL
+-- Chimera v7.2 Database Schema - PostgreSQL
 -- High-frequency copy-trading system for Solana
 --
 -- This is the PostgreSQL equivalent of schema.sql
 -- Key differences from SQLite:
 -- - INTEGER PRIMARY KEY AUTOINCREMENT → SERIAL/BIGSERIAL
 -- - TIMESTAMP → TIMESTAMPTZ (timezone-aware)
--- - REAL → DOUBLE PRECISION (for financial calculations)
--- - REAL → NUMERIC(30,6) for monetary values (higher precision)
--- - Triggers use PostgreSQL syntax
+-- - TEXT (Decimal strings) → NUMERIC(30,18) for monetary values
+-- - Triggers use PostgreSQL syntax (BEFORE UPDATE triggers don't recurse)
 -- - INSERT OR IGNORE → ON CONFLICT DO NOTHING
 
 -- Enable required extensions
@@ -33,20 +32,20 @@ CREATE TABLE IF NOT EXISTS trades (
     token_symbol            TEXT,
     strategy                TEXT NOT NULL CHECK(strategy IN ('SHIELD', 'SPEAR', 'EXIT')),
     side                    TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
-    amount_sol              NUMERIC(30,6) NOT NULL,
-    price_at_signal         NUMERIC(30,6),
+    amount_sol              NUMERIC(30,18) NOT NULL,
+    price_at_signal         NUMERIC(30,18),
     tx_signature            TEXT,
     status                  TEXT NOT NULL DEFAULT 'PENDING'
         CHECK(status IN ('PENDING', 'QUEUED', 'EXECUTING', 'ACTIVE', 'EXITING', 'CLOSED', 'FAILED', 'RETRY', 'DEAD_LETTER')),
     retry_count             INTEGER DEFAULT 0,
     error_message           TEXT,
-    pnl_sol                 NUMERIC(30,6),
-    pnl_usd                 NUMERIC(30,6),
-    jito_tip_sol            NUMERIC(30,6) DEFAULT 0,
-    dex_fee_sol             NUMERIC(30,6) DEFAULT 0,
-    slippage_cost_sol       NUMERIC(30,6) DEFAULT 0,
-    total_cost_sol          NUMERIC(30,6) DEFAULT 0,
-    net_pnl_sol             NUMERIC(30,6),
+    pnl_sol                 NUMERIC(30,18),
+    pnl_usd                 NUMERIC(30,18),
+    jito_tip_sol            NUMERIC(30,18) DEFAULT 0,
+    dex_fee_sol             NUMERIC(30,18) DEFAULT 0,
+    slippage_cost_sol       NUMERIC(30,18) DEFAULT 0,
+    total_cost_sol          NUMERIC(30,18) DEFAULT 0,
+    net_pnl_sol             NUMERIC(30,18),
     created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -71,19 +70,19 @@ CREATE TABLE IF NOT EXISTS positions (
     token_address           TEXT NOT NULL,
     token_symbol            TEXT,
     strategy                TEXT NOT NULL CHECK(strategy IN ('SHIELD', 'SPEAR')),
-    entry_amount_sol        NUMERIC(30,6) NOT NULL,
-    entry_price             NUMERIC(30,6) NOT NULL,
+    entry_amount_sol        NUMERIC(30,18) NOT NULL,
+    entry_price             NUMERIC(30,18) NOT NULL,
     entry_tx_signature      TEXT NOT NULL,
-    current_price           NUMERIC(30,6),
-    unrealized_pnl_sol      NUMERIC(30,6),
+    current_price           NUMERIC(30,18),
+    unrealized_pnl_sol      NUMERIC(30,18),
     unrealized_pnl_percent  NUMERIC(10,4),
     state                   TEXT NOT NULL DEFAULT 'ACTIVE'
         CHECK(state IN ('ACTIVE', 'EXITING', 'CLOSED')),
-    exit_price              NUMERIC(30,6),
+    exit_price              NUMERIC(30,18),
     exit_tx_signature       TEXT,
-    realized_pnl_sol         NUMERIC(30,6),
-    realized_pnl_usd       NUMERIC(30,6),
-    entry_sol_price_usd     NUMERIC(30,6),
+    realized_pnl_sol         NUMERIC(30,18),
+    realized_pnl_usd       NUMERIC(30,18),
+    entry_sol_price_usd     NUMERIC(30,18),
     opened_at               TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_updated            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     closed_at               TIMESTAMPTZ,
@@ -114,11 +113,11 @@ CREATE TABLE IF NOT EXISTS wallets (
     trade_count_30d         INTEGER,
     win_rate                NUMERIC(5,4),
     max_drawdown_30d        NUMERIC(10,4),
-    avg_trade_size_sol      NUMERIC(30,6),
-    avg_win_sol             NUMERIC(30,6),
-    avg_loss_sol            NUMERIC(30,6),
+    avg_trade_size_sol      NUMERIC(30,18),
+    avg_win_sol             NUMERIC(30,18),
+    avg_loss_sol            NUMERIC(30,18),
     profit_factor           NUMERIC(10,4),
-    realized_pnl_30d_sol    NUMERIC(30,6),
+    realized_pnl_30d_sol    NUMERIC(30,18),
     last_trade_at           TIMESTAMPTZ,
     promoted_at             TIMESTAMPTZ,
     ttl_expires_at          TIMESTAMPTZ,  -- For temporary promotions
@@ -211,7 +210,7 @@ CREATE TABLE IF NOT EXISTS admin_wallets (
 -- Jito Tip History: For dynamic tip calculation (cold start persistence)
 CREATE TABLE IF NOT EXISTS jito_tip_history (
     id              BIGSERIAL PRIMARY KEY,
-    tip_amount_sol  NUMERIC(30,6) NOT NULL,
+    tip_amount_sol  NUMERIC(30,18) NOT NULL,
     bundle_signature TEXT,
     strategy        TEXT CHECK(strategy IN ('SHIELD', 'SPEAR')),
     success         BOOLEAN DEFAULT TRUE,
@@ -235,8 +234,8 @@ CREATE TABLE IF NOT EXISTS reconciliation_log (
     actual_on_chain         TEXT,  -- 'FOUND', 'MISSING', 'AMOUNT_MISMATCH'
     discrepancy             TEXT,  -- 'NONE', 'MISSING_TX', 'AMOUNT_MISMATCH', 'STATE_MISMATCH'
     on_chain_tx_signature   TEXT,
-    on_chain_amount_sol     NUMERIC(30,6),
-    expected_amount_sol     NUMERIC(30,6),
+    on_chain_amount_sol     NUMERIC(30,18),
+    expected_amount_sol     NUMERIC(30,18),
     resolved_at             TIMESTAMPTZ,
     resolved_by             TEXT,  -- 'AUTO', 'ADMIN', 'SYSTEM'
     notes                   TEXT,
@@ -261,9 +260,9 @@ CREATE TABLE IF NOT EXISTS backups (
 CREATE TABLE IF NOT EXISTS historical_liquidity (
     id              BIGSERIAL PRIMARY KEY,
     token_address   TEXT NOT NULL,
-    liquidity_usd   NUMERIC(30,6) NOT NULL,
-    price_usd       NUMERIC(30,6),
-    volume_24h_usd  NUMERIC(30,6),
+    liquidity_usd   NUMERIC(30,18) NOT NULL,
+    price_usd       NUMERIC(30,18),
+    volume_24h_usd  NUMERIC(30,18),
     timestamp       TIMESTAMPTZ NOT NULL,
     source          TEXT, -- 'birdeye', 'calculated', 'jupiter', etc.
     created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -321,15 +320,15 @@ CREATE INDEX IF NOT EXISTS idx_wallet_monitoring_helius_webhook_id
 CREATE TABLE IF NOT EXISTS exit_targets (
     id                      BIGSERIAL PRIMARY KEY,
     trade_uuid              TEXT NOT NULL UNIQUE,
-    entry_price             NUMERIC(30,6) NOT NULL,
-    entry_amount_sol        NUMERIC(30,6) NOT NULL,
+    entry_price             NUMERIC(30,18) NOT NULL,
+    entry_amount_sol        NUMERIC(30,18) NOT NULL,
     profit_targets          JSONB,  -- JSON array of target percentages
     targets_hit             JSONB, -- JSON array of hit targets
     trailing_stop_active    BOOLEAN DEFAULT FALSE,
-    trailing_stop_price     NUMERIC(30,6),
-    peak_price              NUMERIC(30,6),
+    trailing_stop_price     NUMERIC(30,18),
+    peak_price              NUMERIC(30,18),
     peak_profit_percent     NUMERIC(10,4),
-    stop_loss_price         NUMERIC(30,6),
+    stop_loss_price         NUMERIC(30,18),
     remaining_fraction      NUMERIC(5,4) NOT NULL DEFAULT 1.0,
     entry_time              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_updated            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -348,7 +347,7 @@ CREATE TABLE IF NOT EXISTS signal_aggregation (
     token_address           TEXT NOT NULL,
     wallet_address          TEXT NOT NULL,
     direction               TEXT NOT NULL CHECK(direction IN ('BUY', 'SELL')),
-    amount_sol              NUMERIC(30,6) NOT NULL,
+    amount_sol              NUMERIC(30,18) NOT NULL,
     signature               TEXT,
     is_consensus            BOOLEAN DEFAULT FALSE,
     consensus_wallet_count  INTEGER,
@@ -375,8 +374,8 @@ CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus
 -- Wallet copy performance: Per-wallet copy trading metrics
 CREATE TABLE IF NOT EXISTS wallet_copy_performance (
     wallet_address      TEXT PRIMARY KEY,
-    copy_pnl_7d         NUMERIC(30,6) DEFAULT 0.0,
-    copy_pnl_30d        NUMERIC(30,6) DEFAULT 0.0,
+    copy_pnl_7d         NUMERIC(30,18) DEFAULT 0.0,
+    copy_pnl_30d        NUMERIC(30,18) DEFAULT 0.0,
     signal_success_rate NUMERIC(5,4) DEFAULT 0.0,
     avg_return_per_trade NUMERIC(10,4) DEFAULT 0.0,
     total_trades        INTEGER DEFAULT 0,
@@ -444,9 +443,9 @@ CREATE TABLE IF NOT EXISTS webhook_configuration (
 CREATE TABLE IF NOT EXISTS wqs_pnl_correlation (
     wallet_address          TEXT PRIMARY KEY,
     wqs_score_at_promotion NUMERIC(10,2) NOT NULL,
-    actual_copy_pnl_7d_sol NUMERIC(30,6),
-    actual_copy_pnl_30d_sol NUMERIC(30,6),
-    actual_copy_pnl_all_sol NUMERIC(30,6),
+    actual_copy_pnl_7d_sol NUMERIC(30,18),
+    actual_copy_pnl_30d_sol NUMERIC(30,18),
+    actual_copy_pnl_all_sol NUMERIC(30,18),
     copy_trade_count_7d    INTEGER DEFAULT 0,
     copy_trade_count_30d   INTEGER DEFAULT 0,
     copy_trade_count_all   INTEGER DEFAULT 0,

@@ -5,7 +5,7 @@ import type { ConfigResponse } from '../types'
 export function useConfig() {
   return useQuery({
     queryKey: ['config'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<ConfigResponse>('/config')
       return data
     },

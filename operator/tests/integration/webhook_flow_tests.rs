@@ -279,10 +279,12 @@ async fn test_unique_uuid_for_different_inputs() {
 /// Test duplicate trade_uuid rejection
 #[tokio::test]
 async fn test_duplicate_trade_uuid_rejection() {
-    use chimera_operator::config::DatabaseConfig;
-    use chimera_operator::db::{init_pool, insert_trade, run_migrations, trade_uuid_exists};
+    use chimera_operator::db_abstraction::{
+        create_database, Database, DatabaseConfig, DbPool, InsertTrade,
+    };
     use rust_decimal::Decimal;
     use std::str::FromStr;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     // This test verifies that the idempotency check works
@@ -290,32 +292,27 @@ async fn test_duplicate_trade_uuid_rejection() {
 
     // Create a test database
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test_webhook_dup.db");
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-    let pool = init_pool(&config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test_webhook_dup.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
     // Insert a trade with a specific UUID
     let test_uuid = "test-duplicate-uuid-12345";
-    insert_trade(
-        &pool,
-        test_uuid,
-        "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
-        Some("USDC"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("0.5").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: test_uuid.to_string(),
+        wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+        token_address: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
+        token_symbol: Some("USDC".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("0.5").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .expect("Failed to insert test trade");
 
     // Check that the UUID exists
-    let exists = trade_uuid_exists(&pool, test_uuid)
+    let exists = db.trade_uuid_exists(test_uuid)
         .await
         .expect("Failed to check trade UUID");
 
@@ -323,7 +320,7 @@ async fn test_duplicate_trade_uuid_rejection() {
 
     // Check that a different UUID doesn't exist
     let different_uuid = "different-uuid-67890";
-    let not_exists = trade_uuid_exists(&pool, different_uuid)
+    let not_exists = db.trade_uuid_exists(different_uuid)
         .await
         .expect("Failed to check different trade UUID");
 

@@ -13,7 +13,7 @@
 //! primary stop-loss threshold provide coverage throughout this gap. RSI is a
 //! secondary, not primary, defense.
 
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::engine::volume_cache::VolumeCache;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;
@@ -32,7 +32,7 @@ pub enum MomentumExitAction {
 /// Momentum exit detector
 pub struct MomentumExit {
     #[allow(dead_code)]
-    db: DbPool,
+    db: Arc<dyn Database>,
     price_cache: Arc<PriceCache>,
     volume_cache: Option<Arc<VolumeCache>>,
     /// Grace period matching stop_loss.rs wick_protection_secs — price-drop check is suppressed
@@ -42,7 +42,7 @@ pub struct MomentumExit {
 
 impl MomentumExit {
     /// Create a new momentum exit detector
-    pub fn new(db: DbPool, price_cache: Arc<PriceCache>, wick_protection_secs: u64) -> Self {
+    pub fn new(db: Arc<dyn Database>, price_cache: Arc<PriceCache>, wick_protection_secs: u64) -> Self {
         Self {
             db,
             price_cache,
@@ -53,7 +53,7 @@ impl MomentumExit {
 
     /// Create with volume cache
     pub fn with_volume_cache(
-        db: DbPool,
+        db: Arc<dyn Database>,
         price_cache: Arc<PriceCache>,
         volume_cache: Arc<VolumeCache>,
         wick_protection_secs: u64,

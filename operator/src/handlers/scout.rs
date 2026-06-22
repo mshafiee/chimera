@@ -13,8 +13,8 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::db::DbPool;
-use crate::error::AppError;
+use crate::db_abstraction::{Database, DbPool};
+use crate::error::{AppError, AppResult};
 
 // Import ApiState for shared state
 use crate::handlers::ApiState;
@@ -198,17 +198,26 @@ pub async fn trigger_scout_run(
 // HELPER FUNCTIONS
 // =============================================================================
 
+fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
+    match db.pool() {
+        DbPool::SQLite(p) => Ok(p),
+        _ => Err(AppError::Internal("Only SQLite backend is supported".to_string())),
+    }
+}
+
 struct WalletStatistics {
     total_wallets: i64,
     last_analysis_time: Option<String>,
     avg_analysis_time: f64,
 }
 
-async fn get_wallet_statistics(db: &DbPool) -> Result<WalletStatistics, AppError> {
+async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistics, AppError> {
+    let pool = sqlite_pool(db)?;
+
     let total_wallets: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -216,7 +225,7 @@ async fn get_wallet_statistics(db: &DbPool) -> Result<WalletStatistics, AppError
     let last_time: Option<String> = sqlx::query_scalar(
         "SELECT MAX(updated_at) FROM wallets WHERE updated_at IS NOT NULL"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -227,7 +236,9 @@ async fn get_wallet_statistics(db: &DbPool) -> Result<WalletStatistics, AppError
     })
 }
 
-async fn calculate_wqs_distribution(db: &DbPool) -> Result<Vec<WQSBucket>, AppError> {
+async fn calculate_wqs_distribution(db: &Arc<dyn Database>) -> Result<Vec<WQSBucket>, AppError> {
+    let pool = sqlite_pool(db)?;
+
     let ranges = vec![
         ("0-20", 0.0, 20.0),
         ("20-40", 20.0, 40.0),
@@ -240,7 +251,7 @@ async fn calculate_wqs_distribution(db: &DbPool) -> Result<Vec<WQSBucket>, AppEr
     let total_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -250,7 +261,7 @@ async fn calculate_wqs_distribution(db: &DbPool) -> Result<Vec<WQSBucket>, AppEr
         )
         .bind(min)
         .bind(max)
-        .fetch_one(db)
+        .fetch_one(&pool)
         .await
         .map_err(AppError::Database)?;
 
@@ -276,11 +287,13 @@ struct WQSStatistics {
     total_count: i64,
 }
 
-async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError> {
+async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistics, AppError> {
+    let pool = sqlite_pool(db)?;
+
     let total_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -296,7 +309,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
     let avg: Option<f64> = sqlx::query_scalar(
         "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score IS NOT NULL"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -307,7 +320,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
             "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
         )
         .bind(total_count / 2 - 1)
-        .fetch_one(db)
+        .fetch_one(&pool)
         .await
         .map_err(AppError::Database)?;
 
@@ -315,7 +328,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
             "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
         )
         .bind(total_count / 2)
-        .fetch_one(db)
+        .fetch_one(&pool)
         .await
         .map_err(AppError::Database)?;
 
@@ -326,7 +339,7 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
             "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
         )
         .bind(total_count / 2)
-        .fetch_one(db)
+        .fetch_one(&pool)
         .await
         .map_err(AppError::Database)?
     };
@@ -338,11 +351,13 @@ async fn calculate_wqs_statistics(db: &DbPool) -> Result<WQSStatistics, AppError
     })
 }
 
-async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, AppError> {
+async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsResponse, AppError> {
+    let pool = sqlite_pool(db)?;
+
     let total_analyzed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -350,7 +365,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     let rug_check_rejections: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED'"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -358,7 +373,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     let backtest_passed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND notes LIKE '%Backtest: PASSED%'"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -372,7 +387,7 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
     let validation_passed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'"
     )
-    .fetch_one(db)
+    .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
@@ -387,23 +402,24 @@ async fn calculate_scout_metrics(db: &DbPool) -> Result<ScoutMetricsResponse, Ap
         rug_check_rejections,
         backtest_success_rate,
         validation_pass_rate,
-        avg_analysis_time_seconds: 0.0, // Would be calculated from actual run data
-        liquidity_validation_rate: 0.0, // Would be calculated from validation data
+        avg_analysis_time_seconds: 0.0,
+        liquidity_validation_rate: 0.0,
     })
 }
 
-async fn get_promotion_queue(db: &DbPool) -> Result<Vec<PromotionItem>, AppError> {
+async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem>, AppError> {
+    let pool = sqlite_pool(db)?;
+
     let rows = sqlx::query_as::<_, (String, f64, String, String)>(
         "SELECT address, wqs_score, notes, promoted_at FROM wallets
          WHERE status = 'ACTIVE' AND promoted_at IS NOT NULL
          ORDER BY promoted_at DESC LIMIT 20"
     )
-    .fetch_all(db)
+    .fetch_all(&pool)
     .await
     .map_err(AppError::Database)?;
 
     let items = rows.into_iter().map(|(address, wqs_score, notes, promoted_at)| {
-        // Determine backtest success from notes
         let backtest_success = notes.contains("Backtest: PASSED");
 
         PromotionItem {
@@ -418,13 +434,15 @@ async fn get_promotion_queue(db: &DbPool) -> Result<Vec<PromotionItem>, AppError
     Ok(items)
 }
 
-async fn get_rejection_queue(db: &DbPool) -> Result<Vec<RejectionItem>, AppError> {
+async fn get_rejection_queue(db: &Arc<dyn Database>) -> Result<Vec<RejectionItem>, AppError> {
+    let pool = sqlite_pool(db)?;
+
     let rows = sqlx::query_as::<_, (String, f64, String, String)>(
         "SELECT address, wqs_score, notes, updated_at FROM wallets
          WHERE status = 'REJECTED'
          ORDER BY updated_at DESC LIMIT 20"
     )
-    .fetch_all(db)
+    .fetch_all(&pool)
     .await
     .map_err(AppError::Database)?;
 

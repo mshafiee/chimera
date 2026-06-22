@@ -9,16 +9,17 @@
 //! manual reset or automatic recovery.
 
 use crate::config::CircuitBreakerConfig;
-use crate::db::{self, DbPool};
+use crate::db_abstraction::Database;
 use crate::error::AppResult;
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use std::sync::Arc;
 
 /// Persist circuit breaker state to the database
 async fn persist_cb_state(
-    db: &DbPool,
+    db: &dyn Database,
     state: CircuitBreakerState,
     tripped_at: Option<DateTime<Utc>>,
     trip_reason: Option<&str>,
@@ -29,27 +30,16 @@ async fn persist_cb_state(
         CircuitBreakerState::Cooldown => "Cooldown",
     };
     let tripped_at_str = tripped_at.map(|t| t.to_rfc3339());
-    sqlx::query(
-        r#"UPDATE circuit_breaker_state
-           SET state = ?, tripped_at = ?, trip_reason = ?, updated_at = datetime('now')
-           WHERE id = 1"#,
-    )
-    .bind(state_str)
-    .bind(tripped_at_str)
-    .bind(trip_reason)
-    .execute(db)
-    .await?;
-    Ok(())
+    db.update_circuit_breaker_state(state_str, tripped_at_str.as_deref(), trip_reason)
+        .await
 }
 
 /// Load persisted circuit breaker state from the database
-async fn load_cb_state(db: &DbPool) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
-    let row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT state, tripped_at, trip_reason FROM circuit_breaker_state WHERE id = 1",
-    )
-    .fetch_optional(db)
-    .await?;
-    Ok(row)
+async fn load_cb_state(db: &dyn Database) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
+    match db.get_circuit_breaker_state().await {
+        Ok(state) => Ok(Some((state.state, state.tripped_at, state.trip_reason))),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Circuit breaker state
@@ -143,7 +133,7 @@ pub struct CircuitBreaker {
     /// Configuration
     config: CircuitBreakerConfig,
     /// Database pool
-    db: DbPool,
+    db: Arc<dyn Database>,
     /// Internal state
     state: Arc<RwLock<InternalState>>,
     /// Check interval
@@ -159,14 +149,14 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     /// Create a new circuit breaker
-    pub fn new(config: CircuitBreakerConfig, db: DbPool, initial_capital_sol: Decimal) -> Self {
+    pub fn new(config: CircuitBreakerConfig, db: Arc<dyn Database>, initial_capital_sol: Decimal) -> Self {
         Self::new_with_ws(config, db, None, initial_capital_sol)
     }
 
     /// Create a new circuit breaker with WebSocket support
     pub fn new_with_ws(
         config: CircuitBreakerConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         ws_state: Option<Arc<crate::handlers::WsState>>,
         initial_capital_sol: Decimal,
     ) -> Self {
@@ -195,7 +185,7 @@ impl CircuitBreaker {
     /// Restore persisted circuit breaker state from DB on startup.
     /// Call this after construction but before the server starts accepting connections.
     pub async fn restore_from_db(&self) -> AppResult<()> {
-        match load_cb_state(&self.db).await? {
+        match load_cb_state(self.db.as_ref()).await? {
             Some((state_str, tripped_at_str, trip_reason_str)) if state_str != "Active" => {
                 let tripped_at = tripped_at_str
                     .as_deref()
@@ -256,7 +246,94 @@ impl CircuitBreaker {
         self.state.read().trip_reason.clone()
     }
 
+    /// Check all breach conditions and return the reason if breached.
+    /// Returns None if no breach conditions are met.
+    async fn check_breach_conditions(&self) -> AppResult<Option<TripReason>> {
+        let (unrealized_sol, realized_pnl_sol, mut realized_usd, null_price_pnl_sol) =
+            self.db.get_evaluation_data().await?;
+
+        let total_capital = *self.total_capital_sol.read();
+        if total_capital > dec!(0.1) {
+            let total_loss_sol = realized_pnl_sol + unrealized_sol;
+            let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
+            let loss_threshold = -self.config.portfolio_stop_loss_percent;
+            if daily_loss_percent < loss_threshold {
+                return Ok(Some(TripReason::PortfolioStop24h {
+                    loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
+                    threshold: self
+                        .config
+                        .portfolio_stop_loss_percent
+                        .to_f64()
+                        .unwrap_or(0.0),
+                }));
+            }
+        }
+
+        if null_price_pnl_sol != Decimal::ZERO {
+            tracing::warn!(
+                null_price_pnl_sol = %null_price_pnl_sol,
+                "Circuit breaker: positions closed without USD price data in 24h window — \
+                 estimating their PnL from SOL-denominated value"
+            );
+        }
+
+        let sol_price_usd = if let Some(ref cache) = self.price_cache {
+            cache.get_price_usd(crate::constants::mints::SOL)
+        } else {
+            None
+        };
+
+        if let Some(price) = sol_price_usd {
+            if price > Decimal::ZERO {
+                if null_price_pnl_sol != Decimal::ZERO {
+                    let estimated = null_price_pnl_sol * price;
+                    realized_usd += estimated;
+                }
+
+                let unrealized_usd = unrealized_sol * price;
+                let total_pnl_usd = realized_usd + unrealized_usd;
+
+                if total_pnl_usd < Decimal::ZERO
+                    && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
+                {
+                    return Ok(Some(TripReason::MaxLoss24h {
+                        loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
+                        threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
+                    }));
+                }
+            } else {
+                tracing::warn!(
+                    "SOL price from cache is zero — skipping USD loss check for this tick"
+                );
+            }
+        } else {
+            tracing::warn!(
+                "SOL price unavailable (stale cache) — skipping USD loss check for this tick"
+            );
+        }
+
+        let consecutive = self.db.get_consecutive_losses().await?;
+        if consecutive >= self.config.max_consecutive_losses {
+            return Ok(Some(TripReason::ConsecutiveLosses {
+                count: consecutive,
+                threshold: self.config.max_consecutive_losses,
+            }));
+        }
+
+        let total_capital = *self.total_capital_sol.read();
+        let drawdown = self.db.get_max_drawdown_percent(total_capital).await?;
+        if drawdown >= self.config.max_drawdown_percent {
+            return Ok(Some(TripReason::MaxDrawdown {
+                drawdown: drawdown.to_f64().unwrap_or(0.0),
+                threshold: self.config.max_drawdown_percent.to_f64().unwrap_or(0.0),
+            }));
+        }
+
+        Ok(None)
+    }
+
     /// Evaluate trip conditions and update state
+    #[tracing::instrument(skip(self))]
     pub async fn evaluate(&self) -> AppResult<()> {
         // FIX [R-M3]: Check interval under write lock but do NOT update last_check yet.
         // last_check is updated only after DB queries succeed (see below).
@@ -305,161 +382,11 @@ impl CircuitBreaker {
             return Ok(());
         }
 
-        // Query unrealized SOL PnL for active/exiting positions
-        let unrealized_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
-            FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING')
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await?;
-        let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
-
-        // FIX [R-H4]: Check 24h SOL portfolio stop using two clean separate queries to
-        // avoid double-counting positions that are still ACTIVE/EXITING but also have a
-        // closed_at timestamp (e.g. stuck positions).
-        let total_capital = *self.total_capital_sol.read();
-        if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
-            // Query 1: realized PnL from CLOSED positions in the last 24h
-            let realized_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
-                FROM positions
-                WHERE state = 'CLOSED'
-                  AND closed_at >= datetime('now', '-24 hours')
-                "#,
-            )
-            .fetch_one(&self.db)
-            .await?;
-            // Query 2: unrealized PnL from currently open positions (already fetched above)
-            // unrealized_sol already holds SUM(unrealized_pnl_sol) WHERE state IN ('ACTIVE','EXITING')
-            let realized_pnl_sol =
-                Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
-            let total_loss_sol = realized_pnl_sol + unrealized_sol;
-            let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = -self.config.portfolio_stop_loss_percent;
-            if daily_loss_percent < loss_threshold {
-                self.trip(TripReason::PortfolioStop24h {
-                    loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: self
-                        .config
-                        .portfolio_stop_loss_percent
-                        .to_f64()
-                        .unwrap_or(0.0),
-                })
-                .await?;
-                return Ok(());
-            }
-        }
-
-        // Sum realized USD PnL in the last 24h — explicitly exclude NULL rows.
-        // Positions closed when SOL price was unavailable have NULL realized_pnl_usd.
-        // SUM() silently ignores those rows, undercounting losses. We recover them
-        // by summing their SOL PnL separately and converting at the current price.
-        let realized_usd_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
-            FROM positions
-            WHERE state = 'CLOSED'
-              AND closed_at >= datetime('now', '-24 hours')
-              AND realized_pnl_usd IS NOT NULL
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        let null_price_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
-            FROM positions
-            WHERE state = 'CLOSED'
-              AND closed_at >= datetime('now', '-24 hours')
-              AND realized_pnl_usd IS NULL
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        if null_price_pnl_sol_f64 != 0.0 {
-            tracing::warn!(
-                null_price_pnl_sol = null_price_pnl_sol_f64,
-                "Circuit breaker: positions closed without USD price data in 24h window — \
-                 estimating their PnL from SOL-denominated value"
-            );
-        }
-
-        let mut realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
-
-        // Get SOL price in USD from price cache
-        let sol_price_usd = if let Some(ref cache) = self.price_cache {
-            cache.get_price_usd(crate::constants::mints::SOL)
-        } else {
-            None
-        };
-
-        if let Some(price) = sol_price_usd {
-            if price > Decimal::ZERO {
-                // Add best-effort USD estimate for positions closed without price data
-                if null_price_pnl_sol_f64 != 0.0 {
-                    let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
-                        .unwrap_or(Decimal::ZERO)
-                        * price;
-                    realized_usd += estimated;
-                }
-
-                let unrealized_usd = unrealized_sol * price;
-                let total_pnl_usd = realized_usd + unrealized_usd;
-
-                // Check 24h loss in USD (sum of realized USD + unrealized USD)
-                if total_pnl_usd < Decimal::ZERO
-                    && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
-                {
-                    self.trip(TripReason::MaxLoss24h {
-                        loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
-                        threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
-                    })
-                    .await?;
-                    return Ok(());
-                }
-            } else {
-                tracing::warn!(
-                    "SOL price from cache is zero — skipping USD loss check for this tick"
-                );
-            }
-        } else {
-            tracing::warn!(
-                "SOL price unavailable (stale cache) — skipping USD loss check for this tick"
-            );
-        }
-
-        // Check consecutive losses
-        let consecutive = db::get_consecutive_losses(&self.db).await?;
-        if consecutive >= self.config.max_consecutive_losses {
-            self.trip(TripReason::ConsecutiveLosses {
-                count: consecutive,
-                threshold: self.config.max_consecutive_losses,
-            })
-            .await?;
+        if let Some(reason) = self.check_breach_conditions().await? {
+            self.trip(reason).await?;
             return Ok(());
         }
-
-        // Check drawdown
-        let total_capital = *self.total_capital_sol.read();
-        let drawdown = db::get_max_drawdown_percent(&self.db, total_capital).await?;
-        if drawdown >= self.config.max_drawdown_percent {
-            self.trip(TripReason::MaxDrawdown {
-                drawdown: drawdown.to_f64().unwrap_or(0.0),
-                threshold: self.config.max_drawdown_percent.to_f64().unwrap_or(0.0),
-            })
-            .await?;
-            return Ok(());
-        }
-
-        // FIX [R-M3]: Update last_check only after all DB queries have succeeded.
-        // If any query above fails (early return via ?), last_check is not advanced,
-        // so the next call will retry immediately rather than silently skipping a cycle.
+        // Update last_check
         {
             self.state.write().last_check = Some(Utc::now());
         }
@@ -468,6 +395,7 @@ impl CircuitBreaker {
     }
 
     /// Trip the circuit breaker
+    #[tracing::instrument(skip(self))]
     async fn trip(&self, reason: TripReason) -> AppResult<()> {
         let reason_str = reason.to_string();
         let now = Utc::now();
@@ -486,7 +414,7 @@ impl CircuitBreaker {
 
         // FIX [R-C1]: Persist state to DB so it survives restarts.
         if let Err(e) = persist_cb_state(
-            &self.db,
+            self.db.as_ref(),
             CircuitBreakerState::Tripped,
             Some(now),
             Some(&reason_str),
@@ -498,8 +426,7 @@ impl CircuitBreaker {
         }
 
         // Log to config audit
-        db::log_config_change(
-            &self.db,
+        self.db.log_config_change(
             "circuit_breaker",
             Some("ACTIVE"),
             "TRIPPED",
@@ -538,8 +465,7 @@ impl CircuitBreaker {
             "Circuit breaker entering cooldown"
         );
 
-        db::log_config_change(
-            &self.db,
+        self.db.log_config_change(
             "circuit_breaker",
             Some("TRIPPED"),
             "COOLDOWN",
@@ -557,180 +483,14 @@ impl CircuitBreaker {
     /// Exit cooldown: re-evaluate breach conditions before resuming.
     /// If the breach condition still holds, re-trip instead of going Active.
     async fn exit_cooldown(&self) -> AppResult<()> {
-        // Query unrealized SOL PnL for active/exiting positions
-        let unrealized_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0)
-            FROM positions
-            WHERE state IN ('ACTIVE', 'EXITING')
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await?;
-        let unrealized_sol = Decimal::from_f64_retain(unrealized_sol_f64).unwrap_or(Decimal::ZERO);
-
-        // FIX [R-H4]: Re-check portfolio stop using two clean separate queries (same as evaluate()).
-        let total_capital = *self.total_capital_sol.read();
-        if total_capital > Decimal::from_f64_retain(0.1).unwrap_or(Decimal::ZERO) {
-            // Query 1: realized PnL from CLOSED positions in the last 24h only
-            let realized_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
-                r#"
-                SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
-                FROM positions
-                WHERE state = 'CLOSED'
-                  AND closed_at >= datetime('now', '-24 hours')
-                "#,
-            )
-            .fetch_one(&self.db)
-            .await?;
-            // Query 2: unrealized PnL from open positions (already in unrealized_sol)
-            let realized_pnl_sol =
-                Decimal::from_f64_retain(realized_pnl_sol_f64).unwrap_or(Decimal::ZERO);
-            let total_loss_sol = realized_pnl_sol + unrealized_sol;
-            let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = -self.config.portfolio_stop_loss_percent;
-            if daily_loss_percent < loss_threshold {
-                let trip_reason = TripReason::PortfolioStop24h {
-                    loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: self
-                        .config
-                        .portfolio_stop_loss_percent
-                        .to_f64()
-                        .unwrap_or(0.0),
-                };
-                // FIX [R-M2]: Log re-trip event before calling trip().
-                tracing::warn!(
-                    reason = ?trip_reason,
-                    original_tripped_at = ?self.state.read().tripped_at,
-                    "Circuit breaker re-tripped during cooldown exit — clock reset"
-                );
-                self.trip(trip_reason).await?;
-                tracing::warn!("Circuit breaker cooldown expired but daily SOL loss still breached — re-tripped");
-                return Ok(());
-            }
-        }
-
-        // Re-evaluate breach conditions before clearing cooldown.
-        // Sum realized USD PnL in the last 24h — explicitly exclude NULL rows (see evaluate()).
-        let realized_usd_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(realized_pnl_usd), 0.0)
-            FROM positions
-            WHERE state = 'CLOSED'
-              AND closed_at >= datetime('now', '-24 hours')
-              AND realized_pnl_usd IS NOT NULL
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        let null_price_pnl_sol_f64: f64 = sqlx::query_scalar::<_, f64>(
-            r#"
-            SELECT COALESCE(SUM(realized_pnl_sol), 0.0)
-            FROM positions
-            WHERE state = 'CLOSED'
-              AND closed_at >= datetime('now', '-24 hours')
-              AND realized_pnl_usd IS NULL
-            "#,
-        )
-        .fetch_one(&self.db)
-        .await?;
-
-        if null_price_pnl_sol_f64 != 0.0 {
+        if let Some(reason) = self.check_breach_conditions().await? {
             tracing::warn!(
-                null_price_pnl_sol = null_price_pnl_sol_f64,
-                "Circuit breaker cooldown: positions closed without USD price data in 24h window — \
-                 estimating their PnL from SOL-denominated value"
-            );
-        }
-
-        let mut realized_usd = Decimal::from_f64_retain(realized_usd_f64).unwrap_or(Decimal::ZERO);
-
-        // Get SOL price in USD from price cache.
-        // If the price cache is unavailable or stale (returns None/zero), skip the
-        // USD threshold check entirely — computing unrealized_usd as 0 would
-        // understate the loss and allow cooldown exit while the breach still holds.
-        let sol_price_usd = if let Some(ref cache) = self.price_cache {
-            cache.get_price_usd(crate::constants::mints::SOL)
-        } else {
-            None
-        };
-
-        let usd_check_result = if let Some(price) = sol_price_usd {
-            // Add best-effort USD estimate for positions closed without price data
-            if null_price_pnl_sol_f64 != 0.0 {
-                let estimated = Decimal::from_f64_retain(null_price_pnl_sol_f64)
-                    .unwrap_or(Decimal::ZERO)
-                    * price;
-                realized_usd += estimated;
-            }
-            let unrealized_usd = unrealized_sol * price;
-            let total_pnl_usd = realized_usd + unrealized_usd;
-            Some(total_pnl_usd)
-        } else {
-            tracing::warn!(
-                "SOL price unavailable (stale cache) — cannot verify USD loss threshold. \
-                 Extending cooldown until price data is available."
-            );
-            // Do not exit cooldown when we cannot verify the loss threshold — a stale
-            // cache could mask an ongoing breach. The caller will retry on the next tick.
-            return Ok(());
-        };
-
-        if let Some(total_pnl_usd) = usd_check_result {
-            if total_pnl_usd < Decimal::ZERO && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
-            {
-                // Loss still breaches threshold — re-trip rather than resume.
-                let trip_reason = TripReason::MaxLoss24h {
-                    loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
-                    threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
-                };
-                // FIX [R-M2]: Log re-trip event before calling trip().
-                tracing::warn!(
-                    reason = ?trip_reason,
-                    original_tripped_at = ?self.state.read().tripped_at,
-                    "Circuit breaker re-tripped during cooldown exit — clock reset"
-                );
-                self.trip(trip_reason).await?;
-                tracing::warn!("Circuit breaker cooldown expired but loss threshold still breached — re-tripped");
-                return Ok(());
-            }
-        }
-
-        let consecutive = db::get_consecutive_losses(&self.db).await?;
-        if consecutive >= self.config.max_consecutive_losses {
-            let trip_reason = TripReason::ConsecutiveLosses {
-                count: consecutive,
-                threshold: self.config.max_consecutive_losses,
-            };
-            // FIX [R-M2]: Log re-trip event before calling trip().
-            tracing::warn!(
-                reason = ?trip_reason,
+                reason = ?reason,
                 original_tripped_at = ?self.state.read().tripped_at,
                 "Circuit breaker re-tripped during cooldown exit — clock reset"
             );
-            self.trip(trip_reason).await?;
-            tracing::warn!("Circuit breaker cooldown expired but consecutive losses still breached — re-tripped");
-            return Ok(());
-        }
-
-        let total_capital = *self.total_capital_sol.read();
-        let drawdown = db::get_max_drawdown_percent(&self.db, total_capital).await?;
-        if drawdown >= self.config.max_drawdown_percent {
-            let trip_reason = TripReason::MaxDrawdown {
-                drawdown: drawdown.to_f64().unwrap_or(0.0),
-                threshold: self.config.max_drawdown_percent.to_f64().unwrap_or(0.0),
-            };
-            // FIX [R-M2]: Log re-trip event before calling trip().
-            tracing::warn!(
-                reason = ?trip_reason,
-                original_tripped_at = ?self.state.read().tripped_at,
-                "Circuit breaker re-tripped during cooldown exit — clock reset"
-            );
-            self.trip(trip_reason).await?;
-            tracing::warn!(
-                "Circuit breaker cooldown expired but drawdown still breached — re-tripped"
-            );
+            self.trip(reason).await?;
+            tracing::warn!("Circuit breaker cooldown expired but breach condition still present — re-tripped");
             return Ok(());
         }
 
@@ -744,12 +504,11 @@ impl CircuitBreaker {
         tracing::info!("Circuit breaker exiting cooldown - trading resumed");
 
         // FIX [R-C1]: Persist Active state so restarts see cleared state.
-        if let Err(e) = persist_cb_state(&self.db, CircuitBreakerState::Active, None, None).await {
+        if let Err(e) = persist_cb_state(self.db.as_ref(), CircuitBreakerState::Active, None, None).await {
             tracing::error!(error = %e, "Failed to persist circuit breaker ACTIVE state to DB after cooldown exit");
         }
 
-        db::log_config_change(
-            &self.db,
+        self.db.log_config_change(
             "circuit_breaker",
             Some("COOLDOWN"),
             "ACTIVE",
@@ -779,12 +538,11 @@ impl CircuitBreaker {
         );
 
         // FIX [R-C1]: Persist Active state so restarts don't re-trip unnecessarily.
-        if let Err(e) = persist_cb_state(&self.db, CircuitBreakerState::Active, None, None).await {
+        if let Err(e) = persist_cb_state(self.db.as_ref(), CircuitBreakerState::Active, None, None).await {
             tracing::error!(error = %e, "Failed to persist circuit breaker ACTIVE state to DB after reset");
         }
 
-        db::log_config_change(
-            &self.db,
+        self.db.log_config_change(
             "circuit_breaker",
             Some(&previous_state.to_string()),
             "ACTIVE",
@@ -800,8 +558,7 @@ impl CircuitBreaker {
     pub async fn manual_trip(&self, admin: &str, reason: String) -> AppResult<()> {
         self.trip(TripReason::Manual { reason }).await?;
 
-        db::log_config_change(
-            &self.db,
+        self.db.log_config_change(
             "circuit_breaker",
             Some("ACTIVE"),
             "TRIPPED",

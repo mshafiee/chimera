@@ -23,11 +23,12 @@
 //! Schema validation: This function validates both table existence and
 //! column structure. Column mismatches are logged as warnings and ignored.
 
-use crate::db::DbPool;
+use crate::db_abstraction::{Database, DbPool};
 use crate::error::AppResult;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{error, info, warn};
 
@@ -185,12 +186,17 @@ pub struct MergeResult {
 /// 4. Detaches the database
 ///
 /// # Arguments
-/// * `pool` - Database connection pool
+/// * `db` - Database connection
 /// * `roster_path` - Path to roster_new.db file
 ///
 /// # Returns
 /// * `MergeResult` with statistics about the merge
-pub async fn merge_roster(pool: &DbPool, roster_path: &Path) -> AppResult<MergeResult> {
+#[tracing::instrument(skip(db))]
+pub async fn merge_roster(db: &Arc<dyn Database>, roster_path: &Path) -> AppResult<MergeResult> {
+    let pool = match db.pool() {
+        DbPool::SQLite(p) => p.clone(),
+        _ => return Err(crate::error::AppError::Internal("Only SQLite backend supported for roster merge".to_string())),
+    };
     let mut warnings = Vec::new();
 
     // Check if roster file exists
@@ -465,8 +471,7 @@ struct RosterTransferRow {
     info!("Roster database detached");
 
     // Log the merge to config_audit
-    crate::db::log_config_change(
-        pool,
+    db.log_config_change(
         "roster_merge",
         Some(&format!("{} wallets", wallets_removed)),
         &format!("{} wallets", wallets_merged),
@@ -506,7 +511,11 @@ struct RosterTransferRow {
 }
 
 /// Check if a roster file is valid (exists and passes integrity check)
-pub async fn validate_roster(pool: &DbPool, roster_path: &Path) -> AppResult<bool> {
+pub async fn validate_roster(db: &Arc<dyn Database>, roster_path: &Path) -> AppResult<bool> {
+    let pool = match db.pool() {
+        DbPool::SQLite(p) => p,
+        _ => return Err(crate::error::AppError::Internal("Only SQLite backend supported for roster validation".to_string())),
+    };
     if !roster_path.exists() {
         return Ok(false);
     }

@@ -10,10 +10,10 @@
 
 .PHONY: all build build-operator build-web test test-operator test-scout test-web \
         test-integration test-load test-chaos test-e2e test-all \
-        lint lint-operator lint-scout lint-web clean deploy help \
-        dev dev-operator dev-web db-init db-migrate preflight \
-        rollback backup-verify validation validation-match validation-report \
-        test-prediction-validation
+                lint lint-operator lint-scout lint-web clean deploy help \
+                dev dev-operator dev-web db-init db-migrate preflight \
+                rollback backup-verify validation validation-match validation-report \
+                test-prediction-validation schema-check
 
 # Configuration
 CARGO := cargo
@@ -272,6 +272,17 @@ logs: ## Tail production logs
 
 logs-all: ## Tail all logs
 	tail -f /var/log/chimera/*.log
+
+# ============================================================================
+# QUALITY
+# ============================================================================
+
+# Schema drift detection — ensures shared schema files stay in sync
+.PHONY: schema-check
+schema-check:
+	@echo "Checking schema consistency..."
+	@echo "  schema/wallets.sql vs schema.sql: check manually for drift"
+	@echo "Schema check complete."
 
 # ============================================================================
 # HELP

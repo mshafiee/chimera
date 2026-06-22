@@ -3,28 +3,24 @@
 //! Tests that multiple wallets buying the same token within 5 minutes
 //! triggers consensus detection and improves signal quality.
 
-use chimera_operator::config::DatabaseConfig;
-use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig,
+};
 use chimera_operator::monitoring::SignalAggregator;
 use rust_decimal::Decimal;
 use std::str::FromStr;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 #[tokio::test]
 async fn test_consensus_detection_two_wallets() {
     // Setup test database
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-
-    let pool = init_pool(&config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-
-    let aggregator = SignalAggregator::new(pool.clone());
+    let aggregator = SignalAggregator::new(db);
 
     // Test token address
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
@@ -71,17 +67,11 @@ async fn test_consensus_detection_two_wallets() {
 #[tokio::test]
 async fn test_consensus_detection_three_wallets() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-
-    let pool = init_pool(&config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-
-    let aggregator = SignalAggregator::new(pool.clone());
+    let aggregator = SignalAggregator::new(db);
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     // Add three wallets buying same token
@@ -124,18 +114,11 @@ async fn test_consensus_detection_three_wallets() {
 #[tokio::test]
 async fn test_consensus_expires_after_5_minutes() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-
-    // Set up DB before pausing time (pool init uses real timers)
-    let pool = init_pool(&config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-
-    let aggregator = SignalAggregator::new(pool.clone());
+    let aggregator = SignalAggregator::new(db);
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     // First wallet buys — records Instant::now()
@@ -169,17 +152,11 @@ async fn test_consensus_expires_after_5_minutes() {
 #[tokio::test]
 async fn test_no_consensus_for_sell_signals() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-
-    let pool = init_pool(&config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-
-    let aggregator = SignalAggregator::new(pool.clone());
+    let aggregator = SignalAggregator::new(db);
     let token_address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     // Multiple SELL signals should not trigger consensus
@@ -210,17 +187,11 @@ async fn test_no_consensus_for_sell_signals() {
 #[tokio::test]
 async fn test_consensus_different_tokens() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
-
-    let pool = init_pool(&config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-
-    let aggregator = SignalAggregator::new(pool.clone());
+    let aggregator = SignalAggregator::new(db);
     let token1 = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"; // USDC
     let token2 = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"; // USDT
 

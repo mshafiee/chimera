@@ -9,41 +9,45 @@
 //! - PnL precision with f64 round-trip
 //! - Orphaned position after trade deleted
 
-use chimera_operator::config::DatabaseConfig;
-use chimera_operator::db::{
-    close_position, init_pool, insert_trade, open_position, revert_position_exit, run_migrations,
-    update_trade_costs, update_trade_status,
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
 };
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
+use std::sync::Arc;
 use tempfile::TempDir;
+
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("db_integrity_test.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("db_integrity_test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
 }
 
 /// Insert a trade and return its UUID.
-async fn setup_trade(pool: &chimera_operator::db::DbPool, uuid: &str) {
-    insert_trade(
-        pool,
-        uuid,
-        "wallet_test",
-        "token_test",
-        Some("SYM"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+async fn setup_trade(db: &Arc<dyn Database>, uuid: &str) {
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_test".to_string(),
+        token_address: "token_test".to_string(),
+        token_symbol: Some("SYM".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 }
@@ -56,9 +60,16 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
     // The caller cannot distinguish "updated successfully" from "UUID not found".
     // This allows phantom state transitions that leave the actual trade stuck in PENDING.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
 
-    let result = update_trade_status(&pool, "nonexistent-uuid-xyz", "QUEUED", None, None).await;
+    let result = db
+        .update_trade_status(&UpdateTradeStatus {
+            trade_uuid: "nonexistent-uuid-xyz".to_string(),
+            status: "QUEUED".to_string(),
+            tx_signature: None,
+            error_message: None,
+        })
+        .await;
 
     assert!(
         result.is_err(),
@@ -66,6 +77,7 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
     );
 
     // Confirm nothing was actually inserted
+    let pool = sqlite_pool(&db);
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = ?")
         .bind("nonexistent-uuid-xyz")
         .fetch_one(&pool)
@@ -82,13 +94,19 @@ async fn test_update_trade_status_real_trade_affects_exactly_one_row() {
     // The function currently returns Ok(()) in both cases — callers must
     // independently verify row count by re-querying.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-real-trade";
-    setup_trade(&pool, uuid).await;
+    setup_trade(&db, uuid).await;
 
-    update_trade_status(&pool, uuid, "QUEUED", None, None)
-        .await
-        .unwrap();
+    db.update_trade_status(&UpdateTradeStatus {
+        trade_uuid: uuid.to_string(),
+        status: "QUEUED".to_string(),
+        tx_signature: None,
+        error_message: None,
+    })
+    .await
+    .unwrap();
 
     let status: (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
         .bind(uuid)
@@ -110,52 +128,53 @@ async fn test_close_position_closes_only_specified_position() {
     // the specified position is closed. If two positions were opened at different
     // prices, closing one leaves the other ACTIVE — no double-close bug.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
-    // Insert two trades for the same wallet+token
+    // Insert two trades for the same wallet but different tokens
+    // (activate_trade_and_open_position enforces one ACTIVE position per token)
     let uuid1 = "uuid-pos-1";
     let uuid2 = "uuid-pos-2";
-    for uuid in [uuid1, uuid2] {
-        insert_trade(
-            &pool,
-            uuid,
-            "wallet_multi",
-            "token_multi",
-            Some("M"),
-            "SHIELD",
-            "BUY",
-            Decimal::from_str("2.0").unwrap(),
-            "ACTIVE",
-        )
+    for (uuid, token) in [("uuid-pos-1", "token_A"), ("uuid-pos-2", "token_B")] {
+        db.insert_trade(&InsertTrade {
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet_multi".to_string(),
+            token_address: token.to_string(),
+            token_symbol: Some("M".to_string()),
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::from_str("2.0").unwrap(),
+            status: "ACTIVE".to_string(),
+        })
         .await
         .unwrap();
     }
 
-    // Open two positions: first at $1.00, second at $2.00
-    open_position(
-        &pool,
+    // Open two positions: first at $1.00, second at $2.00 for different tokens
+    db.activate_trade_and_open_position(
         uuid1,
         "wallet_multi",
-        "token_multi",
+        "token_A",
         Some("M"),
         "SHIELD",
         Decimal::from_str("2.0").unwrap(),
         Decimal::from_str("1.00").unwrap(),
         "sig1",
         None,
+        None,
     )
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid2,
         "wallet_multi",
-        "token_multi",
+        "token_B",
         Some("M"),
         "SHIELD",
         Decimal::from_str("2.0").unwrap(),
         Decimal::from_str("2.00").unwrap(),
         "sig2",
+        None,
         None,
     )
     .await
@@ -163,23 +182,21 @@ async fn test_close_position_closes_only_specified_position() {
 
     // Both positions are ACTIVE
     let active: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND token_address = ? AND state = 'ACTIVE'"
+        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND state = 'ACTIVE'"
     )
     .bind("wallet_multi")
-    .bind("token_multi")
     .fetch_one(&pool)
     .await
     .unwrap();
     assert_eq!(active.0, 2);
 
-    // Close ONLY uuid1 at $3.00
-    close_position(
-        &pool,
-        "token_multi",
+    // Close ONLY uuid1 (token_A) at $3.00
+    db.close_position_full(
+        uuid1,
         "wallet_multi",
+        "token_A",
         Decimal::from_str("3.00").unwrap(),
         "sig_exit",
-        uuid1,  // Only close this specific position
         None,
         Decimal::ONE,
         true,
@@ -192,7 +209,7 @@ async fn test_close_position_closes_only_specified_position() {
         "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND token_address = ? AND state = 'CLOSED'"
     )
     .bind("wallet_multi")
-    .bind("token_multi")
+    .bind("token_A")
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -217,24 +234,23 @@ async fn test_close_position_zero_exit_price_is_rejected() {
     // M11 FIX: close_position() now validates exit_price and returns Err when zero.
     // This prevents recording invalid PnL with exit_price=0.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-zero-exit";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet_z",
-        "token_z",
-        Some("Z"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_z".to_string(),
+        token_address: "token_z".to_string(),
+        token_symbol: Some("Z".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet_z",
         "token_z",
@@ -244,18 +260,18 @@ async fn test_close_position_zero_exit_price_is_rejected() {
         Decimal::from_str("100.0").unwrap(),
         "sig_z",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Close with exit_price = 0 should return Err
-    let result = close_position(
-        &pool,
-        "token_z",
+    let result = db.close_position_full(
+        uuid,
         "wallet_z",
+        "token_z",
         Decimal::ZERO,
         "sig_exit_z",
-        uuid,
         None,
         Decimal::ONE,
         true,
@@ -284,25 +300,24 @@ async fn test_open_position_zero_entry_price_is_rejected() {
     // M4 FIX: open_position() now validates entry_price and returns Err when zero.
     // This prevents creating untrackable positions that bypass stop-loss.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-zero-entry";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet_ze",
-        "token_ze",
-        None,
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_ze".to_string(),
+        token_address: "token_ze".to_string(),
+        token_symbol: None,
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 
-    let result = open_position(
-        &pool,
+    let result = db.activate_trade_and_open_position(
         uuid,
         "wallet_ze",
         "token_ze",
@@ -311,6 +326,7 @@ async fn test_open_position_zero_entry_price_is_rejected() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::ZERO, // zero entry price
         "sig_ze",
+        None,
         None,
     )
     .await;
@@ -338,13 +354,13 @@ async fn test_trade_costs_accumulate_on_retry() {
     // updates add to existing values rather than silently discarding the
     // first call's costs. Net effect: costs from all calls are summed.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-costs";
-    setup_trade(&pool, uuid).await;
+    setup_trade(&db, uuid).await;
 
     // First call: 0.001 SOL Jito tip
-    update_trade_costs(
-        &pool,
+    db.update_trade_costs(
         uuid,
         Decimal::from_str("0.001").unwrap(),
         Decimal::from_str("0.0005").unwrap(),
@@ -354,8 +370,7 @@ async fn test_trade_costs_accumulate_on_retry() {
     .unwrap();
 
     // Second call: different values — accumulates on top of first
-    update_trade_costs(
-        &pool,
+    db.update_trade_costs(
         uuid,
         Decimal::from_str("0.002").unwrap(),
         Decimal::from_str("0.001").unwrap(),
@@ -364,12 +379,14 @@ async fn test_trade_costs_accumulate_on_retry() {
     .await
     .unwrap();
 
-    let (jito, total): (f64, f64) =
+    let (jito_str, total_str): (String, String) =
         sqlx::query_as("SELECT jito_tip_sol, total_cost_sol FROM trades WHERE trade_uuid = ?")
             .bind(uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let jito: f64 = jito_str.parse().unwrap_or(0.0);
+    let total: f64 = total_str.parse().unwrap_or(0.0);
 
     // Accumulated: jito = 0.001 + 0.002 = 0.003, total = 0.0017 + 0.0034 = 0.0051
     assert!(
@@ -398,24 +415,23 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
     //
     // This test confirms: normal application DELETE is blocked (FK works as designed).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-orphan";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet_o",
-        "token_orphan",
-        Some("ORP"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_o".to_string(),
+        token_address: "token_orphan".to_string(),
+        token_symbol: Some("ORP".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet_o",
         "token_orphan",
@@ -424,6 +440,7 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("1.0").unwrap(),
         "sig_o",
+        None,
         None,
     )
     .await
@@ -465,27 +482,26 @@ async fn test_pnl_precision_f64_roundtrip() {
     // loses precision when converted to f64 for storage and read back.
     // The acceptable precision floor is ~1e-7 SOL per position.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-precision";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet_p",
-        "token_p",
-        None,
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_p".to_string(),
+        token_address: "token_p".to_string(),
+        token_symbol: None,
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 
     // Entry price with 15 significant digits
     let precise_entry = Decimal::from_str("1.23456789012345").unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet_p",
         "token_p",
@@ -495,17 +511,18 @@ async fn test_pnl_precision_f64_roundtrip() {
         precise_entry,
         "sig_p",
         None,
+        None,
     )
     .await
     .unwrap();
 
-    let stored: (f64,) = sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = ?")
+    let stored: (String,) = sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = ?")
         .bind(uuid)
         .fetch_one(&pool)
         .await
         .unwrap();
 
-    let recovered = Decimal::from_f64_retain(stored.0).unwrap_or(Decimal::ZERO);
+    let recovered = Decimal::from_str(&stored.0).unwrap_or(Decimal::ZERO);
 
     let diff = (precise_entry - recovered).abs();
     assert!(
@@ -524,15 +541,14 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
     // This can happen if: duplicate exit signal arrives after position was already closed,
     // OR if the state machine advanced the position to EXITING before close_position ran.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
 
-    let result = close_position(
-        &pool,
-        "token_missing",
+    let result = db.close_position_full(
+        "uuid-missing",
         "wallet_missing",
+        "token_missing",
         Decimal::from_str("2.0").unwrap(),
         "sig_missing",
-        "uuid-missing",
         None,
         Decimal::ONE,
         true,
@@ -549,24 +565,23 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
 
 #[tokio::test]
 async fn test_close_position_unconfirmed_sets_exiting_state() {
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-unconfirmed-exit";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet_unconf",
-        "token_unconf",
-        Some("UNC"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_unconf".to_string(),
+        token_address: "token_unconf".to_string(),
+        token_symbol: Some("UNC".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet_unconf",
         "token_unconf",
@@ -576,18 +591,18 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
         Decimal::from_str("100.0").unwrap(),
         "sig_unconf_buy",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Close with confirmed = false
-    let result = close_position(
-        &pool,
-        "token_unconf",
+    let result = db.close_position_full(
+        uuid,
         "wallet_unconf",
+        "token_unconf",
         Decimal::from_str("120.0").unwrap(),
         "sig_unconf_sell",
-        uuid,
         None,
         Decimal::ONE,
         false, // confirmed = false
@@ -611,26 +626,25 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
 
 #[tokio::test]
 async fn test_revert_position_exit_restores_state_and_amount() {
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let entry_uuid = "uuid-revert-entry";
     let exit_uuid = "uuid-revert-exit";
 
     // Setup Entry Trade and Position
-    insert_trade(
-        &pool,
-        entry_uuid,
-        "wallet_revert",
-        "token_revert",
-        Some("REV"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.5").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: entry_uuid.to_string(),
+        wallet_address: "wallet_revert".to_string(),
+        token_address: "token_revert".to_string(),
+        token_symbol: Some("REV".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.5").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         entry_uuid,
         "wallet_revert",
         "token_revert",
@@ -640,22 +654,22 @@ async fn test_revert_position_exit_restores_state_and_amount() {
         Decimal::from_str("100.0").unwrap(),
         "sig_revert_buy",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Setup Exit Trade row representing the pending/failed exit
-    insert_trade(
-        &pool,
-        exit_uuid,
-        "wallet_revert",
-        "token_revert",
-        Some("REV"),
-        "EXIT",
-        "SELL",
-        Decimal::from_str("0.5").unwrap(),
-        "EXITING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: exit_uuid.to_string(),
+        wallet_address: "wallet_revert".to_string(),
+        token_address: "token_revert".to_string(),
+        token_symbol: Some("REV".to_string()),
+        strategy: "EXIT".to_string(),
+        side: "SELL".to_string(),
+        amount_sol: Decimal::from_str("0.5").unwrap(),
+        status: "EXITING".to_string(),
+    })
     .await
     .unwrap();
 
@@ -669,13 +683,12 @@ async fn test_revert_position_exit_restores_state_and_amount() {
 
     // Call close_position with confirmed = false for partial exit (0.5 SOL / 1.5 SOL = 0.333333 fraction)
     // Note: With M3 fix, trade_uuid parameter must match the position's trade_uuid (entry_uuid)
-    close_position(
-        &pool,
-        "token_revert",
+    db.close_position_full(
+        entry_uuid,  // M3 FIX: Use entry_uuid (position's trade_uuid), not exit_uuid
         "wallet_revert",
+        "token_revert",
         Decimal::from_str("120.0").unwrap(),
         "sig_revert_sell",
-        entry_uuid,  // M3 FIX: Use entry_uuid (position's trade_uuid), not exit_uuid
         None,
         Decimal::from_str("0.33333333").unwrap(),
         false, // confirmed = false
@@ -684,12 +697,15 @@ async fn test_revert_position_exit_restores_state_and_amount() {
     .unwrap();
 
     // Verify DB states after unconfirmed partial close
-    let (state_before, amount_before, exit_price_before, exit_sig_before, pnl_before): (String, f64, Option<f64>, Option<String>, Option<f64>) =
+    let (state_before, amount_str, exit_price_str, exit_sig_before, pnl_str): (String, String, Option<String>, Option<String>, Option<String>) =
         sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let amount_before: f64 = amount_str.parse().unwrap_or(0.0);
+    let exit_price_before: Option<f64> = exit_price_str.and_then(|s| s.parse().ok());
+    let pnl_before: Option<f64> = pnl_str.and_then(|s| s.parse().ok());
 
     assert_eq!(state_before, "EXITING");
     assert!((amount_before - 1.0).abs() < 1e-6); // Decremented from 1.5 to 1.0
@@ -698,16 +714,19 @@ async fn test_revert_position_exit_restores_state_and_amount() {
     assert!(pnl_before.is_some());
 
     // Revert the failed exit
-    let revert_res = revert_position_exit(&pool, entry_uuid).await;
+    let revert_res = db.revert_position_exit(entry_uuid).await;
     assert!(revert_res.is_ok());
 
     // Verify DB states after reversion
-    let (state_after, amount_after, exit_price_after, exit_sig_after, pnl_after): (String, f64, Option<f64>, Option<String>, Option<f64>) =
+    let (state_after, amount_after_str, exit_price_after_str, exit_sig_after, pnl_after_str): (String, String, Option<String>, Option<String>, Option<String>) =
         sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let amount_after: f64 = amount_after_str.parse().unwrap_or(0.0);
+    let exit_price_after: Option<f64> = exit_price_after_str.and_then(|s| s.parse().ok());
+    let pnl_after: Option<f64> = pnl_after_str.and_then(|s| s.parse().ok());
 
     assert_eq!(state_after, "ACTIVE");
     assert!((amount_after - 1.5).abs() < 1e-6); // Restored back to 1.5

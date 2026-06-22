@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
@@ -21,11 +21,11 @@ export function Scout() {
   const { data: scoutMetrics, isLoading: metricsLoading } = useScoutMetrics(timeRange)
 
   // Update last update time
-  useState(() => {
+  useEffect(() => {
     if (scoutStatus || wqsDistribution) {
       setLastUpdate(new Date())
     }
-  })
+  }, [scoutStatus, wqsDistribution, setLastUpdate])
 
   const handleRunScout = async () => {
     try {

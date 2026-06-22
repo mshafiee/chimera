@@ -575,14 +575,9 @@ pub struct JupiterSwapResponse {
 
 /// Load wallet keypair from vault
 pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
-    use secrecy::ExposeSecret;
-
-    let key_secret = secrets.wallet_private_key.as_ref().ok_or_else(|| {
+    let key_hex = secrets.wallet_private_key.as_ref().ok_or_else(|| {
         crate::error::AppError::Validation("Wallet private key not found in vault".to_string())
     })?;
-
-    // Expose secret safely only for this operation
-    let key_hex = key_secret.expose_secret();
 
     // Decode hex string to bytes
     let key_bytes = hex::decode(key_hex.trim()).map_err(|e| {

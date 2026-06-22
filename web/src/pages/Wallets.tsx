@@ -43,6 +43,8 @@ export function Wallets() {
   const [wqsMaxFilter, setWqsMaxFilter] = useState<number | undefined>(undefined)
   const [roiMinFilter, setRoiMinFilter] = useState<number | undefined>(undefined)
   const [tradeCountMinFilter, setTradeCountMinFilter] = useState<number | undefined>(undefined)
+  const [page, setPage] = useState(1)
+  const pageSize = 50
 
   const { hasPermission } = useAuthStore()
   const canModify = hasPermission('operator')
@@ -56,12 +58,10 @@ export function Wallets() {
 
   // Filter by search query and advanced filters
   const filteredWallets = wallets.filter((wallet) => {
-    // Search filter
     if (searchQuery && !wallet.address.toLowerCase().includes(searchQuery.toLowerCase())) {
       return false
     }
     
-    // WQS range filter
     if (wqsMinFilter !== undefined && (wallet.wqs_score === null || wallet.wqs_score < wqsMinFilter)) {
       return false
     }
@@ -69,18 +69,20 @@ export function Wallets() {
       return false
     }
     
-    // ROI threshold filter
     if (roiMinFilter !== undefined && (wallet.roi_30d === null || wallet.roi_30d < roiMinFilter)) {
       return false
     }
-    
-    // Trade count filter
+
     if (tradeCountMinFilter !== undefined && (wallet.trade_count_30d === null || wallet.trade_count_30d < tradeCountMinFilter)) {
       return false
     }
-    
+
     return true
   })
+
+  const totalPages = Math.max(1, Math.ceil(filteredWallets.length / pageSize))
+  const safePage = Math.min(page, totalPages)
+  const paginatedWallets = filteredWallets.slice((safePage - 1) * pageSize, safePage * pageSize)
 
   // Toggle wallet selection
   const toggleWalletSelection = (address: string) => {
@@ -98,7 +100,7 @@ export function Wallets() {
     if (selectedWallets.size === filteredWallets.length) {
       setSelectedWallets(new Set())
     } else {
-      setSelectedWallets(new Set(filteredWallets.map(w => w.address)))
+      setSelectedWallets(new Set(paginatedWallets.map(w => w.address)))
     }
   }
 
@@ -157,7 +159,7 @@ export function Wallets() {
     try {
       const csvRows = [
         ['Address', 'Status', 'WQS Score', 'ROI 30d', 'Trade Count 30d', 'Win Rate', 'Max Drawdown', 'TTL Expires'].join(','),
-        ...filteredWallets.map(wallet =>
+        ...paginatedWallets.map(wallet =>
           [
             wallet.address,
             wallet.status,
@@ -444,7 +446,7 @@ export function Wallets() {
                 </TableRow>
               </TableHeader>
             <TableBody>
-              {filteredWallets.map((wallet) => {
+              {paginatedWallets.map((wallet) => {
                 const isExpanded = expandedWallet === wallet.address
                 return (
                   <React.Fragment key={wallet.address}>
@@ -615,8 +617,31 @@ export function Wallets() {
               })}
             </TableBody>
           </Table>
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+              <span className="text-sm text-text-muted">
+                {filteredWallets.length} total wallets (page {safePage} of {totalPages})
+              </span>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={page <= 1}
+                  className="px-3 py-1 text-sm rounded border border-border disabled:opacity-40 hover:bg-surface-light"
+                >
+                  Previous
+                </button>
+                <button
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages}
+                  className="px-3 py-1 text-sm rounded border border-border disabled:opacity-40 hover:bg-surface-light"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
           </div>
-        )}
+        )} 
       </Card>
 
       {/* Promote Modal */}

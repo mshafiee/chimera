@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
-use crate::db::{self, DbPool};
+use crate::db_abstraction::{Database, DbPool, InsertTrade, UpdateTradeStatus};
 use crate::engine::position_sizer::SizingFactors;
 use crate::engine::{EngineHandle, PositionSizer, SignalQuality};
 use crate::error::AppError;
@@ -50,7 +50,7 @@ pub enum WebhookStatus {
 /// State needed by the webhook handler
 pub struct WebhookState {
     /// Database pool
-    pub db: DbPool,
+    pub db: Arc<dyn Database>,
     /// Engine handle for queueing signals
     pub engine: EngineHandle,
     /// Token parser for safety checks
@@ -97,6 +97,7 @@ pub struct WebhookState {
 /// 2. Payload validation
 /// 3. Idempotency check (duplicate detection)
 /// 4. Token safety fast-path check (freeze/mint authority)
+#[tracing::instrument(skip(state, payload))]
 pub async fn webhook_handler(
     State(state): State<Arc<WebhookState>>,
     headers: HeaderMap,
@@ -146,7 +147,7 @@ pub async fn webhook_handler(
     let trade_uuid = payload.generate_trade_uuid(timestamp);
 
     // Check for duplicate (idempotency)
-    if db::trade_uuid_exists(&state.db, &trade_uuid).await? {
+    if state.db.trade_uuid_exists(&trade_uuid).await? {
         tracing::info!(trade_uuid = %trade_uuid, "Duplicate signal rejected");
         // Return PDD-shaped response: normal HTTP 200/202 with status: rejected
         return Ok((
@@ -198,8 +199,7 @@ pub async fn webhook_handler(
                         );
 
                         // Log to dead letter queue
-                        let _ = db::insert_dead_letter(
-                            &state.db,
+                        let _ = state.db.insert_dlq(
                             Some(&trade_uuid),
                             &serde_json::to_string(&payload).unwrap_or_default(),
                             "TOKEN_SAFETY_FAILED",
@@ -256,7 +256,7 @@ pub async fn webhook_handler(
     // Fetch wallet data once (used for both quality check and queue routing).
     // For BUY signals, also gate on wallet status — only ACTIVE wallets may trigger buys.
     let wallet_data = if signal.payload.action == crate::models::Action::Buy {
-        match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
+        match state.db.get_wallet(&signal.payload.wallet_address).await {
             Ok(Some(wallet)) => {
                 if wallet.status != "ACTIVE" {
                     tracing::warn!(
@@ -279,9 +279,8 @@ pub async fn webhook_handler(
                 }
                 let win_rate = wallet
                     .win_rate
-                    .and_then(Decimal::from_f64_retain)
                     .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
-                Some((wallet.wqs_score.unwrap_or(50.0), wallet.wqs_score, win_rate))
+                Some((wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(50.0), wallet.wqs_score, win_rate))
             }
             Ok(None) => {
                 tracing::warn!(
@@ -322,7 +321,7 @@ pub async fn webhook_handler(
     // BUY signals already went through the full wallet gate above; SELL signals previously
     // skipped it entirely, allowing arbitrary amount_sol from the caller.
     if signal.payload.action != crate::models::Action::Buy {
-        match db::get_wallet_by_address(&state.db, &signal.payload.wallet_address).await {
+        match state.db.get_wallet(&signal.payload.wallet_address).await {
             Ok(None) => {
                 return Ok((
                     StatusCode::BAD_REQUEST,
@@ -413,6 +412,10 @@ pub async fn webhook_handler(
         // inserting a new row each time is correct (NULLs don't conflict in UNIQUE indexes).
         if let Some(ref token_address) = signal.payload.token_address {
             let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
+            let pool = match state.db.pool() {
+                DbPool::SQLite(p) => p,
+                _ => return Err(AppError::Internal("Only SQLite backend supported".to_string())),
+            };
             if let Err(e) = sqlx::query(
                 r#"
                 INSERT INTO signal_aggregation
@@ -424,7 +427,7 @@ pub async fn webhook_handler(
             .bind(&signal.payload.wallet_address)
             .bind(amount_f64)
             .bind(is_consensus)
-            .execute(&state.db)
+            .execute(&pool)
             .await
             {
                 tracing::warn!(
@@ -483,8 +486,7 @@ pub async fn webhook_handler(
                 min_required = %min_liquidity,
                 "Signal rejected: liquidity below strategy minimum"
             );
-            let _ = db::insert_dead_letter(
-                &state.db,
+            let _ = state.db.insert_dlq(
                 Some(&signal.trade_uuid),
                 &serde_json::to_string(&signal.payload).unwrap_or_default(),
                 "LIQUIDITY_BELOW_MINIMUM",
@@ -533,8 +535,7 @@ pub async fn webhook_handler(
             );
 
             // Log to dead letter queue
-            let _ = db::insert_dead_letter(
-                &state.db,
+            let _ = state.db.insert_dlq(
                 Some(&signal.trade_uuid),
                 &serde_json::to_string(&signal.payload).unwrap_or_default(),
                 "SIGNAL_QUALITY_TOO_LOW",
@@ -601,8 +602,7 @@ pub async fn webhook_handler(
                     trade_uuid = %signal.trade_uuid,
                     "Signal rejected: position sizer returned zero size (strategy_max < min_size_sol — check config)"
                 );
-                let _ = db::insert_dead_letter(
-                    &state.db,
+                let _ = state.db.insert_dlq(
                     Some(&signal.trade_uuid),
                     &serde_json::to_string(&signal.payload).unwrap_or_default(),
                     "POSITION_SIZE_ZERO",
@@ -643,8 +643,7 @@ pub async fn webhook_handler(
                 );
 
                 // Log to dead letter queue
-                let _ = db::insert_dead_letter(
-                    &state.db,
+                let _ = state.db.insert_dlq(
                     Some(&signal.trade_uuid),
                     &serde_json::to_string(&signal.payload).unwrap_or_default(),
                     "PORTFOLIO_HEAT_LIMIT",
@@ -682,8 +681,7 @@ pub async fn webhook_handler(
                             "Signal rejected: strategy allocation limit reached"
                         );
 
-                        let _ = db::insert_dead_letter(
-                            &state.db,
+                        let _ = state.db.insert_dlq(
                             Some(&signal.trade_uuid),
                             &serde_json::to_string(&signal.payload).unwrap_or_default(),
                             "STRATEGY_HEAT_LIMIT",
@@ -725,17 +723,16 @@ pub async fn webhook_handler(
     }
 
     // Insert into database as PENDING
-    db::insert_trade(
-        &state.db,
-        &signal.trade_uuid,
-        &signal.payload.wallet_address,
-        signal.token_address(),
-        Some(&signal.payload.token),
-        &signal.payload.strategy.to_string(),
-        &signal.payload.action.to_string(),
-        trade_amount_sol,
-        "PENDING",
-    )
+    state.db.insert_trade(&InsertTrade {
+        trade_uuid: signal.trade_uuid.clone(),
+        wallet_address: signal.payload.wallet_address.clone(),
+        token_address: signal.token_address().to_string(),
+        token_symbol: Some(signal.payload.token.clone()),
+        strategy: signal.payload.strategy.to_string(),
+        side: signal.payload.action.to_string(),
+        amount_sol: trade_amount_sol,
+        status: "PENDING".to_string(),
+    })
     .await?;
 
     tracing::info!(
@@ -748,13 +745,18 @@ pub async fn webhook_handler(
     );
 
     // Use cached wallet data for queue routing
-    let wallet_wqs = wallet_data.as_ref().and_then(|(_, wqs, _)| *wqs);
+    let wallet_wqs: Option<f64> = wallet_data.as_ref().and_then(|(_, wqs, _)| wqs.map(|d| d.to_f64().unwrap_or(0.0)));
 
     // Queue for execution
     match state.engine.queue_signal(signal.clone(), wallet_wqs).await {
         Ok(()) => {
             // Update status to QUEUED
-            db::update_trade_status(&state.db, &signal.trade_uuid, "QUEUED", None, None).await?;
+            state.db.update_trade_status(&UpdateTradeStatus {
+                trade_uuid: signal.trade_uuid.clone(),
+                status: "QUEUED".to_string(),
+                tx_signature: None,
+                error_message: None,
+            }).await?;
 
             tracing::info!(trade_uuid = %signal.trade_uuid, "Signal queued for execution");
 
@@ -777,18 +779,15 @@ pub async fn webhook_handler(
 
             // Update trade status to DEAD_LETTER first, then insert the DLQ entry.
             // The status update is authoritative; the DLQ entry is supplementary audit data.
-            db::update_trade_status(
-                &state.db,
-                &signal.trade_uuid,
-                "DEAD_LETTER",
-                None,
-                Some(&e.to_string()),
-            )
-            .await?;
+            state.db.update_trade_status(&UpdateTradeStatus {
+                trade_uuid: signal.trade_uuid.clone(),
+                status: "DEAD_LETTER".to_string(),
+                tx_signature: None,
+                error_message: Some(e.to_string()),
+            }).await?;
 
             // Log to dead letter queue (best-effort — status is already DEAD_LETTER above).
-            if let Err(dlq_err) = db::insert_dead_letter(
-                &state.db,
+            if let Err(dlq_err) = state.db.insert_dlq(
                 Some(&signal.trade_uuid),
                 &serde_json::to_string(&signal.payload).unwrap_or_default(),
                 "QUEUE_FULL",

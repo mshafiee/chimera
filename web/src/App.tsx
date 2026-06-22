@@ -1,27 +1,33 @@
+import { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { Layout } from './components/layout/Layout'
 import { ProtectedRoute } from './components/auth/ProtectedRoute'
-import { Login } from './pages/Login'
-import { Dashboard } from './pages/Dashboard'
-import { Wallets } from './pages/Wallets'
-import { Trades } from './pages/Trades'
-import { Config } from './pages/Config'
-import { Incidents } from './pages/Incidents'
+import { LoadingSpinner } from './components/ui/LoadingSpinner'
 
-// New pages
-import { Scout } from './pages/Scout'
-import { Signals } from './pages/Signals'
-import { Market } from './pages/Market'
-import { Risk } from './pages/Risk'
-import { Reconciliation } from './pages/Reconciliation'
-import { Performance } from './pages/Performance'
-import { Operations } from './pages/Operations'
-import { Consensus } from './pages/Consensus'
-import { WalletMonitoring } from './pages/WalletMonitoring'
-import { Webhooks } from './pages/Webhooks'
+const Login = lazy(() => import('./pages/Login').then(m => ({ default: m.Login })))
+const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m.Dashboard })))
+const Wallets = lazy(() => import('./pages/Wallets').then(m => ({ default: m.Wallets })))
+const Trades = lazy(() => import('./pages/Trades').then(m => ({ default: m.Trades })))
+const Config = lazy(() => import('./pages/Config').then(m => ({ default: m.Config })))
+const Incidents = lazy(() => import('./pages/Incidents').then(m => ({ default: m.Incidents })))
+const Scout = lazy(() => import('./pages/Scout').then(m => ({ default: m.Scout })))
+const Signals = lazy(() => import('./pages/Signals').then(m => ({ default: m.Signals })))
+const Market = lazy(() => import('./pages/Market').then(m => ({ default: m.Market })))
+const Risk = lazy(() => import('./pages/Risk').then(m => ({ default: m.Risk })))
+const Reconciliation = lazy(() => import('./pages/Reconciliation').then(m => ({ default: m.Reconciliation })))
+const Performance = lazy(() => import('./pages/Performance').then(m => ({ default: m.Performance })))
+const Operations = lazy(() => import('./pages/Operations').then(m => ({ default: m.Operations })))
+const Consensus = lazy(() => import('./pages/Consensus').then(m => ({ default: m.Consensus })))
+const WalletMonitoring = lazy(() => import('./pages/WalletMonitoring').then(m => ({ default: m.WalletMonitoring })))
+const Webhooks = lazy(() => import('./pages/Webhooks').then(m => ({ default: m.Webhooks })))
+
+const SuspenseWrapper = ({ children }: { children: React.ReactNode }) => (
+  <Suspense fallback={<LoadingSpinner />}>{children}</Suspense>
+)
 
 function App() {
   return (
+    <SuspenseWrapper>
     <Routes>
       {/* Public route - Login page */}
       <Route path="/login" element={<Login />} />
@@ -60,6 +66,7 @@ function App() {
       {/* Catch all - redirect to dashboard or login */}
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
+    </SuspenseWrapper>
   )
 }
 

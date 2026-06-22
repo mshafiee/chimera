@@ -7,26 +7,31 @@
 //! - Circuit-breaker trip blocks new trades at DB level
 //! - Closing an already-CLOSED position is idempotent
 
-use chimera_operator::config::DatabaseConfig;
-use chimera_operator::db::{
-    close_position, init_pool, insert_trade, open_position, run_migrations, trade_uuid_exists,
-    update_trade_status,
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
 };
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
+use std::sync::Arc;
 use tempfile::TempDir;
+
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("lifecycle_test.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("lifecycle_test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
 }
 
 // ─── Test 90 (plan) ── duplicate BUY creates only one position ────────────────
@@ -36,25 +41,24 @@ async fn test_duplicate_buy_uuid_idempotency() {
     // Two BUY signals with the same trade_uuid must result in exactly one trade row
     // (UNIQUE constraint on trades.trade_uuid) and one position.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-dup-buy";
 
     // First insert succeeds
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet",
-        "token",
-        Some("T"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet".to_string(),
+        token_address: "token".to_string(),
+        token_symbol: Some("T".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet",
         "token",
@@ -64,22 +68,22 @@ async fn test_duplicate_buy_uuid_idempotency() {
         Decimal::from_str("1.0").unwrap(),
         "sig1",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Second insert for the same UUID must fail (UNIQUE violation)
-    let second_insert = insert_trade(
-        &pool,
-        uuid,
-        "wallet",
-        "token",
-        Some("T"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+    let second_insert = db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet".to_string(),
+        token_address: "token".to_string(),
+        token_symbol: Some("T".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await;
     assert!(
         second_insert.is_err(),
@@ -105,15 +109,14 @@ async fn test_close_position_no_active_position_is_noop() {
     // close_position() on a token with no ACTIVE positions returns Ok with a WARN log.
     // No trade record is created. No position is modified.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
 
-    let result = close_position(
-        &pool,
-        "token_nosell",
+    let result = db.close_position_full(
+        "uuid-nosell",
         "wallet_nosell",
+        "token_nosell",
         Decimal::from_str("2.0").unwrap(),
         "sig_exit",
-        "uuid-nosell",
         None,
         Decimal::ONE,
         true,
@@ -125,6 +128,7 @@ async fn test_close_position_no_active_position_is_noop() {
         "Closing non-existent position should not error"
     );
 
+    let pool = sqlite_pool(&db);
     let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions")
         .fetch_one(&pool)
         .await
@@ -147,24 +151,23 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     // This test validates that close_position() calculates gross PnL correctly.
     // Fee deduction is done separately via update_trade_costs + update_trade_net_pnl.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-pnl-fees";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet_f",
-        "token_f",
-        Some("F"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet_f".to_string(),
+        token_address: "token_f".to_string(),
+        token_symbol: Some("F".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet_f",
         "token_f",
@@ -174,18 +177,18 @@ async fn test_pnl_calculation_accuracy_with_fees() {
         Decimal::from_str("100.0").unwrap(), // entry $100
         "sig_buy_f",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Sell at $110
-    close_position(
-        &pool,
-        "token_f",
+    db.close_position_full(
+        uuid,
         "wallet_f",
+        "token_f",
         Decimal::from_str("110.0").unwrap(),
         "sig_sell_f",
-        uuid,
         None,
         Decimal::ONE,
         true,
@@ -193,12 +196,13 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .await
     .unwrap();
 
-    let (realized_pnl,): (f64,) =
+    let (realized_pnl_str,): (String,) =
         sqlx::query_as("SELECT realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let realized_pnl: f64 = realized_pnl_str.parse().unwrap_or(0.0);
 
     // Expected: (110 - 100) / 100 × 1.0 = +0.1 SOL
     assert!(
@@ -208,10 +212,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     );
 
     // Apply fees and net PnL
-    use chimera_operator::db::{update_trade_costs, update_trade_net_pnl};
-
-    update_trade_costs(
-        &pool,
+    db.update_trade_costs(
         uuid,
         Decimal::from_str("0.001").unwrap(),  // Jito tip
         Decimal::from_str("0.0005").unwrap(), // DEX fee
@@ -224,14 +225,15 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     let fees = Decimal::from_str("0.0017").unwrap();
     let net = gross - fees;
 
-    update_trade_net_pnl(&pool, uuid, net).await.unwrap();
+    db.update_trade_net_pnl(uuid, net).await.unwrap();
 
-    let (net_stored,): (f64,) =
+    let (net_stored_str,): (String,) =
         sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
             .bind(uuid)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let net_stored: f64 = net_stored_str.parse().unwrap_or(0.0);
 
     assert!(
         (net_stored - 0.0983).abs() < 1e-9,
@@ -247,20 +249,19 @@ async fn test_trade_uuid_exists_checks_dead_letter_queue() {
     // trade_uuid_exists() checks both `trades` and `dead_letter_queue` tables.
     // A UUID in the DLQ should be detected as existing to prevent re-processing.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let uuid = "uuid-dlq-check";
 
     // Not in any table
-    let exists_before = trade_uuid_exists(&pool, uuid).await.unwrap();
+    let exists_before = db.trade_uuid_exists(uuid).await.unwrap();
     assert!(!exists_before, "UUID must not exist before insertion");
 
     // Insert into dead_letter_queue
-    use chimera_operator::db::insert_dead_letter;
-    insert_dead_letter(&pool, Some(uuid), "{}", "test reason", None, None)
+    db.insert_dlq(Some(uuid), "{}", "test reason", None, None)
         .await
         .unwrap();
 
-    let exists_dlq = trade_uuid_exists(&pool, uuid).await.unwrap();
+    let exists_dlq = db.trade_uuid_exists(uuid).await.unwrap();
     assert!(
         exists_dlq,
         "UUID in DLQ must be detected by trade_uuid_exists()"
@@ -273,20 +274,20 @@ async fn test_trade_uuid_exists_checks_dead_letter_queue() {
 async fn test_full_trade_status_progression() {
     // A successful trade should flow: PENDING → QUEUED → EXECUTING → ACTIVE → CLOSED.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-full-flow";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet",
-        "token",
-        None,
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet".to_string(),
+        token_address: "token".to_string(),
+        token_symbol: None,
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 
@@ -295,9 +296,14 @@ async fn test_full_trade_status_progression() {
         ("EXECUTING", None),
         ("ACTIVE", Some("sig123")),
     ] {
-        update_trade_status(&pool, uuid, status, sig, None)
-            .await
-            .unwrap();
+        db.update_trade_status(&UpdateTradeStatus {
+            trade_uuid: uuid.to_string(),
+            status: status.to_string(),
+            tx_signature: sig.map(|s| s.to_string()),
+            error_message: None,
+        })
+        .await
+        .unwrap();
         let (s,): (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
             .bind(uuid)
             .fetch_one(&pool)
@@ -307,8 +313,7 @@ async fn test_full_trade_status_progression() {
     }
 
     // Open position
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         uuid,
         "wallet",
         "token",
@@ -318,18 +323,18 @@ async fn test_full_trade_status_progression() {
         Decimal::from_str("50.0").unwrap(),
         "sig123",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Close position
-    close_position(
-        &pool,
-        "token",
+    db.close_position_full(
+        uuid,
         "wallet",
+        "token",
         Decimal::from_str("60.0").unwrap(),
         "sig_exit",
-        uuid,
         None,
         Decimal::ONE,
         true,
@@ -337,9 +342,14 @@ async fn test_full_trade_status_progression() {
     .await
     .unwrap();
 
-    update_trade_status(&pool, uuid, "CLOSED", Some("sig_exit"), None)
-        .await
-        .unwrap();
+    db.update_trade_status(&UpdateTradeStatus {
+        trade_uuid: uuid.to_string(),
+        status: "CLOSED".to_string(),
+        tx_signature: Some("sig_exit".to_string()),
+        error_message: None,
+    })
+    .await
+    .unwrap();
 
     let (final_status,): (String,) =
         sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
@@ -364,32 +374,47 @@ async fn test_full_trade_status_progression() {
 async fn test_failed_trade_can_retry() {
     // A FAILED trade should be retryable: FAILED → RETRY → EXECUTING.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let uuid = "uuid-retry";
 
-    insert_trade(
-        &pool,
-        uuid,
-        "wallet",
-        "token",
-        None,
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "wallet".to_string(),
+        token_address: "token".to_string(),
+        token_symbol: None,
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 
-    update_trade_status(&pool, uuid, "FAILED", None, Some("RPC timeout"))
-        .await
-        .unwrap();
-    update_trade_status(&pool, uuid, "RETRY", None, None)
-        .await
-        .unwrap();
-    update_trade_status(&pool, uuid, "EXECUTING", None, None)
-        .await
-        .unwrap();
+    db.update_trade_status(&UpdateTradeStatus {
+        trade_uuid: uuid.to_string(),
+        status: "FAILED".to_string(),
+        tx_signature: None,
+        error_message: Some("RPC timeout".to_string()),
+    })
+    .await
+    .unwrap();
+    db.update_trade_status(&UpdateTradeStatus {
+        trade_uuid: uuid.to_string(),
+        status: "RETRY".to_string(),
+        tx_signature: None,
+        error_message: None,
+    })
+    .await
+    .unwrap();
+    db.update_trade_status(&UpdateTradeStatus {
+        trade_uuid: uuid.to_string(),
+        status: "EXECUTING".to_string(),
+        tx_signature: None,
+        error_message: None,
+    })
+    .await
+    .unwrap();
 
     let (status,): (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
         .bind(uuid)

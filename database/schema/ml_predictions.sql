@@ -1,6 +1,7 @@
 -- ML Predictions Table for Model Validation
 -- Stores all ML predictions for later validation against actual results
 -- Part of Scout module model validation infrastructure
+-- Financial PnL values stored as TEXT (Decimal strings).
 
 CREATE TABLE IF NOT EXISTS ml_predictions (
     -- Primary key
@@ -12,7 +13,7 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
     model_type TEXT NOT NULL,
 
     -- Prediction values
-    predicted_pnl_sol REAL NOT NULL,
+    predicted_pnl_sol TEXT NOT NULL,
     predicted_class TEXT,
     confidence REAL,
 
@@ -23,9 +24,9 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
     wqs_components_json TEXT,
 
     -- Actual results (filled when matched)
-    actual_pnl_sol REAL,
-    actual_pnl_7d_sol REAL,
-    actual_pnl_30d_sol REAL,
+    actual_pnl_sol TEXT,
+    actual_pnl_7d_sol TEXT,
+    actual_pnl_30d_sol TEXT,
     match_timestamp TIMESTAMP,
     days_to_match INTEGER,
 

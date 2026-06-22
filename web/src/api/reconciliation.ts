@@ -68,7 +68,7 @@ export interface DiscrepancyTypeStats {
 export function useReconciliationStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'status'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ReconciliationStatusResponse>('/reconciliation/status')
       return response.data
     },
@@ -95,7 +95,7 @@ export function useReconciliationStatus(refetchInterval?: number) {
 export function useReconciliationHistory(limit?: number) {
   return useQuery({
     queryKey: ['reconciliation', 'history', limit],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ReconciliationHistoryResponse>('/reconciliation/history', {
         params: limit ? { limit } : undefined,
       })
@@ -123,7 +123,7 @@ export function useReconciliationHistory(limit?: number) {
 export function useReconciliationStats(timeRange?: string) {
   return useQuery({
     queryKey: ['reconciliation', 'stats', timeRange],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ReconciliationStatsResponse>('/reconciliation/stats', {
         params: timeRange ? { range: timeRange } : undefined,
       })

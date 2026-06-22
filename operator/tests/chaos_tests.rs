@@ -10,29 +10,30 @@
 mod tests {
 
     use chimera_operator::config::AppConfig;
+    use chimera_operator::db_abstraction::{
+        create_database, Database, DatabaseConfig, DbPool,
+    };
     use chimera_operator::engine::executor::{Executor, RpcMode};
     use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
     use rust_decimal::Decimal;
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use sqlx::Sqlite;
+    use sqlx::{Pool, Sqlite};
     use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    async fn create_test_db() -> (sqlx::Pool<Sqlite>, TempDir) {
+    fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+        match db.pool() {
+            DbPool::SQLite(pool) => pool,
+            _ => panic!("test requires SQLite backend"),
+        }
+    }
+
+    async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db_url = format!("sqlite:{}", db_path.display());
-
-        let options = SqliteConnectOptions::from_str(&db_url)
-            .unwrap()
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
+        let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+        let db = create_database(&config).await.unwrap();
+        let pool = sqlite_pool(&db);
 
         // Create minimal schema
         sqlx::query(
@@ -42,12 +43,12 @@ mod tests {
         .await
         .unwrap();
 
-        (pool, temp_dir)
+        (db, temp_dir)
     }
 
     fn create_test_config() -> Arc<AppConfig> {
         // Try to load config, or create a minimal one for testing
-        let config = if let Ok(cfg) = AppConfig::load() {
+        let config = if let Ok(cfg) = AppConfig::load_config() {
             cfg
         } else {
             // Create minimal test config using config builder
@@ -147,7 +148,7 @@ mod tests {
         let (db, _temp) = create_test_db().await;
 
         // Create config with Jito disabled (simulates fallback mode)
-        let config_no_jito = if let Ok(mut cfg) = AppConfig::load() {
+        let config_no_jito = if let Ok(mut cfg) = AppConfig::load_config() {
             cfg.jito.enabled = false;
             cfg.rpc.fallback_url = Some("https://api.mainnet-beta.solana.com".to_string());
             Arc::new(cfg)
@@ -219,6 +220,7 @@ mod tests {
         use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
         let config = create_test_config();
 
         // manual_trip() calls log_config_change which writes to config_audit
@@ -232,7 +234,7 @@ mod tests {
              change_reason TEXT, \
              changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -318,10 +320,11 @@ mod tests {
         // by testing that SQLite operations handle locks gracefully
 
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         // Create table
         sqlx::query("CREATE TABLE IF NOT EXISTS test_lock (id INTEGER PRIMARY KEY, value TEXT)")
-            .execute(&db)
+            .execute(&pool)
             .await
             .unwrap();
 
@@ -329,12 +332,12 @@ mod tests {
         // (SQLite WAL mode allows concurrent reads/writes)
         let mut handles = vec![];
         for i in 0..5 {
-            let db_clone = db.clone();
+            let pool_clone = pool.clone();
             let handle = tokio::spawn(async move {
                 for j in 0..10 {
                     sqlx::query("INSERT INTO test_lock (value) VALUES (?)")
                         .bind(format!("task-{}-{}", i, j))
-                        .execute(&db_clone)
+                        .execute(&pool_clone)
                         .await
                         .unwrap();
                 }
@@ -349,7 +352,7 @@ mod tests {
 
         // Verify writes succeeded
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM test_lock")
-            .fetch_one(&db)
+            .fetch_one(&pool)
             .await
             .unwrap();
 
@@ -360,21 +363,22 @@ mod tests {
     async fn test_database_lock_max_retries() {
         // Test that database handles high contention
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         sqlx::query("CREATE TABLE IF NOT EXISTS test_contention (id INTEGER PRIMARY KEY)")
-            .execute(&db)
+            .execute(&pool)
             .await
             .unwrap();
 
         // Create many concurrent transactions
         let mut handles = vec![];
         for _ in 0..20 {
-            let db_clone = db.clone();
+            let pool_clone = pool.clone();
             let handle = tokio::spawn(async move {
                 // Each task does multiple operations
                 for _ in 0..5 {
                     sqlx::query("INSERT INTO test_contention DEFAULT VALUES")
-                        .execute(&db_clone)
+                        .execute(&pool_clone)
                         .await
                         .unwrap();
                 }
@@ -400,9 +404,10 @@ mod tests {
     async fn test_database_lock_non_lock_error() {
         // Test that non-lock errors (like syntax errors) fail immediately
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         // Invalid SQL should fail immediately, not retry
-        let result = sqlx::query("INVALID SQL SYNTAX").execute(&db).await;
+        let result = sqlx::query("INVALID SQL SYNTAX").execute(&pool).await;
 
         assert!(result.is_err(), "Invalid SQL should fail immediately");
     }
@@ -411,6 +416,7 @@ mod tests {
     async fn test_sqlite_concurrent_writes() {
         // Test concurrent database writes don't deadlock
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         // Create table for concurrent writes
         sqlx::query(
@@ -419,19 +425,19 @@ mod tests {
                 value TEXT
             )",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
         // Spawn multiple concurrent write tasks
         let mut handles = vec![];
         for i in 0..10 {
-            let db_clone = db.clone();
+            let pool_clone = pool.clone();
             let handle = tokio::spawn(async move {
                 for j in 0..10 {
                     sqlx::query("INSERT INTO test_concurrent (value) VALUES (?)")
                         .bind(format!("task-{}-write-{}", i, j))
-                        .execute(&db_clone)
+                        .execute(&pool_clone)
                         .await
                         .unwrap();
                 }
@@ -446,7 +452,7 @@ mod tests {
 
         // Verify all writes succeeded
         let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM test_concurrent")
-            .fetch_one(&db)
+            .fetch_one(&pool)
             .await
             .unwrap();
 
@@ -457,6 +463,7 @@ mod tests {
     async fn test_sqlite_vacuum_operation() {
         // Test that VACUUM operations don't block other queries
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         // Create table and insert data
         sqlx::query(
@@ -465,7 +472,7 @@ mod tests {
                 data TEXT
             )",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -473,22 +480,23 @@ mod tests {
         for i in 0..100 {
             sqlx::query("INSERT INTO test_vacuum (data) VALUES (?)")
                 .bind(format!("data-{}", i))
-                .execute(&db)
+                .execute(&pool)
                 .await
                 .unwrap();
         }
 
         // Run VACUUM in background
-        let db_vacuum = db.clone();
+        let pool_vacuum = pool.clone();
         let vacuum_handle =
-            tokio::spawn(async move { sqlx::query("VACUUM").execute(&db_vacuum).await });
+            tokio::spawn(async move { sqlx::query("VACUUM").execute(&pool_vacuum).await });
 
         // While VACUUM is running, try to read
+        let pool_read = pool.clone();
         let read_handle = tokio::spawn(async move {
             // Should be able to read even during VACUUM (WAL mode)
             let result: Result<Vec<(i64, String)>, _> =
                 sqlx::query_as("SELECT id, data FROM test_vacuum LIMIT 10")
-                    .fetch_all(&db)
+                    .fetch_all(&pool_read)
                     .await;
 
             result
@@ -512,6 +520,7 @@ mod tests {
         // verify on-chain state, so we test the detection layer here.
 
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         // Schema required by get_stuck_positions() query
         sqlx::query(
@@ -526,7 +535,7 @@ mod tests {
              exit_tx_signature TEXT, \
              last_updated TEXT NOT NULL DEFAULT (datetime('now')))",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -534,7 +543,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS trades (\
              id INTEGER PRIMARY KEY, trade_uuid TEXT UNIQUE, status TEXT DEFAULT 'ACTIVE')",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -544,7 +553,7 @@ mod tests {
              VALUES ('fresh-exiting', 'TOK111111111111111111111111111111111111111', \
              'EXITING', datetime('now', '-10 seconds'))",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
@@ -553,14 +562,12 @@ mod tests {
              VALUES ('stuck-exiting', 'TOK222222222222222222222222222222222222222', \
              'EXITING', datetime('now', '-300 seconds'))",
         )
-        .execute(&db)
+        .execute(&pool)
         .await
         .unwrap();
 
         // get_stuck_positions uses a 60-second threshold by default
-        let stuck = chimera_operator::db::get_stuck_positions(&db, 60)
-            .await
-            .unwrap();
+        let stuck = db.get_stuck_positions(60).await.unwrap();
 
         assert_eq!(
             stuck.len(),
@@ -605,16 +612,17 @@ mod tests {
     async fn test_concurrent_webhook_processing() {
         // Insert 100 unique trade rows concurrently and verify no duplicates or deadlocks.
         let (db, _temp) = create_test_db().await;
+        let pool = sqlite_pool(&db);
 
         let n: usize = 100;
         let mut handles = vec![];
 
         for i in 0..n {
-            let db_clone = db.clone();
+            let pool_clone = pool.clone();
             handles.push(tokio::spawn(async move {
                 sqlx::query("INSERT OR IGNORE INTO trades (trade_uuid) VALUES (?)")
                     .bind(format!("concurrent-uuid-{}", i))
-                    .execute(&db_clone)
+                    .execute(&pool_clone)
                     .await
                     .unwrap();
             }));
@@ -625,7 +633,7 @@ mod tests {
         }
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM trades")
-            .fetch_one(&db)
+            .fetch_one(&pool)
             .await
             .unwrap();
 

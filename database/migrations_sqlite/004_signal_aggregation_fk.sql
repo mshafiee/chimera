@@ -11,7 +11,7 @@ CREATE TABLE signal_aggregation_new (
     token_address TEXT NOT NULL,
     wallet_address TEXT NOT NULL,
     direction TEXT NOT NULL CHECK(direction IN ('BUY', 'SELL')),
-    amount_sol REAL NOT NULL,
+    amount_sol TEXT NOT NULL,
     signature TEXT,
     is_consensus INTEGER DEFAULT 0,
     consensus_wallet_count INTEGER,

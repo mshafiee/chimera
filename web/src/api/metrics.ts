@@ -30,7 +30,7 @@ export interface CostMetrics {
 export function usePerformanceMetrics() {
   return useQuery({
     queryKey: ['metrics', 'performance'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<PerformanceMetrics>('/metrics/performance')
       return data
     },
@@ -41,7 +41,7 @@ export function usePerformanceMetrics() {
 export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: number = 30) {
   return useQuery({
     queryKey: ['metrics', 'strategy', strategy, days],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<StrategyPerformance>(
         `/metrics/strategy`,
         { params: { strategy, days: days.toString() } }
@@ -55,7 +55,7 @@ export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: numbe
 export function useCostMetrics() {
   return useQuery({
     queryKey: ['metrics', 'costs'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<CostMetrics>('/metrics/costs')
       return data
     },

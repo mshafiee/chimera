@@ -21,7 +21,9 @@ pub mod stop_loss;
 pub mod tips;
 pub mod transaction_builder;
 pub mod v0_reconstruction;
+pub mod signal_pipeline;
 pub mod volume_cache;
+pub mod worker_pool;
 
 pub use channel::*;
 pub use degradation::*;
@@ -42,20 +44,18 @@ pub use tips::TipManager;
 pub use volume_cache::VolumeCache;
 
 use crate::config::AppConfig;
-use crate::db::DbPool;
-use crate::handlers::{TradeUpdateData, WsEvent, WsState};
+use crate::db_abstraction::Database;
+use crate::handlers::WsState;
 use crate::metrics::MetricsState;
-use crate::models::{Action, Signal, Strategy};
+use crate::models::Signal;
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
-use chrono::{Timelike, Utc};
-use rust_decimal::prelude::*;
-use sqlx;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 /// Engine handle for external interaction
 #[derive(Clone)]
@@ -67,6 +67,8 @@ pub struct EngineHandle {
     queue: Arc<PriorityQueue>,
     /// Executor for RPC state access
     executor: Option<Arc<tokio::sync::RwLock<crate::engine::executor::Executor>>>,
+    /// Cancellation token for triggering graceful shutdown
+    shutdown_token: CancellationToken,
 }
 
 impl EngineHandle {
@@ -144,15 +146,20 @@ impl EngineHandle {
             None
         }
     }
+
+    /// Trigger a graceful shutdown of the engine.
+    pub fn shutdown(&self) {
+        self.shutdown_token.cancel();
+    }
 }
 
 /// Main trading engine
 pub struct Engine {
     /// Configuration
-    #[allow(dead_code)] // Used for configuration access
+    #[allow(dead_code)]
     config: Arc<AppConfig>,
-    /// Database pool
-    db: DbPool,
+    /// Database
+    db: Arc<dyn Database>,
     /// Priority queue
     queue: Arc<PriorityQueue>,
     /// Executor for trade submission (wrapped in RwLock for shared access)
@@ -161,30 +168,38 @@ pub struct Engine {
     #[allow(dead_code)] // Used in run loop
     rx: mpsc::Receiver<Signal>,
     /// Notification service
-    #[allow(dead_code)] // Used for notifications
+    #[allow(dead_code)] // Used via SignalProcessor
     notifier: Option<Arc<CompositeNotifier>>,
     /// Metrics for monitoring
     metrics: Option<Arc<MetricsState>>,
     /// WebSocket state for real-time updates
+    #[allow(dead_code)] // Used via SignalProcessor
     ws_state: Option<Arc<WsState>>,
     /// Token parser for slow-path safety checks
+    #[allow(dead_code)] // Used via SignalProcessor
     token_parser: Option<Arc<TokenParser>>,
     /// Price cache for real-time pricing
+    #[allow(dead_code)] // Used via SignalProcessor
     price_cache: Option<Arc<PriceCache>>,
     /// Portfolio heat manager (shared from main.rs to use live wallet balance)
+    #[allow(dead_code)] // Used via SignalProcessor
     portfolio_heat: Option<Arc<PortfolioHeat>>,
+    /// Consolidated signal processing pipeline
+    signal_processor: signal_pipeline::SignalProcessor,
+    /// Token for external shutdown signaling
+    shutdown_token: CancellationToken,
 }
 
 impl Engine {
     /// Create a new engine instance
-    pub fn new(config: AppConfig, db: DbPool) -> (Self, EngineHandle) {
+    pub fn new(config: AppConfig, db: Arc<dyn Database>) -> (Self, EngineHandle) {
         Self::new_with_optional_extras(config, db, None, None, None)
     }
 
     /// Create a new engine instance with notification support
     pub fn new_with_notifier(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Arc<CompositeNotifier>,
     ) -> (Self, EngineHandle) {
         Self::new_with_notifier_and_metrics(config, db, notifier, None)
@@ -193,7 +208,7 @@ impl Engine {
     /// Create a new engine instance with notification and metrics support
     pub fn new_with_notifier_and_metrics(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Arc<CompositeNotifier>,
         metrics: Option<Arc<MetricsState>>,
     ) -> (Self, EngineHandle) {
@@ -203,7 +218,7 @@ impl Engine {
     /// Create a new engine instance with all optional extras
     pub fn new_with_extras(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Arc<CompositeNotifier>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
@@ -214,7 +229,7 @@ impl Engine {
     /// Create a new engine instance with all optional extras including tip manager
     pub fn new_with_extras_and_tip_manager(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Arc<CompositeNotifier>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
@@ -234,7 +249,7 @@ impl Engine {
     /// Create a new engine instance with all optional extras including tip manager and price cache
     pub fn new_with_extras_tip_manager_and_price_cache(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Arc<CompositeNotifier>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
@@ -258,7 +273,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_extras_tip_manager_price_cache_and_token_parser(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Arc<CompositeNotifier>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
@@ -283,7 +298,7 @@ impl Engine {
     /// Internal helper to create engine with optional extras
     fn new_with_optional_extras(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Option<Arc<CompositeNotifier>>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
@@ -297,7 +312,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     fn new_with_optional_extras_tip_manager_and_price_cache(
         config: AppConfig,
-        db: DbPool,
+        db: Arc<dyn Database>,
         notifier: Option<Arc<CompositeNotifier>>,
         metrics: Option<Arc<MetricsState>>,
         ws_state: Option<Arc<WsState>>,
@@ -329,11 +344,25 @@ impl Engine {
         }
 
         let executor_arc = Arc::new(tokio::sync::RwLock::new(executor));
+        let shutdown_token = CancellationToken::new();
         let handle = EngineHandle {
             tx,
             queue: queue.clone(),
             executor: Some(executor_arc.clone()),
+            shutdown_token: shutdown_token.clone(),
         };
+
+        let signal_processor = signal_pipeline::SignalProcessor::new(
+            db.clone(),
+            executor_arc.clone(),
+            config.clone(),
+            metrics.clone(),
+            token_parser.clone(),
+            portfolio_heat.clone(),
+            price_cache.clone(),
+            ws_state.clone(),
+            notifier.clone(),
+        );
 
         let engine = Self {
             config,
@@ -347,14 +376,102 @@ impl Engine {
             token_parser,
             price_cache,
             portfolio_heat,
+            signal_processor,
+            shutdown_token: shutdown_token.clone(),
         };
 
         (engine, handle)
     }
 
     /// Start the engine processing loop
-    pub async fn run(mut self) {
+    pub async fn run(self) {
         tracing::info!("Engine started");
+
+        // Check if parallel processing is enabled
+        let parallel_enabled = self.config.queue.parallel_enabled;
+
+        if parallel_enabled {
+            tracing::info!("Using parallel worker pool mode");
+            self.run_parallel().await;
+        } else {
+            tracing::info!("Using sequential processing mode (legacy)");
+            self.run_sequential().await;
+        }
+    }
+
+    /// Run engine with parallel worker pool
+    async fn run_parallel(self) {
+        tracing::info!("Engine running in parallel mode");
+
+        // Spawn metrics update task
+        let metrics_clone = self.metrics.clone();
+        let queue_clone = self.queue.clone();
+        if let Some(metrics) = metrics_clone {
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let depths = queue_clone.depths();
+                    metrics.queue_depth.set(depths.total as i64);
+                }
+            });
+        }
+
+        // Use engine's shutdown token for external cancellation triggering
+        let cancel_token = self.shutdown_token.clone();
+
+        // Create worker pool configuration
+        let worker_config = crate::engine::worker_pool::WorkerPoolConfig::from_app_config(&self.config);
+
+        tracing::info!(
+            num_workers = worker_config.num_workers,
+            max_concurrent_rpc = worker_config.max_concurrent_rpc,
+            "Initializing worker pool"
+        );
+
+        // Create and start worker pool
+        let mut worker_pool = crate::engine::worker_pool::WorkerPool::new(
+            self.queue.clone(),
+            self.signal_processor.clone(),
+            worker_config,
+            cancel_token.clone(),
+        );
+
+        worker_pool.start().await;
+
+        tracing::info!("Worker pool running - engine now processes signals in parallel");
+
+        // Keep the engine task alive and log statistics periodically
+        let mut stats_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            stats_interval.tick().await;
+
+            let stats = worker_pool.stats();
+            let depths = self.queue.depths();
+
+            tracing::info!(
+                active_workers = stats.active_workers,
+                queue_depth = stats.queue_depth,
+                rpc_permits_available = stats.rpc_semaphore_available,
+                high_priority = depths.high,
+                medium_priority = depths.medium,
+                spear_high_wqs = depths.spear_high_wqs,
+                low_priority = depths.low,
+                "Worker pool statistics"
+            );
+
+            // Check for cancellation signal
+            if cancel_token.is_cancelled() {
+                tracing::info!("Shutdown signal received, closing worker pool");
+                worker_pool.shutdown().await;
+                break;
+            }
+        }
+    }
+
+    /// Run engine in sequential processing mode (legacy implementation)
+    async fn run_sequential(mut self) {
+        tracing::info!("Engine running in sequential mode");
 
         // Spawn metrics update task
         let metrics_clone = self.metrics.clone();
@@ -437,8 +554,7 @@ impl Engine {
                             // Attempt to trip circuit breaker via config audit log so
                             // the operations team is alerted even if the CB reference
                             // is not directly accessible from Engine.
-                            let _ = crate::db::log_config_change(
-                                &self.db,
+                            let _ = self.db.log_config_change(
                                 "circuit_breaker",
                                 Some("OPEN"),
                                 "TRIPPED",
@@ -461,665 +577,8 @@ impl Engine {
             }
         }
     }
-
-    /// Process a single signal
+    /// Process a single signal (delegates to SignalProcessor)
     async fn process_signal(&mut self, mut signal: Signal) {
-        let trade_uuid = signal.trade_uuid.clone();
-        let start_time = std::time::Instant::now();
-
-        tracing::info!(
-            trade_uuid = %trade_uuid,
-            strategy = %signal.payload.strategy,
-            token = %signal.payload.token,
-            "Processing signal"
-        );
-
-        // Update status to EXECUTING
-        if let Err(e) =
-            crate::db::update_trade_status(&self.db, &trade_uuid, "EXECUTING", None, None).await
-        {
-            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING — marking FAILED to prevent phantom-QUEUED state");
-            // The signal was already dequeued; if we just return, the trade stays in QUEUED
-            // in the DB with no one processing it. Move it to FAILED so it's visible in DLQ.
-            if let Err(e2) = crate::db::update_trade_status(
-                &self.db,
-                &trade_uuid,
-                "FAILED",
-                None,
-                Some("DB error: failed to transition QUEUED→EXECUTING"),
-            )
-            .await
-            {
-                tracing::error!(error = %e2, trade_uuid = %trade_uuid, "Failed to mark trade FAILED after EXECUTING transition failed — trade is stuck in QUEUED");
-            }
-            return;
-        }
-
-        // Slow-path token safety check (for BUY signals only, before execution)
-        // EXIT signals don't need token validation, SELL signals already own the token
-        if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
-            if let Some(ref token_parser) = self.token_parser {
-                if let Some(ref token_address) = signal.payload.token_address {
-                    match token_parser
-                        .slow_check(token_address, signal.payload.strategy)
-                        .await
-                    {
-                        Ok(result) => {
-                            if !result.safe {
-                                let reason = result.rejection_reason.unwrap_or_else(|| {
-                                    "Token failed slow-path safety check".to_string()
-                                });
-
-                                tracing::warn!(
-                                    trade_uuid = %trade_uuid,
-                                    token = %token_address,
-                                    reason = %reason,
-                                    "Token rejected by slow-path safety check"
-                                );
-
-                                // Atomically mark DEAD_LETTER (status + DLQ in one tx)
-                                let _ = crate::db::mark_dead_letter(
-                                    &self.db,
-                                    &trade_uuid,
-                                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                    &reason,
-                                )
-                                .await;
-
-                                // Broadcast update via WebSocket
-                                if let Some(ref ws) = self.ws_state {
-                                    ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                                        trade_uuid: trade_uuid.clone(),
-                                        status: "DEAD_LETTER".to_string(),
-                                        token_symbol: Some(signal.payload.token.clone()),
-                                        strategy: signal.payload.strategy.to_string(),
-                                    }));
-                                }
-
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            // Fail closed: on slow-check error, reject the trade
-                            let reason = format!("Slow-path token safety check failed: {}", e);
-                            tracing::error!(
-                                trade_uuid = %trade_uuid,
-                                token = %token_address,
-                                error = %e,
-                                "Slow-path token check error, rejecting trade"
-                            );
-
-                            // Atomically mark DEAD_LETTER (status + DLQ in one tx)
-                            let _ = crate::db::mark_dead_letter(
-                                &self.db,
-                                &trade_uuid,
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                &reason,
-                            )
-                            .await;
-
-                            // Broadcast update via WebSocket
-                            if let Some(ref ws) = self.ws_state {
-                                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                                    trade_uuid: trade_uuid.clone(),
-                                    status: "DEAD_LETTER".to_string(),
-                                    token_symbol: Some(signal.payload.token.clone()),
-                                    strategy: signal.payload.strategy.to_string(),
-                                }));
-                            }
-
-                            return;
-                        }
-                    }
-                } else {
-                    // Missing token_address for BUY signal - reject
-                    let reason = "Missing token_address for BUY signal".to_string();
-                    tracing::warn!(
-                        trade_uuid = %trade_uuid,
-                        "BUY signal missing token_address, rejecting"
-                    );
-
-                    // Atomically mark DEAD_LETTER (status + DLQ in one tx)
-                    let _ = crate::db::mark_dead_letter(
-                        &self.db,
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
-
-                    return;
-                }
-            } else if signal.force_slow_path {
-                // fast-check errored at webhook time and token_parser is not available in the
-                // engine (e.g. dev-mode build). Reject rather than silently pass an unchecked token.
-                let reason = "Token parser unavailable; slow-path required by force_slow_path flag but cannot run — trade blocked".to_string();
-                tracing::error!(
-                    trade_uuid = %trade_uuid,
-                    "force_slow_path is set but token_parser is None — rejecting trade to prevent unchecked token execution"
-                );
-
-                if let Err(e) = crate::db::update_trade_status(
-                    &self.db,
-                    &trade_uuid,
-                    "DEAD_LETTER",
-                    None,
-                    Some(&reason),
-                )
-                .await
-                {
-                    tracing::error!(error = %e, "Failed to update trade status to DEAD_LETTER");
-                }
-
-                let _ = crate::db::insert_dead_letter(
-                    &self.db,
-                    Some(&trade_uuid),
-                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                    "TOKEN_SLOW_SAFETY_UNAVAILABLE",
-                    Some(&reason),
-                    signal.source_ip.as_deref(),
-                )
-                .await;
-
-                return;
-            }
-        }
-
-        // Apply off-hours size reduction BEFORE heat/allocation checks so the
-        // reduced amount is what gets evaluated against portfolio limits.
-        // The multiplier ramps linearly 01:00–02:00 (1.0 → base), holds flat 02:00–05:00,
-        // then ramps back 05:00–06:00 (base → 1.0), avoiding the cliff effect of the old
-        // binary step that applied full reduction at exactly 02:00.
-        if signal.payload.action == Action::Buy {
-            let now_time = Utc::now().time();
-            let hour_utc = now_time.hour();
-            let minute_utc = now_time.minute();
-            let mins_since_midnight = (hour_utc * 60 + minute_utc) as i64;
-            const RAMP_DOWN_START: i64 = 60; // 01:00 UTC
-            const FULL_REDUCTION_START: i64 = 120; // 02:00 UTC
-            const FULL_REDUCTION_END: i64 = 300; // 05:00 UTC
-            const RAMP_UP_END: i64 = 360; // 06:00 UTC
-            let base_mult = self.config.position_sizing.off_hours_size_multiplier;
-            let off_hours_mult = if !(RAMP_DOWN_START..RAMP_UP_END).contains(&mins_since_midnight) {
-                rust_decimal::Decimal::ONE
-            } else if mins_since_midnight < FULL_REDUCTION_START {
-                // linear ramp 1.0 → base_mult over 01:00–02:00
-                let t = rust_decimal::Decimal::from(mins_since_midnight - RAMP_DOWN_START)
-                    / rust_decimal::Decimal::from(60);
-                rust_decimal::Decimal::ONE - t * (rust_decimal::Decimal::ONE - base_mult)
-            } else if mins_since_midnight < FULL_REDUCTION_END {
-                base_mult
-            } else {
-                // linear ramp base_mult → 1.0 over 05:00–06:00
-                let t = rust_decimal::Decimal::from(mins_since_midnight - FULL_REDUCTION_END)
-                    / rust_decimal::Decimal::from(60);
-                base_mult + t * (rust_decimal::Decimal::ONE - base_mult)
-            };
-            if off_hours_mult < rust_decimal::Decimal::ONE {
-                tracing::info!(
-                    trade_uuid = %trade_uuid,
-                    hour_utc = hour_utc,
-                    minute_utc = minute_utc,
-                    multiplier = %off_hours_mult,
-                    original_amount_sol = %signal.payload.amount_sol,
-                    "Off-hours window: reducing position size before heat check (gradual ramp)"
-                );
-                signal.payload.amount_sol *= off_hours_mult;
-            }
-        }
-
-        // Re-check portfolio heat and strategy allocation before execution (for BUY signals only)
-        if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
-            let portfolio_heat = if let Some(ref ph) = self.portfolio_heat {
-                Arc::clone(ph)
-            } else {
-                Arc::new(PortfolioHeat::new(
-                    self.db.clone(),
-                    self.config.position_sizing.total_capital_sol,
-                ))
-            };
-
-            // 1. Portfolio Heat Check
-            match portfolio_heat
-                .can_open_position(signal.payload.amount_sol)
-                .await
-            {
-                Ok(false) => {
-                    let reason = "Portfolio heat limit reached at execution time".to_string();
-                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: portfolio heat limit reached");
-
-                    // Reject trade and set status to DEAD_LETTER (atomic: status + DLQ in one tx)
-                    let _ = crate::db::mark_dead_letter(
-                        &self.db,
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
-                    if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "DEAD_LETTER".to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                        }));
-                    }
-                    return;
-                }
-                Ok(true) => {}
-                Err(e) => {
-                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Portfolio heat check failed at execution time");
-                }
-            }
-
-            // 2. Strategy Allocation Check
-            match portfolio_heat
-                .can_open_strategy_position(
-                    signal.payload.strategy,
-                    signal.payload.amount_sol,
-                    self.config.strategy.shield_percent,
-                    self.config.strategy.spear_percent,
-                )
-                .await
-            {
-                Ok(false) => {
-                    let reason = format!(
-                        "Strategy allocation limit reached at execution time for {:?}",
-                        signal.payload.strategy
-                    );
-                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: strategy allocation limit reached");
-
-                    // Reject trade and set status to DEAD_LETTER (atomic: status + DLQ in one tx)
-                    let _ = crate::db::mark_dead_letter(
-                        &self.db,
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
-                    if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "DEAD_LETTER".to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                        }));
-                    }
-                    return;
-                }
-                Ok(true) => {}
-                Err(e) => {
-                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Strategy allocation check failed at execution time");
-                }
-            }
-        }
-
-        // Duplicate-token guard: reject a second BUY for a token we already hold.
-        // Two consensus signals arriving within the queue window both pass the heat check
-        // before either is committed — doubling concentration in a single token.
-        if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
-            if let Some(ref token_address) = signal.payload.token_address {
-                let existing: i64 = match sqlx::query_scalar::<_, i64>(
-                    "SELECT COUNT(*) FROM positions WHERE token_address = ? AND state IN ('ACTIVE','EXITING')"
-                )
-                .bind(token_address)
-                .fetch_one(&self.db)
-                .await
-                {
-                    Ok(n) => n,
-                    Err(e) => {
-                        // Fail-closed: a DB error during the duplicate check could allow a
-                        // duplicate position if we default to 0. Reject the signal instead.
-                        let reason = format!("DB error during duplicate check — rejecting signal (fail-safe): {}", e);
-                        tracing::error!(trade_uuid = %trade_uuid, error = %e, "DB error in duplicate position check — rejecting signal");
-                        let _ = crate::db::mark_dead_letter(
-                            &self.db,
-                            &trade_uuid,
-                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                            &reason,
-                        ).await;
-                        return;
-                    }
-                };
-
-                if existing > 0 {
-                    let reason = format!(
-                        "Duplicate position rejected: already ACTIVE/EXITING in {}",
-                        token_address
-                    );
-                    tracing::warn!(trade_uuid = %trade_uuid, token_address = %token_address, "Duplicate token position rejected");
-                    let _ = crate::db::mark_dead_letter(
-                        &self.db,
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
-                    if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "DEAD_LETTER".to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                        }));
-                    }
-                    return;
-                }
-            }
-        }
-
-        // Execute the trade
-        let result = {
-            let executor = self.executor.read().await;
-            executor.execute(&signal).await
-        };
-        let latency_ms = start_time.elapsed().as_millis() as f64;
-
-        // Update trade latency metric
-        if let Some(ref metrics) = self.metrics {
-            metrics.trade_latency.observe(latency_ms);
-        }
-
-        match result {
-            Ok((tx_signature, confirmed)) => {
-                tracing::info!(
-                    trade_uuid = %trade_uuid,
-                    tx_signature = %tx_signature,
-                    "Trade executed successfully"
-                );
-
-                // 1 + 2a. For BUY signals, atomically mark trade ACTIVE and open position.
-                // This prevents a dangling ACTIVE trade with no position row if open_position fails.
-                if signal.payload.action == Action::Buy {
-                    let fill_price_sol = {
-                        let exec = self.executor.read().await;
-                        exec.get_last_fill_price_sol_per_token()
-                    };
-                    let sol_price_usd = self
-                        .price_cache
-                        .as_ref()
-                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL))
-                        .unwrap_or(Decimal::ZERO);
-
-                    let entry_price = if let Some(fps) = fill_price_sol {
-                        if !sol_price_usd.is_zero() {
-                            fps * sol_price_usd
-                        } else {
-                            self.price_cache
-                                .as_ref()
-                                .and_then(|c| c.get_price_usd(signal.token_address()))
-                                .unwrap_or(Decimal::ZERO)
-                        }
-                    } else {
-                        self.price_cache
-                            .as_ref()
-                            .and_then(|c| c.get_price_usd(signal.token_address()))
-                            .unwrap_or(Decimal::ZERO)
-                    };
-
-                    // [R-H1] BUY confirmed on-chain but entry price unavailable: open the position
-                    // with entry_price=0 so the stop-loss monitor will force-exit it on the next tick.
-                    // This is safer than DEAD_LETTER-ing a trade that already executed on-chain —
-                    // DEAD_LETTER would leave the position open with no tracking row in the DB.
-                    // Only DEAD_LETTER if the position row insert itself fails (handled below in Err branch).
-                    if entry_price.is_zero() {
-                        tracing::warn!(
-                            trade_uuid = %trade_uuid,
-                            token = %signal.payload.token,
-                            "BUY executed on-chain but entry price unavailable (entry_price=0); \
-                             opening position with zero cost basis so stop-loss monitor will force-exit it"
-                        );
-                    }
-
-                    // max_heat_sol = 20% of total capital — matched to PortfolioHeat::new default.
-                    let max_heat_sol = self.config.position_sizing.total_capital_sol
-                        * rust_decimal::Decimal::from_f64_retain(0.20)
-                            .unwrap_or(rust_decimal::Decimal::ZERO);
-
-                    match crate::db::activate_trade_and_open_position(
-                        &self.db,
-                        &trade_uuid,
-                        &signal.payload.wallet_address,
-                        signal.token_address(),
-                        Some(&signal.payload.token),
-                        &signal.payload.strategy.to_string(),
-                        signal.payload.amount_sol,
-                        entry_price,
-                        &tx_signature,
-                        Some(max_heat_sol),
-                        Some(sol_price_usd),
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            if let Some(ref ws) = self.ws_state {
-                                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                                    trade_uuid: trade_uuid.clone(),
-                                    status: "ACTIVE".to_string(),
-                                    token_symbol: Some(signal.payload.token.clone()),
-                                    strategy: signal.payload.strategy.to_string(),
-                                }));
-                            }
-                        }
-                        Err(e) => {
-                            // [R-H1] Position row insert failed: DEAD_LETTER the trade so the operator
-                            // can see it was executed on-chain but not tracked in the DB.
-                            let reason =
-                                format!("Position row insert failed after on-chain BUY: {}", e);
-                            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to activate trade and open position — DEAD_LETTER-ing (on-chain tx executed but no position row)");
-                            let _ = crate::db::update_trade_status(
-                                &self.db,
-                                &trade_uuid,
-                                "DEAD_LETTER",
-                                None,
-                                Some(&reason),
-                            )
-                            .await;
-                            let _ = crate::db::insert_dead_letter(
-                                &self.db,
-                                Some(&trade_uuid),
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                "POSITION_ROW_INSERT_FAILED",
-                                Some(&reason),
-                                signal.source_ip.as_deref(),
-                            )
-                            .await;
-                        }
-                    }
-                } else if signal.payload.action == Action::Sell {
-                    let fill_price_sol = {
-                        let exec = self.executor.read().await;
-                        exec.get_last_fill_price_sol_per_token()
-                    };
-                    let sol_price_usd = self
-                        .price_cache
-                        .as_ref()
-                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL))
-                        .unwrap_or(Decimal::ZERO);
-
-                    let exit_price = if let Some(fps) = fill_price_sol {
-                        if !sol_price_usd.is_zero() {
-                            fps * sol_price_usd
-                        } else {
-                            self.price_cache
-                                .as_ref()
-                                .and_then(|c| c.get_price_usd(signal.token_address()))
-                                .unwrap_or(Decimal::ZERO)
-                        }
-                    } else {
-                        self.price_cache
-                            .as_ref()
-                            .and_then(|c| c.get_price_usd(signal.token_address()))
-                            .unwrap_or(Decimal::ZERO)
-                    };
-
-                    let sol_price_usd_opt = self
-                        .price_cache
-                        .as_ref()
-                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
-
-                    // [B-H1] SELL must never re-enter ACTIVE: transition EXECUTING→EXITING directly.
-                    // Going through ACTIVE first would create a race window where the position
-                    // appears open again (ACTIVE) before the exit confirms, breaking reconciliation.
-                    if let Err(e) = crate::db::update_trade_status(
-                        &self.db,
-                        &trade_uuid,
-                        "EXITING",
-                        Some(&tx_signature),
-                        None,
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, "Failed to update sell trade status to EXITING");
-                    } else if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "EXITING".to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                        }));
-                    }
-
-                    let exit_fraction = {
-                        let raw = signal.payload.exit_fraction.unwrap_or(Decimal::ONE);
-                        if raw <= Decimal::ZERO || raw > Decimal::ONE {
-                            tracing::warn!(
-                                trade_uuid = %trade_uuid,
-                                exit_fraction = %raw,
-                                "Invalid exit_fraction (must be in (0, 1]) — clamping to 1.0 (full exit)"
-                            );
-                            Decimal::ONE
-                        } else {
-                            raw
-                        }
-                    };
-
-                    // Close Position and write net PnL to trades table (full or partial exit)
-                    if let Err(e) = crate::db::close_position(
-                        &self.db,
-                        signal.token_address(),
-                        &signal.payload.wallet_address,
-                        exit_price,
-                        &tx_signature,
-                        &trade_uuid,
-                        sol_price_usd_opt,
-                        exit_fraction,
-                        confirmed,
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, "Failed to close position");
-                    }
-
-                    // Transition to CLOSED after position is confirmed closed
-                    if let Err(e) = crate::db::update_trade_status(
-                        &self.db,
-                        &trade_uuid,
-                        "CLOSED",
-                        Some(&tx_signature),
-                        None,
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, "Failed to update trade status to CLOSED");
-                    }
-                }
-            }
-            Err(crate::engine::executor::ExecutorError::MarketConditionsUnfavorable(
-                ref reason,
-            )) => {
-                if signal.payload.action == Action::Buy {
-                    // BUY deferred due to market conditions: revert to PENDING for retry.
-                    tracing::warn!(
-                        trade_uuid = %trade_uuid,
-                        reason = %reason,
-                        "BUY trade deferred — market conditions unfavorable, reverting to PENDING"
-                    );
-                    if let Err(db_err) = crate::db::update_trade_status(
-                        &self.db,
-                        &trade_uuid,
-                        "PENDING",
-                        None,
-                        Some(reason),
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
-                    }
-                } else {
-                    // EXIT/SELL deferred by market conditions — this is a critical failure because
-                    // check_market_conditions should never block exits (see executor.rs). If we
-                    // reach here something unexpected happened; fail visibly so it shows in DLQ.
-                    tracing::error!(
-                        trade_uuid = %trade_uuid,
-                        reason = %reason,
-                        action = %signal.payload.action,
-                        "CRITICAL: EXIT signal deferred by market conditions — position may be stuck open"
-                    );
-                    if let Err(db_err) = crate::db::update_trade_status(
-                        &self.db,
-                        &trade_uuid,
-                        "FAILED",
-                        None,
-                        Some(reason),
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %db_err, "Failed to update exit trade status to FAILED");
-                    }
-                }
-            }
-            Err(crate::engine::executor::ExecutorError::ExecutionCostTooHigh {
-                cost,
-                cost_pct,
-                limit_pct,
-                strategy,
-            }) => {
-                let reason = format!(
-                    "Cost efficiency check failed: total cost {} SOL ({:.1}%) exceeds limit {:.1}% for strategy {:?}",
-                    cost, cost_pct, limit_pct, strategy
-                );
-                tracing::warn!(trade_uuid = %trade_uuid, reason = %reason, "Trade rejected due to cost efficiency");
-
-                // Atomically mark DEAD_LETTER (status + DLQ in one tx)
-                let _ = crate::db::mark_dead_letter(
-                    &self.db,
-                    &trade_uuid,
-                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                    &reason,
-                )
-                .await;
-
-                // Broadcast update via WebSocket
-                if let Some(ref ws) = self.ws_state {
-                    ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                        trade_uuid: trade_uuid.clone(),
-                        status: "DEAD_LETTER".to_string(),
-                        token_symbol: Some(signal.payload.token.clone()),
-                        strategy: signal.payload.strategy.to_string(),
-                    }));
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    trade_uuid = %trade_uuid,
-                    error = %e,
-                    "Trade execution failed"
-                );
-
-                // Update status to FAILED
-                if let Err(db_err) = crate::db::update_trade_status(
-                    &self.db,
-                    &trade_uuid,
-                    "FAILED",
-                    None,
-                    Some(&e.to_string()),
-                )
-                .await
-                {
-                    tracing::error!(error = %db_err, "Failed to update trade status to FAILED");
-                }
-            }
-        }
+        self.signal_processor.process_signal(&mut signal).await;
     }
 }

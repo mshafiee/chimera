@@ -8,7 +8,6 @@ use chimera_operator::{
     vault::VaultSecrets,
 };
 use rust_decimal::Decimal;
-use secrecy::Secret;
 use solana_sdk::signature::{Keypair, Signer};
 use std::str::FromStr;
 
@@ -31,7 +30,7 @@ fn test_load_wallet_keypair() {
     let secrets = VaultSecrets {
         webhook_secret: "test".to_string(),
         webhook_secret_previous: None,
-        wallet_private_key: Some(Secret::new(hex_key)),
+        wallet_private_key: Some(hex_key),
         rpc_api_key: None,
         fallback_rpc_api_key: None,
     };
@@ -46,7 +45,7 @@ fn test_load_wallet_keypair_invalid() {
     let secrets = VaultSecrets {
         webhook_secret: "test".to_string(),
         webhook_secret_previous: None,
-        wallet_private_key: Some(Secret::new("not-valid-hex".to_string())),
+        wallet_private_key: Some("not-valid-hex".to_string()),
         rpc_api_key: None,
         fallback_rpc_api_key: None,
     };

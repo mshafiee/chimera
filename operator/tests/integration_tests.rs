@@ -2,33 +2,39 @@
 //!
 //! Tests database operations and system behavior using an in-memory test DB.
 
-use chimera_operator::config::DatabaseConfig;
-use chimera_operator::db;
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
+};
 use rust_decimal::prelude::*;
+use sqlx::Pool;
+use sqlx::Sqlite;
+use std::sync::Arc;
 use tempfile::TempDir;
 
-/// Setup test database
-async fn setup_test_db() -> (db::DbPool, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("test.db");
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
 
-    let pool = db::init_pool(&DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    })
-    .await
-    .unwrap();
+/// Setup test database
+async fn setup_test_db() -> (Arc<dyn Database>, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let db = create_database(&config).await.unwrap();
 
     // Run migrations
-    db::run_migrations(&pool).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    (pool, temp_dir)
+    (db, temp_dir)
 }
 
 #[tokio::test]
 async fn test_health_check_db_connectivity() {
     // Verifies that the test DB can be set up and migrations applied successfully.
-    let (pool, _dir) = setup_test_db().await;
+    let (db, _dir) = setup_test_db().await;
+    let pool = sqlite_pool(&db);
     // A simple query that should always succeed on a healthy DB
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades")
         .fetch_one(&pool)
@@ -41,39 +47,38 @@ async fn test_health_check_db_connectivity() {
 async fn test_trade_idempotency() {
     // Inserting two rows with the same trade_uuid should fail on the second insert
     // because the DB schema enforces UNIQUE on trade_uuid.
-    let (pool, _dir) = setup_test_db().await;
+    let (db, _dir) = setup_test_db().await;
+    let pool = sqlite_pool(&db);
 
     let uuid = "idempotency-test-uuid-1234";
     let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
     let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
     // First insert should succeed
-    db::insert_trade(
-        &pool,
-        uuid,
-        wallet,
-        token,
-        Some("BONK"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("0.1").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: wallet.to_string(),
+        token_address: token.to_string(),
+        token_symbol: Some("BONK".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("0.1").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .expect("First insert should succeed");
 
     // Second insert with same UUID should fail
-    let second = db::insert_trade(
-        &pool,
-        uuid,
-        wallet,
-        token,
-        Some("BONK"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("0.1").unwrap(),
-        "PENDING",
-    )
+    let second = db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: wallet.to_string(),
+        token_address: token.to_string(),
+        token_symbol: Some("BONK".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("0.1").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await;
     assert!(
         second.is_err(),
@@ -92,70 +97,74 @@ async fn test_trade_idempotency() {
 #[tokio::test]
 async fn test_circuit_breaker_loss_tracking() {
     // Inserting a CLOSED trade with a large negative PnL and querying for it works correctly.
-    let (pool, _dir) = setup_test_db().await;
+    let (db, _dir) = setup_test_db().await;
+    let pool = sqlite_pool(&db);
 
     let uuid = "circuit-test-uuid-5678";
     let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
     let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
-    db::insert_trade(
-        &pool,
-        uuid,
-        wallet,
-        token,
-        Some("BONK"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "CLOSED",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: wallet.to_string(),
+        token_address: token.to_string(),
+        token_symbol: Some("BONK".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "CLOSED".to_string(),
+    })
     .await
     .unwrap();
 
     let big_loss = Decimal::from_str("-2.5").unwrap();
-    db::update_trade_net_pnl(&pool, uuid, big_loss)
-        .await
-        .unwrap();
+    db.update_trade_net_pnl(uuid, big_loss).await.unwrap();
 
     // Verify the loss is stored correctly
-    let row: (f64,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
+    let row: (String,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
         .bind(uuid)
         .fetch_one(&pool)
         .await
         .unwrap();
+    let net_pnl: f64 = row.0.parse().unwrap_or(0.0);
     assert!(
-        row.0 < 0.0,
+        net_pnl < 0.0,
         "net_pnl_sol should be negative for a losing trade"
     );
-    assert!((row.0 + 2.5).abs() < 0.0001, "net_pnl_sol should be -2.5");
+    assert!((net_pnl + 2.5).abs() < 0.0001, "net_pnl_sol should be -2.5");
 }
 
 #[tokio::test]
 async fn test_trade_status_update() {
-    // Verify that a trade's status can be updated from OPEN to CLOSED.
-    let (pool, _dir) = setup_test_db().await;
+    // Verify that a trade's status can be updated from PENDING to CLOSED.
+    let (db, _dir) = setup_test_db().await;
+    let pool = sqlite_pool(&db);
 
     let uuid = "status-update-uuid-9012";
     let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
     let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
-    db::insert_trade(
-        &pool,
-        uuid,
-        wallet,
-        token,
-        Some("BONK"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("0.5").unwrap(),
-        "PENDING",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: wallet.to_string(),
+        token_address: token.to_string(),
+        token_symbol: Some("BONK".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("0.5").unwrap(),
+        status: "PENDING".to_string(),
+    })
     .await
     .unwrap();
 
-    db::update_trade_status(&pool, uuid, "CLOSED", Some("tx_signature_abc"), None)
-        .await
-        .unwrap();
+    db.update_trade_status(&UpdateTradeStatus {
+        trade_uuid: uuid.to_string(),
+        status: "CLOSED".to_string(),
+        tx_signature: Some("tx_signature_abc".to_string()),
+        error_message: None,
+    })
+    .await
+    .unwrap();
 
     let row: (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
         .bind(uuid)
@@ -168,7 +177,8 @@ async fn test_trade_status_update() {
 #[tokio::test]
 async fn test_wallet_insert_and_query() {
     // Insert a wallet record and verify it can be retrieved.
-    let (pool, _dir) = setup_test_db().await;
+    let (db, _dir) = setup_test_db().await;
+    let pool = sqlite_pool(&db);
 
     let address = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
 

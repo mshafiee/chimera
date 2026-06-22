@@ -8,25 +8,33 @@
 //! - Position size capped at configured maximum
 //! - Low-WQS wallet gets performance penalty
 
-use chimera_operator::config::{DatabaseConfig, PositionSizingConfig};
-use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::config::PositionSizingConfig;
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool,
+};
 use chimera_operator::engine::position_sizer::{PositionSizer, SizingFactors};
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
+
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("position_sizer_test.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("position_sizer_test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
 }
 
 fn default_sizing_config() -> Arc<PositionSizingConfig> {
@@ -66,7 +74,7 @@ fn neutral_factors() -> SizingFactors {
 }
 
 /// Insert N active positions into DB.
-async fn insert_active_positions(pool: &chimera_operator::db::DbPool, count: usize) {
+async fn insert_active_positions(pool: &Pool<Sqlite>, count: usize) {
     for i in 0..count {
         let uuid = format!("uuid-pos-{}", i);
         sqlx::query(
@@ -99,7 +107,8 @@ async fn test_concurrent_position_limit_blocked_on_db_error() {
     // This is fail-safe behavior: during DB connectivity issues, no new positions
     // are opened until connectivity is restored.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Drop the positions table to force a query error
     sqlx::query("DROP TABLE IF EXISTS positions")
@@ -107,7 +116,7 @@ async fn test_concurrent_position_limit_blocked_on_db_error() {
         .await
         .unwrap();
 
-    let sizer = PositionSizer::new(pool, default_sizing_config());
+    let sizer = PositionSizer::new(db, default_sizing_config());
     let can_open = sizer.can_open_position().await;
 
     assert!(
@@ -122,14 +131,15 @@ async fn test_concurrent_position_limit_blocked_on_db_error() {
 async fn test_max_concurrent_positions_enforced() {
     // At exactly max_concurrent_positions ACTIVE positions, can_open_position() = false.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let max = 5_usize;
     let cfg = sizing_config_with_max("1.0", "10.0", "0.1", max);
 
     // Insert max active positions
     insert_active_positions(&pool, max).await;
 
-    let sizer = PositionSizer::new(pool, cfg);
+    let sizer = PositionSizer::new(db, cfg);
     let can_open = sizer.can_open_position().await;
 
     assert!(
@@ -143,13 +153,14 @@ async fn test_max_concurrent_positions_enforced() {
 async fn test_one_below_max_allows_new_position() {
     // At max-1 active positions, one more should be allowed.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let max = 5_usize;
     let cfg = sizing_config_with_max("1.0", "10.0", "0.1", max);
 
     insert_active_positions(&pool, max - 1).await;
 
-    let sizer = PositionSizer::new(pool, cfg);
+    let sizer = PositionSizer::new(db, cfg);
     let can_open = sizer.can_open_position().await;
 
     assert!(
@@ -161,7 +172,7 @@ async fn test_one_below_max_allows_new_position() {
 }
 
 /// Insert N closed trades for a specific wallet (used for confidence seeding).
-async fn insert_closed_trades(pool: &chimera_operator::db::DbPool, wallet: &str, count: usize) {
+async fn insert_closed_trades(pool: &Pool<Sqlite>, wallet: &str, count: usize) {
     for i in 0..count {
         let uuid = format!("closed-{}-{}", wallet, i);
         sqlx::query(
@@ -186,12 +197,13 @@ async fn test_new_token_age_penalty_halves_size() {
     // min_size_sol before the age penalty is applied (otherwise both cases hit
     // the min floor and no difference is visible).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     // Seed 5 closed trades → confidence ≈ 0.70. size = 2.0 * 0.5 * 0.70 = 0.70 > 0.1 (min).
     // Age penalty: 0.70 * 0.5 = 0.35 vs 0.70 — ratio ≈ 0.5. ✓
     insert_closed_trades(&pool, "test_wallet", 5).await;
     let cfg = sizing_config_with_max("2.0", "20.0", "0.1", 10);
-    let sizer = PositionSizer::new(pool, cfg);
+    let sizer = PositionSizer::new(db, cfg);
 
     let mut new_token = neutral_factors();
     new_token.token_age_hours = Some(2.0); // new: < 24h
@@ -226,9 +238,10 @@ async fn test_consensus_multiplier_increases_size() {
     // Use a base size large enough that both sides exceed min_size_sol so the
     // multiplier's effect is visible (0 trades = confidence 0.05).
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let config = sizing_config_with_max("2.0", "5.0", "0.01", 5);
-    let sizer = PositionSizer::new(pool, config);
+    let sizer = PositionSizer::new(db, config);
 
     let mut consensus = neutral_factors();
     consensus.is_consensus = true;
@@ -253,9 +266,10 @@ async fn test_consensus_multiplier_increases_size() {
 async fn test_position_size_capped_at_max() {
     // Even with maximum multipliers (consensus + high WQS + high quality), size ≤ max.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let cfg = sizing_config_with_max("5.0", "6.0", "0.5", 20); // max=6 SOL, base=5
-    let sizer = PositionSizer::new(pool, cfg);
+    let sizer = PositionSizer::new(db, cfg);
 
     let factors = SizingFactors {
         is_consensus: true,                                       // 1.5x
@@ -289,9 +303,10 @@ async fn test_position_size_floor_at_minimum() {
     // All penalties applied: new token, high slippage, low WQS, low quality.
     // Size must not go below min_size_sol.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let cfg = sizing_config_with_max("2.0", "20.0", "0.5", 10); // min=0.5 SOL
-    let sizer = PositionSizer::new(pool, cfg);
+    let sizer = PositionSizer::new(db, cfg);
 
     let factors = SizingFactors {
         is_consensus: false,
@@ -327,9 +342,10 @@ async fn test_high_wqs_multiplier_applied() {
     //
     // Use a large base_size so the WQS factor pushes both values above min_size_sol
     // (with 0 closed trades, confidence=0.05: 10.0 * 0.85 * 0.05 = 0.425 vs 0.25).
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let sizer = PositionSizer::new(
-        pool,
+        db,
         Arc::new(chimera_operator::config::PositionSizingConfig {
             base_size_sol: Decimal::from_str("10.0").unwrap(),
             min_size_sol: Decimal::from_str("0.01").unwrap(),

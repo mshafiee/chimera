@@ -11,7 +11,7 @@ interface PositionsResponse {
 export function usePositions(state?: string) {
   return useQuery({
     queryKey: ['positions', state],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const params = new URLSearchParams()
       if (state) params.set('state', state)
       
@@ -25,7 +25,7 @@ export function usePositions(state?: string) {
 export function usePosition(tradeUuid: string) {
   return useQuery({
     queryKey: ['position', tradeUuid],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const { data } = await apiClient.get<Position>(`/positions/${tradeUuid}`)
       return data
     },

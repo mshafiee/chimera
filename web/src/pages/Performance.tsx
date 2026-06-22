@@ -10,13 +10,13 @@ import { Info } from 'lucide-react'
 import { useState } from 'react'
 
 // Helper function to safely access nested properties
-const safeGet = <T,>(obj: any, path: string, defaultValue: T): T => {
+const safeGet = <T,>(obj: object | null | undefined, path: string, defaultValue: T): T => {
   try {
     const keys = path.split('.')
-    let result = obj
+    let result: unknown = obj
     for (const key of keys) {
       if (result && typeof result === 'object' && key in result) {
-        result = result[key]
+        result = (result as Record<string, unknown>)[key]
       } else {
         return defaultValue
       }

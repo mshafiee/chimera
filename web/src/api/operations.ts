@@ -101,7 +101,7 @@ export interface HealthCheck {
 export function useResourceUsage(refetchInterval?: number) {
   return useQuery({
     queryKey: ['operations', 'resources'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ResourceUsageResponse>('/operations/resources')
       return response.data
     },
@@ -122,7 +122,7 @@ export function useResourceUsage(refetchInterval?: number) {
 export function useSecretRotation() {
   return useQuery({
     queryKey: ['operations', 'secrets'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<SecretRotationResponse>('/operations/secrets')
       return response.data
     },
@@ -142,7 +142,7 @@ export function useSecretRotation() {
 export function useRateLimitStatus() {
   return useQuery({
     queryKey: ['operations', 'rate-limit'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<RateLimitStatusResponse>('/operations/rate-limit')
       return response.data
     },
@@ -162,7 +162,7 @@ export function useRateLimitStatus() {
 export function useSystemLogs(level?: string, limit?: number) {
   return useQuery({
     queryKey: ['operations', 'logs', level, limit],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<SystemLogsResponse>('/operations/logs', {
         params: {
           ...(level && { level }),
@@ -187,7 +187,7 @@ export function useSystemLogs(level?: string, limit?: number) {
 export function useHealthCheckDetails() {
   return useQuery({
     queryKey: ['operations', 'health-checks'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<HealthCheckDetailsResponse>('/operations/health-checks')
       return response.data
     },

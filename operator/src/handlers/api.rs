@@ -17,8 +17,9 @@ use std::sync::Arc;
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
-use crate::db::{
-    self, ConfigAuditItem, DbPool, DeadLetterItem, PositionDetail, TradeDetail, WalletDetail,
+use crate::db_abstraction::{
+    trades_to_csv, trades_to_pdf, ConfigAuditItem, Database, DeadLetterItem, LatencyBucket,
+    PositionDetail, TradeDetail, WalletDetail,
 };
 use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
@@ -33,7 +34,7 @@ use solana_sdk::pubkey::Pubkey;
 
 /// Shared state for API handlers
 pub struct ApiState {
-    pub db: DbPool,
+    pub db: Arc<dyn Database>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub config: Arc<tokio::sync::RwLock<AppConfig>>,
     pub notifier: Arc<CompositeNotifier>,
@@ -78,7 +79,7 @@ pub async fn list_positions(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<PositionsQuery>,
 ) -> Result<Json<PositionsResponse>, AppError> {
-    let positions = db::get_positions(&state.db, params.state.as_deref()).await?;
+    let positions = state.db.get_positions(params.state.as_deref()).await?;
     let total = positions.len();
 
     // Calculate total unrealized PnL from active positions
@@ -104,8 +105,8 @@ pub async fn get_position(
     State(state): State<Arc<ApiState>>,
     Path(trade_uuid): Path<String>,
 ) -> Result<Json<PositionDetail>, AppError> {
-    match db::get_position_by_uuid(&state.db, &trade_uuid).await? {
-        Some(position) => Ok(Json(position)),
+    match state.db.get_position_by_trade_uuid(&trade_uuid).await? {
+        Some(position) => Ok(Json(position.into())),
         None => Err(AppError::NotFound(format!(
             "Position not found: {}",
             trade_uuid
@@ -158,7 +159,7 @@ pub async fn list_wallets(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<WalletsQuery>,
 ) -> Result<Json<WalletsResponse>, AppError> {
-    let wallets = db::get_wallets(&state.db, params.status.as_deref()).await?;
+    let wallets = state.db.get_wallets(params.status.as_deref()).await?;
     let total = wallets.len();
 
     Ok(Json(WalletsResponse { wallets, total }))
@@ -177,8 +178,8 @@ pub async fn get_wallet(
             "Invalid wallet address format".to_string(),
         ));
     }
-    match db::get_wallet_by_address(&state.db, &address).await? {
-        Some(wallet) => Ok(Json(wallet)),
+    match state.db.get_wallet(&address).await? {
+        Some(wallet) => Ok(Json(WalletDetail::from(wallet))),
         None => Err(AppError::NotFound(format!("Wallet not found: {}", address))),
     }
 }
@@ -222,17 +223,16 @@ pub async fn update_wallet(
     }
 
     // Check if wallet exists
-    let existing = db::get_wallet_by_address(&state.db, &address).await?;
+    let existing = state.db.get_wallet(&address).await?;
     if existing.is_none() {
         return Err(AppError::NotFound(format!("Wallet not found: {}", address)));
     }
 
     // Update wallet
-    let updated = db::update_wallet_status(
-        &state.db,
+    let updated = state.db.update_wallet_status_ext(
         &address,
         &body.status,
-        body.ttl_hours,
+        body.ttl_hours.map(|h| h as i32),
         body.reason.as_deref(),
     )
     .await?;
@@ -251,8 +251,7 @@ pub async fn update_wallet(
             .unwrap_or_default()
     );
 
-    db::log_config_change(
-        &state.db,
+    state.db.log_config_change(
         &format!("wallet:{}", address),
         existing.as_ref().map(|w| w.status.as_str()),
         &body.status,
@@ -267,7 +266,7 @@ pub async fn update_wallet(
 
     if was_promoted {
         // Get WQS score from existing wallet or default to 0
-        let wqs_score = existing.as_ref().and_then(|w| w.wqs_score).unwrap_or(0.0);
+        let wqs_score = existing.as_ref().and_then(|w| w.wqs_score.and_then(|d| d.to_f64())).unwrap_or(0.0);
 
         // Check notification rules before sending
         let config = state.config.read().await;
@@ -350,11 +349,11 @@ pub async fn update_wallet(
     }
 
     // Fetch updated wallet
-    let wallet = db::get_wallet_by_address(&state.db, &address).await?;
+    let wallet = state.db.get_wallet(&address).await?;
 
     Ok(Json(WalletUpdateResponse {
         success: true,
-        wallet,
+        wallet: wallet.map(WalletDetail::from),
         message: change_description,
     }))
 }
@@ -1442,8 +1441,7 @@ pub async fn update_config(
 
     // Now issue all audit log DB writes outside the write lock.
     for (key, old_val, new_val) in audit_entries {
-        db::log_config_change(
-            &state.db,
+        state.db.log_config_change(
             &key,
             old_val.as_deref(),
             &new_val,
@@ -1482,7 +1480,7 @@ pub async fn reset_circuit_breaker(
 
     // Clear the kill-switch state in the dedicated table so a restart after reset
     // does not re-trip automatically.
-    let _ = crate::db::set_kill_switch_state(&state.db, false, &auth.0.identifier, None).await;
+    let _ = state.db.set_kill_switch_state("INACTIVE", None).await;
 
     state.circuit_breaker.reset(&auth.0.identifier).await?;
 
@@ -1528,15 +1526,14 @@ pub async fn trip_circuit_breaker(
     // Write to dedicated kill_switch_state table first (single-row UPSERT, crash-safe).
     // main.rs reads this table on startup to re-trip if a crash occurred after the write
     // but before the in-memory circuit-breaker trip completed.
-    crate::db::set_kill_switch_state(&state.db, true, &auth.0.identifier, Some(&reason))
+    state.db.set_kill_switch_state("ACTIVE", Some(&reason))
         .await
         .map_err(|e| {
             crate::error::AppError::Internal(format!("Failed to persist kill-switch state: {}", e))
         })?;
 
     // Also append to config_audit for the immutable audit trail.
-    crate::db::log_config_change(
-        &state.db,
+    state.db.log_config_change(
         "kill_switch",
         Some("INACTIVE"),
         "ACTIVE",
@@ -1629,20 +1626,18 @@ pub async fn list_trades(
     let limit = params.limit.unwrap_or(100).min(1000);
     let offset = params.offset.unwrap_or(0);
 
-    let trades = db::get_trades(
-        &state.db,
+    let trades = state.db.get_trades_filtered(
         params.from.as_deref(),
         params.to.as_deref(),
         params.status.as_deref(),
         params.strategy.as_deref(),
         params.wallet_address.as_deref(),
-        Some(limit),
-        Some(offset),
+        limit,
+        offset,
     )
     .await?;
 
-    let total = db::count_trades(
-        &state.db,
+    let total = state.db.count_trades_filtered(
         params.from.as_deref(),
         params.to.as_deref(),
         params.status.as_deref(),
@@ -1668,15 +1663,14 @@ pub async fn export_trades(
     Query(params): Query<TradesQuery>,
 ) -> Result<Response, AppError> {
     // Fetch all matching trades (no pagination for export)
-    let trades = db::get_trades(
-        &state.db,
+    let trades = state.db.get_trades_filtered(
         params.from.as_deref(),
         params.to.as_deref(),
         params.status.as_deref(),
         params.strategy.as_deref(),
         params.wallet_address.as_deref(),
-        None, // No limit
-        None, // No offset
+        -1, // No limit
+        0,  // No offset
     )
     .await?;
 
@@ -1686,7 +1680,7 @@ pub async fn export_trades(
 
     match format.as_str() {
         "pdf" => {
-            let pdf_content = db::trades_to_pdf(&trades)?;
+            let pdf_content = trades_to_pdf(&trades)?;
             let filename = format!("chimera_trades_{}_{}.pdf", date_from, date_to);
 
             Ok((
@@ -1723,7 +1717,7 @@ pub async fn export_trades(
         }
         _ => {
             // Default to CSV
-            let csv_content = db::trades_to_csv(&trades);
+            let csv_content = trades_to_csv(&trades);
             let filename = format!("chimera_trades_{}_{}.csv", date_from, date_to);
 
             Ok((
@@ -1797,7 +1791,7 @@ pub struct TradeLatencyResponse {
     pub p99: f64,
     pub max: f64,
     pub avg: f64,
-    pub histogram: Vec<crate::db::LatencyBucket>,
+    pub histogram: Vec<LatencyBucket>,
     pub sample_size: u32,
 }
 
@@ -1892,18 +1886,18 @@ pub struct RateLimitInfo {
 pub async fn get_performance_metrics(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<PerformanceMetricsResponse>, AppError> {
-    let pnl_24h = db::get_pnl_24h(&state.db).await?;
-    let pnl_7d = db::get_pnl_7d(&state.db).await?;
-    let pnl_30d = db::get_pnl_30d(&state.db).await?;
+    let pnl_24h = state.db.get_pnl_24h().await?;
+    let pnl_7d = state.db.get_pnl_7d().await?;
+    let pnl_30d = state.db.get_pnl_30d().await?;
 
     // Compare each period to the equivalent prior window to compute change %.
-    let prev_24h = db::get_pnl_prev_window(&state.db, 48, 24)
+    let prev_24h = state.db.get_pnl_window("48", Some("24"))
         .await
         .unwrap_or(Decimal::ZERO);
-    let prev_7d = db::get_pnl_prev_window(&state.db, 336, 168)
+    let prev_7d = state.db.get_pnl_window("336", Some("168"))
         .await
         .unwrap_or(Decimal::ZERO);
-    let prev_30d = db::get_pnl_prev_window(&state.db, 1440, 720)
+    let prev_30d = state.db.get_pnl_window("1440", Some("720"))
         .await
         .unwrap_or(Decimal::ZERO);
 
@@ -1937,15 +1931,14 @@ pub async fn get_cost_metrics(
     let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
     // Get all trades from last 30 days
-    let trades = db::get_trades(
-        &state.db,
+    let trades = state.db.get_trades_filtered(
         Some(&from_date_str),
         None,
         None, // All statuses
         None, // All strategies
         None, // All wallets
-        None, // No limit
-        None, // No offset
+        -1,   // No limit
+        0,    // No offset
     )
     .await?;
 
@@ -2027,22 +2020,21 @@ pub async fn get_strategy_performance(
         .unwrap_or(30);
 
     let (win_rate, avg_return, trade_count) =
-        db::get_strategy_performance(&state.db, strategy, days).await?;
+        state.db.get_strategy_performance(strategy, days as i32).await?;
 
     // Calculate total PnL for the period
     // We need to query the actual trades to get total PnL (not just average)
     let from_date = chrono::Utc::now() - chrono::Duration::days(days);
     let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    let trades = db::get_trades(
-        &state.db,
+    let trades = state.db.get_trades_filtered(
         Some(&from_date_str),
         None,
         Some("CLOSED"),
         Some(strategy),
         None, // No wallet_address filter for strategy performance
-        None,
-        None,
+        -1,
+        0,
     )
     .await?;
 
@@ -2075,9 +2067,9 @@ pub async fn get_trade_latency(
         _ => 24,
     };
 
-    let stats = db::get_trade_latency_stats(&state.db, hours).await?;
+    let stats = state.db.get_trade_latency_stats(hours as i32).await?;
     let histogram =
-        db::get_trade_latency_histogram(&state.db, hours, &[10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0])
+        state.db.get_trade_latency_histogram(hours as i32, &[10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0])
             .await?;
 
     Ok(Json(TradeLatencyResponse {
@@ -2100,8 +2092,8 @@ pub async fn get_database_performance(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<DatabasePerformanceResponse>, AppError> {
     // Get connection pool stats
-    let pool_size = state.db.size() as usize;
-    let pool_idle = state.db.num_idle();
+    let pool_size: i32 = 0; // TODO: trait doesn't expose pool size
+    let pool_idle: i32 = 0; // TODO: trait doesn't expose idle connections
     let max_connections = state.config.read().await.database.max_connections;
 
     // Placeholder query performance stats
@@ -2283,8 +2275,8 @@ pub async fn list_dead_letter_queue(
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
 
-    let items = db::get_dead_letter_queue(&state.db, Some(limit), Some(offset)).await?;
-    let total = db::count_dead_letter_queue(&state.db).await?;
+    let items = state.db.get_dead_letter_entries(limit as i32, offset as i32).await?;
+    let total = state.db.count_dead_letter_entries().await?;
 
     Ok(Json(DeadLetterResponse { items, total }))
 }
@@ -2314,8 +2306,8 @@ pub async fn list_config_audit(
     let limit = params.limit.unwrap_or(50).min(200);
     let offset = params.offset.unwrap_or(0);
 
-    let items = db::get_config_audit(&state.db, Some(limit), Some(offset)).await?;
-    let total = db::count_config_audit(&state.db).await?;
+    let items = state.db.get_config_audit_entries(limit as i32, offset as i32).await?;
+    let total = state.db.count_config_audit_entries().await?;
 
     Ok(Json(ConfigAuditResponse { items, total }))
 }
@@ -2390,8 +2382,7 @@ pub async fn update_reconciliation_metrics(
             );
         }
 
-        db::log_config_change(
-            &state.db,
+        state.db.log_config_change(
             "metrics.reconciliation.checked",
             None,
             &checked.to_string(),
@@ -2415,8 +2406,7 @@ pub async fn update_reconciliation_metrics(
             );
         }
 
-        db::log_config_change(
-            &state.db,
+        state.db.log_config_change(
             "metrics.reconciliation.discrepancies",
             None,
             &discrepancies.to_string(),
@@ -2430,8 +2420,7 @@ pub async fn update_reconciliation_metrics(
         // Set gauge to current unresolved count
         state.metrics.reconciliation_unresolved.set(unresolved);
 
-        db::log_config_change(
-            &state.db,
+        state.db.log_config_change(
             "metrics.reconciliation.unresolved",
             None,
             &unresolved.to_string(),
@@ -2472,8 +2461,7 @@ pub async fn update_secret_rotation_metrics(
     if let Some(timestamp) = payload.last_success_timestamp {
         state.metrics.secret_rotation_last_success.set(timestamp);
 
-        db::log_config_change(
-            &state.db,
+        state.db.log_config_change(
             "metrics.secret_rotation.last_success_timestamp",
             None,
             &timestamp.to_string(),
@@ -2486,8 +2474,7 @@ pub async fn update_secret_rotation_metrics(
     if let Some(days) = payload.days_until_due {
         state.metrics.secret_rotation_days_until_due.set(days);
 
-        db::log_config_change(
-            &state.db,
+        state.db.log_config_change(
             "metrics.secret_rotation.days_until_due",
             None,
             &days.to_string(),
@@ -2644,7 +2631,7 @@ pub async fn get_reconciliation_status(
     Query(params): Query<ReconciliationStatusQuery>,
 ) -> Result<Json<ReconciliationStatusResponse>, AppError> {
     let discrepancies_limit = params.discrepancies_limit.unwrap_or(10).min(100);
-    let status_row = db::get_reconciliation_status(&state.db, Some(discrepancies_limit)).await?;
+    let status_row = state.db.get_reconciliation_status(discrepancies_limit as i32).await?;
 
     let recent_discrepancies = status_row
         .recent_discrepancies
@@ -2684,8 +2671,8 @@ pub async fn get_reconciliation_history(
     Query(params): Query<ReconciliationHistoryQuery>,
 ) -> Result<Json<ReconciliationHistoryResponse>, AppError> {
     let limit = params.limit.unwrap_or(10).min(100);
-    let runs = db::get_reconciliation_history(&state.db, Some(limit)).await?;
-    let total = db::count_reconciliation_runs(&state.db).await?;
+    let runs = state.db.get_reconciliation_history(limit as i32).await?;
+    let total = state.db.count_reconciliation_runs().await?;
 
     let run_responses: Vec<ReconciliationRunResponse> = runs
         .into_iter()
@@ -2736,7 +2723,7 @@ pub async fn get_reconciliation_stats(
     Query(params): Query<ReconciliationStatsQuery>,
 ) -> Result<Json<ReconciliationStatsResponse>, AppError> {
     let _range = params.range.as_deref();
-    let stats = db::get_reconciliation_stats(&state.db, _range).await?;
+    let stats = state.db.get_reconciliation_stats(_range.unwrap_or("30d")).await?;
 
     let discrepancy_types = stats
         .most_common_discrepancy_types
@@ -2779,8 +2766,7 @@ pub async fn trigger_reconciliation(
     tracing::info!("Manual reconciliation triggered by {}", auth.0.identifier);
 
     // Log the trigger event
-    db::log_config_change(
-        &state.db,
+    state.db.log_config_change(
         "reconciliation.manual_trigger",
         None,
         "triggered",
@@ -2818,7 +2804,7 @@ pub async fn resolve_discrepancy(
         "Discrepancy resolution requested"
     );
 
-    db::resolve_discrepancy(&state.db, id, &auth.0.identifier, &payload.resolution).await?;
+    state.db.resolve_discrepancy(id, &auth.0.identifier, &payload.resolution).await?;
 
     Ok(Json(ResolveDiscrepancyResponse { success: true }))
 }

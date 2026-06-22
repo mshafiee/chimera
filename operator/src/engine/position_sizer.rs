@@ -7,16 +7,15 @@
 //! - Portfolio limits
 
 use crate::config::PositionSizingConfig;
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::engine::kelly_sizer::KellySizer;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
-use sqlx;
 use std::sync::Arc;
 
 /// Position sizer
 pub struct PositionSizer {
-    db: DbPool,
+    db: Arc<dyn Database>,
     config: Arc<PositionSizingConfig>,
     /// Kelly Criterion sizer (active when use_kelly_sizing = true and ≥10 closed trades exist)
     kelly_sizer: Option<Arc<KellySizer>>,
@@ -47,7 +46,7 @@ pub struct SizingFactors {
 }
 
 impl PositionSizer {
-    pub fn new(db: DbPool, config: Arc<PositionSizingConfig>) -> Self {
+    pub fn new(db: Arc<dyn Database>, config: Arc<PositionSizingConfig>) -> Self {
         let kelly_sizer = if config.use_kelly_sizing {
             Some(Arc::new(KellySizer::new(db.clone())))
         } else {
@@ -132,10 +131,10 @@ impl PositionSizer {
                 Err(_) => {
                     // < 15 closed trades: scale base size by WQS quality and sample confidence.
                     // Uses the same 15-trade minimum as Kelly Criterion for consistency.
-                    let trade_count =
-                        crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
-                            .await
-                            .unwrap_or(0);
+                    let trade_count = self.db
+                        .get_closed_trade_count_for_wallet(&factors.wallet_address)
+                        .await
+                        .unwrap_or(0);
                     // Floor at 0.05 (5%) so unproven wallets (0 trades) get a minimal but
                     // non-zero base.
                     let confidence =
@@ -162,7 +161,8 @@ impl PositionSizer {
         } else {
             // Kelly not enabled: apply WQS + confidence scaling directly
             // Uses 15-trade denominator to match Kelly's minimum threshold
-            let trade_count = crate::db::get_closed_trade_count(&self.db, &factors.wallet_address)
+            let trade_count = self.db
+                .get_closed_trade_count_for_wallet(&factors.wallet_address)
                 .await
                 .unwrap_or(0);
             let confidence = Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
@@ -338,21 +338,23 @@ impl PositionSizer {
         total_capital_sol: Decimal,
     ) -> SizingFactors {
         // Get wallet from database
-        let wallet_opt = crate::db::get_wallet_by_address(&self.db, wallet_address).await;
+        let wallet_opt = self.db.get_wallet(wallet_address).await;
         let wqs = match wallet_opt {
-            Ok(Some(w)) => w.wqs_score.unwrap_or(50.0),
-            _ => 50.0,
+            Ok(Some(w)) => w.wqs_score.unwrap_or(Default::default()),
+            _ => Default::default(),
         };
+        let wqs = wqs.to_f64().unwrap_or(50.0);
 
         // Get wallet performance metrics from database
         // Convert success rate percentage to Decimal (0.0-1.0)
         let success_rate =
-            match crate::db::get_wallet_copy_performance(&self.db, wallet_address).await {
-                Ok(Some(metrics)) => Decimal::from_f64_retain(metrics.signal_success_rate / 100.0)
-                    .unwrap_or(Decimal::from_str("0.4").unwrap_or(Decimal::ZERO)),
+            match self.db.get_wallet_copy_performance(wallet_address).await {
+                Ok(Some(metrics)) => {
+                    metrics.signal_success_rate / rust_decimal::Decimal::from(100)
+                }
                 // Default to 0.4 for unproven/stale wallets — produces a 0.8× performance
                 // penalty rather than neutral 1.0×, reflecting the uncertainty of no data.
-                _ => Decimal::from_str("0.4").unwrap_or(Decimal::ZERO),
+                _ => rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO),
             };
 
         // Get token age if token address and Helius client are provided
@@ -393,13 +395,8 @@ impl PositionSizer {
     pub async fn can_open_position(&self) -> bool {
         // Count ACTIVE and EXITING positions together — EXITING positions still consume capital
         // until the exit transaction confirms. Ignoring them allows 2× over-deployment.
-        let active_count: i64 = match sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM positions WHERE state IN ('ACTIVE', 'EXITING')",
-        )
-        .fetch_one(&self.db)
-        .await
-        {
-            Ok(count) => count,
+        let active_count: i64 = match self.db.get_active_positions().await {
+            Ok(positions) => positions.len() as i64,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to query active positions, rejecting trade for safety");
                 return false;  // Fail-safe: reject trade on DB error to prevent unlimited position opening

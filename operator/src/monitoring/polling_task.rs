@@ -4,6 +4,7 @@
 //! This provides an alternative to webhooks for local development and production fallback.
 
 use anyhow::{Context, Result};
+use rust_decimal::prelude::*;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{rpc_polling, RateLimiter, RpcPollingState};
 use crate::circuit_breaker::CircuitBreaker;
-use crate::db::{self, DbPool};
+use crate::db_abstraction::Database;
 use crate::engine::EngineHandle;
 use crate::models::{Action, Signal, SignalPayload, Strategy};
 use crate::token::TokenParser;
@@ -34,7 +35,7 @@ pub struct PollingConfig {
 /// This task runs continuously, polling ACTIVE wallets for new transactions
 /// and generating signals for the trading engine.
 pub async fn start_polling_task(
-    db: DbPool,
+    db: Arc<dyn Database>,
     engine: EngineHandle,
     config: PollingConfig,
     cancel_token: CancellationToken,
@@ -73,7 +74,7 @@ pub async fn start_polling_task(
                 poll_count += 1;
 
                 // Query ACTIVE wallets from database
-                let wallets = match get_active_monitored_wallets(&db).await {
+                let wallets = match get_active_monitored_wallets(db.as_ref()).await {
                     Ok(w) => w,
                     Err(e) => {
                         tracing::warn!(error = %e, "Failed to query active wallets, skipping poll cycle");
@@ -102,7 +103,7 @@ pub async fn start_polling_task(
                     config.batch_size,
                     rate_limiter.clone(),
                     polling_state.clone(),
-                    Some(&db),
+                    Some(db.as_ref()),
                 )
                 .await
                 {
@@ -127,7 +128,7 @@ pub async fn start_polling_task(
                 for tx in transactions {
                     let result = tokio::time::timeout(
                         Duration::from_secs(30),
-                        process_transaction(&db, &engine, tx, &circuit_breaker, &token_parser),
+                        process_transaction(db.as_ref(), &engine, tx, &circuit_breaker, &token_parser),
                     )
                     .await;
                     match result {
@@ -142,27 +143,18 @@ pub async fn start_polling_task(
 }
 
 /// Get list of ACTIVE wallets that should be monitored
-async fn get_active_monitored_wallets(db: &DbPool) -> Result<Vec<String>> {
-    let wallets = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT w.address
-        FROM wallets w
-        LEFT JOIN wallet_monitoring wm ON w.address = wm.wallet_address
-        WHERE w.status = 'ACTIVE'
-        AND (wm.monitoring_enabled IS NULL OR wm.monitoring_enabled = 1)
-        ORDER BY w.last_trade_at DESC
-        "#,
-    )
-    .fetch_all(db)
-    .await
-    .context("Failed to query active monitored wallets")?;
+async fn get_active_monitored_wallets(db: &dyn Database) -> Result<Vec<String>> {
+    let wallets = db
+        .get_wallets_by_status("ACTIVE")
+        .await
+        .context("Failed to query active monitored wallets")?;
 
-    Ok(wallets)
+    Ok(wallets.into_iter().map(|w| w.address).collect())
 }
 
 /// Process a single transaction and generate trading signal
 async fn process_transaction(
-    db: &DbPool,
+    db: &dyn Database,
     engine: &EngineHandle,
     tx: rpc_polling::WalletTransaction,
     circuit_breaker: &CircuitBreaker,
@@ -183,7 +175,7 @@ async fn process_transaction(
     }
 
     // Gate 2: wallet must be ACTIVE
-    let wallet = match crate::db::get_wallet_by_address(db, &tx.wallet_address).await? {
+    let wallet = match db.get_wallet(&tx.wallet_address).await? {
         Some(w) => w,
         None => {
             tracing::warn!(wallet = %tx.wallet_address, "Wallet not found in database");
@@ -245,7 +237,7 @@ async fn process_transaction(
 
     // Gate 3: duplicate UUID check — prevents re-processing on restart/pagination gaps
     let trade_uuid = payload.generate_trade_uuid(tx.timestamp);
-    if db::trade_uuid_exists(db, &trade_uuid)
+    if db.trade_uuid_exists(&trade_uuid)
         .await
         .unwrap_or(false)
     {
@@ -310,7 +302,7 @@ async fn process_transaction(
 
     // Queue signal to engine
     engine
-        .queue_signal(signal, wallet.wqs_score)
+        .queue_signal(signal, wallet.wqs_score.map(|v| v.to_f64().unwrap_or(0.0)))
         .await
         .map_err(|e| anyhow::anyhow!("Failed to queue signal: {}", e))?;
 

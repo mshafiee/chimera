@@ -9,38 +9,45 @@
 //! - R3: Dynamic stop fires at threshold → close_position records correct negative PnL
 //! - Bonus: Profitable close records correct positive PnL
 
-use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
-use chimera_operator::db::{
-    close_position, init_pool, insert_trade, open_position, run_migrations,
+use chimera_operator::config::ProfitManagementConfig;
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool, InsertTrade,
 };
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-// ─── helpers ─────────────────────────────────────────────────────────────────
-
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("execution_proof.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
 }
 
-async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: f64) {
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("execution_proof.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
+}
+
+async fn insert_wallet(db: &Arc<dyn Database>, address: &str, wqs: f64) {
+    let pool = sqlite_pool(db);
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
          VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(address)
     .bind(wqs)
-    .execute(pool)
+    .execute(&pool)
     .await
     .unwrap();
 }
@@ -57,32 +64,30 @@ async fn insert_wallet(pool: &chimera_operator::db::DbPool, address: &str, wqs: 
 /// isolates the dynamic threshold, which correctly fires at -15%.
 #[tokio::test]
 async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // WQS=50 → medium tier → dynamic stop threshold = −15%
-    insert_wallet(&pool, "wallet_r3", 50.0).await;
+    insert_wallet(&db, "wallet_r3", 50.0).await;
 
     const UUID: &str = "uuid-r3-stop";
     const WALLET: &str = "wallet_r3";
     const TOKEN: &str = "token_r3_stop";
 
     // Open position: entry_price=$200, entry_amount_sol=1.0
-    insert_trade(
-        &pool,
-        UUID,
-        WALLET,
-        TOKEN,
-        Some("R3"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.0").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: UUID.to_string(),
+        wallet_address: WALLET.to_string(),
+        token_address: TOKEN.to_string(),
+        token_symbol: Some("R3".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.0").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         UUID,
         WALLET,
         TOKEN,
@@ -91,6 +96,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         Decimal::from_str("1.0").unwrap(),
         Decimal::from_str("200.0").unwrap(),
         "sig_entry_r3",
+        None,
         None,
     )
     .await
@@ -109,7 +115,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         max_stop_loss_distance: Decimal::from_str("-100.0").unwrap(),
         ..ProfitManagementConfig::default()
     });
-    let mgr = StopLossManager::new(pool.clone(), config, price_cache);
+    let mgr = StopLossManager::new(db.clone(), config, price_cache);
 
     // Step 1: Stop-loss decision — must return Exit
     let entry_time = chrono::Utc::now() - chrono::TimeDelta::seconds(60);
@@ -129,13 +135,12 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
     );
 
     // Step 2: Close position at the current market price
-    close_position(
-        &pool,
-        TOKEN,
+    db.close_position_full(
+        UUID,
         WALLET,
+        TOKEN,
         Decimal::from_str("150.0").unwrap(),
         "sig_exit_r3",
-        UUID,
         None,
         Decimal::ONE,
         true,
@@ -144,12 +149,14 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
     .unwrap();
 
     // Step 3: Verify realized PnL = (150−200)/200 × 1.0 = −0.25 SOL
-    let (state, pnl): (String, f64) =
+    let pool = sqlite_pool(&db);
+    let (state, pnl_str): (String, String) =
         sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(UUID)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let pnl: f64 = pnl_str.parse().unwrap_or(0.0);
 
     assert_eq!(
         state, "CLOSED",
@@ -175,27 +182,25 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
 /// and that profitable exits are faithfully recorded.
 #[tokio::test]
 async fn test_profit_capture_positive_pnl_recorded() {
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
 
     const UUID: &str = "uuid-profit-proof";
     const WALLET: &str = "wallet_profit_proof";
     const TOKEN: &str = "token_profit_proof";
 
-    insert_trade(
-        &pool,
-        UUID,
-        WALLET,
-        TOKEN,
-        Some("PROF"),
-        "SHIELD",
-        "BUY",
-        Decimal::from_str("1.5").unwrap(),
-        "ACTIVE",
-    )
+    db.insert_trade(&InsertTrade {
+        trade_uuid: UUID.to_string(),
+        wallet_address: WALLET.to_string(),
+        token_address: TOKEN.to_string(),
+        token_symbol: Some("PROF".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::from_str("1.5").unwrap(),
+        status: "ACTIVE".to_string(),
+    })
     .await
     .unwrap();
-    open_position(
-        &pool,
+    db.activate_trade_and_open_position(
         UUID,
         WALLET,
         TOKEN,
@@ -205,18 +210,18 @@ async fn test_profit_capture_positive_pnl_recorded() {
         Decimal::from_str("100.0").unwrap(),
         "sig_entry_profit",
         None,
+        None,
     )
     .await
     .unwrap();
 
     // Exit at +40% gain
-    close_position(
-        &pool,
-        TOKEN,
+    db.close_position_full(
+        UUID,
         WALLET,
+        TOKEN,
         Decimal::from_str("140.0").unwrap(),
         "sig_exit_profit",
-        UUID,
         None,
         Decimal::ONE,
         true,
@@ -224,12 +229,14 @@ async fn test_profit_capture_positive_pnl_recorded() {
     .await
     .unwrap();
 
-    let (state, pnl): (String, f64) =
+    let pool = sqlite_pool(&db);
+    let (state, pnl_str): (String, String) =
         sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(UUID)
             .fetch_one(&pool)
             .await
             .unwrap();
+    let pnl: f64 = pnl_str.parse().unwrap_or(0.0);
 
     assert_eq!(
         state, "CLOSED",

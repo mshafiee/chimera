@@ -1,91 +1,85 @@
-import { useState } from 'react'
-import axios from 'axios'
+import { useCallback } from 'react'
+import { useWallet } from '@solana/wallet-adapter-react'
 import { useAuthStore } from '../../stores/authStore'
+import { apiClient } from '../../api/client'
 import { toast } from '../ui/Toast'
 import { Button } from '../ui/Button'
-import { Lock } from 'lucide-react'
+import { Lock, Wallet } from 'lucide-react'
 
 export function AdminLogin() {
-  const [walletAddress, setWalletAddress] = useState('')
-  const [loading, setLoading] = useState(false)
+  const { publicKey, signMessage, connected } = useWallet()
   const { login } = useAuthStore()
 
-  const handleLogin = async () => {
-    if (!walletAddress.trim()) {
-      toast.error('Please enter a wallet address')
+  const handleLogin = useCallback(async () => {
+    if (!publicKey || !signMessage) {
+      toast.error('Please connect a Solana wallet first')
       return
     }
 
-    // Validate Solana address format (base58, 32-44 chars)
-    if (walletAddress.length < 32 || walletAddress.length > 44) {
-      toast.error('Invalid wallet address format')
-      return
-    }
-
-    setLoading(true)
     try {
-      // Test authentication by making a simple API call with wallet address as Bearer token
-      // The backend will check if this wallet is in admin_wallets (from config)
-      const testClient = axios.create({
-        baseURL: '/api/v1',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${walletAddress.trim()}`,
-        },
+      const walletAddress = publicKey.toBase58()
+      const message = `Chimera Dashboard Authentication\n\nWallet: ${walletAddress}\nTimestamp: ${Math.floor(Date.now() / 1000)}`
+      const encodedMessage = new TextEncoder().encode(message)
+      const signature = await signMessage(encodedMessage)
+
+      const signatureBytes = signature.length === 65 ? signature.slice(0, 64) : signature
+      let binary = ''
+      for (let i = 0; i < signatureBytes.byteLength; i++) {
+        binary += String.fromCharCode(signatureBytes[i])
+      }
+      const signatureBase64 = btoa(binary)
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '')
+
+      const response = await apiClient.post<{
+        token: string
+        role: string
+        identifier: string
+      }>('/auth/wallet', {
+        wallet_address: walletAddress,
+        message,
+        signature: signatureBase64,
       })
 
-      // Try to get config to verify admin access
-      await testClient.get('/config')
-      
-      // If successful, the wallet is authenticated as admin
-      // Store the wallet address as the token (backend uses it directly)
-      // IMPORTANT: Use wallet address as token, not JWT
+      if (response.data.role !== 'admin') {
+        toast.error('Wallet does not have admin permissions')
+        return
+      }
+
       login({
-        identifier: walletAddress.trim(),
-        role: 'admin', // Config endpoint requires admin, so role is admin
-        token: walletAddress.trim(), // Use wallet address as Bearer token (not JWT)
+        identifier: response.data.identifier,
+        role: 'admin',
+        token: response.data.token,
       })
 
       toast.success('Admin wallet authenticated successfully')
-      setWalletAddress('')
-      
-      // Force a page refresh to ensure all components use the new auth state
-      // This prevents stale JWT tokens from being used
-      window.location.reload()
     } catch (error: any) {
       if (error.response?.status === 401 || error.response?.status === 403) {
-        toast.error('Wallet not authorized. Please check if it is configured as admin in config.yaml')
+        toast.error('Wallet not authorized as admin on the backend')
       } else {
-        toast.error('Authentication failed. Please try again.')
+        toast.error(`Authentication failed: ${error.message ?? 'Unknown error'}`)
       }
-    } finally {
-      setLoading(false)
     }
+  }, [publicKey, signMessage, login])
+
+  if (!connected || !publicKey) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-text-muted">
+        <Wallet className="w-4 h-4" />
+        <span>Connect a wallet to authenticate as admin</span>
+      </div>
+    )
   }
 
   return (
     <div className="flex items-center gap-2">
-      <input
-        type="text"
-        value={walletAddress}
-        onChange={(e) => setWalletAddress(e.target.value)}
-        placeholder="Enter admin wallet address"
-        className="bg-surface border border-border rounded-lg px-3 py-2 text-sm text-text focus:outline-none focus:ring-2 focus:ring-shield min-w-[300px]"
-        onKeyPress={(e) => {
-          if (e.key === 'Enter') {
-            handleLogin()
-          }
-        }}
-      />
-      <Button
-        variant="primary"
-        size="sm"
-        onClick={handleLogin}
-        loading={loading}
-        disabled={!walletAddress.trim() || loading}
-      >
+      <span className="text-xs text-text-muted truncate max-w-[160px]">
+        {publicKey.toBase58().slice(0, 8)}...
+      </span>
+      <Button variant="primary" size="sm" onClick={handleLogin}>
         <Lock className="w-4 h-4 mr-2" />
-        Admin Login
+        Sign Admin
       </Button>
     </div>
   )

@@ -8,8 +8,10 @@
 //! - Time-based exit respects profit percentage thresholds
 //! - No double-exit when position is already being exited
 
-use chimera_operator::config::{DatabaseConfig, ProfitManagementConfig};
-use chimera_operator::db::{init_pool, run_migrations};
+use chimera_operator::config::ProfitManagementConfig;
+use chimera_operator::db_abstraction::{
+    create_database, DatabaseConfig,
+};
 use chimera_operator::engine::profit_targets::{ProfitTargetAction, ProfitTargetManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
@@ -19,15 +21,12 @@ use tempfile::TempDir;
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-async fn create_test_db() -> (chimera_operator::db::DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn chimera_operator::db_abstraction::Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db_config = DatabaseConfig {
-        path: temp_dir.path().join("profit_target_test.db"),
-        max_connections: 5,
-    };
-    let pool = init_pool(&db_config).await.unwrap();
-    run_migrations(&pool).await.unwrap();
-    (pool, temp_dir)
+    let config = DatabaseConfig::sqlite(temp_dir.path().join("profit_target_test.db"));
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
+    (db, temp_dir)
 }
 
 fn default_config() -> Arc<ProfitManagementConfig> {
@@ -67,7 +66,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
     //
     // When this bug is fixed: the final assertion must change to FullExit at $1.40.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_crash_recovery";
 
@@ -77,7 +76,7 @@ async fn test_peak_tracking_after_crash_and_recovery() {
         trailing_stop_distance: Decimal::from_str("20.0").unwrap(),
         ..ProfitManagementConfig::default()
     });
-    let mgr = ProfitTargetManager::new(pool, cfg, price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, cfg, price_cache.clone());
 
     price_cache.set_price(
         TOKEN,
@@ -144,7 +143,7 @@ async fn test_first_target_fires_partial_exit_not_full() {
     // Price reaches first target (+25%). Must return ExitAmount not FullExit.
     // entry_amount_sol = 4.0, exit fraction = 0.33, expected sell = 1.32 SOL
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_first_target";
 
@@ -153,7 +152,7 @@ async fn test_first_target_fires_partial_exit_not_full() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
     mgr.register_position(
         "uuid-tier",
         Decimal::from_str("1.00").unwrap(),
@@ -196,7 +195,7 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
     //   0-5%: exit after 12h
     //   5-10%: exit after `time_exit_hours` (default 24h) — this is the "else" branch
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_time_exit";
 
@@ -208,7 +207,7 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
 
     // Use default config (time_exit_hours=24). We can't fast-forward SystemTime in this test,
     // so we register the position and check immediately — it should NOT exit yet.
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
     mgr.register_position(
         "uuid-time",
         Decimal::from_str("1.00").unwrap(),
@@ -239,7 +238,7 @@ async fn test_time_based_exit_not_triggered_with_insufficient_profit() {
 async fn test_price_just_below_first_target_no_exit() {
     // Price at +24.9% — below first target of +25%. No action should fire.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_below_first";
 
@@ -248,7 +247,7 @@ async fn test_price_just_below_first_target_no_exit() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
     mgr.register_position(
         "uuid-below",
         Decimal::from_str("1.00").unwrap(),
@@ -279,7 +278,7 @@ async fn test_trailing_stop_not_active_before_threshold() {
     // Trailing stop activates after +50%. Price at +49% → no trailing stop active.
     // Even a 20% price drop from peak should not trigger FullExit.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_trailing_inactive";
 
@@ -288,7 +287,7 @@ async fn test_trailing_stop_not_active_before_threshold() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
     mgr.register_position(
         "uuid-trail-off",
         Decimal::from_str("1.00").unwrap(),
@@ -333,7 +332,7 @@ async fn test_trailing_stop_distance_from_peak() {
     // (With targets=[25%], the first check_targets at $1.60 (+60%) would return
     // ExitAmount early, preventing trailing_stop_active from ever being set.)
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN_A: &str = "token_trail_a";
     const TOKEN_B: &str = "token_trail_b";
@@ -352,7 +351,7 @@ async fn test_trailing_stop_distance_from_peak() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr_a = ProfitTargetManager::new(pool.clone(), cfg.clone(), price_cache.clone());
+    let mgr_a = ProfitTargetManager::new(db.clone(), cfg.clone(), price_cache.clone());
     mgr_a
         .register_position(
             "uuid-trail-a",
@@ -390,7 +389,7 @@ async fn test_trailing_stop_distance_from_peak() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr_b = ProfitTargetManager::new(pool, cfg, price_cache.clone());
+    let mgr_b = ProfitTargetManager::new(db, cfg, price_cache.clone());
     mgr_b
         .register_position(
             "uuid-trail-b",
@@ -429,7 +428,7 @@ async fn test_unknown_trade_uuid_returns_none() {
     // check_targets for an unregistered trade_uuid returns None (no state → no exit).
     // This prevents ghost exits for already-closed positions.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_unknown";
 
@@ -438,7 +437,7 @@ async fn test_unknown_trade_uuid_returns_none() {
         Decimal::from_str("100.0").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache);
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache);
 
     let action = mgr
         .check_targets("uuid-not-registered", TOKEN, "SHIELD")
@@ -455,7 +454,7 @@ async fn test_unknown_trade_uuid_returns_none() {
 async fn test_same_target_not_hit_twice() {
     // Once a target is marked as hit, the same price level should not trigger another exit.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_double_hit";
 
@@ -464,7 +463,7 @@ async fn test_same_target_not_hit_twice() {
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
     );
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
     mgr.register_position(
         "uuid-dbl",
         Decimal::from_str("1.00").unwrap(),
@@ -500,12 +499,12 @@ async fn test_same_target_not_hit_twice() {
 async fn test_no_price_in_cache_returns_none() {
     // If price cache has no entry for the token, check_targets early-returns None.
 
-    let (pool, _tmp) = create_test_db().await;
+    let (db, _tmp) = create_test_db().await;
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_no_price";
 
     // Register position but set NO price
-    let mgr = ProfitTargetManager::new(pool, default_config(), price_cache.clone());
+    let mgr = ProfitTargetManager::new(db, default_config(), price_cache.clone());
     mgr.register_position(
         "uuid-noprice",
         Decimal::from_str("1.00").unwrap(),

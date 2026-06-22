@@ -67,7 +67,7 @@ export interface ConsensusSignal {
 export function useSignalQuality(timeRange?: string) {
   return useQuery({
     queryKey: ['signals', 'quality', timeRange],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<SignalQualityResponse>('/signals/quality', {
         params: timeRange ? { range: timeRange } : undefined,
       })
@@ -90,7 +90,7 @@ export function useSignalQuality(timeRange?: string) {
 export function useSignalSources() {
   return useQuery({
     queryKey: ['signals', 'sources'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<SignalSourceResponse>('/signals/sources')
       return response.data
     },
@@ -109,7 +109,7 @@ export function useSignalSources() {
 export function useSignalConsensus() {
   return useQuery({
     queryKey: ['signals', 'consensus'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<SignalConsensusResponse>('/signals/consensus')
       return response.data
     },

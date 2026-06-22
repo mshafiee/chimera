@@ -6,76 +6,33 @@
 //! - Atomic write behavior
 //! - Database lock handling
 
-use chimera_operator::config::DatabaseConfig;
-use chimera_operator::db::{init_pool, DbPool};
+use chimera_operator::db_abstraction::{
+    create_database, Database, DatabaseConfig, DbPool,
+};
 use chimera_operator::roster::{merge_roster, validate_roster};
+use sqlx::Pool;
+use sqlx::Sqlite;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 
+fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    match db.pool() {
+        DbPool::SQLite(pool) => pool,
+        _ => panic!("test requires SQLite backend"),
+    }
+}
+
 /// Create a temporary database for testing
-async fn create_test_db() -> (DbPool, TempDir) {
+async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let config = DatabaseConfig {
-        path: db_path.clone(),
-        max_connections: 5,
-    };
+    let config = DatabaseConfig::sqlite(db_path);
+    let db = create_database(&config).await.unwrap();
+    db.run_migrations().await.unwrap();
 
-    let pool = init_pool(&config).await.unwrap();
-
-    // Create essential tables for tests
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS wallets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            address TEXT NOT NULL UNIQUE,
-            status TEXT NOT NULL DEFAULT 'CANDIDATE',
-            wqs_score REAL,
-            wqs_confidence REAL,
-            roi_7d REAL,
-            roi_30d REAL,
-            trade_count_30d INTEGER,
-            win_rate REAL,
-            max_drawdown_30d REAL,
-            avg_trade_size_sol REAL,
-            avg_win_sol REAL,
-            avg_loss_sol REAL,
-            profit_factor REAL,
-            realized_pnl_30d_sol REAL,
-            last_trade_at TIMESTAMP,
-            promoted_at TIMESTAMP,
-            ttl_expires_at TIMESTAMP,
-            notes TEXT,
-            archetype TEXT,
-            avg_entry_delay_seconds REAL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    sqlx::query(
-        r#"
-        CREATE TABLE IF NOT EXISTS config_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            key TEXT NOT NULL,
-            old_value TEXT,
-            new_value TEXT,
-            changed_by TEXT NOT NULL,
-            change_reason TEXT,
-            changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-        "#,
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    (pool, temp_dir)
+    (db, temp_dir)
 }
 
 /// Create a test roster database
@@ -149,7 +106,8 @@ async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
 
 #[tokio::test]
 async fn test_wal_mode_enabled() {
-    let (pool, _temp_dir) = create_test_db().await;
+    let (db, _temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Check journal mode
     let result: (String,) = sqlx::query_as("PRAGMA journal_mode")
@@ -166,7 +124,8 @@ async fn test_wal_mode_enabled() {
 
 #[tokio::test]
 async fn test_concurrent_reads() {
-    let (pool, _temp_dir) = create_test_db().await;
+    let (db, _temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Insert test data
     sqlx::query("INSERT INTO wallets (address, status, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -199,7 +158,8 @@ async fn test_concurrent_reads() {
 
 #[tokio::test]
 async fn test_busy_timeout_configured() {
-    let (pool, _temp_dir) = create_test_db().await;
+    let (db, _temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Check busy timeout (should be 5000ms = 5000000 microseconds)
     let result: (i64,) = sqlx::query_as("PRAGMA busy_timeout")
@@ -220,14 +180,15 @@ async fn test_busy_timeout_configured() {
 
 #[tokio::test]
 async fn test_roster_merge_success() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
     let roster_path = temp_dir.path().join("roster_new.db");
 
     // Create test roster with 3 wallets
     create_test_roster(&roster_path, 3).await;
 
     // Perform merge
-    let result = merge_roster(&pool, &roster_path).await.unwrap();
+    let result = merge_roster(&db, &roster_path).await.unwrap();
 
     assert_eq!(result.wallets_merged, 3, "Should merge 3 wallets");
     assert!(result.integrity_ok, "Integrity check should pass");
@@ -244,14 +205,14 @@ async fn test_roster_merge_success() {
 
 #[tokio::test]
 async fn test_roster_merge_integrity_check_failure() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
     let roster_path = temp_dir.path().join("roster_new.db");
 
     // Create a corrupted roster file (empty file)
     std::fs::write(&roster_path, b"").unwrap();
 
     // Attempt merge - should fail on integrity check or attachment
-    let result = merge_roster(&pool, &roster_path).await;
+    let result = merge_roster(&db, &roster_path).await;
 
     assert!(result.is_err(), "Merge should fail on corrupted roster");
     let error = result.unwrap_err();
@@ -269,11 +230,11 @@ async fn test_roster_merge_integrity_check_failure() {
 
 #[tokio::test]
 async fn test_roster_merge_missing_file() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
     let roster_path = temp_dir.path().join("nonexistent.db");
 
     // Attempt merge with non-existent file
-    let result = merge_roster(&pool, &roster_path).await;
+    let result = merge_roster(&db, &roster_path).await;
 
     assert!(result.is_err(), "Merge should fail on missing file");
     let error_msg = result.unwrap_err().to_string();
@@ -285,7 +246,8 @@ async fn test_roster_merge_missing_file() {
 
 #[tokio::test]
 async fn test_roster_merge_atomic_write() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Insert initial wallet
     sqlx::query("INSERT INTO wallets (address, status, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -301,7 +263,7 @@ async fn test_roster_merge_atomic_write() {
     create_test_roster(&roster_path, 2).await;
 
     // Perform merge
-    let _result = merge_roster(&pool, &roster_path).await.unwrap();
+    let _result = merge_roster(&db, &roster_path).await.unwrap();
 
     // Upsert strategy: existing wallets are preserved, new ones are inserted
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wallets")
@@ -330,14 +292,14 @@ async fn test_roster_merge_atomic_write() {
 
 #[tokio::test]
 async fn test_roster_merge_empty_roster() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
     let roster_path = temp_dir.path().join("roster_new.db");
 
     // Create empty roster (just schema, no wallets)
     create_test_roster(&roster_path, 0).await;
 
     // Perform merge
-    let result = merge_roster(&pool, &roster_path).await.unwrap();
+    let result = merge_roster(&db, &roster_path).await.unwrap();
 
     assert_eq!(result.wallets_merged, 0, "Should merge 0 wallets");
     assert!(
@@ -349,32 +311,33 @@ async fn test_roster_merge_empty_roster() {
 
 #[tokio::test]
 async fn test_roster_validate_success() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
     let roster_path = temp_dir.path().join("roster_new.db");
 
     // Create valid roster
     create_test_roster(&roster_path, 5).await;
 
     // Validate
-    let is_valid = validate_roster(&pool, &roster_path).await.unwrap();
+    let is_valid = validate_roster(&db, &roster_path).await.unwrap();
 
     assert!(is_valid, "Valid roster should pass validation");
 }
 
 #[tokio::test]
 async fn test_roster_validate_missing_file() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
     let roster_path = temp_dir.path().join("nonexistent.db");
 
     // Validate non-existent file
-    let is_valid = validate_roster(&pool, &roster_path).await.unwrap();
+    let is_valid = validate_roster(&db, &roster_path).await.unwrap();
 
     assert!(!is_valid, "Missing file should fail validation");
 }
 
 #[tokio::test]
 async fn test_roster_merge_transaction_rollback() {
-    let (pool, temp_dir) = create_test_db().await;
+    let (db, temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Insert initial wallet
     sqlx::query("INSERT INTO wallets (address, status, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -403,7 +366,7 @@ async fn test_roster_merge_transaction_rollback() {
     assert_eq!(count_before.0, 1, "Should have 1 wallet before merge");
 
     // Perform merge (should succeed)
-    let result = merge_roster(&pool, &roster_path).await.unwrap();
+    let result = merge_roster(&db, &roster_path).await.unwrap();
     assert_eq!(result.wallets_merged, 1);
 
     // Verify final state — upsert strategy: both wallets exist (no deletes)
@@ -423,7 +386,8 @@ async fn test_roster_merge_transaction_rollback() {
 
 #[tokio::test]
 async fn test_concurrent_writes_with_timeout() {
-    let (pool, _temp_dir) = create_test_db().await;
+    let (db, _temp_dir) = create_test_db().await;
+    let pool = sqlite_pool(&db);
 
     // Spawn multiple writers that will contend for locks
     let mut handles = vec![];

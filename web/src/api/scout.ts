@@ -57,7 +57,7 @@ export interface ScoutMetricsResponse {
 export function useScoutStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['scout', 'status'],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ScoutStatusResponse>('/scout/status')
       return response.data
     },
@@ -78,7 +78,7 @@ export function useScoutStatus(refetchInterval?: number) {
 export function useWQSDistribution(timeRange?: string) {
   return useQuery({
     queryKey: ['scout', 'wqs-distribution', timeRange],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<WQSDistributionResponse>('/scout/wqs-distribution', {
         params: timeRange ? { range: timeRange } : undefined,
       })
@@ -100,7 +100,7 @@ export function useWQSDistribution(timeRange?: string) {
 export function useScoutMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['scout', 'metrics', timeRange],
-    queryFn: async () => {
+    queryFn: async ({ signal: _signal }) => {
       const response = await apiClient.get<ScoutMetricsResponse>('/scout/metrics', {
         params: timeRange ? { range: timeRange } : undefined,
       })

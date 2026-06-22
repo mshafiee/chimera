@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::error::AppError;
 use crate::middleware::{AuthExtension, Role};
 use crate::roster;
@@ -37,7 +37,7 @@ pub struct MergeResponse {
 /// State for roster endpoints
 pub struct RosterState {
     /// Database pool
-    pub db: DbPool,
+    pub db: Arc<dyn Database>,
     /// Default roster path
     pub default_roster_path: PathBuf,
 }

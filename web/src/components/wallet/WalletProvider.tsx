@@ -76,16 +76,9 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
         .replace(/\//g, '_')
         .replace(/=/g, '')
 
-      console.log('🔐 Debug Auth:', {
-        walletAddress: publicKey.toBase58(),
-        signatureLength: signature.length,
-        signatureBytesLength: signatureBytes.length,
-        signatureBase64Length: signatureBase64.length,
-        signatureBase64: signatureBase64.substring(0, 20) + '...',
-        fullSignatureBase64: signatureBase64
-      })
-
-      console.log('📤 Sending auth request to:', '/auth/wallet')
+      if (import.meta.env.DEV) {
+        console.log('[Auth] Wallet:', publicKey.toBase58(), 'Signature:', signatureBase64.substring(0, 20) + '...')
+      }
 
       const response = await apiClient.post<{
         token: string
@@ -105,36 +98,30 @@ function WalletAuthProvider({ children }: { children: ReactNode }) {
       })
       toast.success('Wallet authenticated successfully')
     } catch (error: any) {
-      console.error('❌ Authentication failed:', error)
-      console.error('Error details:', {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status
-      })
+      if (import.meta.env.DEV) {
+        console.error('[Auth] Failed:', error)
+      }
       toast.error(`Authentication failed: ${error.response?.data?.reason || error.message || 'Unknown error'}`)
       // Disconnect wallet on auth failure
       disconnect()
     }
   }, [publicKey, signMessage, login, disconnect])
 
-  // Handle wallet connection/disconnection
+  // Handle wallet connection/disconnection and wallet change
   useEffect(() => {
-    if (connected && publicKey && !isAuthenticated) {
+    if (!connected || !publicKey) {
+      if (isAuthenticated && user) {
+        logout()
+      }
+      return
+    }
+
+    if (!isAuthenticated) {
       authenticate()
-    } else if (!connected && isAuthenticated && user && user.identifier === publicKey?.toBase58()) {
+    } else if (user && user.identifier !== publicKey.toBase58()) {
       logout()
     }
-  }, [connected, publicKey, isAuthenticated, user, authenticate, logout])
-
-  // Handle wallet change — re-authenticate if a different wallet connects
-  useEffect(() => {
-    if (connected && publicKey && isAuthenticated && user) {
-      if (user.identifier !== publicKey.toBase58()) {
-        logout()
-        authenticate()
-      }
-    }
-  }, [connected, publicKey, isAuthenticated, user, authenticate, logout])
+  }, [connected, publicKey, isAuthenticated, user])
 
   return <>{children}</>
 }

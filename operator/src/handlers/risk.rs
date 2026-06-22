@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::db::{DbPool, get_max_drawdown_percent};
+use crate::db_abstraction::{Database, DbPool};
 use crate::error::{AppError, AppResult};
 use crate::handlers::api::ApiState;
 
@@ -245,10 +245,18 @@ fn determine_heat_status(exposure: f64, threshold: f64) -> &'static str {
 // DATABASE QUERY FUNCTIONS
 // =============================================================================
 
+fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
+    match db.pool() {
+        DbPool::SQLite(p) => Ok(p),
+        _ => Err(AppError::Internal("Only SQLite backend supported".to_string())),
+    }
+}
+
 /// Get position concentrations grouped by token
 async fn get_position_concentrations(
-    pool: &DbPool,
+    db: &Arc<dyn Database>,
 ) -> AppResult<(Vec<TokenConcentration>, Vec<SectorConcentration>, f64)> {
+    let pool = sqlite_pool(db)?;
     let rows = sqlx::query_as::<_, (String, Option<String>, i64, f64)>(
         r#"
         SELECT token_address, token_symbol, COUNT(*) as position_count,
@@ -259,7 +267,7 @@ async fn get_position_concentrations(
         ORDER BY total_value_sol DESC
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
 
     let total_exposure: f64 = rows.iter().map(|r| r.3).sum();
@@ -301,7 +309,8 @@ async fn get_position_concentrations(
 }
 
 /// Get portfolio exposure data
-async fn get_portfolio_exposure(pool: &DbPool) -> AppResult<ExposureData> {
+async fn get_portfolio_exposure(db: &Arc<dyn Database>) -> AppResult<ExposureData> {
+    let pool = sqlite_pool(db)?;
     let total: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT COALESCE(SUM(entry_amount_sol), 0.0)
@@ -309,7 +318,7 @@ async fn get_portfolio_exposure(pool: &DbPool) -> AppResult<ExposureData> {
         WHERE state IN ('ACTIVE', 'EXITING')
         "#,
     )
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let total_exposure_sol = total.0.unwrap_or(0.0);
@@ -331,9 +340,10 @@ async fn get_portfolio_exposure(pool: &DbPool) -> AppResult<ExposureData> {
 
 /// Get stop loss metrics (activations where exit was near stop price)
 async fn get_stop_loss_metrics_db(
-    pool: &DbPool,
+    db: &Arc<dyn Database>,
     days: u32,
 ) -> AppResult<StopLossMetricsResponse> {
+    let pool = sqlite_pool(db)?;
     let days_str = format!("-{} days", days);
 
     // Get total activations and loss prevented
@@ -352,7 +362,7 @@ async fn get_stop_loss_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let total_activations = total_result.0.unwrap_or(0);
@@ -381,7 +391,7 @@ async fn get_stop_loss_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
 
     let activations_by_strategy: Vec<StrategyStopLossData> = by_strategy_rows
@@ -411,7 +421,7 @@ async fn get_stop_loss_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
 
     let recent_activations: Vec<StopLossActivation> = recent_rows
@@ -440,7 +450,7 @@ async fn get_stop_loss_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let total_closed_count = total_closed.0.unwrap_or(0);
@@ -462,9 +472,10 @@ async fn get_stop_loss_metrics_db(
 
 /// Get profit target metrics
 async fn get_profit_target_metrics_db(
-    pool: &DbPool,
+    db: &Arc<dyn Database>,
     days: u32,
 ) -> AppResult<ProfitTargetMetricsResponse> {
+    let pool = sqlite_pool(db)?;
     let days_str = format!("-{} days", days);
 
     // Get total hits (positions with targets_hit > 0)
@@ -481,7 +492,7 @@ async fn get_profit_target_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let total_hits = total_hits_result.0.unwrap_or(0);
@@ -504,7 +515,7 @@ async fn get_profit_target_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let trailing_stop_activations = trailing_result.0.unwrap_or(0);
@@ -526,7 +537,7 @@ async fn get_profit_target_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
 
     let targets_by_strategy: Vec<StrategyProfitTargetData> = by_strategy_rows
@@ -557,7 +568,7 @@ async fn get_profit_target_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
 
     let recent_hits: Vec<ProfitTargetHit> = recent_rows
@@ -582,7 +593,7 @@ async fn get_profit_target_metrics_db(
         "#,
     )
     .bind(&days_str)
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let total_closed_count = total_closed.0.unwrap_or(0);
@@ -605,8 +616,9 @@ async fn get_profit_target_metrics_db(
 
 /// Get position size analysis
 async fn get_position_size_analysis_db(
-    pool: &DbPool,
+    db: &Arc<dyn Database>,
 ) -> AppResult<PositionSizeAnalysisResponse> {
+    let pool = sqlite_pool(db)?;
     // Get statistics
     let stats: (Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
         r#"
@@ -618,7 +630,7 @@ async fn get_position_size_analysis_db(
         WHERE state IN ('ACTIVE', 'EXITING')
         "#,
     )
-    .fetch_one(pool)
+    .fetch_one(&pool)
     .await?;
 
     let average_position_sol = stats.0.unwrap_or(0.0);
@@ -636,7 +648,7 @@ async fn get_position_size_analysis_db(
         OFFSET (SELECT COUNT(*) / 2 FROM positions WHERE state IN ('ACTIVE', 'EXITING'))
         "#,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&pool)
     .await?
     .unwrap_or((None,));
 
@@ -660,7 +672,7 @@ async fn get_position_size_analysis_db(
         ) GROUP BY size_bucket
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&pool)
     .await?;
 
     let total_count: i64 = bucket_rows.iter().map(|r| r.1).sum();
@@ -709,7 +721,7 @@ pub async fn get_portfolio_risk(
     let mut exposure = get_portfolio_exposure(&state.db).await?;
 
     // Get drawdown
-    let current_drawdown = get_max_drawdown_percent(&state.db, total_capital).await?;
+    let current_drawdown = state.db.get_max_drawdown_percent(total_capital).await?;
     let current_drawdown_f64 = current_drawdown.to_f64().unwrap_or(0.0);
 
     exposure.max_drawdown_percent = current_drawdown_f64.max(exposure.max_drawdown_percent);
