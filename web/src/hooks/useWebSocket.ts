@@ -10,15 +10,15 @@ interface UseWebSocketOptions {
   url?: string
   reconnectInterval?: number
   maxReconnectAttempts?: number
-  apiKey?: string // Add API key option for WebSocket auth
+  apiKey: string
 }
 
-export function useWebSocket(options: UseWebSocketOptions = {}) {
+export function useWebSocket(options: UseWebSocketOptions) {
   const {
     url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/api/v1/ws`,
     reconnectInterval = 3000,
     maxReconnectAttempts = 10,
-    apiKey: customApiKey = 'dev-admin-key', // Default API key for development
+    apiKey: customApiKey,
   } = options
 
   const [isConnected, setIsConnected] = useState(false)

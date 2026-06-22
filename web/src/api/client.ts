@@ -12,6 +12,8 @@ export const apiClient = axios.create({
   headers: {
     'Content-Type': 'application/json',
   },
+  // No CSRF protection needed — auth uses Bearer tokens (not cookies).
+  // If switching to cookie-based auth, add: xsrfCookieName, xsrfHeaderName, withCredentials.
 })
 
 let isRefreshing = false

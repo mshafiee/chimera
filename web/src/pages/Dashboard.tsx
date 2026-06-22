@@ -10,6 +10,7 @@ import { useTrades } from '../api/trades'
 import { useConfig } from '../api/config'
 import { useLayoutContext } from '../components/layout/Layout'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useAuthStore } from '../stores/authStore'
 import { toast } from '../components/ui/Toast'
 import { MetricCard } from '../components/ui/MetricCard'
 import { usePortfolioRisk, useRPCLatency, useCostAnalysis, useBalanceAndNAV } from '../api'
@@ -44,7 +45,10 @@ export function Dashboard() {
   const { data: tradesData } = useTrades({ from: thirtyDaysAgo, status: 'CLOSED', limit: 1000 })
   
   // WebSocket for real-time updates
-  const { isConnected, lastMessage } = useWebSocket()
+  const userToken = useAuthStore(state => state.user?.token)
+  const { isConnected, lastMessage } = useWebSocket({
+    apiKey: userToken ?? '',
+  })
 
   // Update last update time when data changes
   useEffect(() => {

@@ -9,11 +9,10 @@ export function LogoutButton() {
   const { disconnect, connected } = useWallet()
 
   const handleLogout = () => {
-    // Check if this is wallet-based auth (JWT token) or admin login (wallet address)
-    const isJwtToken = user?.token?.includes('.') ?? false
+    const isWalletConnected = connected
 
-    // If wallet is connected and this was wallet-based auth, disconnect wallet
-    if (connected && isJwtToken) {
+    // If wallet is connected and user was authenticated via wallet, disconnect wallet
+    if (isWalletConnected) {
       disconnect().catch((error) => {
         console.error('Failed to disconnect wallet:', error)
       })

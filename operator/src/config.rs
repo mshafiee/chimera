@@ -60,6 +60,9 @@ pub struct ServerConfig {
     /// Port to listen on
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Number of worker threads for the Tokio runtime (0 = auto-detect)
+    #[serde(default = "default_worker_threads")]
+    pub worker_threads: usize,
     /// Request timeout in milliseconds
     #[serde(default = "default_request_timeout")]
     pub request_timeout_ms: u64,
@@ -71,6 +74,10 @@ fn default_host() -> String {
 
 fn default_port() -> u16 {
     8080
+}
+
+fn default_worker_threads() -> usize {
+    4
 }
 
 fn default_request_timeout() -> u64 {
@@ -180,12 +187,21 @@ pub struct SecurityConfig {
 /// variables or storing the key in the vault (`vault.rs`), which loads those
 /// env vars into an encrypted `VaultSecrets` bundle. The YAML field is a
 /// fallback for local development only and should never be committed to git.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct ApiKeyConfig {
     /// The API key value
     pub key: String,
     /// The role: admin, operator, readonly
     pub role: String,
+}
+
+impl std::fmt::Debug for ApiKeyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ApiKeyConfig")
+            .field("key", &"[REDACTED]")
+            .field("role", &self.role)
+            .finish()
+    }
 }
 
 /// Admin wallet configuration
@@ -255,7 +271,7 @@ fn default_max_drawdown() -> Decimal {
 }
 
 fn default_portfolio_stop_loss_percent() -> Decimal {
-    dec!(5.0)
+    dec!(-5.0)
 }
 
 fn default_cooldown() -> u32 {
@@ -445,6 +461,15 @@ pub struct QueueConfig {
     /// Threshold for load shedding (percentage of capacity)
     #[serde(default = "default_load_shed_threshold")]
     pub load_shed_threshold_percent: u32,
+    /// Enable parallel processing with worker pool
+    #[serde(default = "default_parallel_enabled")]
+    pub parallel_enabled: bool,
+    /// Number of parallel workers (default: 4, should match DB connection pool size)
+    #[serde(default = "default_num_workers")]
+    pub num_workers: Option<usize>,
+    /// Maximum concurrent RPC requests across all workers
+    #[serde(default = "default_max_concurrent_rpc")]
+    pub max_concurrent_rpc: Option<usize>,
 }
 
 fn default_queue_capacity() -> usize {
@@ -453,6 +478,18 @@ fn default_queue_capacity() -> usize {
 
 fn default_load_shed_threshold() -> u32 {
     80
+}
+
+fn default_parallel_enabled() -> bool {
+    true
+}
+
+fn default_num_workers() -> Option<usize> {
+    Some(4)
+}
+
+fn default_max_concurrent_rpc() -> Option<usize> {
+    Some(8)
 }
 
 /// Token safety configuration
@@ -1068,14 +1105,42 @@ impl Default for MevProtectionConfig {
 }
 
 impl AppConfig {
-    /// Load configuration from files and environment
+    /// Load configuration from files and environment with optional custom path
+    ///
+    /// Priority (highest to lowest):
+    /// 1. Environment variables (CHIMERA_*)
+    /// 2. Custom config path (if provided)
+    /// 3. config/config.yaml (if exists)
+    /// 4. config.yaml (if exists)
+    /// 5. Default values
+    pub fn load(path: Option<&PathBuf>) -> Result<Self, ConfigError> {
+        let mut builder = Config::builder()
+            // Default config file
+            .add_source(File::with_name("config").required(false));
+        // Optional custom path
+        if let Some(p) = path {
+            builder = builder.add_source(File::from(p.as_path()).required(false));
+        }
+        let config = builder
+            // Environment overrides
+            .add_source(
+                Environment::with_prefix("CHIMERA")
+                    .separator("__")
+                    .try_parsing(true)
+                    .list_separator(","),
+            )
+            .build()?;
+        config.try_deserialize()
+    }
+
+    /// Load configuration from files and environment (backward compatible)
     ///
     /// Priority (highest to lowest):
     /// 1. Environment variables (CHIMERA_*)
     /// 2. config/config.yaml (if exists)
     /// 3. config.yaml (if exists)
     /// 4. Default values
-    pub fn load() -> Result<Self, ConfigError> {
+    pub fn load_config() -> Result<Self, ConfigError> {
         let config = Config::builder()
             // Start with default values
             .set_default("server.host", "0.0.0.0")?
@@ -1176,6 +1241,58 @@ impl AppConfig {
             return Err(ConfigError::Message(
                 "position_sizing.total_capital_sol must be greater than zero".to_string(),
             ));
+        }
+
+        // Validate worker threads
+        if self.server.worker_threads == 0 {
+            return Err(ConfigError::Message("server.worker_threads must be > 0".into()));
+        }
+
+        // Validate RPC timeout bounds
+        if self.rpc.timeout_ms < 1000 || self.rpc.timeout_ms > 60000 {
+            return Err(ConfigError::Message(
+                "rpc.timeout_ms must be between 1000 and 60000".into(),
+            ));
+        }
+
+        // Validate circuit breaker cooldown
+        if self.circuit_breakers.cooldown_minutes == 0 {
+            return Err(ConfigError::Message(
+                "circuit_breakers.cooldown_minutes must be > 0".into(),
+            ));
+        }
+
+        // Validate max loss threshold
+        if self.circuit_breakers.max_loss_24h_usd <= Decimal::ZERO {
+            return Err(ConfigError::Message(
+                "circuit_breakers.max_loss_24h_usd must be > 0".into(),
+            ));
+        }
+
+        // Validate consecutive losses
+        if self.circuit_breakers.max_consecutive_losses == 0 {
+            return Err(ConfigError::Message(
+                "circuit_breakers.max_consecutive_losses must be > 0".into(),
+            ));
+        }
+
+        // Validate portfolio stop loss is negative
+        if self.circuit_breakers.portfolio_stop_loss_percent >= Decimal::ZERO {
+            return Err(ConfigError::Message(
+                "circuit_breakers.portfolio_stop_loss_percent must be negative".into(),
+            ));
+        }
+
+        // Validate database connection pool bounds
+        if self.database.max_connections < 2 || self.database.max_connections > 100 {
+            return Err(ConfigError::Message(
+                "database.max_connections must be between 2 and 100".into(),
+            ));
+        }
+
+        // Validate queue capacity
+        if self.queue.capacity == 0 {
+            return Err(ConfigError::Message("queue.capacity must be > 0".into()));
         }
 
         // Validate admin wallet addresses are valid Solana public keys

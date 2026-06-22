@@ -97,10 +97,8 @@ export const useAuthStore = create<AuthState>()(
     {
       name: 'chimera-auth',
       partialize: (state) => ({
-        user: state.user,
+        user: state.user ? { identifier: state.user.identifier, role: state.user.role } as AuthUser : null,
         isAuthenticated: state.isAuthenticated,
-        tokenExpiresAt: state.tokenExpiresAt,
-        refreshToken: state.refreshToken,
         lastActivity: state.lastActivity,
       }),
       onRehydrateStorage: () => () => {

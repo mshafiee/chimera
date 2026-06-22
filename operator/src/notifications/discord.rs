@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Discord notifier configuration
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiscordConfig {
     /// Webhook URL from Discord channel settings
     pub webhook_url: String,
@@ -16,6 +16,16 @@ pub struct DiscordConfig {
     pub enabled: bool,
     /// Minimum interval between messages of same type (seconds)
     pub rate_limit_seconds: u64,
+}
+
+impl std::fmt::Debug for DiscordConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordConfig")
+            .field("webhook_url", &"[REDACTED]")
+            .field("enabled", &self.enabled)
+            .field("rate_limit_seconds", &self.rate_limit_seconds)
+            .finish()
+    }
 }
 
 impl Default for DiscordConfig {
@@ -97,7 +107,10 @@ impl DiscordNotifier {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()
-            .expect("Failed to create HTTP client");
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "Failed to create Discord HTTP client — using default client");
+                reqwest::Client::new()
+            });
 
         Self {
             webhook_url: config.webhook_url,

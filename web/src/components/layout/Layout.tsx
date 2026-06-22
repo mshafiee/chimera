@@ -4,14 +4,17 @@ import { Header } from './Header'
 import { useState, useCallback } from 'react'
 import { Menu, X, AlertTriangle } from 'lucide-react'
 import { ToastContainer, useToastStore } from '../ui/Toast'
+import { ErrorBoundary } from '../ErrorBoundary'
 import { useWebSocket } from '../../hooks/useWebSocket'
+import { useAuthStore } from '../../stores/authStore'
 import { useHealth } from '../../api'
 import { Card, CardContent } from '../ui/Card'
 import { Badge } from '../ui/Badge'
 
 export function Layout() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
-  const { isConnected } = useWebSocket() // Get actual WebSocket connection status
+  const userToken = useAuthStore(state => state.user?.token)
+  const { isConnected } = useWebSocket({ apiKey: userToken ?? '' })
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
   const { data: health } = useHealth() // Get health status for system halted banner
 
@@ -114,7 +117,9 @@ export function Layout() {
 
         {/* Page Content */}
         <main className="p-4 md:p-6 pb-20 md:pb-6">
-          <Outlet context={{ setLastUpdate }} />
+          <ErrorBoundary>
+            <Outlet context={{ setLastUpdate }} />
+          </ErrorBoundary>
         </main>
       </div>
 
