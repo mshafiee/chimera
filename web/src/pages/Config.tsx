@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle, Save, RefreshCw, History, Power,
   Shield, Zap, TrendingUp, Target, Settings,
@@ -19,6 +20,7 @@ export function Config() {
   const { hasPermission, user: _user, isAuthenticated: _isAuthenticated } = useAuthStore()
   const isAdmin = hasPermission('admin')
 
+  const queryClient = useQueryClient()
   const { data: config, isLoading, refetch } = useConfig()
   const { data: health } = useHealth()
   const updateConfig = useUpdateConfig()
@@ -387,9 +389,7 @@ export function Config() {
       setKillSwitchConfirm('')
       toast.success('Emergency kill switch activated. All trading halted.')
       // Refetch health to show updated status
-      setTimeout(() => {
-        window.location.reload()
-      }, 1000)
+      queryClient.invalidateQueries({ queryKey: ['health'] })
     } catch (error: any) {
       const errorMessage = error.response?.data?.details || error.response?.data?.reason || error.message
       if (error.response?.status === 401 || error.response?.status === 403) {

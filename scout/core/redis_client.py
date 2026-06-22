@@ -168,6 +168,16 @@ class RedisClient:
         # Fallback
         self._fallback_cache.clear()
     
+    def close(self):
+        """Close the Redis connection and release resources."""
+        if self.redis_client:
+            try:
+                self.redis_client.close()
+            except Exception as e:
+                logger.debug(f"Error closing Redis connection: {e}")
+            self.redis_client = None
+        self._fallback_cache.clear()
+
     def is_available(self) -> bool:
         """Check if Redis is available and working."""
         if not self.enabled or not self.redis_client:

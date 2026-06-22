@@ -2094,7 +2094,8 @@ class HeliusClient:
                 # Extract API key from RPC URL
                 api_key = self.api_key
                 if "api-key=" in rpc_url:
-                    api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
+                    from urllib.parse import urlparse, parse_qs
+                    api_key = parse_qs(urlparse(rpc_url).query).get("api-key", [None])[0]
                 
                 # Make RPC request
                 await self._rate_limit_async()

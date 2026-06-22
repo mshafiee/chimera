@@ -68,6 +68,7 @@ export function ToastItem({ toast, onClose }: ToastProps) {
           setIsVisible(false)
           setTimeout(() => onClose(toast.id), 300)
         }}
+        aria-label="Dismiss notification"
         className="text-text-muted hover:text-text transition-colors"
       >
         <X className="w-4 h-4" />
@@ -81,7 +82,7 @@ export function ToastContainer({ toasts, onClose }: { toasts: Toast[]; onClose: 
   if (toasts.length === 0) return null
 
   return (
-    <div className="fixed top-4 right-4 z-50 flex flex-col gap-2">
+    <div aria-live="polite" className="fixed top-4 right-4 z-50 flex flex-col gap-2">
       {toasts.map((toast) => (
         <ToastItem key={toast.id} toast={toast} onClose={onClose} />
       ))}

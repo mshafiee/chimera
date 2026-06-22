@@ -158,7 +158,9 @@ export function Trades() {
             {/* Date Range Inputs */}
             {(selectedDatePreset === 'custom' || (!selectedDatePreset && (dateFrom || dateTo))) && (
               <div className="flex items-center gap-2">
+                <label className="sr-only" htmlFor="trades-date-from">From date</label>
                 <input
+                  id="trades-date-from"
                   type="date"
                   value={dateFrom}
                   onChange={(e) => {
@@ -170,7 +172,9 @@ export function Trades() {
                   placeholder="From"
                 />
                 <span className="text-text-muted">to</span>
+                <label className="sr-only" htmlFor="trades-date-to">To date</label>
                 <input
+                  id="trades-date-to"
                   type="date"
                   value={dateTo}
                   onChange={(e) => {

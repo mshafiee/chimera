@@ -56,11 +56,7 @@ export async function exportTrades(
   })
 
   // Create download link
-  const url = window.URL.createObjectURL(new Blob([response.data]))
-  const link = document.createElement('a')
-  link.href = url
-  
-  // Get filename from Content-Disposition header or use default
+  const blob = new Blob([response.data])
   const contentDisposition = response.headers['content-disposition']
   const defaultExtension = format === 'pdf' ? 'pdf' : format === 'json' ? 'json' : 'csv'
   const defaultFilename = `chimera_trades_${new Date().toISOString().split('T')[0]}.${defaultExtension}`
@@ -68,9 +64,13 @@ export async function exportTrades(
     ? contentDisposition.split('filename=')[1]?.replace(/"/g, '')
     : defaultFilename
   
-  link.setAttribute('download', filename)
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.style.display = 'none'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
   window.URL.revokeObjectURL(url)
 }

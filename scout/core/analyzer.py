@@ -2386,7 +2386,7 @@ class WalletAnalyzer:
         # Check remaining bags (open positions)
         # Apply penalty for positions held > 30 days without exit
         # Full unrealized PnL requires price fetches (handled in calculate_unrealized_pnl async)
-        now = Decimal(str(int(time.time())))
+        now = Decimal(str(time.time()))
         bag_count = 0
         max_bag_age_seconds = Decimal('2592000')  # 30 days
         for token, pos in positions.items():

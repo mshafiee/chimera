@@ -1169,7 +1169,8 @@ async def main_async():
                 # Try to extract from RPC URL
                 rpc_url = os.getenv("CHIMERA_RPC__PRIMARY_URL") or os.getenv("SOLANA_RPC_URL", "")
                 if "api-key=" in rpc_url:
-                    helius_api_key = rpc_url.split("api-key=")[1].split("&")[0].split("?")[0]
+                    from urllib.parse import urlparse, parse_qs
+                    helius_api_key = parse_qs(urlparse(rpc_url).query).get("api-key", [None])[0]
         
         if liquidity_mode == "simulated":
             print("[Scout] WARNING: Running with simulated liquidity mode - results are non-deterministic!")

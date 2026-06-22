@@ -704,7 +704,8 @@ class BacktestSimulator:
                 # Reduce position
                 position["qty"] -= sell_qty
                 position["cost_basis_sol"] -= allocated_cost_basis
-                if position["qty"] <= Decimal('0.000000000001'):  # Use Decimal comparison instead of 1e-12
+                MIN_QTY_EPSILON = Decimal('0.000000000001')
+                if position["qty"] <= MIN_QTY_EPSILON:
                     positions.pop(token, None)
         
         return SimulatedTrade(

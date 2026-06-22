@@ -1,7 +1,7 @@
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import { Sidebar, MobileBottomNav } from './Sidebar'
 import { Header } from './Header'
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { Menu, X, AlertTriangle } from 'lucide-react'
 import { ToastContainer, useToastStore } from '../ui/Toast'
 import { ErrorBoundary } from '../ErrorBoundary'
@@ -13,6 +13,12 @@ import { Badge } from '../ui/Badge'
 
 export function Layout() {
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null)
+  const mainRef = useRef<HTMLElement>(null)
+  const location = useLocation()
+
+  useEffect(() => {
+    mainRef.current?.focus()
+  }, [location.pathname])
   const userToken = useAuthStore(state => state.user?.token)
   const { isConnected } = useWebSocket({ apiKey: userToken ?? '' })
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false)
@@ -116,7 +122,7 @@ export function Layout() {
         )}
 
         {/* Page Content */}
-        <main className="p-4 md:p-6 pb-20 md:pb-6">
+        <main ref={mainRef} tabIndex={-1} className="p-4 md:p-6 pb-20 md:pb-6 outline-none">
           <ErrorBoundary>
             <Outlet context={{ setLastUpdate }} />
           </ErrorBoundary>

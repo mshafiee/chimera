@@ -1,5 +1,6 @@
 import { LogOut } from 'lucide-react'
 import { useWallet } from '@solana/wallet-adapter-react'
+import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../../stores/authStore'
 import { Button } from '../ui/Button'
 import { toast } from '../ui/Toast'
@@ -7,6 +8,7 @@ import { toast } from '../ui/Toast'
 export function LogoutButton() {
   const { logout, user } = useAuthStore()
   const { disconnect, connected } = useWallet()
+  const navigate = useNavigate()
 
   const handleLogout = () => {
     const isWalletConnected = connected
@@ -21,12 +23,7 @@ export function LogoutButton() {
     // Clear authentication state
     logout()
     toast.success('Logged out successfully')
-    
-    // Force a page refresh to ensure all components use the cleared auth state
-    // This prevents stale tokens from being used
-    setTimeout(() => {
-      window.location.reload()
-    }, 500)
+    navigate('/login', { replace: true })
   }
 
   return (

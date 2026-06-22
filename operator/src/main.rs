@@ -1786,7 +1786,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     cancel_token.cancel();
-    let _ = server_handle.await;
+    if let Err(e) = server_handle.await {
+        tracing::error!(error = %e, "Server task panicked during shutdown");
+    }
 
     // Wait for remaining background tasks with a timeout
     for handle in task_handles {

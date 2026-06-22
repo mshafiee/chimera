@@ -66,7 +66,7 @@ export function Header({ isConnected = false, lastUpdate, onRefresh }: HeaderPro
 
         {/* Refresh Button */}
         {onRefresh && (
-          <Button variant="ghost" size="sm" onClick={onRefresh}>
+          <Button variant="ghost" size="sm" onClick={onRefresh} aria-label="Refresh data">
             <RefreshCw className="w-4 h-4" />
           </Button>
         )}
