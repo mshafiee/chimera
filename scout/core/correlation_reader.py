@@ -14,10 +14,11 @@ Used by Phase 3b (adaptive weights) and the calibration dashboard.
 
 import json
 import os
-import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from pathlib import Path
+
+from .db import get_connection, execute_query
 
 
 @dataclass
@@ -64,11 +65,10 @@ class CorrelationReader:
             db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
         self.db_path = Path(db_path)
 
-    def _get_connection(self) -> Optional[sqlite3.Connection]:
+    def _get_connection(self):
         if not self.db_path.exists():
             return None
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_connection(str(self.db_path))
         return conn
 
     def table_exists(self) -> bool:
@@ -77,7 +77,13 @@ class CorrelationReader:
             return False
         try:
             cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='wqs_pnl_correlation'")
+            # Use PostgreSQL-compatible query
+            cursor.execute("""
+                SELECT table_name FROM information_schema.tables
+                WHERE table_name = 'wqs_pnl_correlation'
+                UNION
+                SELECT name FROM sqlite_master WHERE type='table' AND name='wqs_pnl_correlation'
+            """)
             result = cursor.fetchone()
             conn.close()
             return result is not None

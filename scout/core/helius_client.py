@@ -1118,15 +1118,15 @@ class HeliusClient:
         # Check database if available and enabled
         if check_database:
             try:
+                from .db import get_connection
                 db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
                 if os.path.exists(db_path):
-                    import sqlite3
-                    conn = sqlite3.connect(db_path)
+                    conn = get_connection(db_path)
                     cursor = conn.cursor()
                     cursor.execute("SELECT 1 FROM wallets WHERE address = ? LIMIT 1", (wallet_address,))
                     exists = cursor.fetchone() is not None
                     conn.close()
-                    
+
                     if exists:
                         self._known_wallets_cache.add(wallet_address)
                         return True

@@ -20,7 +20,6 @@ State Schema:
 
 import time
 import logging
-import sqlite3
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
@@ -28,6 +27,8 @@ from enum import Enum
 import threading
 from pathlib import Path
 from contextlib import contextmanager
+
+from .db import get_connection, execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +108,7 @@ class StatePersistence:
         """Initialize the state persistence manager."""
         self._config = config or PersistenceConfig()
         self._lock = threading.Lock()
-        self._db_conn: Optional[sqlite3.Connection] = None
+        self._db_conn = None
 
         # Initialize database
         self._init_database()
@@ -123,10 +124,9 @@ class StatePersistence:
     @contextmanager
     def _get_connection(self):
         """Get database connection with context manager."""
-        conn = sqlite3.connect(self._get_db_path(), timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
+        conn = get_connection(self._get_db_path())
+        # row_factory is already set by get_connection() for SQLite
+        # WAL mode already enabled by get_connection()
         try:
             yield conn
             conn.commit()
@@ -515,8 +515,8 @@ class StatePersistence:
 
         with self._lock:
             # Read from source
-            source = sqlite3.connect(self._get_db_path())
-            backup = sqlite3.connect(backup_path)
+            source = get_connection(self._get_db_path())
+            backup = get_connection(backup_path)
 
             try:
                 source.backup(backup)

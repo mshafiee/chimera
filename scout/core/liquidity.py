@@ -534,16 +534,19 @@ class LiquidityProvider:
 
     def _get_database_connection(self):
         """
-        Helper to get a configured SQLite connection with WAL mode.
-        
+        Helper to get a configured database connection with WAL mode.
+
+        Supports both SQLite (development) and PostgreSQL (production) via
+        SCOUT_DB_BACKEND environment variable.
+
         WAL (Write-Ahead Logging) mode allows concurrent reads while writes
         are in progress, preventing database locks when Rust Operator reads
         while Python Scout writes.
         """
-        import sqlite3
-        conn = sqlite3.connect(self.db_path, timeout=10.0)  # 10s timeout for busy retries
-        conn.execute("PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
-        conn.execute("PRAGMA synchronous=NORMAL;")  # Faster writes, still safe
+        from .db import get_connection, execute_query
+
+        conn = get_connection(self.db_path)  # 10s timeout for busy retries
+        # WAL mode is enabled by default in get_connection for SQLite
         return conn
 
     def _get_from_database(

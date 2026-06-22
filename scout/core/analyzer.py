@@ -647,22 +647,25 @@ class WalletAnalyzer:
         try:
             # Try main database first
             roster_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
-            
+
             for db_path in [roster_path]:
                 if os.path.exists(db_path):
-                    import sqlite3
-                    conn = sqlite3.connect(db_path)
+                    from .db import get_connection
+                    conn = get_connection(db_path)
                     cursor = conn.cursor()
-                    # Check if wallets table exists
+                    # Check if wallets table exists (PostgreSQL-compatible query)
                     cursor.execute("""
-                        SELECT name FROM sqlite_master 
+                        SELECT table_name FROM information_schema.tables
+                        WHERE table_name = 'wallets'
+                        UNION
+                        SELECT name FROM sqlite_master
                         WHERE type='table' AND name='wallets'
                     """)
                     if cursor.fetchone():
                         # Get existing wallets from database
                         cursor.execute("""
-                            SELECT DISTINCT address 
-                            FROM wallets 
+                            SELECT DISTINCT address
+                            FROM wallets
                             WHERE status IN ('ACTIVE', 'CANDIDATE')
                             ORDER BY wqs_score DESC NULLS LAST
                             LIMIT ?
@@ -886,8 +889,8 @@ class WalletAnalyzer:
         try:
             db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
             if os.path.exists(db_path):
-                import sqlite3
-                conn = sqlite3.connect(db_path)
+                from .db import get_connection
+                conn = get_connection(db_path)
                 cursor = conn.cursor()
                 cursor.execute("""
                     SELECT wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate,
@@ -898,7 +901,7 @@ class WalletAnalyzer:
                 """, (address,))
                 row = cursor.fetchone()
                 conn.close()
-                
+
                 if row:
                     # Convert database row to WalletMetrics
                     wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, \

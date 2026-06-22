@@ -102,8 +102,8 @@ class ValidationReporter:
         # Get all model types if not specified
         if model_types is None:
             try:
-                import sqlite3
-                conn = sqlite3.connect(str(self.db_path))
+                from .db import get_connection
+                conn = get_connection(str(self.db_path))
                 cursor = conn.cursor()
                 cursor.execute("SELECT DISTINCT model_type FROM ml_predictions WHERE status = 'MATCHED'")
                 model_types = [row[0] for row in cursor.fetchall()]

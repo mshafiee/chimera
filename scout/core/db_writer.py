@@ -32,9 +32,10 @@ The schema is automatically loaded from the shared file to prevent drift.
 import fcntl
 import logging
 import os
-import sqlite3
 import time
 from dataclasses import dataclass
+
+from .db import get_connection, execute_query, execute_script
 
 from .utils import utcnow
 
@@ -225,28 +226,29 @@ class RosterWriter:
         self._cleanup_temp()
         
         # Create new database with WAL mode for concurrent access
-        conn = sqlite3.connect(str(self.temp_path), timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
-        conn.execute("PRAGMA synchronous=FULL;")  # Ensures durability on power loss
-        cursor = conn.cursor()
-        
+        # Always use SQLite for roster files (atomic file operations)
+        conn = get_connection(str(self.temp_path), force_sqlite=True)
+        cursor = execute_query(conn, "PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
+        execute_query(conn, "PRAGMA synchronous=FULL;")  # Ensures durability on power loss
+        conn.commit()  # Commit PRAGMA statements
+
         try:
             # Create schema
-            cursor.execute(self.WALLETS_SCHEMA)
-            
+            execute_query(conn, self.WALLETS_SCHEMA)
+
             # Create index
-            cursor.execute(
+            execute_query(conn,
                 "CREATE INDEX IF NOT EXISTS idx_wallets_status ON wallets(status)"
             )
-            cursor.execute(
+            execute_query(conn,
                 "CREATE INDEX IF NOT EXISTS idx_wallets_wqs ON wallets(wqs_score DESC)"
             )
             
             # Insert wallets
             now = utcnow().isoformat() + "Z"
-            
+
             for wallet in wallets:
-                cursor.execute(
+                execute_query(conn,
                     """
                     INSERT OR REPLACE INTO wallets (
                         address, status, wqs_score, wqs_confidence, roi_7d, roi_30d,
@@ -281,11 +283,11 @@ class RosterWriter:
                         now,
                     )
                 )
-            
+
             conn.commit()
 
             # Checkpoint the WAL so the file is self-contained before rename.
-            ckpt = conn.execute("PRAGMA wal_checkpoint(FULL)")
+            ckpt = execute_query(conn, "PRAGMA wal_checkpoint(FULL)")
             row = ckpt.fetchone()
             if row and row[1] != row[2]:  # pages_written != pages_checkpointed
                 logger.warning(
@@ -301,19 +303,18 @@ class RosterWriter:
         """Verify integrity of the temporary database file."""
         if not self.temp_path.exists():
             return False
-        
+
         try:
-            conn = sqlite3.connect(str(self.temp_path))
-            cursor = conn.cursor()
-            
+            conn = get_connection(str(self.temp_path), force_sqlite=True)
+
             # Run integrity check
-            cursor.execute("PRAGMA integrity_check")
+            cursor = execute_query(conn, "PRAGMA integrity_check")
             result = cursor.fetchone()
-            
+
             conn.close()
-            
+
             return result is not None and result[0] == "ok"
-            
+
         except Exception as e:
             print(f"[RosterWriter] Integrity check error: {e}")
             return False

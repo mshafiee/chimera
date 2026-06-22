@@ -12,12 +12,13 @@ Usage:
 """
 
 import logging
-import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+
+from .db import get_connection, execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ class TrainingDataLoader:
             return []
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = get_connection(self.db_path)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -155,7 +156,7 @@ class TrainingDataLoader:
             return {}
 
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = get_connection(self.db_path)
             cursor = conn.cursor()
 
             # Calculate time threshold

@@ -12,13 +12,14 @@ Usage:
 
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
 import numpy as np
+
+from .db import get_connection
 
 try:
     from scipy import stats
@@ -110,13 +111,12 @@ class ValidationMetricsCalculator:
 
         self.db_path = Path(db_path)
 
-    def _get_connection(self) -> sqlite3.Connection:
+    def _get_connection(self):
         """Get a database connection with row factory."""
         if not self.db_path.exists():
             logger.warning(f"Database not found at {self.db_path}")
 
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
+        conn = get_connection(str(self.db_path))
         return conn
 
     def calculate_metrics(

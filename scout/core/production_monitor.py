@@ -28,7 +28,8 @@ from typing import Dict, List, Optional, Tuple, Any, Callable
 from dataclasses import dataclass, asdict
 from enum import Enum
 import threading
-import sqlite3
+
+from .db import get_connection, execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -274,7 +275,7 @@ class ProductionMonitor:
         try:
             os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
 
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             # Create alerts table
@@ -454,7 +455,7 @@ class ProductionMonitor:
     def _store_health_check(self, check: HealthCheck):
         """Store health check result in database."""
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -478,7 +479,7 @@ class ProductionMonitor:
     def _store_metrics(self, metrics: PerformanceMetrics):
         """Store metrics in database."""
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -545,7 +546,7 @@ class ProductionMonitor:
     def _store_alert(self, alert: Alert):
         """Store alert in database."""
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -719,7 +720,7 @@ class ProductionMonitor:
         """Get recent alerts."""
         # Get from database
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -882,7 +883,7 @@ class GrowthTracker:
         try:
             os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
 
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             # Create growth_history table
@@ -947,7 +948,7 @@ class GrowthTracker:
     def _load_latest_state(self):
         """Load latest capital state from database."""
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -1016,7 +1017,7 @@ class GrowthTracker:
         month_ago = now - (30 * 86400)
 
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             # Get capital at different time periods
@@ -1126,7 +1127,7 @@ class GrowthTracker:
         """Store growth metrics snapshot in database."""
         conn = None
         try:
-            conn = sqlite3.connect(self._db_path, timeout=10.0)
+            conn = get_connection(self._db_path, timeout=10.0)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -1169,7 +1170,7 @@ class GrowthTracker:
         """Record a significant capital event."""
         conn = None
         try:
-            conn = sqlite3.connect(self._db_path, timeout=10.0)
+            conn = get_connection(self._db_path, timeout=10.0)
             cursor = conn.cursor()
 
             event_id = f"{event_type}_{int(time.time())}_{time.time_ns()}"
@@ -1237,7 +1238,7 @@ class GrowthTracker:
         """Store growth alert."""
         conn = None
         try:
-            conn = sqlite3.connect(self._db_path, timeout=10.0)
+            conn = get_connection(self._db_path, timeout=10.0)
             cursor = conn.cursor()
 
             alert_id = f"{alert_type}_{int(time.time())}_{time.time_ns()}"
@@ -1277,7 +1278,7 @@ class GrowthTracker:
             List of GrowthMetrics snapshots
         """
         try:
-            conn = sqlite3.connect(self._db_path)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cutoff_time = time.time() - (days * 86400)

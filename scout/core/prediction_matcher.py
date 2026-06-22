@@ -12,7 +12,6 @@ Usage:
 """
 
 import logging
-import sqlite3
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +19,7 @@ from typing import Dict, Any, Optional, List
 
 from scout.core.prediction_logger import PredictionLogger, PredictionRecord
 from scout.core.correlation_reader import CorrelationReader, WqsCorrelationRecord
+from .db import get_connection, execute_query
 
 logger = logging.getLogger(__name__)
 
@@ -368,8 +368,7 @@ class PredictionMatcher:
             List of matched predictions
         """
         try:
-            conn = sqlite3.connect(str(self.db_path))
-            conn.row_factory = sqlite3.Row
+            conn = get_connection(str(self.db_path))
             cursor = conn.cursor()
 
             query = """

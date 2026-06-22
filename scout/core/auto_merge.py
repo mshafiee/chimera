@@ -194,13 +194,14 @@ def auto_merge_roster(
     
     # Check if roster has wallets
     try:
-        import sqlite3
-        conn = sqlite3.connect(str(roster_file))
+        from .db import get_connection
+        # Roster files always use SQLite for atomic file operations
+        conn = get_connection(str(roster_file), force_sqlite=True)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM wallets")
         count = cursor.fetchone()[0]
         conn.close()
-        
+
         if count == 0:
             return False, "Roster file contains no wallets"
     except Exception as e:

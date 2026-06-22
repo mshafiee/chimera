@@ -67,7 +67,7 @@ pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
 /// Run database migrations (apply schema)
 pub async fn run_migrations(pool: &DbPool) -> AppResult<()> {
     // Use the macro which embeds the migrations into the binary
-    sqlx::migrate!("./migrations")
+    sqlx::migrate!("./migrations_sqlite")
         .run(pool)
         .await
         .map_err(|e| AppError::Database(e.into()))?;
