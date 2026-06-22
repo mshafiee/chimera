@@ -11,8 +11,10 @@ use axum::{
 use chrono::Utc;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -22,8 +24,17 @@ use tokio_util::sync::CancellationToken;
 
 use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::AppConfig;
-use chimera_operator::db;
-use chimera_operator::db::ActivePositionEntry;
+use chimera_operator::db_abstraction;
+use chimera_operator::db_abstraction::ActivePositionEntry;
+use chimera_operator::db_abstraction::DbPool;
+use chimera_operator::error::AppError;
+
+fn sqlite_pool(db: &Arc<dyn chimera_operator::db_abstraction::Database>) -> Result<sqlx::Pool<sqlx::Sqlite>, AppError> {
+    match db.pool() {
+        DbPool::SQLite(p) => Ok(p),
+        _ => Err(AppError::Internal("Only SQLite backend supported".to_string())),
+    }
+}
 use chimera_operator::engine::{
     self, MarketRegimeDetector, MomentumExit, PortfolioHeat, PositionSizer, ProfitTargetAction,
     ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager, VolumeCache,
@@ -54,7 +65,7 @@ use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, Tok
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
 
-#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     init_tracing();
@@ -144,10 +155,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Initialize database
-    let db_pool = db::init_pool(&config.database).await?;
-    db::run_migrations(&db_pool).await?;
-    db::startup_integrity_check(&db_pool).await?;
-    db::recover_executing_trades(&db_pool).await?;
+    let db_config = db_abstraction::DatabaseConfig {
+        backend: db_abstraction::DatabaseBackend::SQLite,
+        path: config.database.path.clone(),
+        url: None,
+        max_connections: config.database.max_connections,
+        acquire_timeout_seconds: 30,
+    };
+    let db_pool = db_abstraction::create_database(&db_config).await?;
+    db_pool.run_migrations().await?;
+    db_pool.startup_integrity_check().await?;
+    db_pool.recover_executing_trades().await?;
     tracing::info!("Database initialized");
 
     let cancel_token = CancellationToken::new();
@@ -217,15 +235,16 @@ async fn main() -> anyhow::Result<()> {
     // by the kill-switch API handler before tripping the circuit breaker in memory.
     // Falls back to config_audit if kill_switch_state row is absent (pre-migration DBs).
     {
-        let is_active = if db::is_kill_switch_active(&db_pool).await {
+        let is_active = if db_pool.get_kill_switch_state().await.map(|s| s.state == "ACTIVE").unwrap_or(true) {
             true
         } else {
             // Fallback: config_audit (legacy path for DBs without kill_switch_state row)
             // Fail-safe: return true on DB error to prevent unintended trading
+            let kill_pool = sqlite_pool(&db_pool)?;
             match sqlx::query_scalar::<_, String>(
                 "SELECT new_value FROM config_audit WHERE key = 'kill_switch' ORDER BY changed_at DESC LIMIT 1",
             )
-            .fetch_optional(&db_pool)
+            .fetch_optional(&kill_pool)
             .await
             {
                 Ok(row) => row.as_deref() == Some("ACTIVE"),
@@ -238,18 +257,24 @@ async fn main() -> anyhow::Result<()> {
 
         if is_active {
             tracing::warn!("Kill-switch was active before restart — re-tripping circuit breaker");
-            let _ = circuit_breaker
+            if let Err(e) = circuit_breaker
                 .manual_trip(
                     "SYSTEM_RESTART_RESTORE",
                     "Kill-switch was active before restart".to_string(),
                 )
-                .await;
+                .await
+            {
+                tracing::error!(error = %e, "CRITICAL: Failed to restore kill-switch — ABORTING STARTUP");
+                return Err(anyhow::anyhow!("Failed to restore kill-switch: {}", e));
+            }
         }
     }
 
     // Initialize tip manager
     let tip_manager = Arc::new(TipManager::new(config.jito.clone(), db_pool.clone()));
-    let _ = tip_manager.init().await;
+    if let Err(e) = tip_manager.init().await {
+        tracing::error!(error = %e, "Failed to initialize tip manager — operating in cold-start mode");
+    }
 
     // Initialize notification service
     let notifier = {
@@ -353,16 +378,14 @@ async fn main() -> anyhow::Result<()> {
         );
     tracing::info!("Engine created");
 
+    let mut task_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
     // Spawn engine
-    tokio::spawn(async move {
+    task_handles.push(tokio::spawn(async move {
         engine.run().await;
-    });
+    }));
     tracing::info!("Engine task spawned");
 
-    // Shared engine handle for the recovery manager — reuses the same connection as
-    // the executor so that any failover logic applied to that client is also
-    // available to recovery operations instead of having a separate single-point
-    // connection with no fallback.
     // Spawn recovery manager
     let recovery_manager = Arc::new(RecoveryManager::new_with_rpc(
         db_pool.clone(),
@@ -370,21 +393,19 @@ async fn main() -> anyhow::Result<()> {
         Some(ws_state.clone()),
     ));
     let recovery_clone = recovery_manager.clone();
-    tokio::spawn(async move {
+    task_handles.push(tokio::spawn(async move {
         recovery_clone.start_background_task().await;
-    });
+    }));
     tracing::info!("Recovery manager task spawned");
 
-    // Periodic EXECUTING cleanup: catch trades that get stuck in EXECUTING due to a
-    // crash or panic mid-flight. The startup sweep only covers the previous run; this
-    // covers long-running operators that never restart.
+    // Periodic EXECUTING cleanup
     {
         let exec_cleanup_db = db_pool.clone();
-        tokio::spawn(async move {
+        task_handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
                 interval.tick().await;
-                match db::recover_executing_trades(&exec_cleanup_db).await {
+                match exec_cleanup_db.recover_executing_trades().await {
                     Ok(0) => {}
                     Ok(n) => tracing::warn!(
                         count = n,
@@ -393,7 +414,7 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::error!(error = %e, "Periodic EXECUTING cleanup failed"),
                 }
             }
-        });
+        }));
     }
 
     // Spawn PnL refresh task — updates unrealized_pnl_percent every 30 seconds for active positions
@@ -404,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 interval.tick().await;
-                match db::get_active_position_tokens(&pnl_db).await {
+                match pnl_db.get_active_position_tokens().await {
                     Ok(positions) => {
                         for pos in positions {
                             if let Some(current_usd) = pnl_pc.get_price_usd(&pos.token_address) {
@@ -459,8 +480,7 @@ async fn main() -> anyhow::Result<()> {
                                 } else {
                                     rust_decimal::Decimal::ZERO
                                 };
-                                if let Err(e) = db::update_position_unrealized_pnl(
-                                    &pnl_db,
+                                if let Err(e) = pnl_db.update_position_unrealized_pnl(
                                     &pos.trade_uuid,
                                     current_usd,
                                     pnl_sol,
@@ -534,6 +554,13 @@ async fn main() -> anyhow::Result<()> {
     let dlq_pool = db_pool.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+        let sqlite_dlq = match sqlite_pool(&dlq_pool) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "DLQ worker requires SQLite backend");
+                return;
+            }
+        };
         loop {
             tokio::select! {
                 _ = dlq_token.cancelled() => {
@@ -545,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
                     match sqlx::query_as::<_, (String, String, i64)>(
                         "SELECT trade_uuid, payload, retry_count FROM dead_letter_queue WHERE can_retry = 1 AND processed_at IS NULL LIMIT 50"
                     )
-                    .fetch_all(&dlq_pool)
+                    .fetch_all(&sqlite_dlq)
                     .await {
                         Ok(items) => {
                             const MAX_DLQ_RETRIES: i64 = 3;
@@ -560,7 +587,7 @@ async fn main() -> anyhow::Result<()> {
                                 .bind(new_count)
                                 .bind(can_still_retry)
                                 .bind(&trade_uuid)
-                                .execute(&dlq_pool)
+                                .execute(&sqlite_dlq)
                                 .await {
                                     tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to increment DLQ retry_count");
                                     continue;
@@ -583,10 +610,17 @@ async fn main() -> anyhow::Result<()> {
                                             "UPDATE dead_letter_queue SET processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = ?"
                                         )
                                         .bind(&trade_uuid)
-                                        .execute(&dlq_pool)
+                                        .execute(&sqlite_dlq)
                                         .await {
                                             tracing::warn!(error = %e, "Failed to mark DLQ item as processed");
-                                        } else if let Err(e) = crate::db::update_trade_status(&dlq_pool, &trade_uuid, "RETRY", None, None).await {
+                                        } else if let Err(e) = dlq_pool.update_trade_status(
+                                            &db_abstraction::UpdateTradeStatus {
+                                                trade_uuid: trade_uuid.clone(),
+                                                status: "RETRY".to_string(),
+                                                tx_signature: None,
+                                                error_message: None,
+                                            },
+                                        ).await {
                                             tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to update trade status to RETRY");
                                         } else {
                                             tracing::info!(uuid = %trade_uuid, retry_count = new_count, "DLQ item re-queued to RETRY");
@@ -659,7 +693,7 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(std::time::Duration::from_secs(3600));
             tokio::time::sleep(sleep_duration).await;
 
-            match generate_daily_summary(&db_pool_daily).await {
+            match generate_daily_summary(db_pool_daily.as_ref()).await {
                 Ok((pnl_usd, trade_count, win_rate)) => {
                     notifier_daily
                         .notify(NotificationEvent::DailySummary {
@@ -686,12 +720,11 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = ttl_token.cancelled() => break,
                 _ = interval.tick() => {
-                    match db::get_expired_ttl_wallets(&db_pool_ttl).await {
+                    match db_pool_ttl.get_expired_ttl_wallets().await {
                         Ok(expired_wallets) => {
                             for address in expired_wallets {
                                 tracing::info!(wallet = %address, "Demoting wallet due to TTL expiration");
-                                if let Err(e) = db::demote_wallet(
-                                    &db_pool_ttl,
+                                if let Err(e) = db_pool_ttl.demote_wallet(
                                     &address,
                                     "Auto-demoted: TTL expired",
                                 )
@@ -699,8 +732,7 @@ async fn main() -> anyhow::Result<()> {
                                 {
                                     tracing::error!(wallet = %address, error = %e, "Failed to demote wallet");
                                 } else {
-                                    let _ = db::log_config_change(
-                                        &db_pool_ttl,
+                                    let _ = db_pool_ttl.log_config_change(
                                         &format!("wallet:{}", address),
                                         Some("ACTIVE"),
                                         "CANDIDATE",
@@ -851,7 +883,7 @@ async fn main() -> anyhow::Result<()> {
                         break;
                     }
                     _ = interval.tick() => {
-                        let positions = match db::get_active_positions_with_entry(&monitor_db).await {
+                        let positions = match monitor_db.get_active_positions_with_entry().await {
                             Ok(p) => { db_fail_count = 0; p }
                             Err(e) => {
                                 db_fail_count += 1;
@@ -905,7 +937,10 @@ async fn main() -> anyhow::Result<()> {
                                     "Stop-loss triggered, queuing EXIT signal"
                                 );
                                 let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
-                                let _ = monitor_engine.queue_signal(signal, None).await;
+                                if let Err(e) = monitor_engine.queue_signal(signal, None).await {
+                                    tracing::error!(error = %e, trade_uuid = %pos.trade_uuid, "Stop-loss signal failed — will retry next monitoring cycle");
+                                    continue;
+                                }
                                 monitor_pt.remove_position(&pos.trade_uuid).await;
                                 continue;
                             }
@@ -931,8 +966,11 @@ async fn main() -> anyhow::Result<()> {
                                         "Full profit target reached, queuing EXIT signal"
                                     );
                                     let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
-                                    let _ = monitor_engine.queue_signal(signal, None).await;
-                                    monitor_pt.remove_position(&pos.trade_uuid).await;
+                                    if let Err(e) = monitor_engine.queue_signal(signal, None).await {
+                                        tracing::error!(error = %e, trade_uuid = %pos.trade_uuid, "Full profit target signal failed — will retry");
+                                    } else {
+                                        monitor_pt.remove_position(&pos.trade_uuid).await;
+                                    }
                                 }
                                 ProfitTargetAction::ExitAmount(amount_sol) => {
                                     tracing::info!(
@@ -942,7 +980,9 @@ async fn main() -> anyhow::Result<()> {
                                         "Partial profit target reached, queuing partial EXIT signal"
                                     );
                                     let signal = build_exit_signal_amount(&pos, amount_sol);
-                                    let _ = monitor_engine.queue_signal(signal, None).await;
+                                    if let Err(e) = monitor_engine.queue_signal(signal, None).await {
+                                        tracing::error!(error = %e, trade_uuid = %pos.trade_uuid, "Partial profit target signal failed — will retry");
+                                    }
                                 }
                                 ProfitTargetAction::None => {}
                             }
@@ -998,12 +1038,13 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     // Update active positions count
-                    if let Ok(count) = db::count_active_positions(&db_pool_metrics).await {
+                    if let Ok(positions) = db_pool_metrics.get_active_positions().await {
+                        let count = positions.len() as i64;
                         metrics_state_clone.active_positions.set(count);
                     }
 
                     // Update total trades count
-                    if let Ok(count) = db::count_total_trades(&db_pool_metrics).await {
+                    if let Ok(count) = db_pool_metrics.count_trades_filtered(None, None, None, None, None).await {
                         metrics_state_clone.total_trades.set(count);
                     }
 
@@ -1262,6 +1303,20 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         .with_state(app_state.clone());
 
+    // Rate limiter for public API routes (more permissive — 60 req/s, burst 100)
+    let public_api_limiter_conf = tower_governor::governor::GovernorConfigBuilder::default()
+        .per_second(60)
+        .burst_size(100)
+        .key_extractor(middleware::ProxyAwareKeyExtractor)
+        .finish()
+        .ok_or_else(|| {
+            anyhow::anyhow!("Failed to build public API rate limiter")
+        })?;
+    let public_api_limiter_conf = std::sync::Arc::new(public_api_limiter_conf);
+    let public_api_governor_layer = tower_governor::GovernorLayer {
+        config: public_api_limiter_conf,
+    };
+
     // Build public read-only API routes (no auth required for dashboard)
     let public_api_routes = Router::new()
         .route("/positions", get(list_positions))
@@ -1293,7 +1348,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/scout/wqs-distribution", get(get_wqs_distribution))
         .route("/scout/metrics", get(get_scout_metrics))
         .route("/scout/run", post(trigger_scout_run))
-        .with_state(api_state.clone());
+        .with_state(api_state.clone())
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024))
+        .layer(public_api_governor_layer.clone());
 
     // Build operations API routes (use OperationsState)
     let operations_routes = Router::new()
@@ -1390,7 +1447,7 @@ async fn main() -> anyhow::Result<()> {
         let fl_db = db_pool.clone();
         let fl_engine = _engine_handle.clone();
         let fl_token = cancel_token.clone();
-        tokio::spawn(async move {
+        task_handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 tokio::select! {
@@ -1407,7 +1464,7 @@ async fn main() -> anyhow::Result<()> {
                             continue;
                         }
                         tracing::warn!("HEAT_OVEREXPOSED: capital drain detected — force-exiting oldest positions");
-                        let positions = match db::get_active_positions_with_entry(&fl_db).await {
+                        let positions = match fl_db.get_active_positions_with_entry().await {
                             Ok(p) => p,
                             Err(e) => {
                                 tracing::error!(error = %e, "Force-liquidation: DB query failed");
@@ -1425,7 +1482,10 @@ async fn main() -> anyhow::Result<()> {
                                 break;
                             }
                             let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
-                            let _ = fl_engine.queue_signal(signal, None).await;
+                            if let Err(e) = fl_engine.queue_signal(signal, None).await {
+                                tracing::error!(error = %e, trade_uuid = %pos.trade_uuid, "Force-liquidation signal failed — will retry next cycle");
+                                continue;
+                            }
                             tracing::warn!(
                                 trade_uuid = %pos.trade_uuid,
                                 token = %pos.token_address,
@@ -1437,7 +1497,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
             }
-        });
+        }));
         tracing::info!("Force-liquidation task spawned (60s interval, triggers at 150% heat)");
     }
 
@@ -1558,10 +1618,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Build auth routes
     // jwt_secret already defined above
+    let sqlite_pool = match db_pool.pool() {
+        db_abstraction::DbPool::SQLite(pool) => pool,
+        _ => return Err(anyhow::anyhow!("SQLite pool required for wallet auth")),
+    };
     let auth_routes = Router::new()
         .route("/auth/wallet", post(wallet_auth))
         .with_state(Arc::new(WalletAuthState {
-            db: db_pool.clone(),
+            db: sqlite_pool,
             jwt_secret,
             // FIX 11: Initialize auth nonce store for replay protection
             seen_auth_nonces: std::sync::Arc::new(parking_lot::Mutex::new(
@@ -1672,6 +1736,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", monitoring_routes)
         .merge(metrics_routes)
         .layer(cors)
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
                 tracing::info_span!(
@@ -1722,6 +1787,14 @@ async fn main() -> anyhow::Result<()> {
 
     cancel_token.cancel();
     let _ = server_handle.await;
+
+    // Wait for remaining background tasks with a timeout
+    for handle in task_handles {
+        if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
+            tracing::warn!(error = %e, "Background task did not complete within 5s shutdown window");
+        }
+    }
+
     tracing::info!("Chimera Operator shut down successfully");
 
     Ok(())
@@ -1814,7 +1887,7 @@ fn load_config() -> anyhow::Result<AppConfig> {
         ));
     }
 
-    let config = AppConfig::load().map_err(|e| {
+    let config = AppConfig::load_config().map_err(|e| {
         tracing::error!(error = %e, "Failed to load configuration");
         anyhow::anyhow!("Configuration error: {}", e)
     })?;
@@ -1834,7 +1907,7 @@ fn load_config() -> anyhow::Result<AppConfig> {
 
 /// Generate daily trading summary from database
 async fn generate_daily_summary(
-    db: &db::DbPool,
+    db: &dyn db_abstraction::Database,
 ) -> anyhow::Result<(rust_decimal::Decimal, u32, f64)> {
     // Get yesterday's date range
     let now = Utc::now();
@@ -1846,15 +1919,14 @@ async fn generate_daily_summary(
         .to_string();
 
     // Query trades from yesterday
-    let trades = db::get_trades(
-        db,
+    let trades = db.get_trades_filtered(
         Some(&yesterday_start),
         Some(&yesterday_end),
         Some("CLOSED"),
         None,
         None, // No wallet_address filter for daily summary
-        None,
-        None,
+        1000,
+        0,
     )
     .await?;
 

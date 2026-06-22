@@ -4,7 +4,7 @@
 //! Includes RPC failover with automatic recovery to primary.
 
 use crate::config::AppConfig;
-use crate::db::DbPool;
+use crate::db_abstraction::Database;
 use crate::engine::tips::TipManager;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
 use crate::models::{Signal, Strategy};
@@ -66,8 +66,8 @@ struct ExecutorMutableState {
 pub struct Executor {
     /// Configuration
     config: Arc<AppConfig>,
-    /// Database pool
-    db: DbPool,
+    /// Database
+    db: Arc<dyn Database>,
     /// Interior-mutable RPC state (see ExecutorMutableState)
     mutable: parking_lot::Mutex<ExecutorMutableState>,
     /// Recovery check interval (default 5 minutes)
@@ -105,20 +105,20 @@ pub struct Executor {
 
 impl Executor {
     /// Create a new executor
-    pub fn new(config: Arc<AppConfig>, db: DbPool) -> Self {
+    pub fn new(config: Arc<AppConfig>, db: Arc<dyn Database>) -> Self {
         let rpc_mode = if config.jito.enabled {
             RpcMode::Jito
         } else {
             RpcMode::Standard
         };
 
-        // Create HTTP client with timeout (reserved for fallback scenarios)
-        // Note: This can panic if the system TLS backend cannot be initialized.
-        // In production, this should be caught during startup and logged.
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.rpc.timeout_ms))
             .build()
-            .expect("Failed to create HTTP client - system may not have a valid TLS backend");
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "Failed to create HTTP client with custom config — using default client");
+                reqwest::Client::new()
+            });
 
         // Create Solana RPC client for primary endpoint
         let rpc_client = Arc::new(RpcClient::new_with_timeout(
@@ -255,6 +255,7 @@ impl Executor {
     /// Execute a trade signal
     ///
     /// Returns the transaction signature on success
+    #[tracing::instrument(skip(self, signal))]
     pub async fn execute(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
         let mut attempts = 0;
         loop {
@@ -455,8 +456,7 @@ impl Executor {
                     let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
 
                     // Update trade costs in database
-                    if let Err(e) = crate::db::update_trade_costs(
-                        &self.db,
+                    if let Err(e) = self.db.update_trade_costs(
                         &signal.trade_uuid,
                         jito_tip,
                         dex_fee_sol,
@@ -497,8 +497,7 @@ impl Executor {
                     // Record costs even for failed trades — Jito tip was still paid
                     if rpc_mode == RpcMode::Jito {
                         let jito_tip = self.calculate_jito_tip(signal);
-                        if let Err(cost_err) = crate::db::update_trade_costs(
-                            &self.db,
+                        if let Err(cost_err) = self.db.update_trade_costs(
                             &signal.trade_uuid,
                             jito_tip,
                             Decimal::ZERO,
@@ -704,11 +703,10 @@ impl Executor {
                 }
 
                 // Log recovery to config audit
-                if let Err(e) = crate::db::log_config_change(
-                    &self.db,
+                if let Err(e) = self.db.log_config_change(
                     "rpc_mode",
-                    Some("STANDARD"),
-                    "JITO",
+                    Some("JITO"),
+                    "STANDARD",
                     "SYSTEM_RECOVERY",
                     Some("Primary RPC recovered, switching back from fallback"),
                 )
@@ -1819,8 +1817,7 @@ impl Executor {
             .await;
 
             // Log to config audit
-            if let Err(e) = crate::db::log_config_change(
-                &self.db,
+            if let Err(e) = self.db.log_config_change(
                 "rpc_mode",
                 Some("JITO"),
                 "STANDARD",

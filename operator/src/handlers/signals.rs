@@ -6,11 +6,21 @@
 //! - Signal aggregation status
 
 use axum::{extract::Query, extract::State, Json};
+use chrono::Utc;
 use serde::Serialize;
+use sqlx::Row;
 use std::sync::Arc;
 
 use super::api::ApiState;
+use crate::db_abstraction::DbPool;
 use crate::error::AppError;
+
+fn sqlite_pool(db: &Arc<dyn crate::db_abstraction::Database>) -> Result<sqlx::Pool<sqlx::Sqlite>, AppError> {
+    match db.pool() {
+        DbPool::SQLite(p) => Ok(p),
+        _ => Err(AppError::Internal("Only SQLite backend supported".to_string())),
+    }
+}
 
 // =============================================================================
 // RESPONSE TYPES
@@ -194,9 +204,10 @@ pub struct SignalSource {
 pub async fn get_consensus(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ConsensusResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
+
     // Query database for recent consensus signals
-    let recent_signals = sqlx::query_as!(
-        SignalAggRow,
+    let recent_rows = sqlx::query(
         r#"
         SELECT
             token_address,
@@ -204,31 +215,40 @@ pub async fn get_consensus(
             direction,
             amount_sol,
             consensus_wallet_count,
-            datetime(created_at) as "created_at!"
+            datetime(created_at) as created_at
         FROM signal_aggregation
         WHERE is_consensus = 1
         ORDER BY created_at DESC
         LIMIT 20
-        "#
+        "#,
     )
-    .fetch_all(&state.db)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
 
+    let recent_signals: Vec<SignalAggRow> = recent_rows.into_iter().map(|row| {
+        SignalAggRow {
+            token_address: row.try_get("token_address").unwrap_or_default(),
+            wallet_address: row.try_get("wallet_address").unwrap_or_default(),
+            direction: row.try_get("direction").unwrap_or_default(),
+            amount_sol: row.try_get("amount_sol").unwrap_or(0.0),
+            consensus_wallet_count: row.try_get("consensus_wallet_count").ok(),
+            created_at: row.try_get("created_at").unwrap_or_default(),
+        }
+    }).collect();
+
     // Calculate consensus rate (consensus signals / total signals in last 24h)
-    let consensus_rate = sqlx::query_scalar!(
+    let consensus_rate: f64 = sqlx::query_scalar(
         r#"
         SELECT
             CAST(COUNT(DISTINCT CASE WHEN is_consensus = 1 THEN token_address || ':' || created_at END) AS REAL) /
             NULLIF(COUNT(DISTINCT token_address || ':' || created_at), 0) AS rate
         FROM signal_aggregation
         WHERE created_at >= datetime('now', '-24 hours')
-        "#
+        "#,
     )
-    .fetch_one(&state.db)
+    .fetch_one(&pool)
     .await
-    .ok()
-    .flatten()
     .unwrap_or(0.0);
 
     // Group by token for consensus signals
@@ -282,7 +302,7 @@ pub async fn get_consensus(
 
     // Get active clusters
     let active_clusters = if let Some(ref agg) = state.signal_aggregator {
-        get_active_clusters(agg, &state.db).await
+        get_active_clusters(agg, &sqlite_pool(&state.db)?).await
     } else {
         Vec::new()
     };
@@ -304,8 +324,9 @@ pub async fn get_consensus(
 pub async fn get_wallet_clustering(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<WalletClusteringResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
     let clusters = if let Some(ref agg) = state.signal_aggregator {
-        get_active_clusters(agg, &state.db).await
+        get_active_clusters(agg, &pool).await
     } else {
         Vec::new()
     };
@@ -347,9 +368,10 @@ pub async fn get_signal_aggregation(
     let window_start = chrono::Utc::now() - chrono::Duration::seconds(300);
     let window_end = chrono::Utc::now();
 
+    let pool = sqlite_pool(&state.db)?;
+
     // Query signals in the aggregation window
-    let signals = sqlx::query_as!(
-        SignalAggRow,
+    let signal_rows = sqlx::query(
         r#"
         SELECT
             token_address,
@@ -357,15 +379,26 @@ pub async fn get_signal_aggregation(
             direction,
             amount_sol,
             consensus_wallet_count,
-            datetime(created_at) as "created_at!"
+            datetime(created_at) as created_at
         FROM signal_aggregation
         WHERE created_at >= datetime('now', '-5 minutes')
         ORDER BY created_at DESC
-        "#
+        "#,
     )
-    .fetch_all(&state.db)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
+
+    let signals: Vec<SignalAggRow> = signal_rows.into_iter().map(|row| {
+        SignalAggRow {
+            token_address: row.try_get("token_address").unwrap_or_default(),
+            wallet_address: row.try_get("wallet_address").unwrap_or_default(),
+            direction: row.try_get("direction").unwrap_or_default(),
+            amount_sol: row.try_get("amount_sol").unwrap_or(0.0),
+            consensus_wallet_count: row.try_get("consensus_wallet_count").ok(),
+            created_at: row.try_get("created_at").unwrap_or_default(),
+        }
+    }).collect();
 
     let total_signals = signals.len();
     let unique_tokens = signals
@@ -459,51 +492,54 @@ pub async fn get_signal_quality(
     State(state): State<Arc<ApiState>>,
     Query(params): Query<SignalQualityParams>,
 ) -> Result<Json<SignalQualityResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
+
     // Parse time range
     let range = params.range;
-    let time_filter = match range.as_str() {
-        "1h" => "datetime('now', '-1 hour')",
-        "6h" => "datetime('now', '-6 hours')",
-        "24h" => "datetime('now', '-24 hours')",
-        "7d" => "datetime('now', '-7 days')",
-        _ => "datetime('now', '-24 hours')", // Default to 24h
+    let cutoff = Utc::now() - match range.as_str() {
+        "1h" => chrono::Duration::hours(1),
+        "6h" => chrono::Duration::hours(6),
+        "24h" => chrono::Duration::hours(24),
+        "7d" => chrono::Duration::days(7),
+        _ => chrono::Duration::hours(24),
     };
+    let cutoff_str = cutoff.to_rfc3339();
 
     // Total signals in time range
-    let total_signals: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM trades WHERE created_at >= {}",
-        time_filter
-    ))
-    .fetch_one(&state.db)
+    let total_signals: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM trades WHERE created_at >= ?",
+    )
+    .bind(&cutoff_str)
+    .fetch_one(&pool)
     .await
     .unwrap_or(0);
 
     // Accepted vs rejected signals
     let (accepted_signals, rejected_signals): (i64, i64) =
-        sqlx::query_as(&format!(
+        sqlx::query_as(
             r#"
             SELECT
                 COUNT(CASE WHEN status IN ('ACTIVE', 'CLOSED') THEN 1 END) as accepted,
                 COUNT(CASE WHEN status IN ('FAILED', 'DEAD_LETTER') THEN 1 END) as rejected
-            FROM trades WHERE created_at >= {}
+            FROM trades WHERE created_at >= ?
             "#,
-            time_filter
-        ))
-        .fetch_one(&state.db)
+        )
+        .bind(&cutoff_str)
+        .fetch_one(&pool)
         .await
         .unwrap_or((0, 0));
 
     // Current quality score (average WQS of wallets that sent signals)
-    let current_quality_score: f64 = sqlx::query_scalar(&format!(
+    let current_quality_score: f64 = sqlx::query_scalar(
         r#"
         SELECT COALESCE(AVG(w.wqs_score), 50.0)
         FROM trades t
         LEFT JOIN wallets w ON t.wallet_address = w.address
-        WHERE t.created_at >= {}
+        WHERE t.created_at >= ?
         "#,
-        time_filter
-    ))
-    .fetch_one(&state.db)
+    )
+    .bind(&cutoff_str)
+    .fetch_one(&pool)
     .await
     .unwrap_or(50.0);
 
@@ -514,11 +550,19 @@ pub async fn get_signal_quality(
         0.0
     };
 
+    let hours = match range.as_str() {
+        "1h" => 1,
+        "6h" => 6,
+        "24h" => 24,
+        "7d" => 168,
+        _ => 24,
+    };
+
     // Quality distribution buckets
-    let quality_distribution = build_quality_distribution(&state.db, time_filter).await;
+    let quality_distribution = build_quality_distribution(&pool, &cutoff_str).await;
 
     // Average quality trend (hourly data points)
-    let average_quality_trend = build_quality_trend(&state.db, time_filter).await;
+    let average_quality_trend = build_quality_trend(&pool, &cutoff_str, hours).await;
 
     Ok(Json(SignalQualityResponse {
         current_quality_score,
@@ -540,43 +584,50 @@ pub async fn get_signal_quality(
 pub async fn get_signal_sources(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<SignalSourcesResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
+
     // Query per-wallet signal statistics (last 7 days)
-    let sources_raw = sqlx::query_as!(
-        SignalSourceRow,
+    let source_rows = sqlx::query(
         r#"
         SELECT
-            t.wallet_address as "source!",
-            CAST(COUNT(*) AS INTEGER) as "signal_count!",
-            COALESCE(w.wqs_score, 50.0) as "average_quality!",
-            CAST(COUNT(CASE WHEN t.status IN ('ACTIVE', 'CLOSED') THEN 1 END) AS REAL) / CAST(COUNT(*) AS REAL) as "acceptance_rate!",
-            MAX(t.created_at) as "last_signal_at!"
+            t.wallet_address as source,
+            CAST(COUNT(*) AS INTEGER) as signal_count,
+            COALESCE(w.wqs_score, 50.0) as average_quality,
+            CAST(COUNT(CASE WHEN t.status IN ('ACTIVE', 'CLOSED') THEN 1 END) AS REAL) / CAST(COUNT(*) AS REAL) as acceptance_rate,
+            MAX(t.created_at) as last_signal_at
         FROM trades t
         LEFT JOIN wallets w ON t.wallet_address = w.address
         WHERE t.created_at >= datetime('now', '-7 days')
         GROUP BY t.wallet_address
         ORDER BY COUNT(*) DESC
         LIMIT 50
-        "#
+        "#,
     )
-    .fetch_all(&state.db)
+    .fetch_all(&pool)
     .await
     .unwrap_or_default();
+
+    let sources_raw: Vec<SignalSourceRow> = source_rows.into_iter().map(|row| {
+        SignalSourceRow {
+            source: row.try_get("source").unwrap_or_default(),
+            signal_count: row.try_get("signal_count").unwrap_or(0),
+            average_quality: row.try_get("average_quality").unwrap_or(50.0),
+            acceptance_rate: row.try_get("acceptance_rate").unwrap_or(0.0),
+            last_signal_at: row.try_get("last_signal_at").unwrap_or_default(),
+        }
+    }).collect();
 
     let total_signals = sources_raw.iter().map(|s| s.signal_count).sum::<i64>();
 
     let sources: Vec<SignalSource> = sources_raw
         .into_iter()
         .map(|row| {
-            let dt = chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
-                row.last_signal_at,
-                chrono::Utc,
-            );
             SignalSource {
                 source: row.source,
                 signal_count: row.signal_count,
                 average_quality: row.average_quality,
                 acceptance_rate: row.acceptance_rate,
-                last_signal_at: dt.to_rfc3339(),
+                last_signal_at: row.last_signal_at,
             }
         })
         .collect();
@@ -717,13 +768,13 @@ struct SignalSourceRow {
     signal_count: i64,
     average_quality: f64,
     acceptance_rate: f64,
-    last_signal_at: chrono::NaiveDateTime,
+    last_signal_at: String,
 }
 
 /// Build quality distribution buckets
 async fn build_quality_distribution(
     db: &sqlx::Pool<sqlx::Sqlite>,
-    time_filter: &str,
+    cutoff_str: &str,
 ) -> Vec<QualityBucket> {
     let buckets = [
         ("0-0.2", 0.0, 20.0),
@@ -733,30 +784,31 @@ async fn build_quality_distribution(
         ("0.8-1.0", 80.0, 100.0),
     ];
 
-    // Get total count for percentage calculation
-    let total: i64 = sqlx::query_scalar(&format!(
+    let total: i64 = sqlx::query_scalar(
         "SELECT COUNT(DISTINCT t.wallet_address) FROM trades t
          LEFT JOIN wallets w ON t.wallet_address = w.address
-         WHERE t.created_at >= {}",
-        time_filter
-    ))
+         WHERE t.created_at >= ?",
+    )
+    .bind(cutoff_str)
     .fetch_one(db)
     .await
-    .unwrap_or(1); // Avoid division by zero
+    .unwrap_or(1);
 
     let mut distribution = Vec::new();
 
     for (range, min_score, max_score) in buckets {
-        let count: i64 = sqlx::query_scalar(&format!(
+        let count: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(DISTINCT t.wallet_address)
             FROM trades t
             LEFT JOIN wallets w ON t.wallet_address = w.address
-            WHERE t.created_at >= {}
-            AND COALESCE(w.wqs_score, 50.0) >= {} AND COALESCE(w.wqs_score, 50.0) < {}
+            WHERE t.created_at >= ?
+            AND COALESCE(w.wqs_score, 50.0) >= ? AND COALESCE(w.wqs_score, 50.0) < ?
             "#,
-            time_filter, min_score, max_score
-        ))
+        )
+        .bind(cutoff_str)
+        .bind(min_score)
+        .bind(max_score)
         .fetch_one(db)
         .await
         .unwrap_or(0);
@@ -780,18 +832,9 @@ async fn build_quality_distribution(
 /// Build quality trend data (hourly points)
 async fn build_quality_trend(
     db: &sqlx::Pool<sqlx::Sqlite>,
-    time_filter: &str,
+    cutoff_str: &str,
+    hours: i64,
 ) -> Vec<QualityTrendPoint> {
-    // Determine number of data points based on time range
-    let hours = if time_filter.contains("1 hour") {
-        1
-    } else if time_filter.contains("6 hours") {
-        6
-    } else if time_filter.contains("7 days") {
-        168 // 7 * 24
-    } else {
-        24 // Default 24h
-    };
 
     let mut trend = Vec::new();
 
