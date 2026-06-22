@@ -43,11 +43,11 @@ except ImportError:
     logger.warning("MetaLearner not available")
 
 try:
-    from .ml_predictor import SimpleRegressionPredictor
-    SIMPLE_REGRESSION_AVAILABLE = True
+    from .ml_predictor import HeuristicPredictor
+    HEURISTIC_AVAILABLE = True
 except ImportError:
-    SIMPLE_REGRESSION_AVAILABLE = False
-    logger.warning("SimpleRegressionPredictor not available")
+    HEURISTIC_AVAILABLE = False
+    logger.warning("HeuristicPredictor not available")
 
 
 class ModelType(Enum):
@@ -152,14 +152,14 @@ class EnsemblePredictor:
             except Exception as e:
                 logger.warning(f"Failed to initialize MetaLearner: {e}")
 
-        if SIMPLE_REGRESSION_AVAILABLE:
+        if HEURISTIC_AVAILABLE:
             try:
-                self._models[ModelType.SIMPLE_REGRESSION] = SimpleRegressionPredictor()
+                self._models[ModelType.SIMPLE_REGRESSION] = HeuristicPredictor()
                 self._weights[ModelType.SIMPLE_REGRESSION] = 0.2
                 self._performance[ModelType.SIMPLE_REGRESSION] = ModelPerformance(ModelType.SIMPLE_REGRESSION)
-                logger.info("SimpleRegressionPredictor initialized")
+                logger.info("HeuristicPredictor initialized")
             except Exception as e:
-                logger.warning(f"Failed to initialize SimpleRegressionPredictor: {e}")
+                logger.warning(f"Failed to initialize HeuristicPredictor: {e}")
 
         # Normalize weights
         self._normalize_weights()

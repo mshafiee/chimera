@@ -599,6 +599,10 @@ async def analyze_wallets(
             print(f"[Scout] ✗ Wallet task failed: {e}")
             results.append(None)
     print("[Scout] All tasks completed, processing results...")
+
+    # Clear analyzer caches to free memory before proceeding
+    if analyzer:
+        analyzer.clear_all_caches()
     
     for res in results:
         if isinstance(res, Exception):
@@ -959,6 +963,7 @@ def _write_correlation_record(
     Actual PnL fields (actual_copy_pnl_*) stay NULL until the Operator UPDATEs them.
     """
     db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
+    conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -971,9 +976,11 @@ def _write_correlation_record(
             (wallet_address, wqs_score, components_json_str, now, strategy, now),
         )
         conn.commit()
-        conn.close()
-    except sqlite3.OperationalError:
-        pass
+    except sqlite3.OperationalError as e:
+        print(f"[Scout] Failed to write correlation record: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
@@ -1030,11 +1037,11 @@ def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
 
     # Also write to chimera.db with enhanced schema
     db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
+    conn = None
     try:
         conn = sqlite3.connect(db_path, timeout=10.0)
         conn.execute("PRAGMA journal_mode=WAL;")
 
-        # Enhanced schema with confidence and priority
         conn.execute("""
             CREATE TABLE IF NOT EXISTS exit_recommendations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1049,7 +1056,6 @@ def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
             )
         """)
 
-        # Write enhanced records
         for rec in enhanced_recs:
             conn.execute(
                 """INSERT INTO exit_recommendations
@@ -1060,15 +1066,16 @@ def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
             )
 
         conn.commit()
-        conn.close()
         print(f"[Scout] Wrote {len(enhanced_recs)} exit recommendations to {db_path} (exit_recommendations table)")
 
-        # Log summary
         high_conf = sum(1 for r in enhanced_recs if r.get("confidence", 0) >= 0.7)
         print(f"[Scout] Exit summary: {len(enhanced_recs)} total, {high_conf} high confidence")
 
     except Exception as e:
         print(f"[Scout] Failed to write exit recommendations to DB: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 def _calculate_exit_confidence(rec: Dict[str, Any]) -> float:
@@ -1492,7 +1499,7 @@ async def main_async():
             
             # NEW CODE: Wrap in try/except to prevent crash if Operator is down
             try:
-                merge_success, merge_message = auto_merge_roster(
+                merge_success, merge_message = await auto_merge_roster(
                     roster_path=str(output_path),
                     api_url=os.getenv("CHIMERA_API_URL", "http://localhost:8080"),
                     operator_container=os.getenv("CHIMERA_OPERATOR_CONTAINER", "chimera-operator"),

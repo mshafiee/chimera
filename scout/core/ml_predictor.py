@@ -1,16 +1,11 @@
 """
-ML-based Profitability Prediction for Scout
+Heuristic-based profitability predictor for Scout.
 
-Uses historical wallet features to predict profitability (PnL).
-This module provides:
-- Simple regression models for profitability prediction
-- Feature importance tracking
-- Continuous retraining support
-- Prediction confidence scoring
+Uses a weighted linear combination of features to estimate PnL.
+This is NOT a trained ML model — it uses hand-tuned weights
+designed for interpretability and zero-dependency operation.
 
-Usage:
-    predictor = ProfitabilityPredictor()
-    prediction = predictor.predict_profitability(wallet_features)
+For actual ML predictions, see `ensemble_predictor.py`.
 """
 
 import logging
@@ -23,12 +18,15 @@ import pickle
 logger = logging.getLogger(__name__)
 
 
-class SimpleRegressionPredictor:
+class HeuristicPredictor:
     """
-    Simple linear regression predictor for wallet profitability.
+    Heuristic-based profitability predictor for Scout.
 
-    Uses weighted linear combination of features to predict PnL.
-    Designed for interpretability and fast training without ML dependencies.
+    Uses a weighted linear combination of features to estimate PnL.
+    This is NOT a trained ML model — it uses hand-tuned weights
+    designed for interpretability and zero-dependency operation.
+
+    For actual ML predictions, see `ensemble_predictor.py`.
     """
 
     def __init__(self):
@@ -210,7 +208,7 @@ class ProfitabilityPredictor:
         self.model_path = Path(model_path)
         self.model_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.predictor = SimpleRegressionPredictor()
+        self.predictor = HeuristicPredictor()
         self.feature_importance = {}
 
         # Try to load existing model

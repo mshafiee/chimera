@@ -33,6 +33,8 @@ import fcntl
 import logging
 import os
 import time
+from decimal import Decimal
+
 from dataclasses import dataclass
 
 from .db import get_connection, execute_query, execute_script
@@ -57,11 +59,11 @@ class WalletRecord:
     trade_count_30d: Optional[int] = None
     win_rate: Optional[float] = None
     max_drawdown_30d: Optional[float] = None
-    avg_trade_size_sol: Optional[float] = None
-    avg_win_sol: Optional[float] = None
-    avg_loss_sol: Optional[float] = None
+    avg_trade_size_sol: Optional[Decimal] = None
+    avg_win_sol: Optional[Decimal] = None
+    avg_loss_sol: Optional[Decimal] = None
     profit_factor: Optional[float] = None
-    realized_pnl_30d_sol: Optional[float] = None
+    realized_pnl_30d_sol: Optional[Decimal] = None
     last_trade_at: Optional[str] = None
     promoted_at: Optional[str] = None
     ttl_expires_at: Optional[str] = None
@@ -191,14 +193,14 @@ class RosterWriter:
         """
         lock_path = self.output_path.with_suffix('.lock')
 
-        # Clean up stale lock files before attempting to acquire the lock
-        self._cleanup_stale_lock(lock_path)
-
         with open(lock_path, 'w') as lock_file:
             try:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except IOError:
                 raise RuntimeError("Another Scout process is already writing the roster")
+
+            # Clean up stale lock AFTER acquiring the lock, to avoid TOCTOU race
+            self._cleanup_stale_lock(lock_path)
 
             try:
                 # Step 1: Write to temporary file

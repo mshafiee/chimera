@@ -406,7 +406,7 @@ class PrePromotionValidator:
         # min_holdout_pnl_sol SOL to prove the wallet is profitable in the most
         # recent window, not just historically.
         if is_walk_forward and self.criteria.min_holdout_pnl_sol > 0:
-            holdout_pnl_sol = float(backtest_result.original_pnl_sol) if backtest_result.original_pnl_sol else 0.0
+            holdout_pnl_sol = float(backtest_result.original_pnl_sol) if backtest_result.original_pnl_sol is not None else 0.0
             if holdout_pnl_sol < self.criteria.min_holdout_pnl_sol:
                 logger.info(
                     f"Wallet failed holdout PnL check: {holdout_pnl_sol:.4f} SOL < {self.criteria.min_holdout_pnl_sol} SOL"

@@ -34,12 +34,11 @@ class TraderArchetype(Enum):
 class LiquidityData:
     """Snapshot of token liquidity at a point in time."""
     token_address: str
-    liquidity_usd: float
-    price_usd: float
-    volume_24h_usd: float
+    liquidity_usd: Decimal
+    price_usd: Decimal
+    volume_24h_usd: Decimal
     timestamp: datetime
     source: str = "unknown"
-    # New: Token creation time for sniper checks
     token_creation_timestamp: Optional[datetime] = None
 
 

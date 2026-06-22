@@ -173,6 +173,7 @@ class LaserStreamClient:
         # Streams
         self._active_streams: Dict[str, grpc.aio.UnaryStreamCall] = {}
         self._subscriptions: Dict[str, StreamSubscription] = {}
+        self._stream_tasks: list[asyncio.Task] = []
 
         # Message queue
         self._message_queue: deque[StreamMessage] = deque(maxlen=self._config.MESSAGE_QUEUE_SIZE)
@@ -293,8 +294,8 @@ class LaserStreamClient:
             )
 
             # Start streaming
-            # Note: This is a placeholder - actual implementation depends on Helius proto
-            asyncio.create_task(self._stream_transactions(stream_id, filters or {}))
+            task = asyncio.create_task(self._stream_transactions(stream_id, filters or {}))
+            self._stream_tasks.append(task)
 
             logger.info(f"Subscribed to transaction streaming (ID: {stream_id})")
             return stream_id
@@ -332,7 +333,8 @@ class LaserStreamClient:
             )
 
             # Start streaming
-            asyncio.create_task(self._stream_dex_trades(stream_id, token_mints or []))
+            task = asyncio.create_task(self._stream_dex_trades(stream_id, token_mints or []))
+            self._stream_tasks.append(task)
 
             logger.info(f"Subscribed to DEX trade streaming (ID: {stream_id})")
             return stream_id
@@ -370,7 +372,8 @@ class LaserStreamClient:
             )
 
             # Start streaming
-            asyncio.create_task(self._stream_prices(stream_id, token_mints))
+            task = asyncio.create_task(self._stream_prices(stream_id, token_mints))
+            self._stream_tasks.append(task)
 
             logger.info(f"Subscribed to price streaming (ID: {stream_id})")
             return stream_id
@@ -568,6 +571,14 @@ class LaserStreamClient:
 
     async def shutdown(self):
         """Cleanup and shutdown."""
+        # Cancel any running stream tasks
+        for task in self._stream_tasks:
+            if not task.done():
+                task.cancel()
+        if self._stream_tasks:
+            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
+        self._stream_tasks.clear()
+
         await self.disconnect()
 
         # Clear subscriptions

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
-def merge_via_api(
+async def merge_via_api(
     api_url: str = "http://localhost:8080",
     roster_path: Optional[str] = None,
     timeout: int = 30,
@@ -55,37 +55,32 @@ def merge_via_api(
     
     for attempt in range(retries):
         try:
-            response = requests.post(
-                endpoint,
-                json=payload,
-                timeout=timeout,
-                headers=headers,
+            response = await asyncio.to_thread(
+                requests.post, endpoint, json=payload, timeout=timeout, headers=headers
             )
-            
+
             if response.status_code == 200:
                 result = response.json()
                 wallets_merged = result.get("wallets_merged", 0)
                 return True, f"Successfully merged {wallets_merged} wallets via API"
             elif response.status_code == 401:
-                # Authentication required - try SIGHUP instead
                 return False, "API requires authentication, trying SIGHUP..."
             elif response.status_code == 500:
-                # Server error - might be database lock, retry
                 if attempt < retries - 1:
-                    time.sleep(retry_delay * (attempt + 1))
+                    await asyncio.sleep(retry_delay * (attempt + 1))
                     continue
                 return False, f"Server error: {response.text}"
             else:
                 return False, f"API returned status {response.status_code}: {response.text}"
-                
+
         except requests.exceptions.ConnectionError:
             if attempt < retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
+                await asyncio.sleep(retry_delay * (attempt + 1))
                 continue
             return False, "Could not connect to operator API"
         except requests.exceptions.Timeout:
             if attempt < retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
+                await asyncio.sleep(retry_delay * (attempt + 1))
                 continue
             return False, "API request timed out"
         except Exception as e:
@@ -155,7 +150,7 @@ def merge_via_sighup(
         return False, f"SIGHUP failed: {str(e)}"
 
 
-def auto_merge_roster(
+async def auto_merge_roster(
     roster_path: Optional[str] = None,
     api_url: str = "http://localhost:8080",
     operator_container: str = "chimera-operator",
@@ -209,7 +204,7 @@ def auto_merge_roster(
     
     # Try API first if preferred
     if prefer_api:
-        success, message = merge_via_api(
+        success, message = await merge_via_api(
             api_url=api_url,
             roster_path=roster_path,
             retries=retries,

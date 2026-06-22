@@ -77,7 +77,6 @@ class CorrelationReader:
             return False
         try:
             cursor = conn.cursor()
-            # Use PostgreSQL-compatible query
             cursor.execute("""
                 SELECT table_name FROM information_schema.tables
                 WHERE table_name = 'wqs_pnl_correlation'
@@ -85,10 +84,11 @@ class CorrelationReader:
                 SELECT name FROM sqlite_master WHERE type='table' AND name='wqs_pnl_correlation'
             """)
             result = cursor.fetchone()
-            conn.close()
             return result is not None
         except Exception:
             return False
+        finally:
+            conn.close()
 
     def get_all_records(
         self,
@@ -115,7 +115,6 @@ class CorrelationReader:
                     (min_trades,),
                 )
             rows = cursor.fetchall()
-            conn.close()
             records = []
             for row in rows:
                 records.append(WqsCorrelationRecord(
@@ -135,6 +134,8 @@ class CorrelationReader:
             return records
         except sqlite3.OperationalError:
             return []
+        finally:
+            conn.close()
 
     def get_correlation_stats(
         self, strategy: Optional[str] = None

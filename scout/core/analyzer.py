@@ -331,9 +331,11 @@ class WalletAnalyzer:
             except Exception as e:
                 logger.warning(f"Failed to initialize RugCheck client: {e}")
         
-        # Cache for metrics and trades
-        self._metrics_cache: Dict[str, WalletMetrics] = {}
-        self._trades_cache: Dict[str, List[HistoricalTrade]] = {}
+        # Cache for metrics and trades (bounded to prevent memory growth)
+        self._metrics_cache: OrderedDict = OrderedDict()
+        self._metrics_cache_maxlen = 500
+        self._trades_cache: OrderedDict = OrderedDict()
+        self._trades_cache_maxlen = 500
         self._candidate_wallets: List[str] = []
         self._token_meta_cache: OrderedDict = OrderedDict()
         self._token_creation_cache: OrderedDict = OrderedDict()
@@ -476,6 +478,18 @@ class WalletAnalyzer:
         self._metrics_cache.pop(address, None)
         self._trades_cache.pop(address, None)
         # Note: We keep _token_meta_cache as that is reusable across wallets
+
+    def _metrics_cache_set(self, key: str, value: Any):
+        self._metrics_cache[key] = value
+        self._metrics_cache.move_to_end(key)
+        if len(self._metrics_cache) > self._metrics_cache_maxlen:
+            self._metrics_cache.popitem(last=False)
+
+    def _trades_cache_set(self, key: str, value: Any):
+        self._trades_cache[key] = value
+        self._trades_cache.move_to_end(key)
+        if len(self._trades_cache) > self._trades_cache_maxlen:
+            self._trades_cache.popitem(last=False)
 
     def clear_all_caches(self):
         """Clear all cached data to free memory."""
@@ -645,39 +659,36 @@ class WalletAnalyzer:
         
         # Fallback: Try to load from existing roster database
         try:
-            # Try main database first
             roster_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
 
             for db_path in [roster_path]:
                 if os.path.exists(db_path):
                     from .db import get_connection
                     conn = get_connection(db_path)
-                    cursor = conn.cursor()
-                    # Check if wallets table exists (PostgreSQL-compatible query)
-                    cursor.execute("""
-                        SELECT table_name FROM information_schema.tables
-                        WHERE table_name = 'wallets'
-                        UNION
-                        SELECT name FROM sqlite_master
-                        WHERE type='table' AND name='wallets'
-                    """)
-                    if cursor.fetchone():
-                        # Get existing wallets from database
+                    try:
+                        cursor = conn.cursor()
                         cursor.execute("""
-                            SELECT DISTINCT address
-                            FROM wallets
-                            WHERE status IN ('ACTIVE', 'CANDIDATE')
-                            ORDER BY wqs_score DESC NULLS LAST
-                            LIMIT ?
-                        """, (self._max_wallets,))
-                        existing_wallets = [row[0] for row in cursor.fetchall()]
-                        conn.close()
+                            SELECT table_name FROM information_schema.tables
+                            WHERE table_name = 'wallets'
+                            UNION
+                            SELECT name FROM sqlite_master
+                            WHERE type='table' AND name='wallets'
+                        """)
+                        if cursor.fetchone():
+                            cursor.execute("""
+                                SELECT DISTINCT address
+                                FROM wallets
+                                WHERE status IN ('ACTIVE', 'CANDIDATE')
+                                ORDER BY wqs_score DESC NULLS LAST
+                                LIMIT ?
+                            """, (self._max_wallets,))
+                            existing_wallets = [row[0] for row in cursor.fetchall()]
 
-                        if existing_wallets:
-                            self._candidate_wallets = existing_wallets[:self._max_wallets]
-                            print(f"[Analyzer] Loaded {len(self._candidate_wallets)} wallets from existing database ({db_path})")
-                            return
-                    else:
+                            if existing_wallets:
+                                self._candidate_wallets = existing_wallets[:self._max_wallets]
+                                print(f"[Analyzer] Loaded {len(self._candidate_wallets)} wallets from existing database ({db_path})")
+                                return
+                    finally:
                         conn.close()
         except Exception as e:
             print(f"[Analyzer] Warning: Failed to load from database: {e}")
@@ -891,70 +902,65 @@ class WalletAnalyzer:
             if os.path.exists(db_path):
                 from .db import get_connection
                 conn = get_connection(db_path)
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate,
-                           max_drawdown_30d, avg_trade_size_sol, last_trade_at
-                    FROM wallets
-                    WHERE address = ?
-                    LIMIT 1
-                """, (address,))
-                row = cursor.fetchone()
-                conn.close()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate,
+                               max_drawdown_30d, avg_trade_size_sol, last_trade_at
+                        FROM wallets
+                        WHERE address = ?
+                        LIMIT 1
+                    """, (address,))
+                    row = cursor.fetchone()
 
-                if row:
-                    # Convert database row to WalletMetrics
-                    wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, \
-                    max_drawdown_30d, avg_trade_size_sol, last_trade_at = row
+                    if row:
+                        wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, \
+                        max_drawdown_30d, avg_trade_size_sol, last_trade_at = row
 
-                    # Check recency: if DB's last_trade_at is > 30 days old,
-                    # force re-fetch from chain instead of using stale cached data.
-                    is_stale = False
-                    if last_trade_at:
-                        try:
-                            lt_str = str(last_trade_at).replace("Z", "+00:00")
-                            lt_dt = datetime.fromisoformat(lt_str)
-                            if lt_dt.tzinfo is None:
-                                lt_dt = lt_dt.replace(tzinfo=timezone.utc)
-                            age = utcnow() - lt_dt
-                            if age.days > 30:
-                                is_stale = True
-                                print(f"  [{address[:8]}] DB metrics stale (last trade {age.days}d ago), will re-fetch")
-                        except (ValueError, TypeError):
+                        is_stale = False
+                        if last_trade_at:
+                            try:
+                                lt_str = str(last_trade_at).replace("Z", "+00:00")
+                                lt_dt = datetime.fromisoformat(lt_str)
+                                if lt_dt.tzinfo is None:
+                                    lt_dt = lt_dt.replace(tzinfo=timezone.utc)
+                                age = utcnow() - lt_dt
+                                if age.days > 30:
+                                    is_stale = True
+                                    print(f"  [{address[:8]}] DB metrics stale (last trade {age.days}d ago), will re-fetch")
+                            except (ValueError, TypeError):
+                                pass
+
+                        if is_stale:
                             pass
-
-                    if is_stale:
-                        pass  # Fall through to chain fetch below
-                    # If we have some metrics and they're fresh, create WalletMetrics object
-                    elif any(x is not None for x in [roi_7d, roi_30d, trade_count_30d, win_rate]):
-                        metrics = WalletMetrics(
-                            address=address,
-                            roi_7d=roi_7d,
-                            roi_30d=roi_30d,
-                            trade_count_30d=trade_count_30d,
-                            win_rate=win_rate,
-                            max_drawdown_30d=max_drawdown_30d,
-                            avg_trade_size_sol=avg_trade_size_sol,
-                            last_trade_at=last_trade_at,
-                            win_streak_consistency=None,  # Not stored in DB, will be calculated
-                        )
-                        self._metrics_cache[address] = metrics
-                        return metrics
+                        elif any(x is not None for x in [roi_7d, roi_30d, trade_count_30d, win_rate]):
+                            metrics = WalletMetrics(
+                                address=address,
+                                roi_7d=roi_7d,
+                                roi_30d=roi_30d,
+                                trade_count_30d=trade_count_30d,
+                                win_rate=win_rate,
+                                max_drawdown_30d=max_drawdown_30d,
+                                avg_trade_size_sol=avg_trade_size_sol,
+                                last_trade_at=last_trade_at,
+                                win_streak_consistency=None,
+                            )
+                            self._metrics_cache_set(address, metrics)
+                            return metrics
+                finally:
+                    conn.close()
         except Exception as e:
-            # Log but don't fail - continue to try other sources
-            if os.getenv("SCOUT_VERBOSE", "false").lower() == "true":
-                print(f"[Analyzer] Warning: Failed to load metrics from database for {address[:8]}...: {e}")
-        
+            logger.warning("Failed to load metrics from database for %s: %s", address[:8], e)
+
         # Fetch real data if Helius client is available
         if self.helius_client.api_key:
             try:
                 metrics = await self._fetch_real_wallet_metrics(address)
                 if metrics:
-                    self._metrics_cache[address] = metrics
+                    self._metrics_cache_set(address, metrics)
                     return metrics
             except Exception as e:
-                if os.getenv("SCOUT_VERBOSE", "false").lower() == "true":
-                    print(f"[Analyzer] Warning: Failed to fetch metrics for {address[:8]}...: {e}")
+                logger.warning("Failed to fetch metrics for %s: %s", address[:8], e)
         
         # Fall back to cached sample data
         return self._metrics_cache.get(address)
@@ -2724,10 +2730,10 @@ class WalletAnalyzer:
             try:
                 trades = await self._fetch_real_historical_trades(address, days)
                 if trades:
-                    self._trades_cache[address] = trades
+                    self._trades_cache_set(address, trades)
                     return trades
             except Exception as e:
-                print(f"[Analyzer] Warning: Failed to fetch trades for {address[:8]}...: {e}")
+                logger.warning("Failed to fetch trades for %s: %s", address[:8], e)
         
         # Fall back to cached sample data
         trades = self._trades_cache.get(address, [])

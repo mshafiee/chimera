@@ -54,16 +54,29 @@ class DexScreenerClient:
             if not data or "pairs" not in data or not data["pairs"]:
                 return None
 
-            # Get the pair with highest liquidity
             pairs = data["pairs"]
+            if not isinstance(pairs, list):
+                raise ValueError(f"Expected list of pairs, got {type(pairs).__name__}")
+
             best_pair = max(
                 pairs,
                 key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0),
             )
 
-            liquidity_usd = float(best_pair.get("liquidity", {}).get("usd", 0) or 0)
-            price_usd = float(best_pair.get("priceUsd", 0) or 0)
-            volume_24h_usd = float(best_pair.get("volume", {}).get("h24", 0) or 0)
+            liquidity_src = best_pair.get("liquidity", {})
+            price_src = best_pair.get("priceUsd")
+            volume_src = best_pair.get("volume", {})
+
+            if not isinstance(liquidity_src, dict):
+                raise ValueError(f"Expected dict for liquidity, got {type(liquidity_src).__name__}")
+            if not isinstance(price_src, (int, float, str)):
+                raise ValueError(f"Unexpected priceUsd type: {type(price_src).__name__}")
+            if not isinstance(volume_src, dict):
+                raise ValueError(f"Expected dict for volume, got {type(volume_src).__name__}")
+
+            liquidity_usd = float(liquidity_src.get("usd", 0) or 0)
+            price_usd = float(price_src)
+            volume_24h_usd = float(volume_src.get("h24", 0) or 0)
 
             if liquidity_usd > 0:
                 return LiquidityData(
