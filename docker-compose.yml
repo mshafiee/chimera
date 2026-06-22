@@ -1,4 +1,102 @@
 services:
+  # PostgreSQL - Production Database (mainnet-paper and mainnet-prod profiles)
+  postgres:
+    image: postgres:15-alpine
+    container_name: chimera-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      # Database credentials
+      - POSTGRES_USER=${POSTGRES_USER:-chimera}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme_asap}
+      - POSTGRES_DB=${POSTGRES_DB:-chimera}
+      # Performance tuning
+      - POSTGRES_INITDB_ARGS=-E UTF8 --locale=C
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=1GB
+      - POSTGRES_MAINTENANCE_WORK_MEM=64MB
+      - POSTGRES_WORK_MEM=16MB
+      - POSTGRES_MAX_CONNECTIONS=100
+      # WAL configuration for backup/recovery
+      - POSTGRES_WAL_LEVEL=replica
+      - POSTGRES_MAX_WAL_SENDERS=3
+      - POSTGRES_WAL_KEEP_SIZE=256MB
+    volumes:
+      # Data persistence
+      - postgres-data:/var/lib/postgresql/data
+      # Initialization scripts
+      - ./database/schema_postgres.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/migrations_postgresql:/docker-entrypoint-initdb.d/migrations:ro
+      # Backup scripts
+      - ./ops/backup-postgres.sh:/usr/local/bin/backup-postgres.sh:ro
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=100"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=1GB"
+      - "-c"
+      - "maintenance_work_mem=64MB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_senders=3"
+      - "-c"
+      - "wal_keep_size=256MB"
+      - "-c"
+      - "log_statement=all"
+      - "-c"
+      - "log_destination=stderr"
+      - "-c"
+      - "log_line_prefix='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-chimera} -d ${POSTGRES_DB:-chimera}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - chimera-network
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
+  # Redis - Unified cache for security services and application caching
+  redis:
+    image: redis:7-alpine
+    container_name: chimera-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command:
+      - "redis-server"
+      - "--appendonly yes"                    # AOF persistence
+      - "--appendfsync everysec"              # Flush every second
+      - "--maxmemory 512mb"                   # Memory limit
+      - "--maxmemory-policy allkeys-lru"      # Eviction policy
+      - "--save 900 1"                         # RDB snapshot: 1 change in 900s
+      - "--save 300 10"                        # RDB snapshot: 10 changes in 300s
+      - "--save 60 10000"                      # RDB snapshot: 10k changes in 60s
+      - "--dir /data"                          # Data directory
+    volumes:
+      - redis-data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - chimera-network
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
   # Chimera Operator - Core trading engine
   operator:
     build:
@@ -15,11 +113,19 @@ services:
       - CHIMERA_SERVER__HOST=0.0.0.0
       - CHIMERA_SERVER__PORT=8080
       - CHIMERA_DATABASE__PATH=/app/data/chimera.db
+      # Database backend selection
+      - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-sqlite}
+      - DATABASE_URL=${DATABASE_URL}
+      # Redis configuration
+      - REDIS_ENABLED=${REDIS_ENABLED:-true}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
     env_file:
       - docker/env.${COMPOSE_PROFILE:-devnet}
       - docker/env.${COMPOSE_PROFILE:-devnet}.local
     depends_on:
       - prometheus
+      - postgres
+      - redis
     networks:
       - chimera-network
     healthcheck:
@@ -66,11 +172,23 @@ services:
       # Clean token list (removed invalid addresses: GCS89xYV, Ac7m5c4t, G0AT7B4R, M00DENG)
       - SCOUT_ACTIVE_TOKENS=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263,EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm,7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr,Grass7B4RdKfBCjTKgSqnXkqjwiG6DuGc62rSdZ9mtm,So11111111111111111111111111111111111111112
       # API Keys for validation (Loaded from env_file)
+      # Database configuration
+      - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-sqlite}
+      - DATABASE_URL=${DATABASE_URL}
+      # Redis configuration
+      - REDIS_ENABLED=${REDIS_ENABLED:-true}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      # Scout-specific Redis caching
+      - SCOUT_CACHE_ENABLED=true
+      - SCOUT_CACHE_TTL=3600
+      - SCOUT_LIQUIDITY_CACHE_TTL=60
     env_file:
       - docker/env.${COMPOSE_PROFILE:-devnet}
       - docker/env.${COMPOSE_PROFILE:-devnet}.local
     depends_on:
       - operator
+      - postgres
+      - redis
     networks:
       - chimera-network
     # Run scout on a schedule (daily at 2 AM UTC) with automatic roster merge
@@ -195,6 +313,23 @@ services:
       - mainnet-paper
       - mainnet-prod
 
+  # PostgreSQL Exporter - Metrics for Prometheus
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    container_name: chimera-postgres-exporter
+    restart: unless-stopped
+    environment:
+      - DATA_SOURCE_NAME=postgresql://${POSTGRES_USER:-chimera}:${POSTGRES_PASSWORD:-changeme_asap}@postgres:5432/${POSTGRES_DB:-chimera}?sslmode=disable
+    ports:
+      - "9187:9187"
+    networks:
+      - chimera-network
+    depends_on:
+      - postgres
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
 volumes:
   prometheus-data:
     driver: local
@@ -203,6 +338,10 @@ volumes:
   alertmanager-data:
     driver: local
   scout-data:
+    driver: local
+  postgres-data:
+    driver: local
+  redis-data:
     driver: local
 
 networks:
