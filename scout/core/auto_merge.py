@@ -5,6 +5,7 @@ This module provides automatic merging of roster_new.db into the main database
 without manual intervention. It handles database locks gracefully with retries.
 """
 
+import asyncio
 import os
 import sys
 import time

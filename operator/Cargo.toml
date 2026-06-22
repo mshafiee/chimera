@@ -101,3 +101,6 @@ axum-test = "18.4.1"
 tempfile = "3.23"
 tower = { version = "0.4", features = ["util"] }
 tokio = { version = "1.37", features = ["test-util"] }
+mockall = "0.13"
+proptest = "1.4"
+rstest = "0.21"

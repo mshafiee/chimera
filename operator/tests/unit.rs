@@ -51,3 +51,6 @@ mod fix_verification_tests;
 
 #[path = "unit/v0_reconstruction_tests.rs"]
 mod v0_reconstruction_tests;
+
+#[path = "unit/signal_pipeline_tests.rs"]
+mod signal_pipeline_tests;
