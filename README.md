@@ -106,25 +106,36 @@ Daily Cron Job
     ↓
 Wallet Analyzer
     ├─ Fetch transaction history
-    ├─ Calculate Wallet Quality Score (WQS)
-    └─ Run pre-promotion backtests
+    ├─ Calculate Wallet Quality Score (WQS) — optionally split 70/30
+    │   for look-ahead-free scoring (SCOUT_SPLIT_WQS_ENABLED)
+    ├─ Composite alpha decay detection (win-rate, trade-size,
+    │   token-rotation signals)
+    └─ Survivorship bias flagging (FRESH_30D / SURVIVED_30D)
     ↓
 Pre-Promotion Validator
     ├─ Historical liquidity checks
-    ├─ Simulated PnL validation
+    ├─ Simulated PnL validation (walk-forward, holdout)
+    ├─ Market regime classification (BULL/BEAR/SIDEWAYS)
     └─ Risk assessment
     ↓
-Roster Writer
-    └─ Atomic write to roster_new.db
+Roster Writer → Atomic write to roster_new.db
     ↓
 Operator Merge (via SIGHUP or API)
+    ↓
+Feedback Loop (subsequent runs)
+    ├─ Backfill copy PnL from operator's wallets table
+    ├─ Adaptive weight calibration from actual PnL outcomes
+    ├─ WQS-PnL correlation printed in end-of-run summary
+    └─ Shadow comparison: old vs. split WQS logged to JSONL
 ```
 
 **Key Components:**
 - **Analyzer:** Fetches wallet transaction history from Solana
-- **WQS Calculator:** Computes wallet quality scores with temporal consistency penalties
-- **Backtester:** Pre-promotion trade simulation with historical liquidity validation
-- **DB Writer:** Atomic writes to prevent database corruption
+- **WQS Calculator:** Wallet quality scores with capped penalties and heuristic boost caps
+- **In-Sample Metrics:** Chronological 70/30 trade split for look-ahead-free scoring
+- **Backtester:** Pre-promotion trade simulation with market regime classification
+- **Alpha Decay:** Composite detection across win-rate, trade-size, and token-rotation
+- **Feedback Loop:** WQS-PnL correlation tracking and adaptive weight calibration
 
 ### Web Dashboard (TypeScript/React)
 Real-time monitoring and management interface with:
@@ -158,7 +169,12 @@ Real-time monitoring and management interface with:
 - **Wallet Quality Score (WQS) v2:** Advanced scoring with temporal consistency penalties
 - **Pre-Promotion Backtesting:** Historical trade simulation before wallet activation
 - **Historical Liquidity Validation:** Ensures trades would have been profitable with past liquidity
+- **Split-WQS Mode:** Chronological 70/30 trade split eliminates look-ahead bias in scoring
+- **Composite Alpha Decay:** Multi-signal decay detection (win-rate, trade-size, token-rotation)
+- **WQS Predictiveness Validation:** Pearson correlation between WQS and actual copy PnL
+- **Shadow WQS Comparison:** Dual-write old vs. new WQS for offline A/B analysis
 - **Dynamic Jito Tips:** Percentile-based tip calculation for optimal bundle inclusion
+- **Macro Kill Switch:** Emergency pause via SCOUT_EMERGENCY_PAUSE env var
 
 ### 🎯 Operations & Compliance
 - **Trade Reconciliation:** Daily audit comparing database state vs. on-chain state
@@ -501,6 +517,17 @@ SCOUT_MIN_WQS_ACTIVE=50
 SCOUT_MIN_WQS_CANDIDATE=20
 SCOUT_DISCOVERY_MAX_WALLETS=100
 SCOUT_VALIDATE_WALLET_ACTIVITY=false
+
+# Feature flags (all default to false — enable after validation)
+SCOUT_SPLIT_WQS_ENABLED=false       # Chronological 70/30 split for clean WQS
+SCOUT_ROI_ADDITIVE_MODE=false       # Additive log curve vs legacy multipliers
+SCOUT_WQS_COMPARISON_MODE=false     # Shadow comparison to JSONL
+SCOUT_EMERGENCY_PAUSE=false         # Kill switch — zero promotions
+
+# WQS boost
+SCOUT_MAX_HEURISTIC_BOOST=10.0      # Max points from ML boost + trajectory
+SCOUT_WQS_BOOST_ENABLED=true        # WQS growth optimization via prediction
+SCOUT_GROWTH_OPTIMIZED=false        # Growth-targeted scoring ($200 → $1000)
 EOF
 ```
 
@@ -684,6 +711,12 @@ make test-chaos
 
 # E2E tests (requires Playwright)
 cd web && npm run test:e2e
+
+# WQS predictiveness validation (requires production DB with copy PnL)
+make validate-wqs
+
+# Backfill historical PnL into correlation table (one-time)
+make backfill-correlation
 ```
 
 ### Test Coverage
