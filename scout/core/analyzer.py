@@ -2560,9 +2560,116 @@ class WalletAnalyzer:
         
         recent_win_rate = recent_wins / recent_total
         return recent_win_rate / all_time_win_rate
-    
-    # Adding this methodology to where _detect_insider_patterns is or simply add a new helper method
-    
+
+    @staticmethod
+    def _calculate_trade_size_decay(trades: List[HistoricalTrade]) -> Optional[float]:
+        """
+        Compute trade size decay: ratio of avg size of last N trades to first N trades.
+
+        Returns a value in [0, 1]:
+        - 1.0 = same or growing position sizes
+        - < 0.5 = significantly shrinking positions (conservative behavior change)
+        - None if fewer than 6 trades exist.
+        """
+        if len(trades) < 6:
+            return None
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        # Use time-based split so clustered trades don't bias the halves
+        total_span = (sorted_trades[-1].timestamp - sorted_trades[0].timestamp).total_seconds()
+        if total_span >= 7 * 86400:
+            midpoint = sorted_trades[0].timestamp + timedelta(seconds=total_span / 2)
+            first_half = [t for t in sorted_trades if t.timestamp < midpoint]
+            second_half = [t for t in sorted_trades if t.timestamp >= midpoint]
+        else:
+            # Fall back to count-based for short time spans
+            first_half = sorted_trades[:len(sorted_trades)//2]
+            second_half = sorted_trades[-(len(sorted_trades)//2):]
+        avg_first = sum(t.amount_sol for t in first_half) / max(1, len(first_half))
+        avg_second = sum(t.amount_sol for t in second_half) / max(1, len(second_half))
+        if avg_first <= 0:
+            return None
+        ratio = avg_second / avg_first
+        return max(0.0, min(1.0, ratio))
+
+    @staticmethod
+    def _calculate_token_rotation_decay(trades: List[HistoricalTrade]) -> Optional[float]:
+        """
+        Compute token rotation decay: unique tokens in recent trades vs all trades.
+
+        Returns a value in [0, 1]:
+        - 1.0 = same token diversity as historically
+        - < 0.3 = stuck trading the same tokens (loss of exploratory behaviour)
+        - None if fewer than 10 trades exist.
+        """
+        if len(trades) < 10:
+            return None
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        recent = sorted_trades[-10:]
+        all_unique = len(set(t.token_address for t in sorted_trades))
+        recent_unique = len(set(t.token_address for t in recent))
+        if all_unique <= 0:
+            return None
+        ratio = recent_unique / all_unique
+        return max(0.0, min(1.0, ratio))
+
+    @staticmethod
+    def _calculate_composite_decay(trades: List[HistoricalTrade]) -> Optional[float]:
+        """
+        Compute composite alpha decay from multiple signals.
+
+        Combines:
+        - Win rate decay (weight 0.5): ratio of recent/all-time win rate
+        - Trade size decay (weight 0.3): ratio of recent/first half avg size
+        - Token rotation decay (weight 0.2): ratio of recent/all-time unique tokens
+
+        Returns a score in [0, 1]:
+        - 1.0 = fresh (no decay detected)
+        - 0.6 = borderline decay
+        - < 0.4 = significant decay
+        - None if insufficient trade data for any component.
+        """
+        wr = WalletAnalyzer._calculate_alpha_decay(trades)
+        sz = WalletAnalyzer._calculate_trade_size_decay(trades)
+        rt = WalletAnalyzer._calculate_token_rotation_decay(trades)
+
+        components = []
+        if wr is not None:
+            components.append(("wr", wr, 0.5))
+        if sz is not None:
+            components.append(("sz", sz, 0.3))
+        if rt is not None:
+            components.append(("rt", rt, 0.2))
+
+        if not components:
+            return None
+
+        total_weight = sum(w for _, _, w in components)
+        score = sum(v * w for _, v, w in components) / total_weight
+        return max(0.0, min(1.0, score))
+
+    @staticmethod
+    def _compute_survivorship_flag(trades: List[HistoricalTrade], wallet_age_days: Optional[float] = None) -> str:
+        """
+        Classify wallet survivorship bias risk based on trade history span.
+
+        Returns:
+            "SURVIVED_90D" — wallet was active 30+ days ago (more cycles)
+            "SURVIVED_30D" — trade span >= 30 days
+            "FRESH_30D"    — trade span < 30 days (survivorship bias risk)
+            "UNKNOWN"      — insufficient data
+        """
+        if not trades:
+            return "UNKNOWN"
+        sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+        oldest = sorted_trades[0].timestamp
+        newest = sorted_trades[-1].timestamp
+        span_days = (newest - oldest).days
+        if span_days >= 30:
+            return "SURVIVED_30D"
+        if wallet_age_days is not None and wallet_age_days >= 90:
+            return "SURVIVED_90D"
+        return "FRESH_30D"
+
     @staticmethod
     def _classify_token_category(token_symbol: str) -> Optional[str]:
         """Classify a token into a broad category based on symbol patterns."""

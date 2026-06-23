@@ -1,11 +1,20 @@
 """
+EXPERIMENTAL / DEPRECATED — Not wired into the production Scout pipeline.
+
+The HeuristicProfitabilityPredictor class and predict_wallet_profitability()
+convenience function are no longer called from any production code path.
+The HeuristicPredictor base class is used only by ensemble_predictor.py
+(itself experimental — not wired into production).
+
+For the active production prediction path, see:
+  profitability_predictor.py::ProfitabilityPredictor -> SimpleEnsembleModel
+  (called via scout_optimizer.py from main.py)
+
 Heuristic-based profitability predictor for Scout.
 
 Uses a weighted linear combination of features to estimate PnL.
 This is NOT a trained ML model — it uses hand-tuned weights
 designed for interpretability and zero-dependency operation.
-
-For actual ML predictions, see `ensemble_predictor.py`.
 """
 
 import logging
@@ -187,12 +196,13 @@ class HeuristicPredictor:
         return correlation
 
 
-class ProfitabilityPredictor:
+class HeuristicProfitabilityPredictor:
     """
-    Main predictor class that handles training and prediction.
+    Heuristic-only predictor class that handles training and prediction.
 
-    Provides a simple interface for profitability prediction with
-    confidence scoring and continuous retraining support.
+    Uses hand-tuned feature weights — NOT a trained ML model.
+    For trained ML predictions, use ensemble_predictor.py or
+    the ScoutOptimizer path via profitability_predictor.py.
     """
 
     def __init__(self, model_path: Optional[str] = None):
@@ -293,12 +303,11 @@ class ProfitabilityPredictor:
                         'max_drawdown_30d': self._safe_float(row.get('max_drawdown_30d')),
                     }
 
-                    # Look for actual PnL from database or other source
-                    # For now, we'll use roi_30d as a proxy
-                    if record.get('roi_30d') is not None:
-                        # Convert ROI to SOL PnL (rough approximation)
-                        # In production, this would come from actual copy-trade results
-                        record['actual_pnl_sol'] = record['roi_30d'] * 0.1  # Rough scaling
+                    # actual_pnl_sol should come from wqs_pnl_correlation.actual_copy_pnl_30d_sol
+                    # in a production training pipeline. Using roi_30d as a proxy is circular
+                    # (the model learns to predict ROI from features that include ROI).
+                    # See: scout/scripts/train_profitability_model.py for proper training.
+                    record['actual_pnl_sol'] = None
 
                     historical_data.append(record)
         except Exception as e:
@@ -374,5 +383,5 @@ def predict_wallet_profitability(wallet_features: Dict[str, Any]) -> Dict[str, A
     Returns:
         Dictionary with predicted_pnl_sol and confidence
     """
-    predictor = ProfitabilityPredictor()
+    predictor = HeuristicProfitabilityPredictor()
     return predictor.predict_profitability(wallet_features)

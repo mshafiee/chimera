@@ -559,6 +559,11 @@ class PrePromotionValidator:
                 )
         
         # All checks passed!
+        if backtest_result.regime_risk == "BULL":
+            logger.info(
+                f"Wallet {wallet_address[:8]}... profitable in BULL regime — "
+                f"may underperform in bear/crab markets"
+            )
         logger.info(f"Wallet {wallet_address[:8]}... passed all validation checks")
         return ValidationResult(
             wallet_address=wallet_address,

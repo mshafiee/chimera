@@ -193,6 +193,9 @@ class SimulatedResult:
     passed: bool = False
     failure_reason: Optional[str] = None
 
+    # Market regime during the wallet's trade period
+    regime_risk: Optional[str] = None  # "BULL", "BEAR", "SIDEWAYS", or None
+
     # Final position state after simulation (token_address -> {qty, cost_basis_sol})
     # Used by walk-forward to carry positions from train to test phase.
     final_positions: Dict[str, Dict[str, Decimal]] = field(default_factory=dict)

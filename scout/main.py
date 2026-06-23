@@ -26,7 +26,7 @@ import math
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, TYPE_CHECKING
@@ -49,9 +49,9 @@ from core.utils import utcnow
 
 from core.db_writer import WalletRecord, write_roster_atomic
 from core.wqs import calculate_wqs_with_confidence, \
-    _calculate_raw_score, _interpret_trajectory, _compute_wmi
+    _calculate_raw_score, _interpret_trajectory, _compute_wmi, WalletMetrics
 from core.analyzer import WalletAnalyzer
-from core.models import BacktestConfig
+from core.models import BacktestConfig, TradeAction
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
 from core.auto_merge import auto_merge_roster
@@ -60,8 +60,6 @@ from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
 from core.correlation_reader import CorrelationReader
 from core.feature_store import FeatureStore
-from core.ml_predictor import predict_wallet_profitability
-
 # Import optimization modules
 try:
     from core.scout_optimizer import get_scout_optimizer
@@ -312,6 +310,98 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _compute_in_sample_metrics(
+    analyzer: WalletAnalyzer,
+    in_sample_trades: list,
+    full_metrics: WalletMetrics,
+) -> Optional[WalletMetrics]:
+    """Compute WQS-critical financial metrics from in-sample trades only.
+
+    Financial fields (roi, win_rate, drawdown, profit_factor, trade_count)
+    are recomputed from the in-sample period. Structural wallet properties
+    (DEX diversity, MEV protection, limit orders, scam correlation, etc.)
+    are carried over from full_metrics since they don't leak future info.
+
+    Returns None if in_sample_trades is insufficient.
+    """
+    if not in_sample_trades:
+        return None
+
+    # Financial metrics from in-sample only (all synchronous)
+    roi = analyzer._calculate_roi_from_trades(in_sample_trades)
+    win_rate = analyzer._calculate_win_rate_from_trades(in_sample_trades)
+    max_drawdown = analyzer._calculate_drawdown_from_trades(in_sample_trades)
+
+    # Profit factor from in-sample realized closes
+    closes = [t for t in in_sample_trades
+              if t.action == TradeAction.SELL and t.pnl_sol is not None]
+    gross_profit = sum(t.pnl_sol for t in closes if t.pnl_sol > Decimal('0'))
+    gross_loss = abs(sum(t.pnl_sol for t in closes if t.pnl_sol < Decimal('0')))
+    win_count = sum(1 for t in closes if t.pnl_sol > Decimal('0'))
+    profit_factor = analyzer._compute_base_profit_factor(
+        gross_profit, gross_loss, win_count
+    )
+    trade_count = len(closes)
+
+    # Average trade size from in-sample (all trades, not just closes)
+    avg_size = float(
+        sum(t.amount_sol for t in in_sample_trades)
+        / max(1, len(in_sample_trades))
+    )
+
+    # Last trade timestamp from in-sample
+    last_trade = (
+        in_sample_trades[-1].timestamp.isoformat()
+        if in_sample_trades else None
+    )
+
+    # ROI 7d from last 7 days of in-sample period
+    cutoff_7d = utcnow() - timedelta(days=7)
+    in_sample_7d = [t for t in in_sample_trades if t.timestamp >= cutoff_7d]
+    roi_7d = (
+        analyzer._calculate_roi_from_trades(in_sample_7d)
+        if in_sample_7d else 0.0
+    )
+
+    # Win streak consistency from in-sample
+    win_streak = analyzer._calculate_win_streak_consistency(in_sample_trades)
+
+    return WalletMetrics(
+        address=full_metrics.address,
+        # Recalculated from in-sample
+        roi_7d=roi_7d,
+        roi_30d=roi,  # in-sample spans ~21d — best available proxy for 30d
+        trade_count_30d=trade_count,
+        win_rate=win_rate,
+        max_drawdown_30d=max_drawdown,
+        avg_trade_size_sol=avg_size,
+        last_trade_at=last_trade,
+        profit_factor=profit_factor,
+        win_streak_consistency=win_streak,
+        # Carried from full metrics (structural, no future leakage)
+        roi_90d=full_metrics.roi_90d,
+        is_fresh_wallet=full_metrics.is_fresh_wallet,
+        is_unproven=full_metrics.is_unproven,
+        parse_rate=full_metrics.parse_rate,
+        uses_limit_orders=full_metrics.uses_limit_orders,
+        uses_mev_protection=full_metrics.uses_mev_protection,
+        correlated_with_scam=full_metrics.correlated_with_scam,
+        mev_risk_score=full_metrics.mev_risk_score,
+        dex_diversity_score=full_metrics.dex_diversity_score,
+        unique_token_categories=full_metrics.unique_token_categories,
+        archetype=full_metrics.archetype,
+        trajectory=full_metrics.trajectory,
+        sortino_ratio=full_metrics.sortino_ratio,
+        avg_entry_delay_seconds=full_metrics.avg_entry_delay_seconds,
+        total_unrealized_loss_sol=full_metrics.total_unrealized_loss_sol,
+        total_realized_profit_sol=full_metrics.total_realized_profit_sol,
+        total_unrealized_gain_sol=full_metrics.total_unrealized_gain_sol,
+        volatility_30d=full_metrics.volatility_30d,
+        trade_sizes=full_metrics.trade_sizes,
+        avg_hold_time_hours=full_metrics.avg_hold_time_hours,
+    )
+
+
 async def analyze_wallets(
     analyzer: WalletAnalyzer,
     validator: Optional[PrePromotionValidator],
@@ -324,6 +414,16 @@ async def analyze_wallets(
     """
     Analyze wallets in parallel and generate roster records.
     """
+    # Macro kill switch: emergency pause prevents all new promotions
+    if os.getenv("SCOUT_EMERGENCY_PAUSE", "false").lower() == "true":
+        print("[Scout] EMERGENCY PAUSE ACTIVE — returning zero promotions")
+        empty_stats = {
+            "total": 0, "active": 0, "candidate": 0, "rejected": 0,
+            "backtest_passed": 0, "backtest_failed": 0, "backtest_skipped": 0,
+            "trajectory_demotions": 0, "trajectory_peak_blocks": 0,
+        }
+        return [], empty_stats, []
+
     records = []
     stats = {
         "total": 0, "active": 0, "candidate": 0, "rejected": 0,
@@ -345,10 +445,31 @@ async def analyze_wallets(
             if metrics is None:
                 print(f"[Scout] No metrics for {wallet_address[:8]}... (skipped)")
                 return None
-            
+
+            print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
+            trades = analyzer._trades_cache.get(wallet_address, [])
+            print(f"[Scout] Got {len(trades)} trades from cache")
+
+            # --- Chronological split for clean WQS ---
+            # In-sample: oldest 70% of trades for WQS scoring
+            # Holdout: newest 30% (the validator does its own split for backtest)
+            MAX_HEURISTIC_BOOST = float(os.getenv("SCOUT_MAX_HEURISTIC_BOOST", "10.0"))
+            _SPLIT_ENABLED = os.getenv("SCOUT_SPLIT_WQS_ENABLED", "false").lower() == "true"
+            wqs_metrics = metrics
+            if _SPLIT_ENABLED and len(trades) >= 10:
+                sorted_trades = sorted(trades, key=lambda t: t.timestamp)
+                split_idx = int(len(sorted_trades) * 0.70)
+                in_sample_trades = sorted_trades[:split_idx]
+                _in_sample_m = _compute_in_sample_metrics(analyzer, in_sample_trades, metrics)
+                if _in_sample_m is not None and (_in_sample_m.trade_count_30d or 0) >= 5:
+                    wqs_metrics = _in_sample_m
+                    print(f"[Scout] Split WQS: in-sample={len(in_sample_trades)}t, "
+                          f"holdout={len(sorted_trades) - split_idx}t, "
+                          f"wqs_roi_30d={wqs_metrics.roi_30d:.1f}%")
+
             print(f"[Scout] Computing WQS for {wallet_address[:8]}...")
             try:
-                wqs_result = calculate_wqs_with_confidence(metrics)
+                wqs_result = calculate_wqs_with_confidence(wqs_metrics)
                 wqs_score = wqs_result.score
                 wqs_confidence = wqs_result.confidence
                 print(f"[Scout] WQS calculated: {wqs_score:.1f} (confidence={wqs_confidence:.2f})")
@@ -358,20 +479,29 @@ async def analyze_wallets(
                 traceback.print_exc()
                 return None
 
+            # Survivorship bias flag (informational)
+            survivorship = analyzer._compute_survivorship_flag(trades)
+            if survivorship == "FRESH_30D":
+                sorted_t = sorted(trades, key=lambda t: t.timestamp)
+                span = (sorted_t[-1].timestamp - sorted_t[0].timestamp).days
+                print(f"[Scout] {wallet_address[:8]}... FRESH wallet "
+                      f"(only {span}d of trade data — survivorship bias risk)")
+
             # ML-based profitability prediction for growth optimization
-            ml_boost = 0.0
-            if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_ml_prediction_enabled():
+            heuristic_boost_used = 0.0
+            ml_boost_applied = 0.0
+            if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_wqs_boost_enabled():
                 try:
-                    # Prepare wallet features for ML prediction
+                    # Prepare wallet features for ML prediction (from wqs_metrics)
                     wallet_features = {
-                        'roi_7d': metrics.roi_7d,
-                        'roi_30d': metrics.roi_30d,
-                        'win_rate': metrics.win_rate,
-                        'profit_factor': metrics.profit_factor,
-                        'sortino_ratio': metrics.sortino_ratio,
-                        'max_drawdown_30d': metrics.max_drawdown_30d,
-                        'trade_count_30d': metrics.trade_count_30d,
-                        'avg_trade_size_sol': metrics.avg_trade_size_sol,
+                        'roi_7d': wqs_metrics.roi_7d,
+                        'roi_30d': wqs_metrics.roi_30d,
+                        'win_rate': wqs_metrics.win_rate,
+                        'profit_factor': wqs_metrics.profit_factor,
+                        'sortino_ratio': wqs_metrics.sortino_ratio,
+                        'max_drawdown_30d': wqs_metrics.max_drawdown_30d,
+                        'trade_count_30d': wqs_metrics.trade_count_30d,
+                        'avg_trade_size_sol': wqs_metrics.avg_trade_size_sol,
                     }
 
                     # Get ML prediction
@@ -382,44 +512,70 @@ async def analyze_wallets(
                           f"confidence: {prediction.confidence:.1f}, "
                           f"risk: {prediction.risk_score:.1f})")
 
-                    # Apply growth optimization WQS boost
+                    # Apply growth optimization WQS boost (capped by MAX_HEURISTIC_BOOST)
                     if ScoutConfig.get_growth_optimized():
                         expected_return = prediction.expected_return_pct
                         prediction_confidence = prediction.confidence
 
-                        # Boost for high expected returns with good confidence
                         if expected_return > 15 and prediction_confidence > 0.6:
-                            ml_boost = min(8.0, expected_return / 4)  # Max 8 point boost
-                            wqs_score += ml_boost
-                            print(f"[Scout] Growth boost: +{ml_boost:.1f} WQS (optimized for $200→$1K goal)")
+                            boost_raw = min(8.0, expected_return / 4)
+                            ml_boost_applied = min(boost_raw, MAX_HEURISTIC_BOOST - heuristic_boost_used)
+                            if ml_boost_applied > 0:
+                                wqs_score += ml_boost_applied
+                                heuristic_boost_used += ml_boost_applied
+                                print(f"[Scout] Growth boost: +{ml_boost_applied:.1f} WQS "
+                                      f"(heuristic total: {heuristic_boost_used:.1f})")
                         elif expected_return > 10 and prediction_confidence > 0.5:
-                            ml_boost = min(4.0, expected_return / 6)  # Smaller boost
-                            wqs_score += ml_boost
-                            print(f"[Scout] Growth boost: +{ml_boost:.1f} WQS")
+                            boost_raw = min(4.0, expected_return / 6)
+                            ml_boost_applied = min(boost_raw, MAX_HEURISTIC_BOOST - heuristic_boost_used)
+                            if ml_boost_applied > 0:
+                                wqs_score += ml_boost_applied
+                                heuristic_boost_used += ml_boost_applied
+                                print(f"[Scout] Growth boost: +{ml_boost_applied:.1f} WQS "
+                                      f"(heuristic total: {heuristic_boost_used:.1f})")
 
                 except Exception as e:
                     print(f"[Scout] ML prediction failed: {e}")
 
-            print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
-            # Get trades from cache (already fetched during metrics calculation)
-            trades = analyzer._trades_cache.get(wallet_address, [])
-            print(f"[Scout] Got {len(trades)} trades from cache")
+            # Log the prediction for downstream matching against actual PnL
+            if ml_boost_applied > 0 and optimizer and OPTIMIZATION_AVAILABLE:
+                try:
+                    from core.prediction_logger import PredictionLogger
+                    plogger = PredictionLogger()
+                    plogger.log_prediction(
+                        wallet_address=wallet_address,
+                        model_type="simple_ensemble",
+                        # expected_return_pct is a percentage (e.g. 15.0 = 15%), but
+                        # downstream matcher compares to actual_copy_pnl_30d_sol in SOL.
+                        # TODO: normalize units before matching.
+                        predicted_pnl=prediction.expected_return_pct,
+                        confidence=prediction.confidence,
+                        features={
+                            'roi_7d': wqs_metrics.roi_7d,
+                            'roi_30d': wqs_metrics.roi_30d,
+                            'win_rate': wqs_metrics.win_rate,
+                            'profit_factor': wqs_metrics.profit_factor,
+                            'trade_count_30d': wqs_metrics.trade_count_30d,
+                        },
+                    )
+                except Exception as e:
+                    print(f"[Scout] Prediction logging failed for {wallet_address[:8]}...: {e}")
 
-            # Phase 3c: Determine strategy from archetype
+            # Phase 3c: Determine strategy from archetype (from wqs_metrics)
             _archetype = None
             try:
-                _archetype_enum = analyzer.determine_archetype(metrics, trades)
+                _archetype_enum = analyzer.determine_archetype(wqs_metrics, trades)
                 _archetype = _archetype_enum.value if _archetype_enum else None
             except Exception:
                 _archetype = None
             _strategy = "SPEAR" if _archetype in ("WHALE", "SWING") else "SHIELD"
             
-            # Get raw components for correlation tracking
-            raw_components = _calculate_raw_score(metrics, strategy=_strategy)
+            # Get raw components for correlation tracking (from wqs_metrics)
+            raw_components = _calculate_raw_score(wqs_metrics, strategy=_strategy)
             
-            # Step 2: Multi-TF trajectory interpretation
-            trajectory = _interpret_trajectory(metrics.roi_7d, metrics.roi_30d)
-            wmi = _compute_wmi(metrics.roi_7d, metrics.roi_30d, metrics.trade_count_30d)
+            # Step 2: Multi-TF trajectory interpretation (from wqs_metrics)
+            trajectory = _interpret_trajectory(wqs_metrics.roi_7d, wqs_metrics.roi_30d)
+            wmi = _compute_wmi(wqs_metrics.roi_7d, wqs_metrics.roi_30d, wqs_metrics.trade_count_30d)
             
             # Initial Status (with confidence gating for ACTIVE)
             if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
@@ -436,11 +592,15 @@ async def analyze_wallets(
                 print(f"[Scout] {wallet_address[:8]}... PEAKED trajectory, "
                       f"blocking promotion (WQS={wqs_score:.1f})")
             elif trajectory == "IMPROVING":
-                wqs_score += 5.0
+                trajectory_boost = min(5.0, MAX_HEURISTIC_BOOST - heuristic_boost_used)
+                if trajectory_boost > 0:
+                    wqs_score += trajectory_boost
+                    heuristic_boost_used += trajectory_boost
                 if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
                     initial_status = "ACTIVE"
                 print(f"[Scout] {wallet_address[:8]}... IMPROVING trajectory, "
-                      f"+5 WQS bonus (WQS={wqs_score:.1f})")
+                      f"+{trajectory_boost:.0f} WQS (heuristic total: {heuristic_boost_used:.1f}, "
+                      f"WQS={wqs_score:.1f})")
             elif trajectory == "DECLINING":
                 if initial_status == "ACTIVE":
                     initial_status = "CANDIDATE"
@@ -452,28 +612,53 @@ async def analyze_wallets(
                     exit_recs.append({
                         "wallet": wallet_address,
                         "reason": f"WMI={wmi:.2f}, trajectory=DECLINING, "
-                                  f"roi_7d={metrics.roi_7d}, roi_30d={metrics.roi_30d}",
+                                  f"roi_7d={wqs_metrics.roi_7d}, roi_30d={wqs_metrics.roi_30d}",
                         "timestamp": utcnow().isoformat(),
                         "recommended_action": "EXIT_ALL",
                     })
             
-            # Step 3: Alpha decay detection — catch wallets losing their edge
+            # Step 3: Composite alpha decay detection — catch wallets losing their edge
             # even when WQS and trajectory still look fine.
+            # Combines win-rate decay, trade-size decay, and token-rotation decay.
             if initial_status == "ACTIVE":
-                alpha_decay = analyzer._calculate_alpha_decay(trades)
-                if alpha_decay is not None and alpha_decay < 0.70:
-                    initial_status = "CANDIDATE"
-                    print(f"[Scout] {wallet_address[:8]}... alpha decay detected "
-                          f"(recent/overall win rate ratio={alpha_decay:.2f}), "
-                          f"demoting to CANDIDATE")
+                wr_decay = analyzer._calculate_alpha_decay(trades)
+                sz_decay = analyzer._calculate_trade_size_decay(trades)
+                rt_decay = analyzer._calculate_token_rotation_decay(trades)
+
+                # Build composite decay from individual values (inlined to avoid
+                # redundant calls inside _calculate_composite_decay)
+                composite_decay = None
+                parts = []
+                if wr_decay is not None: parts.append((wr_decay, 0.5))
+                if sz_decay is not None: parts.append((sz_decay, 0.3))
+                if rt_decay is not None: parts.append((rt_decay, 0.2))
+                if parts:
+                    total_w = sum(w for _, w in parts)
+                    composite_decay = max(0.0, min(1.0, sum(v * w for v, w in parts) / total_w))
+
+                if composite_decay is not None:
+                    single_signal_decay = (
+                        (wr_decay is not None and wr_decay < 0.30) or
+                        (sz_decay is not None and sz_decay < 0.25) or
+                        (rt_decay is not None and rt_decay < 0.20)
+                    )
+
+                    if composite_decay < 0.60 or single_signal_decay:
+                        initial_status = "CANDIDATE"
+                        reason = "composite" if composite_decay < 0.60 else "single-signal"
+                        print(f"[Scout] {wallet_address[:8]}... {reason} decay detected "
+                              f"(composite={composite_decay:.2f}), demoting to CANDIDATE")
+                    elif composite_decay < 0.70:
+                        print(f"[Scout] {wallet_address[:8]}... borderline decay "
+                              f"(composite={composite_decay:.2f}) — flagging for monitoring")
             
             # Performance degradation check: if an ACTIVE wallet shows signs of
             # decay, demote to CANDIDATE regardless of historical WQS.
             # Skip for IMPROVING wallets — they're accelerating, not decaying.
-            if initial_status == "ACTIVE" and trajectory != "IMPROVING" and _check_performance_degradation(metrics):
+            if initial_status == "ACTIVE" and trajectory != "IMPROVING" and _check_performance_degradation(wqs_metrics):
                 initial_status = "CANDIDATE"
                 print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} but "
-                      f"degradation detected (7d ROI={metrics.roi_7d}), demoting to CANDIDATE")
+                      f"degradation detected (7d ROI={wqs_metrics.roi_7d}), demoting to CANDIDATE")
             
             print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} Status={initial_status}")
             
@@ -500,7 +685,7 @@ async def analyze_wallets(
 
                 if trades and can_validate:
                     validation = await validator.validate_for_promotion(
-                        wallet_address, metrics, trades, strategy=_strategy
+                        wallet_address, wqs_metrics, trades, strategy=_strategy
                     )
                     if validation.passed:
                         backtest_res = {"status": "PASSED", "notes": validation.notes}
@@ -524,24 +709,6 @@ async def analyze_wallets(
                 traceback.print_exc()
                 return None
             
-            # ML-based profitability prediction (if enabled)
-            ml_prediction = None
-            if os.getenv("SCOUT_ML_PREDICTION_ENABLED", "true").lower() == "true":
-                try:
-                    # Prepare features for ML prediction
-                    wallet_features = {
-                        'roi_7d': metrics.roi_7d,
-                        'roi_30d': metrics.roi_30d,
-                        'win_rate': metrics.win_rate,
-                        'profit_factor': metrics.profit_factor,
-                        'sortino_ratio': metrics.sortino_ratio,
-                        'trade_count_30d': metrics.trade_count_30d,
-                        'max_drawdown_30d': metrics.max_drawdown_30d,
-                    }
-                    ml_prediction = predict_wallet_profitability(wallet_features)
-                except Exception as e:
-                    print(f"[Scout] ML prediction failed for {wallet_address[:8]}...: {e}")
-
             result = {
                 "address": wallet_address,
                 "metrics": metrics,
@@ -556,7 +723,6 @@ async def analyze_wallets(
                 "wmi": wmi,
                 "strategy": _strategy,
                 "archetype": _archetype,
-                "ml_prediction": ml_prediction,
             }
             
             print(f"[Scout] ✓ Completed {wallet_address[:8]}... (WQS={wqs_score:.1f}, Status={final_status})")
@@ -949,6 +1115,64 @@ def _check_performance_degradation(metrics) -> bool:
     return False
 
 
+def _backfill_correlation_pnl(db_path: str) -> int:
+    """
+    Backfill actual copy PnL from wallets table into wqs_pnl_correlation.
+
+    The Operator writes realized_pnl_30d_sol to the wallets table but never
+    writes actual_copy_pnl_* to wqs_pnl_correlation. This function bridges
+    that gap: for any correlation record promoted >=7 days ago that still
+    has NULL PnL, it reads the wallets table and updates the correlation row.
+
+    Returns the number of records updated.
+    """
+    updated = 0
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path, timeout=10.0)
+        conn.row_factory = sqlite3.Row
+        # Find correlation records needing backfill
+        rows = conn.execute(
+            """SELECT c.wallet_address, c.promoted_at
+               FROM wqs_pnl_correlation c
+               WHERE c.actual_copy_pnl_30d_sol IS NULL
+                 AND c.promoted_at < datetime('now', '-7 days')"""
+        ).fetchall()
+        if not rows:
+            return 0
+        for row in rows:
+            addr = row["wallet_address"]
+            # Look up realized PnL from wallets table (populated by Operator)
+            w = conn.execute(
+                """SELECT realized_pnl_30d_sol, trade_count_30d
+                   FROM wallets WHERE address = ?""",
+                (addr,)
+            ).fetchone()
+            if w is None:
+                continue
+            realized_pnl = w["realized_pnl_30d_sol"]
+            trade_count = w["trade_count_30d"]
+            if realized_pnl is not None:
+                conn.execute(
+                    """UPDATE wqs_pnl_correlation
+                       SET actual_copy_pnl_30d_sol = ?,
+                           copy_trade_count_30d = ?,
+                           last_updated_at = ?
+                       WHERE wallet_address = ?""",
+                    (realized_pnl, trade_count or 0, utcnow().isoformat(), addr),
+                )
+                updated += 1
+        conn.commit()
+        if updated:
+            print(f"[Scout] Backfilled PnL for {updated} wallets")
+    except sqlite3.OperationalError as e:
+        print(f"[Scout] PnL backfill skipped: {e}")
+    finally:
+        if conn:
+            conn.close()
+    return updated
+
+
 def _write_correlation_record(
     wallet_address: str,
     wqs_score: float,
@@ -960,7 +1184,7 @@ def _write_correlation_record(
     
     Writes the fields the Scout owns: wallet_address, wqs_score_at_promotion,
     wqs_components_json, promoted_at, strategy, last_updated_at.
-    Actual PnL fields (actual_copy_pnl_*) stay NULL until the Operator UPDATEs them.
+    Actual PnL fields (actual_copy_pnl_*) are backfilled later by _backfill_correlation_pnl().
     """
     db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
     conn = None
@@ -1346,7 +1570,14 @@ async def main_async():
     if args.calibration_report or args.verbose or args.dry_run:
         _calibration_report(records, stats)
 
-    # Phase 3a: Print WQS-to-PnL correlation summary (if data exists)
+    # Backfill actual copy PnL from wallets table (before correlation summary + calibration)
+    try:
+        _backfill_correlation_pnl(os.getenv("CHIMERA_DB_PATH", "../data/chimera.db"))
+    except Exception as e:
+        if args.verbose:
+            print(f"[Scout] PnL backfill error: {e}")
+
+    # Phase 3a: Print WQS-to-PnL correlation summary (now has backfilled data)
     try:
         corr_reader = CorrelationReader()
         if corr_reader.table_exists():
@@ -1397,6 +1628,73 @@ async def main_async():
     except Exception as e:
         if args.verbose:
             print(f"[Scout] PnL feedback loop skipped: {e}")
+
+    # Prediction matching + validation metrics
+    if os.getenv("SCOUT_PREDICTION_MATCHING_ENABLED", "true").lower() == "true":
+        try:
+            from core.prediction_matcher import PredictionMatcher
+            from core.validation_metrics import ValidationMetricsCalculator
+            matcher = PredictionMatcher()
+            matched_count = matcher.match_predictions_to_actuals()
+            if matched_count > 0:
+                print(f"[Scout] Prediction matching: {matched_count} predictions matched to actual PnL")
+                metrics_calc = ValidationMetricsCalculator()
+                vm = metrics_calc.calculate_metrics()
+                if vm:
+                    print(f"[Scout] Model accuracy: RMSE={vm.rmse:.4f}, "
+                          f"direction_accuracy={vm.direction_accuracy:.1%}")
+            elif os.getenv("SCOUT_PREDICTION_MATCHING_ENABLED") == "true":
+                print(f"[Scout] Prediction matching: no unmatched predictions found")
+        except Exception as e:
+            if args.verbose:
+                print(f"[Scout] Prediction matching skipped: {e}")
+
+    # End-of-run outcome summary
+    try:
+        cr = CorrelationReader()
+        if cr.table_exists():
+            stats = cr.get_correlation_stats()
+            print(f"\n[Scout] === Outcome Summary ===")
+            print(f"  Wallets with PnL data: {stats.wallets_with_pnl}/{stats.total_wallets}")
+            if stats.wallets_with_pnl > 0:
+                print(f"  Mean copy PnL (30d): {stats.mean_pnl_30d_sol:.4f} SOL")
+                print(f"  Mean WQS at promotion: {stats.mean_wqs_at_promotion:.1f}")
+
+                # WQS-to-PnL predictiveness check (Pearson correlation)
+                records = cr.get_all_records(min_trades=1)
+                pairs = [(r.wqs_score_at_promotion, r.actual_copy_pnl_30d_sol)
+                         for r in records if r.actual_copy_pnl_30d_sol is not None]
+                if len(pairs) >= 5:
+                    n = len(pairs)
+                    mean_w = sum(p[0] for p in pairs) / n
+                    mean_p = sum(p[1] for p in pairs) / n
+                    cov = sum((w - mean_w) * (p - mean_p) for w, p in pairs)
+                    var_w = sum((w - mean_w) ** 2 for w, _ in pairs)
+                    var_p = sum((p - mean_p) ** 2 for _, p in pairs)
+                    r = cov / ((var_w * var_p) ** 0.5) if var_w * var_p > 0 else 0.0
+                    print(f"  WQS-PnL correlation: r={r:.3f}, n={n}")
+                    if metrics:
+                        metrics.update_pnl_correlation_metrics(
+                            wallets_with_pnl=stats.wallets_with_pnl,
+                            mean_pnl_30d=stats.mean_pnl_30d_sol,
+                            correlation_r=r,
+                        )
+                else:
+                    print(f"  WQS-PnL correlation: insufficient data ({len(pairs)} pairs, need 5+)")
+                    if metrics:
+                        metrics.update_pnl_correlation_metrics(
+                            wallets_with_pnl=stats.wallets_with_pnl,
+                            mean_pnl_30d=stats.mean_pnl_30d_sol,
+                            correlation_r=None,
+                        )
+
+                for strat, data in stats.strategy_breakdown.items():
+                    mean_pnl = data.get('mean_pnl', 0) or 0
+                    print(f"  {strat}: {data.get('count', 0)} wallets, "
+                          f"mean PnL={mean_pnl:.4f} SOL")
+    except Exception as e:
+        if args.verbose:
+            print(f"[Scout] Outcome summary skipped: {e}")
 
     # Phase 6a: Write feature vectors to FeatureStore for downstream ML
     if not args.dry_run:

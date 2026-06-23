@@ -19,8 +19,8 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from scout.core.training_data_loader import TrainingDataLoader
-from scout.core.gradient_boost_predictor import GradientBoostPredictor
-from scout.core.meta_learner import MetaLearner
+from scout.core.archive.gradient_boost_predictor import GradientBoostPredictor
+from scout.core.archive.meta_learner import MetaLearner
 
 # Configure logging
 logging.basicConfig(

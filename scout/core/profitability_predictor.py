@@ -12,6 +12,7 @@ Features:
 - Early identification of high-potential wallets
 """
 
+import math
 import os
 import logging
 import numpy as np
@@ -196,22 +197,25 @@ class SimpleEnsembleModel:
             momentum = self._normalize_score(roi_7d, 0, 100) * 0.7 + \
                        self._normalize_score(roi_30d, 0, 50) * 0.3
 
-            # Enhanced momentum detection for growth goal
-            # Bonus for accelerating performance (recent better than historical)
-            if roi_7d > roi_30d * 0.6:
-                momentum *= 1.3  # Increased bonus for growth optimization
-
-            # Additional bonus for explosive growth (7d ROI > 50%)
-            if roi_7d > 50:
-                momentum *= 1.2
-
-            # Super bonus for moonshot (7d ROI > 100%)
-            if roi_7d > 100:
-                momentum *= 1.5
-
-            # Penalty for declining momentum (recent worse than historical)
-            if roi_7d < roi_30d * 0.3:
-                momentum *= 0.5
+            if os.getenv("SCOUT_ROI_ADDITIVE_MODE", "false").lower() == "true":
+                # Additive mode (diminishing returns, cappable)
+                if roi_7d > roi_30d * 0.6:
+                    acceleration = min(1.0, roi_7d / max(roi_30d, 1.0))
+                    momentum += acceleration * 0.12  # Max +0.12
+                if roi_7d > 20:
+                    momentum += min(0.12, math.log(roi_7d / 20.0) * 0.04)
+                if roi_7d > 0 and roi_30d > 0 and roi_7d < roi_30d * 0.3:
+                    momentum -= 0.15
+            else:
+                # Legacy multiplicative mode (deprecated)
+                if roi_7d > roi_30d * 0.6:
+                    momentum *= 1.3
+                if roi_7d > 50:
+                    momentum *= 1.2
+                if roi_7d > 100:
+                    momentum *= 1.5
+                if roi_7d < roi_30d * 0.3:
+                    momentum *= 0.5
 
             return min(momentum, 1.0), "roi_momentum"
 

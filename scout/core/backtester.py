@@ -297,6 +297,13 @@ class BacktestSimulator:
                 else:
                     failure_reason = bias_msg
         
+        # Market regime classification
+        regime_risk = None
+        if sorted_trades and hasattr(self.liquidity, 'classify_market_regime'):
+            regime_risk = self.liquidity.classify_market_regime(
+                sorted_trades[0].timestamp, sorted_trades[-1].timestamp,
+            )
+        
         return SimulatedResult(
             wallet_address=wallet_address,
             total_trades=len(sorted_trades),
@@ -311,6 +318,7 @@ class BacktestSimulator:
             trades=simulated_trades,  # Enables profit factor check in validator
             passed=passed,
             failure_reason=failure_reason,
+            regime_risk=regime_risk,
             final_positions=positions,
         )
     def run_walk_forward(

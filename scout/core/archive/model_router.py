@@ -1,4 +1,13 @@
 """
+EXPERIMENTAL — Not wired into the production Scout pipeline.
+
+This module provides optional ML model routing (GradientBoost, MetaLearner,
+Heuristic) with A/B testing support. It is imported by no production code
+path and exists as a framework for future use.
+
+To activate, wire this module into scout_optimizer.py or main.py and set
+the appropriate env vars (see config.py).
+
 Model Router for Scout
 
 Provides intelligent model selection and routing for ML predictions.
@@ -66,24 +75,24 @@ class ModelRouter:
         """Initialize available models."""
         # Gradient boost model
         try:
-            from scout.core.gradient_boost_predictor import GradientBoostPredictor
+            from scout.core.archive.gradient_boost_predictor import GradientBoostPredictor
             self.models[ModelType.GRADIENT_BOOST] = GradientBoostPredictor()
-            logger.info("Gradient boost model initialized")
+            logger.info("Gradient boost model initialized (archive)")
         except ImportError:
             logger.warning("GradientBoostPredictor not available")
 
         # Meta-learner
         try:
-            from scout.core.meta_learner import MetaLearner
+            from scout.core.archive.meta_learner import MetaLearner
             self.models[ModelType.META_LEARNER] = MetaLearner()
-            logger.info("Meta-learner initialized")
+            logger.info("Meta-learner initialized (archive)")
         except ImportError:
             logger.warning("MetaLearner not available")
 
         # Linear model (existing)
         try:
-            from scout.core.ml_predictor import ProfitabilityPredictor
-            self.models[ModelType.LINEAR] = ProfitabilityPredictor()
+            from scout.core.archive.ml_predictor import HeuristicProfitabilityPredictor
+            self.models[ModelType.LINEAR] = HeuristicProfitabilityPredictor()
             logger.info("Linear model initialized")
         except ImportError:
             logger.warning("ProfitabilityPredictor not available")

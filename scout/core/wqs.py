@@ -690,28 +690,45 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     except Exception as e:
         logger.warning("Failed to apply dynamic weights: %s", e)
 
-    max_total_penalty = float(os.getenv("SCOUT_MAX_TOTAL_PENALTY", "40.0"))
+    max_total_penalty = float(os.getenv("SCOUT_MAX_TOTAL_PENALTY", "80.0"))
     penalty_cap_enabled = os.getenv("SCOUT_PENALTY_CAP_ENABLED", "true").lower() == "true"
     penalty_precedence_enabled = os.getenv("SCOUT_PENALTY_PRECEDENCE", "true").lower() == "true"
+
+    # Certain penalty categories indicate fundamentally dangerous behaviour
+    # and should never be diluted by a proportional cap.
+    UNCAPPABLE_PENALTIES = {PenaltyCategory.SNIPER, PenaltyCategory.SCAM}
 
     if penalty_cap_enabled and tracker.negative > 0:
         total_negative_before = tracker.negative
 
         if tracker.negative > max_total_penalty:
-            excess = tracker.negative - max_total_penalty
-
-            if tracker.negative > 0:
-                scale_factor = max_total_penalty / tracker.negative
-
-                for name in list(tracker.components.keys()):
-                    if tracker.components[name] < 0:
-                        tracker.components[name] *= scale_factor
-
-                tracker.negative = max_total_penalty
+            # Separate cappable from uncappable penalties.
+            # String-keyed negatives (e.g. "pf_score", "enhanced_momentum")
+            # are never uncappable — they are always proportional to the penalty.
+            cappable = abs(sum(
+                v for k, v in tracker.components.items()
+                if v < 0 and not (isinstance(k, PenaltyCategory) and k in UNCAPPABLE_PENALTIES)
+            ))
+            uncappable = abs(sum(
+                v for k, v in tracker.components.items()
+                if isinstance(k, PenaltyCategory) and k in UNCAPPABLE_PENALTIES and v < 0
+            ))
+            if (cappable + uncappable) > max_total_penalty:
+                new_cappable_target = max(0.0, max_total_penalty - uncappable)
+                if cappable > 0:
+                    scale = new_cappable_target / cappable
+                    for name in list(tracker.components.keys()):
+                        if tracker.components[name] < 0:
+                            if isinstance(name, PenaltyCategory) and name in UNCAPPABLE_PENALTIES:
+                                continue  # Preserve at full strength
+                            tracker.components[name] *= scale
+                tracker.negative = abs(sum(
+                    v for v in tracker.components.values() if v < 0
+                ))
 
                 logger.debug(
                     f"Penalty cap applied: {total_negative_before:.1f} -> {tracker.negative:.1f} "
-                    f"(excess {excess:.1f} capped at {max_total_penalty})"
+                    f"(cappable={cappable:.1f}, uncappable={uncappable:.1f})"
                 )
 
         if penalty_precedence_enabled:

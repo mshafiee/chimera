@@ -29,7 +29,7 @@ except ImportError:
     logging.warning("scikit-learn not available - some metrics will be limited")
 
 from scout.core.training_data_loader import TrainingDataLoader
-from scout.core.gradient_boost_predictor import GradientBoostPredictor
+from scout.core.archive.gradient_boost_predictor import GradientBoostPredictor
 
 # Configure logging
 logging.basicConfig(

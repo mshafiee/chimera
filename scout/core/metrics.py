@@ -90,6 +90,22 @@ class ScoutMetrics:
             'Time taken to analyze wallets',
             buckets=[10, 30, 60, 120, 300, 600, 1800]
         )
+
+        # WQS-PnL correlation metrics (Phase 4C)
+        self.wqs_pnl_correlation = Gauge(
+            'scout_wqs_pnl_correlation',
+            'Pearson correlation between WQS at promotion and actual 30d copy PnL',
+        )
+
+        self.wallets_with_pnl_count = Gauge(
+            'scout_wallets_with_pnl_count',
+            'Number of promoted wallets with actual copy PnL data',
+        )
+
+        self.mean_copy_pnl_30d = Gauge(
+            'scout_mean_copy_pnl_30d_sol',
+            'Mean 30d copy PnL across all promoted wallets with data',
+        )
     
     def start_server(self):
         """Start Prometheus metrics HTTP server."""
@@ -202,6 +218,28 @@ class ScoutMetrics:
             return
         
         self.analysis_duration.observe(duration_seconds)
+    
+    def update_pnl_correlation_metrics(
+        self,
+        wallets_with_pnl: int,
+        mean_pnl_30d: float,
+        correlation_r: Optional[float] = None,
+    ):
+        """
+        Update WQS-PnL correlation metrics.
+        
+        Args:
+            wallets_with_pnl: Number of wallets with PnL data
+            mean_pnl_30d: Mean 30d copy PnL in SOL
+            correlation_r: Pearson correlation between WQS and actual PnL
+        """
+        if not PROMETHEUS_AVAILABLE:
+            return
+        
+        self.wallets_with_pnl_count.set(wallets_with_pnl)
+        self.mean_copy_pnl_30d.set(mean_pnl_30d)
+        if correlation_r is not None:
+            self.wqs_pnl_correlation.set(correlation_r)
 
 
 # Global metrics instance

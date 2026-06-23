@@ -1,4 +1,13 @@
 """
+EXPERIMENTAL — Not wired into the production Scout pipeline.
+
+This module provides optional WQS enhancement using gradient boosting,
+meta-learner stacking, and time-series features. It is imported by no
+production code path and exists as a framework for future use.
+
+To activate, wire this module into scout_optimizer.py or main.py and set
+the appropriate env vars (see config.py).
+
 ML Integration for Scout WQS
 
 Integrates new ML components (gradient boosting, meta-learner, feature extractors)
@@ -24,18 +33,18 @@ logger = logging.getLogger(__name__)
 
 # Import new ML components (with fallbacks if not available)
 try:
-    from scout.core.gradient_boost_predictor import GradientBoostPredictor
+    from scout.core.archive.gradient_boost_predictor import GradientBoostPredictor
     GRADIENT_BOOST_AVAILABLE = True
 except ImportError:
     GRADIENT_BOOST_AVAILABLE = False
-    logger.warning("GradientBoostPredictor not available")
+    logger.warning("GradientBoostPredictor not available (archive)")
 
 try:
-    from scout.core.meta_learner import MetaLearner
+    from scout.core.archive.meta_learner import MetaLearner
     META_LEARNER_AVAILABLE = True
 except ImportError:
     META_LEARNER_AVAILABLE = False
-    logger.warning("MetaLearner not available")
+    logger.warning("MetaLearner not available (archive)")
 
 try:
     from scout.core.time_series_features import TimeSeriesFeatures

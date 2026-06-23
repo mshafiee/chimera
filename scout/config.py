@@ -322,9 +322,9 @@ class ScoutConfig:
         return os.getenv("SCOUT_CREDIT_TRACKING_ENABLED", "true").lower() == "true"
 
     @staticmethod
-    def get_ml_prediction_enabled() -> bool:
-        """Get whether ML profitability prediction is enabled."""
-        return os.getenv("SCOUT_ML_PREDICTION_ENABLED", "true").lower() == "true"
+    def get_wqs_boost_enabled() -> bool:
+        """Get whether WQS growth boost via profitability prediction is enabled."""
+        return os.getenv("SCOUT_WQS_BOOST_ENABLED", "true").lower() == "true"
 
     @staticmethod
     def get_production_monitoring_enabled() -> bool:
@@ -929,7 +929,7 @@ class ScoutConfig:
         print("\nOptimization Settings:")
         print(f"  Optimization Enabled: {ScoutConfig.get_optimization_enabled()}")
         print(f"  Credit Tracking: {ScoutConfig.get_credit_tracking_enabled()}")
-        print(f"  ML Prediction: {ScoutConfig.get_ml_prediction_enabled()}")
+        print(f"  WQS Boost: {ScoutConfig.get_wqs_boost_enabled()}")
         print(f"  Production Monitoring: {ScoutConfig.get_production_monitoring_enabled()}")
         print(f"  Growth Optimized: {ScoutConfig.get_growth_optimized()}")
         print(f"  Current Capital: ${ScoutConfig.get_current_capital():,.0f}")

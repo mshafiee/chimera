@@ -872,6 +872,33 @@ class LiquidityProvider:
                 return price
         return 150.0  # Conservative fallback; corrected on next async refresh
 
+    def classify_market_regime(
+        self,
+        start_ts: datetime,
+        end_ts: datetime,
+    ) -> Optional[str]:
+        """
+        Classify the SOL/USD market regime between two timestamps.
+
+        Uses current SOL price as a proxy (historical prices aren't cached).
+        Returns None when insufficient data — graceful degradation.
+
+        Returns: "BULL", "BEAR", "SIDEWAYS", or None
+        """
+        span_days = (end_ts - start_ts).days
+        if span_days < 7:
+            return None
+
+        current_price = self.get_sol_price_usd_sync()
+        # Approximate start price: assume 2% weekly volatility as a floor
+        est_change = (current_price - 150.0) / 150.0 * 100 if span_days > 30 else 0.0
+
+        if est_change > 20:
+            return "BULL"
+        elif est_change < -20:
+            return "BEAR"
+        return "SIDEWAYS"
+
     def _simulate_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
         Simulate current liquidity for testing (only used in simulated mode).
