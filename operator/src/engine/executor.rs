@@ -221,6 +221,7 @@ impl Executor {
                 NotificationEvent::CircuitBreakerTriggered { .. } => {
                     rules.circuit_breaker_triggered
                 }
+                NotificationEvent::CircuitBreakerRecovered => rules.circuit_breaker_triggered,
                 NotificationEvent::WalletDrained { .. } => rules.wallet_drained,
                 NotificationEvent::SystemCrash { .. } => rules.system_crash,
                 NotificationEvent::PositionExited { .. } => rules.position_exited,

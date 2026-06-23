@@ -212,6 +212,43 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Initialize notification service
+    let notifier = {
+        let mut composite = notifications::CompositeNotifier::new();
+
+        // Add Discord notifier if configured via environment variable
+        if let Some(discord) = notifications::DiscordNotifier::from_env() {
+            composite.add_service(Arc::new(discord));
+            tracing::info!("Discord notifications enabled");
+        }
+
+        // Add Telegram notifier if configured
+        if config.notifications.telegram.enabled {
+            let telegram_config = notifications::telegram::TelegramConfig {
+                bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
+                    .unwrap_or_else(|_| config.notifications.telegram.bot_token.clone()),
+                chat_id: std::env::var("TELEGRAM_CHAT_ID")
+                    .unwrap_or_else(|_| config.notifications.telegram.chat_id.clone()),
+                enabled: true,
+                rate_limit_seconds: config.notifications.telegram.rate_limit_seconds,
+            };
+
+            if !telegram_config.bot_token.is_empty() && !telegram_config.chat_id.is_empty() {
+                composite.add_service(Arc::new(notifications::TelegramNotifier::new(
+                    telegram_config,
+                )));
+                tracing::info!("Telegram notifications enabled");
+            } else {
+                tracing::warn!(
+                    "Telegram notifications enabled in config but bot_token/chat_id not set"
+                );
+            }
+        }
+
+        Arc::new(composite)
+    };
+    tracing::info!("Notification service initialized");
+
     // Initialize circuit breaker
     let circuit_breaker = Arc::new(
         CircuitBreaker::new_with_ws(
@@ -222,6 +259,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_price_cache(price_cache.clone()),
     );
+
+    // Wire notification service into circuit breaker so manual/auto trips send push alerts
+    circuit_breaker.set_notifier(notifier.clone());
 
     // FIX [R-C1]: Restore persisted circuit breaker state from DB before accepting connections.
     // This ensures that a trip persisted before last restart is re-applied and evaluate()
@@ -275,42 +315,6 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = tip_manager.init().await {
         tracing::error!(error = %e, "Failed to initialize tip manager — operating in cold-start mode");
     }
-
-    // Initialize notification service
-    let notifier = {
-        let mut composite = notifications::CompositeNotifier::new();
-
-        // Add Discord notifier if configured via environment variable
-        if let Some(discord) = notifications::DiscordNotifier::from_env() {
-            composite.add_service(Arc::new(discord));
-            tracing::info!("Discord notifications enabled");
-        }
-
-        // Add Telegram notifier if configured
-        if config.notifications.telegram.enabled {
-            let telegram_config = notifications::telegram::TelegramConfig {
-                bot_token: std::env::var("TELEGRAM_BOT_TOKEN")
-                    .unwrap_or_else(|_| config.notifications.telegram.bot_token.clone()),
-                chat_id: std::env::var("TELEGRAM_CHAT_ID")
-                    .unwrap_or_else(|_| config.notifications.telegram.chat_id.clone()),
-                enabled: true,
-                rate_limit_seconds: config.notifications.telegram.rate_limit_seconds,
-            };
-
-            if !telegram_config.bot_token.is_empty() && !telegram_config.chat_id.is_empty() {
-                composite.add_service(Arc::new(notifications::TelegramNotifier::new(
-                    telegram_config,
-                )));
-                tracing::info!("Telegram notifications enabled");
-            } else {
-                tracing::warn!(
-                    "Telegram notifications enabled in config but bot_token/chat_id not set"
-                );
-            }
-        }
-
-        Arc::new(composite)
-    };
 
     // Initialize token parser (needed for slow-path safety checks in engine)
     // Create RPC rate limiter for token metadata fetching (simulation calls are weighted)
@@ -520,28 +524,22 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
-                    let was_active = circuit_breaker_clone.is_trading_allowed();
-
                     if let Err(e) = circuit_breaker_clone.evaluate().await {
                         tracing::error!(error = %e, "Circuit breaker evaluation failed");
                     }
 
-                    // Check if circuit breaker just tripped
+                    // Recovery notification: trip notification is sent directly
+                    // by trip() in circuit_breaker.rs (immediate, including manual trips).
                     let is_active = circuit_breaker_clone.is_trading_allowed();
-                    if was_active && !is_active && !was_tripped {
-                        was_tripped = true;
+                    if is_active && was_tripped {
+                        was_tripped = false;
                         if notify_rules.circuit_breaker_triggered {
-                            let reason = circuit_breaker_clone
-                                .trip_reason()
-                                .map(|r| r.to_string())
-                                .unwrap_or_else(|| "Unknown reason".to_string());
-
                             notifier_cb
-                                .notify(NotificationEvent::CircuitBreakerTriggered { reason })
+                                .notify(NotificationEvent::CircuitBreakerRecovered)
                                 .await;
                         }
-                    } else if is_active {
-                        was_tripped = false;
+                    } else if !is_active {
+                        was_tripped = true;
                     }
                 }
             }
@@ -1010,6 +1008,12 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Wire Prometheus metrics into circuit breaker for event-driven updates
+    circuit_breaker.set_metrics(
+        metrics_state.circuit_breaker_state.clone(),
+        metrics_state.circuit_breaker_trips.clone(),
+    );
+
     // Spawn metrics update task
     let metrics_state_clone = metrics_state.clone();
     let circuit_breaker_clone = circuit_breaker.clone();
@@ -1023,12 +1027,8 @@ async fn main() -> anyhow::Result<()> {
             tokio::select! {
                 _ = metrics_token.cancelled() => break,
                 _ = interval.tick() => {
-                    // Update circuit breaker state
-                    let cb_state = circuit_breaker_clone.current_state();
-                    let is_active = cb_state == chimera_operator::circuit_breaker::CircuitBreakerState::Active;
-                    metrics_state_clone
-                        .circuit_breaker_state
-                        .set(if is_active { 1 } else { 0 });
+                    // CB gauge is updated event-driven by circuit_breaker.rs — no polling needed.
+                    let is_active = circuit_breaker_clone.is_trading_allowed();
 
                     // Update RPC health
                     if let Some(rpc_health) = engine_handle_metrics.get_rpc_health().await {

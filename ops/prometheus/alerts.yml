@@ -73,7 +73,29 @@ groups:
         annotations:
           summary: "Circuit breaker has tripped"
           description: "Trading is halted. Check circuit breaker status and recent losses."
-          
+
+      # Circuit Breaker in Cooldown
+      - alert: CircuitBreakerCooldown
+        expr: chimera_circuit_breaker_state == 1
+        for: 2m
+        labels:
+          severity: warning
+          component: circuit_breaker
+        annotations:
+          summary: "Circuit breaker in cooldown period"
+          description: "Trading is halted. Circuit breaker will auto-recover after cooldown expires."
+
+      # Circuit Breaker Frequent Trips
+      - alert: CircuitBreakerFrequentTrips
+        expr: rate(chimera_circuit_breaker_trips_total[1h]) > 3
+        for: 10m
+        labels:
+          severity: critical
+          component: circuit_breaker
+        annotations:
+          summary: "Circuit breaker is tripping frequently"
+          description: "Trip rate is {{ $value }}/hour. Review loss patterns and strategy performance."
+
       # RPC Unhealthy
       - alert: RpcUnhealthy
         expr: chimera_rpc_health == 0

@@ -45,6 +45,8 @@ impl std::fmt::Display for AlertLevel {
 pub enum NotificationEvent {
     /// Circuit breaker was triggered
     CircuitBreakerTriggered { reason: String },
+    /// Circuit breaker recovered (returned to active)
+    CircuitBreakerRecovered,
     /// Wallet balance dropped significantly
     WalletDrained {
         delta_sol: Decimal,
@@ -76,6 +78,7 @@ impl NotificationEvent {
     pub fn level(&self) -> AlertLevel {
         match self {
             NotificationEvent::CircuitBreakerTriggered { .. } => AlertLevel::Critical,
+            NotificationEvent::CircuitBreakerRecovered => AlertLevel::Info,
             NotificationEvent::WalletDrained { .. } => AlertLevel::Critical,
             NotificationEvent::SystemCrash { .. } => AlertLevel::Critical,
             NotificationEvent::PositionExited { .. } => AlertLevel::Important,
@@ -90,6 +93,9 @@ impl NotificationEvent {
         match self {
             NotificationEvent::CircuitBreakerTriggered { reason } => {
                 format!("🚨 Circuit breaker triggered: {}", reason)
+            }
+            NotificationEvent::CircuitBreakerRecovered => {
+                "✅ Circuit breaker recovered - trading resumed".to_string()
             }
             NotificationEvent::WalletDrained {
                 delta_sol,
@@ -219,6 +225,14 @@ mod tests {
         };
         assert!(event.format_message().contains("Circuit breaker"));
         assert!(event.format_message().contains("🚨"));
+    }
+
+    #[test]
+    fn test_circuit_breaker_recovered_event() {
+        let event = NotificationEvent::CircuitBreakerRecovered;
+        assert!(event.format_message().contains("recovered"));
+        assert!(event.format_message().contains("trading resumed"));
+        assert_eq!(event.level(), AlertLevel::Info);
     }
 
     #[test]

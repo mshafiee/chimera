@@ -73,6 +73,7 @@ impl RateLimiter {
     fn get_key(event: &NotificationEvent) -> String {
         match event {
             NotificationEvent::CircuitBreakerTriggered { .. } => "circuit_breaker".to_string(),
+            NotificationEvent::CircuitBreakerRecovered => "circuit_breaker_recovered".to_string(),
             NotificationEvent::WalletDrained { .. } => "wallet_drained".to_string(),
             NotificationEvent::SystemCrash { component } => format!("system_crash:{}", component),
             NotificationEvent::PositionExited {

@@ -11,8 +11,11 @@
 use crate::config::CircuitBreakerConfig;
 use crate::db_abstraction::Database;
 use crate::error::AppResult;
+use crate::notifications::{CompositeNotifier, NotificationEvent};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
+use std::sync::OnceLock;
+use prometheus::{IntCounter, IntGauge};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
@@ -145,6 +148,12 @@ pub struct CircuitBreaker {
     total_capital_sol: Arc<RwLock<Decimal>>,
     /// Price cache for converting unrealized SOL losses to USD
     price_cache: Option<Arc<crate::price_cache::PriceCache>>,
+    /// Prometheus gauge for circuit breaker state (2=Active, 1=Cooldown, 0=Tripped)
+    circuit_breaker_state: OnceLock<IntGauge>,
+    /// Prometheus counter for lifetime trips
+    trips_total: OnceLock<IntCounter>,
+    /// Optional notification service for push alerts
+    notifier: OnceLock<Arc<CompositeNotifier>>,
 }
 
 impl CircuitBreaker {
@@ -173,7 +182,28 @@ impl CircuitBreaker {
             ws_state,
             total_capital_sol: Arc::new(RwLock::new(initial_capital_sol)),
             price_cache: None,
+            circuit_breaker_state: OnceLock::new(),
+            trips_total: OnceLock::new(),
+            notifier: OnceLock::new(),
         }
+    }
+
+    /// Set Prometheus metrics (can be called once after construction)
+    pub fn set_metrics(&self, gauge: IntGauge, counter: IntCounter) {
+        // Initialize gauge from actual CB state — avoids overwriting an already-tripped state
+        let val = match self.current_state() {
+            CircuitBreakerState::Active => 2,
+            CircuitBreakerState::Cooldown => 1,
+            CircuitBreakerState::Tripped => 0,
+        };
+        gauge.set(val);
+        let _ = self.circuit_breaker_state.set(gauge);
+        let _ = self.trips_total.set(counter);
+    }
+
+    /// Set notification service (can be called once after construction)
+    pub fn set_notifier(&self, notifier: Arc<CompositeNotifier>) {
+        let _ = self.notifier.set(notifier);
     }
 
     /// Set price cache
@@ -446,6 +476,23 @@ impl CircuitBreaker {
             ));
         }
 
+        // Update Prometheus metrics
+        if let Some(gauge) = self.circuit_breaker_state.get() {
+            gauge.set(0);
+        }
+        if let Some(counter) = self.trips_total.get() {
+            counter.inc();
+        }
+
+        // Send push notification
+        if let Some(notifier) = self.notifier.get() {
+            notifier
+                .notify(NotificationEvent::CircuitBreakerTriggered {
+                    reason: reason_str,
+                })
+                .await;
+        }
+
         Ok(())
     }
 
@@ -464,6 +511,11 @@ impl CircuitBreaker {
             cooldown_minutes = self.config.cooldown_minutes,
             "Circuit breaker entering cooldown"
         );
+
+        // Update Prometheus gauge to Cooldown (1)
+        if let Some(gauge) = self.circuit_breaker_state.get() {
+            gauge.set(1);
+        }
 
         self.db.log_config_change(
             "circuit_breaker",
@@ -501,6 +553,11 @@ impl CircuitBreaker {
             state.trip_reason = None;
         }
 
+        // Update Prometheus gauge to Active (2)
+        if let Some(gauge) = self.circuit_breaker_state.get() {
+            gauge.set(2);
+        }
+
         tracing::info!("Circuit breaker exiting cooldown - trading resumed");
 
         // FIX [R-C1]: Persist Active state so restarts see cleared state.
@@ -529,6 +586,11 @@ impl CircuitBreaker {
             state.state = CircuitBreakerState::Active;
             state.tripped_at = None;
             state.trip_reason = None;
+        }
+
+        // Update Prometheus gauge to Active (2)
+        if let Some(gauge) = self.circuit_breaker_state.get() {
+            gauge.set(2);
         }
 
         tracing::warn!(

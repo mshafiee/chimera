@@ -281,6 +281,79 @@
         "noDataState": "no_data",
         "notifications": []
       }
+    },
+    {
+      "id": 9,
+      "title": "Circuit Breaker State",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 20},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_circuit_breaker_state",
+          "legendFormat": "CB State",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}}, "value": "0"},
+            {"type": "value", "options": {"1": {"text": "COOLDOWN", "color": "yellow"}}, "value": "1"},
+            {"type": "value", "options": {"2": {"text": "ACTIVE", "color": "green"}}, "value": "2"}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "red"},
+              {"value": 1, "color": "yellow"},
+              {"value": 2, "color": "green"}
+            ]
+          },
+          "min": 0,
+          "max": 2
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Circuit Breaker Trip Rate",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 12, "y": 20},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "increase(chimera_circuit_breaker_trips_total[1h])",
+          "legendFormat": "Trips/hour",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "PBFA97CFB590B2093"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 3, "color": "red"}
+            ]
+          }
+        }
+      }
     }
   ],
   "time": {

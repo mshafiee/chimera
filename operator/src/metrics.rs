@@ -23,8 +23,10 @@ pub struct MetricsState {
     pub trade_latency: Histogram,
     /// RPC health gauge (1 = healthy, 0 = unhealthy)
     pub rpc_health: IntGauge,
-    /// Circuit breaker state gauge (1 = active, 0 = tripped)
+    /// Circuit breaker state gauge (2 = active, 1 = cooldown, 0 = tripped)
     pub circuit_breaker_state: IntGauge,
+    /// Circuit breaker trips counter
+    pub circuit_breaker_trips: prometheus::IntCounter,
     /// Active positions count
     pub active_positions: IntGauge,
     /// Total trades count
@@ -101,6 +103,16 @@ impl MetricsState {
         registry
             .register(Box::new(circuit_breaker_state.clone()))
             .map_err(|e| format!("Failed to register circuit_breaker_state: {}", e))?;
+
+        // Circuit breaker trips counter
+        let circuit_breaker_trips = prometheus::IntCounter::with_opts(Opts::new(
+            "chimera_circuit_breaker_trips_total",
+            "Total number of circuit breaker trips",
+        ))
+        .map_err(|e| format!("Failed to create circuit_breaker_trips counter: {}", e))?;
+        registry
+            .register(Box::new(circuit_breaker_trips.clone()))
+            .map_err(|e| format!("Failed to register circuit_breaker_trips: {}", e))?;
 
         // Active positions count
         let active_positions = IntGauge::with_opts(Opts::new(
@@ -238,6 +250,7 @@ impl MetricsState {
             trade_latency,
             rpc_health,
             circuit_breaker_state,
+            circuit_breaker_trips,
             active_positions,
             total_trades,
             rpc_latency,
@@ -310,6 +323,7 @@ mod tests {
         assert_eq!(state.queue_depth.get(), 0);
         assert_eq!(state.rpc_health.get(), 0);
         assert_eq!(state.circuit_breaker_state.get(), 0);
+        assert_eq!(state.circuit_breaker_trips.get(), 0);
     }
 
     #[test]
