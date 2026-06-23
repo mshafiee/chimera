@@ -26,7 +26,7 @@ import math
 import os
 import sqlite3
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, TYPE_CHECKING
@@ -49,9 +49,9 @@ from core.utils import utcnow
 
 from core.db_writer import WalletRecord, write_roster_atomic
 from core.wqs import calculate_wqs_with_confidence, \
-    _calculate_raw_score, _interpret_trajectory, _compute_wmi, WalletMetrics
+    _calculate_raw_score, _interpret_trajectory, _compute_wmi
 from core.analyzer import WalletAnalyzer
-from core.models import BacktestConfig, TradeAction
+from core.models import BacktestConfig
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
 from core.auto_merge import auto_merge_roster
@@ -310,96 +310,9 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _compute_in_sample_metrics(
-    analyzer: WalletAnalyzer,
-    in_sample_trades: list,
-    full_metrics: WalletMetrics,
-) -> Optional[WalletMetrics]:
-    """Compute WQS-critical financial metrics from in-sample trades only.
-
-    Financial fields (roi, win_rate, drawdown, profit_factor, trade_count)
-    are recomputed from the in-sample period. Structural wallet properties
-    (DEX diversity, MEV protection, limit orders, scam correlation, etc.)
-    are carried over from full_metrics since they don't leak future info.
-
-    Returns None if in_sample_trades is insufficient.
-    """
-    if not in_sample_trades:
-        return None
-
-    # Financial metrics from in-sample only (all synchronous)
-    roi = analyzer._calculate_roi_from_trades(in_sample_trades)
-    win_rate = analyzer._calculate_win_rate_from_trades(in_sample_trades)
-    max_drawdown = analyzer._calculate_drawdown_from_trades(in_sample_trades)
-
-    # Profit factor from in-sample realized closes
-    closes = [t for t in in_sample_trades
-              if t.action == TradeAction.SELL and t.pnl_sol is not None]
-    gross_profit = sum(t.pnl_sol for t in closes if t.pnl_sol > Decimal('0'))
-    gross_loss = abs(sum(t.pnl_sol for t in closes if t.pnl_sol < Decimal('0')))
-    win_count = sum(1 for t in closes if t.pnl_sol > Decimal('0'))
-    profit_factor = analyzer._compute_base_profit_factor(
-        gross_profit, gross_loss, win_count
-    )
-    trade_count = len(closes)
-
-    # Average trade size from in-sample (all trades, not just closes)
-    avg_size = float(
-        sum(t.amount_sol for t in in_sample_trades)
-        / max(1, len(in_sample_trades))
-    )
-
-    # Last trade timestamp from in-sample
-    last_trade = (
-        in_sample_trades[-1].timestamp.isoformat()
-        if in_sample_trades else None
-    )
-
-    # ROI 7d from last 7 days of in-sample period
-    cutoff_7d = utcnow() - timedelta(days=7)
-    in_sample_7d = [t for t in in_sample_trades if t.timestamp >= cutoff_7d]
-    roi_7d = (
-        analyzer._calculate_roi_from_trades(in_sample_7d)
-        if in_sample_7d else 0.0
-    )
-
-    # Win streak consistency from in-sample
-    win_streak = analyzer._calculate_win_streak_consistency(in_sample_trades)
-
-    return WalletMetrics(
-        address=full_metrics.address,
-        # Recalculated from in-sample
-        roi_7d=roi_7d,
-        roi_30d=roi,  # in-sample spans ~21d — best available proxy for 30d
-        trade_count_30d=trade_count,
-        win_rate=win_rate,
-        max_drawdown_30d=max_drawdown,
-        avg_trade_size_sol=avg_size,
-        last_trade_at=last_trade,
-        profit_factor=profit_factor,
-        win_streak_consistency=win_streak,
-        # Carried from full metrics (structural, no future leakage)
-        roi_90d=full_metrics.roi_90d,
-        is_fresh_wallet=full_metrics.is_fresh_wallet,
-        is_unproven=full_metrics.is_unproven,
-        parse_rate=full_metrics.parse_rate,
-        uses_limit_orders=full_metrics.uses_limit_orders,
-        uses_mev_protection=full_metrics.uses_mev_protection,
-        correlated_with_scam=full_metrics.correlated_with_scam,
-        mev_risk_score=full_metrics.mev_risk_score,
-        dex_diversity_score=full_metrics.dex_diversity_score,
-        unique_token_categories=full_metrics.unique_token_categories,
-        archetype=full_metrics.archetype,
-        trajectory=full_metrics.trajectory,
-        sortino_ratio=full_metrics.sortino_ratio,
-        avg_entry_delay_seconds=full_metrics.avg_entry_delay_seconds,
-        total_unrealized_loss_sol=full_metrics.total_unrealized_loss_sol,
-        total_realized_profit_sol=full_metrics.total_realized_profit_sol,
-        total_unrealized_gain_sol=full_metrics.total_unrealized_gain_sol,
-        volatility_30d=full_metrics.volatility_30d,
-        trade_sizes=full_metrics.trade_sizes,
-        avg_hold_time_hours=full_metrics.avg_hold_time_hours,
-    )
+from core.in_sample import compute_in_sample_metrics
+from core.correlation_backfill import backfill_correlation_pnl, write_correlation_record
+from core.degradation import check_performance_degradation
 
 
 async def analyze_wallets(
@@ -460,7 +373,7 @@ async def analyze_wallets(
                 sorted_trades = sorted(trades, key=lambda t: t.timestamp)
                 split_idx = int(len(sorted_trades) * 0.70)
                 in_sample_trades = sorted_trades[:split_idx]
-                _in_sample_m = _compute_in_sample_metrics(analyzer, in_sample_trades, metrics)
+                _in_sample_m = compute_in_sample_metrics(analyzer, in_sample_trades, metrics)
                 if _in_sample_m is not None and (_in_sample_m.trade_count_30d or 0) >= 5:
                     wqs_metrics = _in_sample_m
                     print(f"[Scout] Split WQS: in-sample={len(in_sample_trades)}t, "
@@ -478,6 +391,28 @@ async def analyze_wallets(
                 import traceback
                 traceback.print_exc()
                 return None
+
+            # Shadow WQS comparison mode (dual-write: old vs new WQS)
+            if os.getenv("SCOUT_WQS_COMPARISON_MODE", "false").lower() == "true":
+                try:
+                    from core.wqs_comparison import compute_comparison, append_to_log
+                    if wqs_metrics is not metrics:
+                        comp = compute_comparison(
+                            wallet_address, metrics, wqs_metrics,
+                            active_threshold=min_wqs_active,
+                        )
+                        append_to_log(comp)
+                        if comp.promoted_by_new_only:
+                            print(f"[Scout] SHADOW: {wallet_address[:8]}... promoted by NEW WQS "
+                                  f"(old={comp.old_wqs:.1f} → new={comp.new_wqs:.1f})")
+                        elif comp.demoted_by_new_only:
+                            print(f"[Scout] SHADOW: {wallet_address[:8]}... demoted by NEW WQS "
+                                  f"(old={comp.old_wqs:.1f} → new={comp.new_wqs:.1f})")
+                        elif abs(comp.delta) > 5.0:
+                            print(f"[Scout] SHADOW: {wallet_address[:8]}... WQS delta={comp.delta:+.1f} "
+                                  f"(old={comp.old_wqs:.1f} → new={comp.new_wqs:.1f})")
+                except Exception:
+                    pass
 
             # Survivorship bias flag (informational)
             survivorship = analyzer._compute_survivorship_flag(trades)
@@ -655,7 +590,7 @@ async def analyze_wallets(
             # Performance degradation check: if an ACTIVE wallet shows signs of
             # decay, demote to CANDIDATE regardless of historical WQS.
             # Skip for IMPROVING wallets — they're accelerating, not decaying.
-            if initial_status == "ACTIVE" and trajectory != "IMPROVING" and _check_performance_degradation(wqs_metrics):
+            if initial_status == "ACTIVE" and trajectory != "IMPROVING" and check_performance_degradation(wqs_metrics):
                 initial_status = "CANDIDATE"
                 print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} but "
                       f"degradation detected (7d ROI={wqs_metrics.roi_7d}), demoting to CANDIDATE")
@@ -948,7 +883,7 @@ async def analyze_wallets(
         components = res.get('components')
         strategy = res.get('strategy', 'SHIELD')
         if components:
-            _write_correlation_record(
+            write_correlation_record(
                 wallet_addr, res['wqs'],
                 components.components_json, strategy
             )
@@ -1083,128 +1018,6 @@ def _apply_archetype_diversification(records: List[WalletRecord], min_wqs_active
         print(f"[Scout]   Diversity score: {diversity_score:.2f}, Avg opportunity cost: {avg_opportunity_cost:.2f} WQS points")
     else:
         print(f"[Scout] Archetype diversification: No promotions needed (diversity score: {diversity_score:.2f})")
-
-
-def _check_performance_degradation(metrics) -> bool:
-    """
-    Detect when a previously-ACTIVE wallet's recent performance has degraded.
-    
-    Returns True if:
-    - 7d ROI is negative AND last trade was > 7 days ago (stale + negative trend)
-    - 7d ROI is significantly negative (< -15%) regardless of recency (sharp decline)
-    """
-    seven_d_roi = metrics.roi_7d
-    last_trade = metrics.last_trade_at
-
-    if seven_d_roi is not None and seven_d_roi < 0:
-        if last_trade:
-            try:
-                last_trade_dt = datetime.fromisoformat(last_trade.replace("Z", "+00:00"))
-                now = utcnow()
-                if last_trade_dt.tzinfo is None:
-                    now = now.replace(tzinfo=None)
-                days_since = (now - last_trade_dt).days
-                if days_since > 7:
-                    return True
-            except (ValueError, TypeError):
-                pass
-        
-        if seven_d_roi < -15.0:
-            return True
-
-    return False
-
-
-def _backfill_correlation_pnl(db_path: str) -> int:
-    """
-    Backfill actual copy PnL from wallets table into wqs_pnl_correlation.
-
-    The Operator writes realized_pnl_30d_sol to the wallets table but never
-    writes actual_copy_pnl_* to wqs_pnl_correlation. This function bridges
-    that gap: for any correlation record promoted >=7 days ago that still
-    has NULL PnL, it reads the wallets table and updates the correlation row.
-
-    Returns the number of records updated.
-    """
-    updated = 0
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        # Find correlation records needing backfill
-        rows = conn.execute(
-            """SELECT c.wallet_address, c.promoted_at
-               FROM wqs_pnl_correlation c
-               WHERE c.actual_copy_pnl_30d_sol IS NULL
-                 AND c.promoted_at < datetime('now', '-7 days')"""
-        ).fetchall()
-        if not rows:
-            return 0
-        for row in rows:
-            addr = row["wallet_address"]
-            # Look up realized PnL from wallets table (populated by Operator)
-            w = conn.execute(
-                """SELECT realized_pnl_30d_sol, trade_count_30d
-                   FROM wallets WHERE address = ?""",
-                (addr,)
-            ).fetchone()
-            if w is None:
-                continue
-            realized_pnl = w["realized_pnl_30d_sol"]
-            trade_count = w["trade_count_30d"]
-            if realized_pnl is not None:
-                conn.execute(
-                    """UPDATE wqs_pnl_correlation
-                       SET actual_copy_pnl_30d_sol = ?,
-                           copy_trade_count_30d = ?,
-                           last_updated_at = ?
-                       WHERE wallet_address = ?""",
-                    (realized_pnl, trade_count or 0, utcnow().isoformat(), addr),
-                )
-                updated += 1
-        conn.commit()
-        if updated:
-            print(f"[Scout] Backfilled PnL for {updated} wallets")
-    except sqlite3.OperationalError as e:
-        print(f"[Scout] PnL backfill skipped: {e}")
-    finally:
-        if conn:
-            conn.close()
-    return updated
-
-
-def _write_correlation_record(
-    wallet_address: str,
-    wqs_score: float,
-    components_json_str: str,
-    strategy: str,
-) -> None:
-    """
-    INSERT OR REPLACE into wqs_pnl_correlation table in the MAIN database.
-    
-    Writes the fields the Scout owns: wallet_address, wqs_score_at_promotion,
-    wqs_components_json, promoted_at, strategy, last_updated_at.
-    Actual PnL fields (actual_copy_pnl_*) are backfilled later by _backfill_correlation_pnl().
-    """
-    db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
-    conn = None
-    try:
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        now = utcnow().isoformat()
-        conn.execute(
-            """INSERT OR REPLACE INTO wqs_pnl_correlation
-               (wallet_address, wqs_score_at_promotion, wqs_components_json,
-                promoted_at, strategy, last_updated_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (wallet_address, wqs_score, components_json_str, now, strategy, now),
-        )
-        conn.commit()
-    except sqlite3.OperationalError as e:
-        print(f"[Scout] Failed to write correlation record: {e}")
-    finally:
-        if conn:
-            conn.close()
 
 
 def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
@@ -1572,7 +1385,7 @@ async def main_async():
 
     # Backfill actual copy PnL from wallets table (before correlation summary + calibration)
     try:
-        _backfill_correlation_pnl(os.getenv("CHIMERA_DB_PATH", "../data/chimera.db"))
+        backfill_correlation_pnl(os.getenv("CHIMERA_DB_PATH", "../data/chimera.db"))
     except Exception as e:
         if args.verbose:
             print(f"[Scout] PnL backfill error: {e}")
@@ -1679,6 +1492,14 @@ async def main_async():
                             mean_pnl_30d=stats.mean_pnl_30d_sol,
                             correlation_r=r,
                         )
+
+                    # Profitability rate vs random baseline
+                    profitable = sum(1 for _, p in pairs if p > 0)
+                    profit_rate = profitable / n * 100
+                    print(f"  Profitability rate: {profit_rate:.1f}% ({profitable}/{n})")
+                    print(f"  Baseline (random):  50.0%")
+                    if profit_rate > 50:
+                        print(f"  WQS beats random by {profit_rate - 50:.1f}pp")
                 else:
                     print(f"  WQS-PnL correlation: insufficient data ({len(pairs)} pairs, need 5+)")
                     if metrics:

@@ -152,6 +152,9 @@ class LiquidityProvider:
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
         self._sol_price_cache: Optional[Tuple[float, datetime]] = None
 
+        # Historical SOL price window for market regime classification
+        self._sol_price_history: List[Tuple[datetime, float]] = []
+
         # Rate limiting for external API calls
         self._rate_limit_lock = threading.Lock()
         self._last_request_time = 0.0
@@ -872,6 +875,16 @@ class LiquidityProvider:
                 return price
         return 150.0  # Conservative fallback; corrected on next async refresh
 
+    def cache_historical_sol_price(self, ts: datetime, price: float):
+        """Record a historical SOL price observation for market regime classification.
+
+        Called by the analyzer during trade processing to build a time-series
+        window used by classify_market_regime(). Keeps the last 200 entries.
+        """
+        self._sol_price_history.append((ts, price))
+        if len(self._sol_price_history) > 200:
+            self._sol_price_history = self._sol_price_history[-200:]
+
     def classify_market_regime(
         self,
         start_ts: datetime,
@@ -880,8 +893,8 @@ class LiquidityProvider:
         """
         Classify the SOL/USD market regime between two timestamps.
 
-        Uses current SOL price as a proxy (historical prices aren't cached).
-        Returns None when insufficient data — graceful degradation.
+        Uses the historical price cache first (populated by cache_historical_sol_price).
+        Falls back to a heuristic based on current price if insufficient history.
 
         Returns: "BULL", "BEAR", "SIDEWAYS", or None
         """
@@ -889,13 +902,23 @@ class LiquidityProvider:
         if span_days < 7:
             return None
 
-        current_price = self.get_sol_price_usd_sync()
-        # Approximate start price: assume 2% weekly volatility as a floor
-        est_change = (current_price - 150.0) / 150.0 * 100 if span_days > 30 else 0.0
+        # Try historical cache first
+        prices_in_window = [
+            p for t, p in self._sol_price_history
+            if start_ts <= t <= end_ts
+        ]
+        if len(prices_in_window) >= 2:
+            start_price = prices_in_window[0]
+            end_price = prices_in_window[-1]
+            change_pct = ((end_price - start_price) / start_price) * 100
+        else:
+            # Fallback heuristic
+            current_price = self.get_sol_price_usd_sync()
+            change_pct = (current_price - 150.0) / 150.0 * 100 if span_days > 30 else 0.0
 
-        if est_change > 20:
+        if change_pct > 20:
             return "BULL"
-        elif est_change < -20:
+        elif change_pct < -20:
             return "BEAR"
         return "SIDEWAYS"
 

@@ -10,6 +10,7 @@
 
 .PHONY: all build build-operator build-web test test-operator test-scout test-web \
         test-integration test-load test-chaos test-e2e test-all \
+        validate-wqs backfill-correlation \
                 lint lint-operator lint-scout lint-web clean deploy help \
                 dev dev-operator dev-web db-init db-migrate preflight \
                 rollback backup-verify validation validation-match validation-report \
@@ -70,6 +71,14 @@ test-operator: ## Run Rust operator tests
 test-scout: ## Run Python scout tests
 	@echo "$(YELLOW)Running scout tests...$(NC)"
 	cd $(SCOUT_DIR) && $(PYTHON) -m pytest tests/ -v || echo "$(YELLOW)No tests found$(NC)"
+
+validate-wqs: ## Validate WQS predictiveness against actual copy PnL
+	@echo "$(YELLOW)Validating WQS predictiveness...$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) scripts/validate_wqs_predictiveness.py
+
+backfill-correlation: ## Backfill historical PnL into wqs_pnl_correlation
+	@echo "$(YELLOW)Backfilling historical correlation records...$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) scripts/backfill_historical_correlation.py
 
 test-web: ## Run web dashboard tests
 	@echo "$(YELLOW)Running web tests...$(NC)"

@@ -1663,6 +1663,12 @@ class WalletAnalyzer:
             price = prices.get(sol_mint, 0.0)
             if price > 0:
                 self._sol_price_usd = price
+                # Feed historical SOL price to liquidity provider for market regime detection
+                if hasattr(self.liquidity_provider, 'cache_historical_sol_price'):
+                    from datetime import timezone
+                    self.liquidity_provider.cache_historical_sol_price(
+                        datetime.now(timezone.utc), price
+                    )
                 return price
         except Exception as e:
             logger.debug(f"Failed to fetch SOL price: {e}")

@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scout.main import _backfill_correlation_pnl
+from scout.core.correlation_backfill import backfill_correlation_pnl
 
 
 class TestBackfillCorrelationPnl(unittest.TestCase):
@@ -80,7 +80,7 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        updated = _backfill_correlation_pnl(self.db_path)
+        updated = backfill_correlation_pnl(self.db_path)
 
         self.assertEqual(updated, 1)
 
@@ -105,7 +105,7 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        updated = _backfill_correlation_pnl(self.db_path)
+        updated = backfill_correlation_pnl(self.db_path)
 
         self.assertEqual(updated, 0)
 
@@ -116,7 +116,7 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        updated = _backfill_correlation_pnl(self.db_path)
+        updated = backfill_correlation_pnl(self.db_path)
 
         self.assertEqual(updated, 0)
 
@@ -128,13 +128,13 @@ class TestBackfillCorrelationPnl(unittest.TestCase):
         conn.commit()
         conn.close()
 
-        updated = _backfill_correlation_pnl(self.db_path)
+        updated = backfill_correlation_pnl(self.db_path)
 
         self.assertEqual(updated, 0)
 
     def test_backfill_handles_missing_db(self):
         """Non-existent database path returns 0 without crashing."""
-        updated = _backfill_correlation_pnl("/nonexistent/path/chimera.db")
+        updated = backfill_correlation_pnl("/nonexistent/path/chimera.db")
         self.assertEqual(updated, 0)
 
 
