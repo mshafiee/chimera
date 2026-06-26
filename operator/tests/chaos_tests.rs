@@ -16,7 +16,7 @@ mod tests {
     use chimera_operator::engine::executor::{Executor, RpcMode};
     use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
     use rust_decimal::Decimal;
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    
     use sqlx::{Pool, Sqlite};
     use std::str::FromStr;
     use std::sync::Arc;

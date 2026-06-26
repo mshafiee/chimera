@@ -29,7 +29,7 @@ from dataclasses import dataclass, asdict
 from enum import Enum
 import threading
 
-from .db import get_connection, execute_query
+from .db import get_connection
 
 logger = logging.getLogger(__name__)
 

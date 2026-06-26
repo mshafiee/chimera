@@ -14,7 +14,9 @@
                 lint lint-operator lint-scout lint-web clean deploy help \
                 dev dev-operator dev-web db-init db-migrate preflight \
                 rollback backup-verify validation validation-match validation-report \
-                test-prediction-validation schema-check
+                test-prediction-validation schema-check \
+                release release-patch release-minor release-major version-check \
+                version changelog
 
 # Configuration
 CARGO := cargo
@@ -270,11 +272,15 @@ check-deps: ## Check if dependencies are installed
 	@which sqlite3 > /dev/null || echo "$(RED)Missing: sqlite3$(NC)"
 	@echo "$(GREEN)Dependency check complete$(NC)"
 
-version: ## Show version information
+version: ## Show version information (reads VERSION file)
 	@echo "Chimera Version Info:"
+	@echo "  Project: $$(cat VERSION | tr -d '[:space:]')"
 	@echo "  Operator: $$(grep '^version' $(OPERATOR_DIR)/Cargo.toml | head -1 | cut -d'"' -f2)"
 	@echo "  Web: $$(grep '"version"' $(WEB_DIR)/package.json | head -1 | cut -d'"' -f4)"
-	@echo "  Scout: $$(grep '__version__' $(SCOUT_DIR)/main.py 2>/dev/null || echo 'N/A')"
+	@echo "  Scout: $$(grep '__version__' $(SCOUT_DIR)/_version.py 2>/dev/null | cut -d'"' -f2 || echo 'N/A')"
+
+version-check: ## Verify VERSION file matches all component manifests
+	@./scripts/check-version-consistency.sh
 
 logs: ## Tail production logs
 	tail -f /var/log/chimera/operator.log
@@ -292,6 +298,29 @@ schema-check:
 	@echo "Checking schema consistency..."
 	@echo "  schema/wallets.sql vs schema.sql: check manually for drift"
 	@echo "Schema check complete."
+
+# ============================================================================
+# VERSIONING & RELEASES
+# ============================================================================
+
+release: ## Bump version and prepare release (usage: make release TYPE=patch|minor|major)
+ifndef TYPE
+	$(error TYPE is required. Usage: make release TYPE=patch|minor|major)
+endif
+	./scripts/bump-version.sh $(TYPE)
+
+release-patch: ## Shorthand: patch release
+	./scripts/bump-version.sh patch
+
+release-minor: ## Shorthand: minor release
+	./scripts/bump-version.sh minor
+
+release-major: ## Shorthand: major release
+	./scripts/bump-version.sh major
+
+changelog: ## Show changes since last tag (for manual review)
+	@echo "Changes since last tag:"
+	@git log --pretty=format:"%s (%h)" $$(git describe --tags --abbrev=0 2>/dev/null || echo HEAD)..HEAD 2>/dev/null || echo "No tags found"
 
 # ============================================================================
 # HELP

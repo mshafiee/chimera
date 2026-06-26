@@ -280,11 +280,11 @@ async fn test_unique_uuid_for_different_inputs() {
 #[tokio::test]
 async fn test_duplicate_trade_uuid_rejection() {
     use chimera_operator::db_abstraction::{
-        create_database, Database, DatabaseConfig, DbPool, InsertTrade,
+        create_database, DatabaseConfig, InsertTrade,
     };
     use rust_decimal::Decimal;
     use std::str::FromStr;
-    use std::sync::Arc;
+    
     use tempfile::TempDir;
 
     // This test verifies that the idempotency check works

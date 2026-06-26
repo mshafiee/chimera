@@ -239,7 +239,7 @@ async fn test_consensus_multiplier_increases_size() {
     // multiplier's effect is visible (0 trades = confidence 0.05).
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let _pool = sqlite_pool(&db);
     let config = sizing_config_with_max("2.0", "5.0", "0.01", 5);
     let sizer = PositionSizer::new(db, config);
 
@@ -267,7 +267,7 @@ async fn test_position_size_capped_at_max() {
     // Even with maximum multipliers (consensus + high WQS + high quality), size ≤ max.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let _pool = sqlite_pool(&db);
     let cfg = sizing_config_with_max("5.0", "6.0", "0.5", 20); // max=6 SOL, base=5
     let sizer = PositionSizer::new(db, cfg);
 
@@ -304,7 +304,7 @@ async fn test_position_size_floor_at_minimum() {
     // Size must not go below min_size_sol.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let _pool = sqlite_pool(&db);
     let cfg = sizing_config_with_max("2.0", "20.0", "0.5", 10); // min=0.5 SOL
     let sizer = PositionSizer::new(db, cfg);
 
@@ -343,7 +343,7 @@ async fn test_high_wqs_multiplier_applied() {
     // Use a large base_size so the WQS factor pushes both values above min_size_sol
     // (with 0 closed trades, confidence=0.05: 10.0 * 0.85 * 0.05 = 0.425 vs 0.25).
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let _pool = sqlite_pool(&db);
     let sizer = PositionSizer::new(
         db,
         Arc::new(chimera_operator::config::PositionSizingConfig {

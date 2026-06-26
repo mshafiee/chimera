@@ -3,7 +3,7 @@
 //! Provides REST API endpoints for webhook lifecycle management including
 //! statistics, bulk operations, manual reconciliation, and audit logging.
 
-use crate::db_abstraction::{Database, WebhookAuditLog, WebhookStats};
+use crate::db_abstraction::{WebhookAuditLog, WebhookStats};
 use crate::error::{AppError, AppResult};
 use crate::middleware::AuthExtension;
 use crate::monitoring::webhook_lifecycle::{

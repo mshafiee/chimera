@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import { clsx } from 'clsx'
+import { APP_VERSION } from '../../lib/version'
 import {
   LayoutDashboard,
   Wallet,
@@ -87,7 +88,7 @@ export function Sidebar({ onNavigate }: SidebarProps) {
       {/* Footer */}
       <div className="p-4 border-t border-border">
         <div className="text-xs text-text-muted">
-          <div>Chimera v7.1</div>
+          <div>Chimera {APP_VERSION}</div>
           <div className="mt-1">© 2025 Project Chimera</div>
         </div>
       </div>

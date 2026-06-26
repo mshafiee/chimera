@@ -546,7 +546,7 @@ class LiquidityProvider:
         are in progress, preventing database locks when Rust Operator reads
         while Python Scout writes.
         """
-        from .db import get_connection, execute_query
+        from .db import get_connection
 
         conn = get_connection(self.db_path)  # 10s timeout for busy retries
         # WAL mode is enabled by default in get_connection for SQLite

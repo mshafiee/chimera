@@ -20,12 +20,13 @@ Usage:
 
 import json
 import logging
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from .db import get_connection, execute_query, execute_script
+from .db import get_connection
 
 logger = logging.getLogger(__name__)
 

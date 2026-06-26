@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test-gate:
+    name: Test Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Install Python dependencies
+        working-directory: scout
+        run: pip install pytest && pip install -r requirements.txt || true
+
+      - name: Install Node dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Check version consistency
+        run: ./scripts/check-version-consistency.sh
+
+      - name: Rust lint
+        working-directory: operator
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Rust format check
+        working-directory: operator
+        run: cargo fmt --check
+
+      - name: Rust tests
+        working-directory: operator
+        run: |
+          mkdir -p data
+          sqlite3 data/chimera.db < ../database/schema.sql || echo "Schema may have been applied"
+          cargo test --lib --bins
+          cargo test --test '*'
+
+      - name: Python lint
+        working-directory: scout
+        run: ruff check core/ --output-format=github --ignore E501
+
+      - name: Python tests
+        working-directory: scout
+        run: pytest tests/ -v
+
+      - name: Web lint
+        working-directory: web
+        run: npm run lint
+
+      - name: Web build
+        working-directory: web
+        run: npm run build
+
+  build-operator:
+    name: Build Operator (Release)
+    needs: test-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            operator/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        working-directory: operator
+        run: cargo build --release
+
+      - name: Upload operator binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: chimera-operator
+          path: operator/target/release/chimera_operator
+          retention-days: 30
+
+  build-web:
+    name: Build Web Dashboard
+    needs: test-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build
+        working-directory: web
+        run: npm run build
+
+      - name: Upload web dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: chimera-web-dist
+          path: web/dist/
+          retention-days: 30
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-operator, build-web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download operator binary
+        uses: actions/download-artifact@v4
+        with:
+          name: chimera-operator
+
+      - name: Download web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: chimera-web-dist
+          path: web-dist/
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create tarball for operator
+        run: tar czf chimera-operator-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz chimera_operator
+
+      - name: Create zip for web dist
+        run: zip -r chimera-web-${{ steps.version.outputs.VERSION }}.zip web-dist/
+
+      - name: Generate changelog body
+        id: changelog
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            awk '/^## \['"${GITHUB_REF_NAME#v}"'\]/,/^## \[/' CHANGELOG.md | head -n -1 > release_body.md
+          else
+            echo "Release ${{ steps.version.outputs.VERSION }}" > release_body.md
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: release_body.md
+          files: |
+            chimera-operator-${{ steps.version.outputs.VERSION }}-linux-x86_64.tar.gz
+            chimera-web-${{ steps.version.outputs.VERSION }}.zip
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

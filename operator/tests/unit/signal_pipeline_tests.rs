@@ -63,7 +63,7 @@ fn test_signal_trade_uuid_differs_for_different_actions() {
 
 #[test]
 fn test_signal_trade_uuid_differs_for_different_wallets() {
-    let mut payload1 = make_payload(Action::Buy, Strategy::Shield, "1.0");
+    let payload1 = make_payload(Action::Buy, Strategy::Shield, "1.0");
     let mut payload2 = make_payload(Action::Buy, Strategy::Shield, "1.0");
     payload2.wallet_address = "9xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string();
     let signal1 = make_signal(payload1, 1700000000);

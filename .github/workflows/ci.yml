@@ -291,6 +291,18 @@ jobs:
           echo "✅ Schema validation passed - Rust and Python schemas are consistent"
 
   # ==========================================================================
+  # VERSION CONSISTENCY
+  # ==========================================================================
+  version-consistency:
+    name: Version Consistency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check version consistency
+        run: ./scripts/check-version-consistency.sh
+
+  # ==========================================================================
   # TEST SUMMARY
   # ==========================================================================
   test-summary:

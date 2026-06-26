@@ -602,7 +602,7 @@ impl Database for SqliteBackend {
 
     async fn merge_roster(&self, roster_db_path: &str) -> AppResult<u32> {
         // ATTACH DATABASE and merge wallets
-        sqlx::query(&format!("ATTACH DATABASE ? AS roster"))
+        sqlx::query("ATTACH DATABASE ? AS roster")
             .bind(roster_db_path)
             .execute(&self.pool)
             .await?;
@@ -1029,7 +1029,7 @@ impl Database for SqliteBackend {
         strategy: &str,
         days: i32,
     ) -> AppResult<(f64, Decimal, u32)> {
-        let days_clamped = days.max(1).min(365);
+        let days_clamped = days.clamp(1, 365);
         let days_interval = format!("-{} days", days_clamped);
 
         let rows: Vec<(String,)> = sqlx::query_as(
@@ -1153,6 +1153,7 @@ impl Database for SqliteBackend {
     // POSITIONS - ADVANCED OPERATIONS
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn activate_trade_and_open_position(
         &self,
         trade_uuid: &str,
@@ -1257,6 +1258,7 @@ impl Database for SqliteBackend {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn atomic_portfolio_heat_check_and_open_position(
         &self,
         trade_uuid: &str,
@@ -1310,6 +1312,7 @@ impl Database for SqliteBackend {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn close_position_full(
         &self,
         trade_uuid: &str,
@@ -2330,6 +2333,7 @@ impl Database for SqliteBackend {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn log_webhook_lifecycle_event(
         &self,
         wallet_address: &str,
@@ -2388,7 +2392,7 @@ impl Database for SqliteBackend {
 
         sql.push_str(" ORDER BY created_at DESC");
 
-        let limit_val = limit.unwrap_or(100).max(1).min(1000);
+        let limit_val = limit.unwrap_or(100).clamp(1, 1000);
         sql.push_str(" LIMIT ?");
 
         let mut query = sqlx::query_as::<_, WebhookAuditLogSqliteRow>(&sql);
@@ -2466,8 +2470,7 @@ impl Database for SqliteBackend {
             return Ok(Vec::new());
         }
 
-        let placeholders: Vec<String> = std::iter::repeat("?".to_string())
-            .take(helius_webhook_ids.len())
+        let placeholders: Vec<String> = std::iter::repeat_n("?".to_string(), helius_webhook_ids.len())
             .collect();
 
         let query = format!(
@@ -2492,6 +2495,7 @@ impl Database for SqliteBackend {
     // EXIT TARGETS
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_exit_target(
         &self,
         trade_uuid: &str,
@@ -2610,7 +2614,7 @@ impl Database for SqliteBackend {
         &self,
         discrepancies_limit: i32,
     ) -> AppResult<ReconciliationStatus> {
-        let limit = discrepancies_limit.max(1).min(100) as i64;
+        let limit = discrepancies_limit.clamp(1, 100) as i64;
 
         let latest_row = sqlx::query_as::<_, (Option<String>, Option<i64>)>(
             r#"
@@ -2704,7 +2708,7 @@ impl Database for SqliteBackend {
         &self,
         limit: i32,
     ) -> AppResult<Vec<ReconciliationRun>> {
-        let limit_val = limit.max(1).min(100) as i64;
+        let limit_val = limit.clamp(1, 100) as i64;
 
         let rows = sqlx::query(
             r#"
@@ -2887,6 +2891,7 @@ impl Database for SqliteBackend {
     // TRADES - FILTERED QUERIES
     // ========================================================================
 
+    #[allow(clippy::too_many_arguments)]
     async fn get_trades_filtered(
         &self,
         from_date: Option<&str>,
@@ -3587,11 +3592,11 @@ impl Database for SqliteBackend {
                 id: row.try_get("id").unwrap_or(0),
                 address: row.try_get("address").unwrap_or_default(),
                 status: row.try_get("status").unwrap_or_default(),
-                wqs_score: row.try_get::<f64, _>("wqs_score").ok().and_then(|v| Decimal::from_f64(v)),
+                wqs_score: row.try_get::<f64, _>("wqs_score").ok().and_then(Decimal::from_f64),
                 roi_7d: opt_text_to_dec(row.try_get::<String, _>("roi_7d").ok().as_deref()),
                 roi_30d: opt_text_to_dec(row.try_get::<String, _>("roi_30d").ok().as_deref()),
                 trade_count_30d: row.try_get("trade_count_30d").ok(),
-                win_rate: row.try_get::<f64, _>("win_rate").ok().and_then(|v| Decimal::from_f64(v)),
+                win_rate: row.try_get::<f64, _>("win_rate").ok().and_then(Decimal::from_f64),
                 max_drawdown_30d: opt_text_to_dec(row.try_get::<String, _>("max_drawdown_30d").ok().as_deref()),
                 avg_trade_size_sol: opt_text_to_dec(row.try_get::<String, _>("avg_trade_size_sol").ok().as_deref()),
                 avg_win_sol: opt_text_to_dec(row.try_get::<String, _>("avg_win_sol").ok().as_deref()),
@@ -3603,7 +3608,7 @@ impl Database for SqliteBackend {
                 ttl_expires_at: row.try_get("ttl_expires_at").ok(),
                 notes: row.try_get("notes").ok(),
                 archetype: row.try_get("archetype").ok(),
-                avg_entry_delay_seconds: row.try_get::<f64, _>("avg_entry_delay_seconds").ok().and_then(|v| Decimal::from_f64(v)),
+                avg_entry_delay_seconds: row.try_get::<f64, _>("avg_entry_delay_seconds").ok().and_then(Decimal::from_f64),
                 created_at: row.try_get("created_at").unwrap_or_default(),
                 updated_at: row.try_get("updated_at").unwrap_or_default(),
             }

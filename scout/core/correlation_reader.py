@@ -14,11 +14,12 @@ Used by Phase 3b (adaptive weights) and the calibration dashboard.
 
 import json
 import os
+import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from pathlib import Path
 
-from .db import get_connection, execute_query
+from .db import get_connection
 
 
 @dataclass

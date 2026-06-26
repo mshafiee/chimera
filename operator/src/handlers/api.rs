@@ -2067,9 +2067,9 @@ pub async fn get_trade_latency(
         _ => 24,
     };
 
-    let stats = state.db.get_trade_latency_stats(hours as i32).await?;
+    let stats = state.db.get_trade_latency_stats(hours).await?;
     let histogram =
-        state.db.get_trade_latency_histogram(hours as i32, &[10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0])
+        state.db.get_trade_latency_histogram(hours, &[10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0])
             .await?;
 
     Ok(Json(TradeLatencyResponse {

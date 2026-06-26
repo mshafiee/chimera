@@ -235,6 +235,7 @@ pub trait Database: Send + Sync {
     // ========================================================================
 
     /// Atomically mark a trade ACTIVE and insert the corresponding position row
+    #[allow(clippy::too_many_arguments)]
     async fn activate_trade_and_open_position(
         &self,
         trade_uuid: &str,
@@ -250,6 +251,7 @@ pub trait Database: Send + Sync {
     ) -> AppResult<()>;
 
     /// Atomic portfolio heat check and position open with retry
+    #[allow(clippy::too_many_arguments)]
     async fn atomic_portfolio_heat_check_and_open_position(
         &self,
         trade_uuid: &str,
@@ -265,6 +267,7 @@ pub trait Database: Send + Sync {
     ) -> AppResult<()>;
 
     /// Close a position from a successful sell trade (full version with partial close support)
+    #[allow(clippy::too_many_arguments)]
     async fn close_position_full(
         &self,
         trade_uuid: &str,
@@ -377,6 +380,7 @@ pub trait Database: Send + Sync {
     async fn update_webhook_status(&self, wallet_address: &str, webhook_status: &str) -> AppResult<()>;
 
     /// Log webhook lifecycle event with comprehensive tracking
+    #[allow(clippy::too_many_arguments)]
     async fn log_webhook_lifecycle_event(
         &self,
         wallet_address: &str,
@@ -409,6 +413,7 @@ pub trait Database: Send + Sync {
     // ========================================================================
 
     /// Upsert profit target state for a position
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_exit_target(
         &self,
         trade_uuid: &str,
@@ -463,6 +468,7 @@ pub trait Database: Send + Sync {
     // ========================================================================
 
     /// Get trades with optional filters for API and export
+    #[allow(clippy::too_many_arguments)]
     async fn get_trades_filtered(
         &self,
         from_date: Option<&str>,

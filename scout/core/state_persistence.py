@@ -28,7 +28,7 @@ import threading
 from pathlib import Path
 from contextlib import contextmanager
 
-from .db import get_connection, execute_query
+from .db import get_connection
 
 logger = logging.getLogger(__name__)
 

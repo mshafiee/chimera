@@ -18,6 +18,8 @@ The Scout writes to roster_new.db atomically. The Rust Operator then
 merges this into the main database via SIGHUP or API call.
 """
 
+from _version import __version__
+
 from __future__ import annotations
 
 import argparse

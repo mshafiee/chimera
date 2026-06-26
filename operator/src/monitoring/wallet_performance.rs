@@ -283,7 +283,7 @@ impl WalletPerformanceTracker {
                 // Calculate expected copy PnL (simplified: assume same ROI)
                 // In reality, we'd need to track original wallet's actual PnL
                 let expected_copy_pnl =
-                    (original_roi_7d * rust_decimal::Decimal::from_f64_retain(0.01).unwrap_or(rust_decimal::Decimal::ZERO)); // Rough estimate
+                    original_roi_7d * rust_decimal::Decimal::from_f64_retain(0.01).unwrap_or(rust_decimal::Decimal::ZERO); // Rough estimate
 
                 // If copy PnL is significantly worse than expected (less than 70% of expected)
                 let threshold =

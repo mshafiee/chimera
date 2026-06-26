@@ -1,6 +1,7 @@
 import { Navigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { ConnectWalletButton } from '../components/wallet'
+import { APP_VERSION } from '../lib/version'
 
 export function Login() {
   const { isAuthenticated } = useAuthStore()
@@ -47,7 +48,7 @@ export function Login() {
 
         {/* Footer */}
         <div className="text-center mt-8 text-text-muted text-sm">
-          <p>Chimera v7.1 - MoSch Engineering</p>
+          <p>Chimera {APP_VERSION} - MoSch Engineering</p>
         </div>
       </div>
     </div>

@@ -6,7 +6,7 @@
 
 *Barbell Strategy Execution • Sub-5ms Internal Latency • Institutional-Grade Resilience*
 
-[![Version](https://img.shields.io/badge/version-v7.1_(Engineering_Freeze)-blue)](https://github.com/mshafiee/chimera)
+[![Version](https://img.shields.io/badge/version-v1.0.0-blue)](https://github.com/mshafiee/chimera)
 [![Status](https://img.shields.io/badge/status-production--ready-success)](https://github.com/mshafiee/chimera)
 [![License](https://img.shields.io/badge/license-MIT-purple)](LICENSE)
 [![Stack](https://img.shields.io/badge/stack-Rust_%7C_Python_%7C_TypeScript-orange)](https://github.com/mshafiee/chimera)

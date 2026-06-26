@@ -832,7 +832,7 @@ async fn build_quality_distribution(
 /// Build quality trend data (hourly points)
 async fn build_quality_trend(
     db: &sqlx::Pool<sqlx::Sqlite>,
-    cutoff_str: &str,
+    _cutoff_str: &str,
     hours: i64,
 ) -> Vec<QualityTrendPoint> {
 
@@ -857,7 +857,7 @@ async fn build_quality_trend(
         .await
         .unwrap_or(50.0);
 
-        let timestamp = chrono::Utc::now() - chrono::Duration::hours(hour_offset as i64);
+        let timestamp = chrono::Utc::now() - chrono::Duration::hours(hour_offset);
 
         trend.push(QualityTrendPoint {
             timestamp: timestamp.to_rfc3339(),

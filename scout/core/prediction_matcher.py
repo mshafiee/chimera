@@ -19,7 +19,7 @@ from typing import Dict, Any, Optional, List
 
 from scout.core.prediction_logger import PredictionLogger, PredictionRecord
 from scout.core.correlation_reader import CorrelationReader, WqsCorrelationRecord
-from .db import get_connection, execute_query
+from .db import get_connection
 
 logger = logging.getLogger(__name__)
 

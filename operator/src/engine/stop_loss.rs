@@ -6,7 +6,7 @@
 //! - Portfolio-level stop (pause all trading if daily loss >5%)
 
 use crate::config::ProfitManagementConfig;
-use crate::db_abstraction::{Database, DbPool};
+use crate::db_abstraction::Database;
 use crate::monitoring::SignalAggregator;
 use crate::price_cache::PriceCache;
 use rust_decimal::prelude::*;

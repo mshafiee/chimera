@@ -37,7 +37,7 @@ from decimal import Decimal
 
 from dataclasses import dataclass
 
-from .db import get_connection, execute_query, execute_script
+from .db import get_connection, execute_query
 
 from .utils import utcnow
 
@@ -230,7 +230,7 @@ class RosterWriter:
         # Create new database with WAL mode for concurrent access
         # Always use SQLite for roster files (atomic file operations)
         conn = get_connection(str(self.temp_path), force_sqlite=True)
-        cursor = execute_query(conn, "PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
+        execute_query(conn, "PRAGMA journal_mode=WAL;")  # Enable concurrent read/write
         execute_query(conn, "PRAGMA synchronous=FULL;")  # Ensures durability on power loss
         conn.commit()  # Commit PRAGMA statements
 

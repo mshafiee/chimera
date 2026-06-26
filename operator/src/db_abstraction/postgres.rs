@@ -27,10 +27,7 @@ fn decimal_to_f64(val: Decimal) -> f64 {
     val.to_f64().unwrap_or(0.0)
 }
 fn opt_f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
-    val.and_then(|v| Decimal::from_f64_retain(v))
-}
-fn opt_decimal_to_f64(val: Option<Decimal>) -> Option<f64> {
-    val.and_then(|d| d.to_f64())
+    val.and_then(Decimal::from_f64_retain)
 }
 
 /// PostgreSQL backend implementation
@@ -106,7 +103,7 @@ impl Database for PostgresBackend {
                 sqlx::query(statement)
                     .execute(&self.pool)
                     .await
-                    .map_err(|e| AppError::Database(e.into()))?;
+                    .map_err(AppError::Database)?;
             }
         }
 
@@ -671,7 +668,6 @@ impl Database for PostgresBackend {
         }
         if let Some(_r) = trip_reason {
             sql.push_str(&format!(", trip_reason = ${}", param_idx));
-            param_idx += 1;
         }
 
         sql.push_str(" WHERE id = 1");
@@ -885,12 +881,15 @@ impl Database for PostgresBackend {
     async fn get_max_drawdown_percent(&self, _cap: Decimal) -> AppResult<Decimal> {
         Err(AppError::Internal("get_max_drawdown_percent not implemented for PostgreSQL".into()))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn activate_trade_and_open_position(&self, _uuid: &str, _wallet: &str, _token: &str, _sym: Option<&str>, _strat: &str, _amt: Decimal, _price: Decimal, _sig: &str, _heat: Option<Decimal>, _sol_price: Option<Decimal>) -> AppResult<()> {
         Err(AppError::Internal("activate_trade_and_open_position not implemented for PostgreSQL".into()))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn atomic_portfolio_heat_check_and_open_position(&self, _uuid: &str, _wallet: &str, _token: &str, _sym: Option<&str>, _strat: &str, _amt: Decimal, _price: Decimal, _sig: &str, _heat: Option<Decimal>, _sol_price: Option<Decimal>) -> AppResult<()> {
         Err(AppError::Internal("atomic_portfolio_heat_check_and_open_position not implemented for PostgreSQL".into()))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn close_position_full(&self, _uuid: &str, _wallet: &str, _token: &str, _price: Decimal, _sig: &str, _sol_price: Option<Decimal>, _frac: Decimal, _confirmed: bool) -> AppResult<()> {
         Err(AppError::Internal("close_position_full not implemented for PostgreSQL".into()))
     }
@@ -951,6 +950,7 @@ impl Database for PostgresBackend {
     async fn update_webhook_status(&self, _addr: &str, _status: &str) -> AppResult<()> {
         Err(AppError::Internal("update_webhook_status not implemented for PostgreSQL".into()))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn log_webhook_lifecycle_event(&self, _addr: &str, _action: &str, _status: &str, _wid: Option<&str>, _details: Option<&str>, _err: Option<&str>, _dur: Option<i32>) -> AppResult<()> {
         Err(AppError::Internal("log_webhook_lifecycle_event not implemented for PostgreSQL".into()))
     }
@@ -975,6 +975,7 @@ impl Database for PostgresBackend {
     async fn get_orphaned_webhooks(&self, _ids: &[String]) -> AppResult<Vec<String>> {
         Err(AppError::Internal("get_orphaned_webhooks not implemented for PostgreSQL".into()))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_exit_target(&self, _uuid: &str, _ep: Decimal, _eas: Decimal, _pp: Decimal, _ppp: Decimal, _th: &str, _tsa: bool, _tsp: Decimal, _rf: Decimal) -> AppResult<()> {
         Err(AppError::Internal("upsert_exit_target not implemented for PostgreSQL".into()))
     }
@@ -1002,6 +1003,7 @@ impl Database for PostgresBackend {
     async fn resolve_discrepancy(&self, _id: i64, _by: &str, _res: &str) -> AppResult<()> {
         Err(AppError::Internal("resolve_discrepancy not implemented for PostgreSQL".into()))
     }
+    #[allow(clippy::too_many_arguments)]
     async fn get_trades_filtered(&self, _from: Option<&str>, _to: Option<&str>, _status: Option<&str>, _strat: Option<&str>, _wallet: Option<&str>, _limit: i64, _offset: i64) -> AppResult<Vec<TradeDetail>> {
         Err(AppError::Internal("get_trades_filtered not implemented for PostgreSQL".into()))
     }

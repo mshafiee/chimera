@@ -11,10 +11,8 @@ use axum::{
 use chrono::Utc;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -26,7 +24,6 @@ use chimera_operator::circuit_breaker::CircuitBreaker;
 use chimera_operator::config::AppConfig;
 use chimera_operator::db_abstraction;
 use chimera_operator::db_abstraction::ActivePositionEntry;
-use chimera_operator::db_abstraction::DbPool;
 use chimera_operator::engine::{
     self, MarketRegimeDetector, MomentumExit, PortfolioHeat, PositionSizer, ProfitTargetAction,
     ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager, VolumeCache,

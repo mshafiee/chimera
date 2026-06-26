@@ -6,7 +6,7 @@ use chimera_operator::db_abstraction::{
     create_database, Database, DatabaseConfig, DbPool,
 };
 use chimera_operator::roster;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Pool, Sqlite};
 use std::sync::Arc;
 use tempfile::TempDir;

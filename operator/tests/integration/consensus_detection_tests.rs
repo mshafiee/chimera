@@ -4,12 +4,11 @@
 //! triggers consensus detection and improves signal quality.
 
 use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig,
+    create_database, DatabaseConfig,
 };
 use chimera_operator::monitoring::SignalAggregator;
 use rust_decimal::Decimal;
 use std::str::FromStr;
-use std::sync::Arc;
 use tempfile::TempDir;
 
 #[tokio::test]

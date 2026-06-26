@@ -8,7 +8,6 @@ without manual intervention. It handles database locks gracefully with retries.
 import asyncio
 import os
 import sys
-import time
 import requests
 import subprocess
 import shutil

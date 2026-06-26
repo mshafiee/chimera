@@ -62,7 +62,6 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
 
         # Ensure parent directory exists
         if db_path and isinstance(db_path, str) and db_path != ':memory:':
-            import os
             os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
 
         conn = sqlite3.connect(db_path, timeout=10.0)

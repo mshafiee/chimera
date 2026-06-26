@@ -3,22 +3,13 @@
 #[cfg(test)]
 mod tests {
     use chimera_operator::db_abstraction::{
-        create_database, Database, DatabaseConfig, DbPool, InsertTrade,
+        create_database, Database, DatabaseConfig, InsertTrade,
     };
     use chimera_operator::engine::kelly_sizer::KellySizer;
     use chimera_operator::models::Strategy;
     use rust_decimal::prelude::*;
-    use sqlx::Pool;
-    use sqlx::Sqlite;
     use std::sync::Arc;
     use tempfile::TempDir;
-
-    fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
-        match db.pool() {
-            DbPool::SQLite(pool) => pool,
-            _ => panic!("test requires SQLite backend"),
-        }
-    }
 
     async fn setup_test_db() -> (Arc<dyn Database>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
