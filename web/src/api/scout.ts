@@ -57,8 +57,8 @@ export interface ScoutMetricsResponse {
 export function useScoutStatus(refetchInterval?: number) {
   return useQuery({
     queryKey: ['scout', 'status'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<ScoutStatusResponse>('/scout/status')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<ScoutStatusResponse>('/scout/status', { signal })
       return response.data
     },
     refetchInterval,
@@ -78,9 +78,10 @@ export function useScoutStatus(refetchInterval?: number) {
 export function useWQSDistribution(timeRange?: string) {
   return useQuery({
     queryKey: ['scout', 'wqs-distribution', timeRange],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const response = await apiClient.get<WQSDistributionResponse>('/scout/wqs-distribution', {
         params: timeRange ? { range: timeRange } : undefined,
+        signal,
       })
       return response.data
     },
@@ -100,9 +101,10 @@ export function useWQSDistribution(timeRange?: string) {
 export function useScoutMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['scout', 'metrics', timeRange],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const response = await apiClient.get<ScoutMetricsResponse>('/scout/metrics', {
         params: timeRange ? { range: timeRange } : undefined,
+        signal,
       })
       return response.data
     },
@@ -120,6 +122,6 @@ export function useScoutMetrics(timeRange?: string) {
 
 // Manual Scout Run Trigger
 export async function triggerScoutRun(): Promise<{ run_id: string; scheduled_at: string }> {
-  const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/scout/run')
+  const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/scout/run', {})
   return response.data
 }

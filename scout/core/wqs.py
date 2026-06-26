@@ -20,6 +20,8 @@ from datetime import datetime
 
 from .utils import utcnow
 
+from decimal import Decimal
+
 import os
 import logging
 
@@ -266,7 +268,7 @@ def _apply_archetype_adjustments(tracker: ScoreTracker, metrics, regime: str) ->
     """
     avg_hold_time = getattr(metrics, 'avg_hold_time_hours', 24) or 24
     trade_freq = getattr(metrics, 'trade_count_30d', 30) or 30
-    avg_size = getattr(metrics, 'avg_trade_size_sol', 1.0) or 1.0
+    avg_size = float(getattr(metrics, 'avg_trade_size_sol', Decimal(1)) or Decimal(1))
 
     if avg_hold_time < 1 and trade_freq > 100:
         archetype = "SCALPER"
@@ -373,7 +375,7 @@ class WalletMetrics:
     trade_count_30d: Optional[int] = None
     win_rate: Optional[float] = None
     max_drawdown_30d: Optional[float] = None
-    avg_trade_size_sol: Optional[float] = None
+    avg_trade_size_sol: Optional[Decimal] = None
     last_trade_at: Optional[str] = None
     win_streak_consistency: Optional[float] = None
     avg_entry_delay_seconds: Optional[float] = None
@@ -382,9 +384,9 @@ class WalletMetrics:
     is_fresh_wallet: bool = False
     is_unproven: bool = False
     parse_rate: Optional[float] = None
-    total_unrealized_loss_sol: Optional[float] = None
-    total_realized_profit_sol: Optional[float] = None
-    total_unrealized_gain_sol: Optional[float] = None
+    total_unrealized_loss_sol: Optional[Decimal] = None
+    total_realized_profit_sol: Optional[Decimal] = None
+    total_unrealized_gain_sol: Optional[Decimal] = None
     dex_diversity_score: Optional[int] = None
     uses_limit_orders: bool = False
     uses_mev_protection: bool = False
@@ -493,7 +495,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     if _is_pump_spike:
         tracker.add_neg(PenaltyCategory.PUMP_SPIKE, 25.0)
         
-    if (metrics.avg_trade_size_sol or 0) < 0.05:
+    if (metrics.avg_trade_size_sol or Decimal(0)) < Decimal('0.05'):
         tracker.add_neg(PenaltyCategory.PUMP_SPIKE, 10.0)
 
     if metrics.win_streak_consistency and metrics.win_streak_consistency > 0.4:
@@ -638,17 +640,17 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
                 tracker.add_pos("adaptability", 5.0)
 
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
-        if metrics.total_realized_profit_sol > 0:
+        if metrics.total_realized_profit_sol > Decimal(0):
             loss_ratio = metrics.total_unrealized_loss_sol / metrics.total_realized_profit_sol
-            tracker.add_neg(PenaltyCategory.MARTINGALE, min(30.0, loss_ratio * 60.0))
-        elif metrics.total_unrealized_loss_sol > 0:
+            tracker.add_neg(PenaltyCategory.MARTINGALE, min(30.0, float(loss_ratio) * 60.0))
+        elif metrics.total_unrealized_loss_sol > Decimal(0):
             tracker.add_neg(PenaltyCategory.MARTINGALE, 20.0)
     
-    if metrics.total_unrealized_gain_sol is not None and metrics.total_unrealized_gain_sol > 0:
-        total_gains = (metrics.total_realized_profit_sol or 0) + metrics.total_unrealized_gain_sol
-        if total_gains > 0:
+    if metrics.total_unrealized_gain_sol is not None and metrics.total_unrealized_gain_sol > Decimal(0):
+        total_gains = (metrics.total_realized_profit_sol or Decimal(0)) + metrics.total_unrealized_gain_sol
+        if total_gains > Decimal(0):
             paper_ratio = metrics.total_unrealized_gain_sol / total_gains
-            if paper_ratio > 0.60:
+            if float(paper_ratio) > 0.60:
                 tracker.add_neg(PenaltyCategory.MARTINGALE, 15.0)
     
     if metrics.last_trade_at:
@@ -762,7 +764,7 @@ def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None,
         confidence = 0.80
 
     if metrics is not None and metrics.avg_trade_size_sol is not None:
-        avg_size = metrics.avg_trade_size_sol
+        avg_size = float(metrics.avg_trade_size_sol)
         size_factor = min(1.0, avg_size / 0.5)
         confidence = confidence * (0.5 + 0.5 * size_factor)
 

@@ -666,8 +666,12 @@ async def analyze_wallets(
             print(f"[Scout] ✗ ERROR processing {wallet_address[:8]}...: {e}")
             return None
 
+    if not candidates:
+        print("[Scout] No candidate wallets to process")
+        return [], stats, []
+
     # Run in parallel using asyncio (with semaphore for rate limiting)
-    semaphore = asyncio.Semaphore(min(10, len(candidates)))
+    semaphore = asyncio.Semaphore(max(1, min(10, len(candidates))))
     
     async def process_with_semaphore(wallet_address):
         async with semaphore:
@@ -703,7 +707,7 @@ async def analyze_wallets(
 
     # Clear analyzer caches to free memory before proceeding
     if analyzer:
-        analyzer.clear_all_caches()
+        await analyzer.clear_all_caches()
     
     for res in results:
         if isinstance(res, Exception):
@@ -946,13 +950,13 @@ def _apply_archetype_diversification(records: List[WalletRecord], min_wqs_active
     max_count = max(archetype_counts.values()) if archetype_counts else total_active
 
     # Calculate diversity score (0.0 = completely unbalanced, 1.0 = perfectly balanced)
-    # Using normalized entropy calculation
+    # Using normalized entropy calculation, excluding UNKNOWN archetypes
+    non_unknown = {arch: count for arch, count in archetype_counts.items() if arch != "UNKNOWN"}
     diversity_score = 0.0
-    if max_count > 0:
-        for arch, count in archetype_counts.items():
-            if arch != "UNKNOWN":
-                diversity_score += (count / max_count) * math.log2(len(archetype_counts))
-        diversity_score = diversity_score / (len(archetype_counts) * math.log2(len(archetype_counts))) if len(archetype_counts) > 1 else 0.0
+    if len(non_unknown) > 1 and max_count > 0:
+        for arch, count in non_unknown.items():
+            diversity_score += (count / max_count) * math.log2(len(non_unknown))
+        diversity_score = diversity_score / (len(non_unknown) * math.log2(len(non_unknown)))
 
     # Target archetypes with minimum thresholds (soft targets in flexible mode)
     target_archetypes = {"SCALPER", "SWING", "WHALE"}

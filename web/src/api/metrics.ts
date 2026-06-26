@@ -30,8 +30,8 @@ export interface CostMetrics {
 export function usePerformanceMetrics() {
   return useQuery({
     queryKey: ['metrics', 'performance'],
-    queryFn: async ({ signal: _signal }) => {
-      const { data } = await apiClient.get<PerformanceMetrics>('/metrics/performance')
+    queryFn: async ({ signal }) => {
+      const { data } = await apiClient.get<PerformanceMetrics>('/metrics/performance', { signal })
       return data
     },
     refetchInterval: 30000, // Refetch every 30 seconds
@@ -41,10 +41,10 @@ export function usePerformanceMetrics() {
 export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: number = 30) {
   return useQuery({
     queryKey: ['metrics', 'strategy', strategy, days],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const { data } = await apiClient.get<StrategyPerformance>(
         `/metrics/strategy`,
-        { params: { strategy, days: days.toString() } }
+        { params: { strategy, days: days.toString() }, signal }
       )
       return data
     },
@@ -55,8 +55,8 @@ export function useStrategyPerformance(strategy: 'SHIELD' | 'SPEAR', days: numbe
 export function useCostMetrics() {
   return useQuery({
     queryKey: ['metrics', 'costs'],
-    queryFn: async ({ signal: _signal }) => {
-      const { data } = await apiClient.get<CostMetrics>('/metrics/costs')
+    queryFn: async ({ signal }) => {
+      const { data } = await apiClient.get<CostMetrics>('/metrics/costs', { signal })
       return data
     },
     refetchInterval: 60000, // Refetch every minute

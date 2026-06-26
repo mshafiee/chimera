@@ -22,7 +22,7 @@ interface TradesParams {
 export function useTrades(params: TradesParams = {}) {
   return useQuery({
     queryKey: ['trades', params],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const searchParams = new URLSearchParams()
       if (params.from) searchParams.set('from', params.from)
       if (params.to) searchParams.set('to', params.to)
@@ -32,7 +32,7 @@ export function useTrades(params: TradesParams = {}) {
       if (params.limit) searchParams.set('limit', params.limit.toString())
       if (params.offset) searchParams.set('offset', params.offset.toString())
       
-      const { data } = await apiClient.get<TradesResponse>('/trades', { params: searchParams })
+      const { data } = await apiClient.get<TradesResponse>('/trades', { params: searchParams, signal })
       return data
     },
   })

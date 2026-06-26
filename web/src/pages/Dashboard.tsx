@@ -14,24 +14,25 @@ import { useAuthStore } from '../stores/authStore'
 import { toast } from '../components/ui/Toast'
 import { MetricCard } from '../components/ui/MetricCard'
 import { usePortfolioRisk, useRPCLatency, useCostAnalysis, useBalanceAndNAV } from '../api'
+import { ApiErrorBanner } from '../components/ui/ApiErrorBanner'
 import { CostBreakdownChart } from '../components/dashboard/CostBreakdownChart'
 import { WalletAttribution } from '../components/dashboard/WalletAttribution'
 
 export function Dashboard() {
   const { setLastUpdate } = useLayoutContext()
-  const { data: health, refetch: refetchHealth } = useHealth()
-  const { data: positionsData, isLoading: positionsLoading, refetch: refetchPositions } = usePositions()
-  const { data: performanceMetrics, isLoading: metricsLoading } = usePerformanceMetrics()
-  const { data: costMetrics, isLoading: costMetricsLoading } = useCostMetrics()
+  const { data: health, error: healthError, refetch: refetchHealth } = useHealth()
+  const { data: positionsData, error: positionsError, isLoading: positionsLoading, refetch: refetchPositions } = usePositions()
+  const { data: performanceMetrics, error: metricsError, isLoading: metricsLoading } = usePerformanceMetrics()
+  const { data: costMetrics, error: costError, isLoading: costMetricsLoading } = useCostMetrics()
   const { data: shieldPerformance } = useStrategyPerformance('SHIELD', 30)
   const { data: spearPerformance } = useStrategyPerformance('SPEAR', 30)
   const { data: configData } = useConfig()
 
   // New data sources for enhanced dashboard
-  const { data: portfolioRisk } = usePortfolioRisk()
-  const { data: rpcLatency } = useRPCLatency()
-  const { data: costAnalysis } = useCostAnalysis('24h')
-  const { data: walletsData } = useWallets()
+  const { data: portfolioRisk, error: portfolioError } = usePortfolioRisk()
+  const { data: rpcLatency, error: rpcError } = useRPCLatency()
+  const { data: costAnalysis, error: costAnalysisError } = useCostAnalysis('24h')
+  const { data: walletsData, error: walletsError } = useWallets()
 
   // Balance and NAV calculation
   const { balance, nav, isLoading: balanceLoading } = useBalanceAndNAV()
@@ -118,6 +119,9 @@ export function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* API Error Banner - Non-intrusive */}
+      <ApiErrorBanner errors={[healthError, positionsError, metricsError, costError, portfolioError, rpcError, costAnalysisError, walletsError]} />
+
       {/* System Halted Banner - Prominent Alert */}
       {health && !health.circuit_breaker.trading_allowed && (
         <Card className="bg-loss/10 border-loss border-2">

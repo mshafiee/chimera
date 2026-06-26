@@ -4,6 +4,7 @@ use super::types::PostgresPool;
 use super::{
     ActivePositionEntry, ActivePositionSummary, CircuitBreakerState, ConfigAuditItem,
     Database, DbPool, DeadLetterItem, ExitTargetData, InsertPosition, InsertTrade,
+    RetryableDlqItem, UpdateDlqItemParams,
     KillSwitchState, LatencyBucket, Position, PositionDetail, PositionRecord,
     ReconciliationRun, ReconciliationStats, ReconciliationStatus, Trade, TradeDetail,
     TradeLatencyStats, TradeStatistics, UpdatePosition, UpdateTradeStatus, Wallet,
@@ -1024,6 +1025,21 @@ impl Database for PostgresBackend {
     }
     async fn count_dead_letter_entries(&self) -> AppResult<i64> {
         Err(AppError::Internal("count_dead_letter_entries not implemented for PostgreSQL".into()))
+    }
+    async fn get_retryable_dlq_items(&self, _limit: i64) -> AppResult<Vec<RetryableDlqItem>> {
+        Err(AppError::Internal("get_retryable_dlq_items not implemented for PostgreSQL".into()))
+    }
+    async fn update_dlq_item(
+        &self,
+        _trade_uuid: &str,
+        _retry_count: i64,
+        _can_retry: bool,
+        _mark_processed: bool,
+    ) -> AppResult<()> {
+        Err(AppError::Internal("update_dlq_item not implemented for PostgreSQL".into()))
+    }
+    async fn update_dlq_items_batch(&self, _items: Vec<UpdateDlqItemParams>) -> AppResult<usize> {
+        Err(AppError::Internal("update_dlq_items_batch not implemented for PostgreSQL".into()))
     }
     async fn get_config_audit_entries(&self, _limit: i32, _offset: i32) -> AppResult<Vec<ConfigAuditItem>> {
         Err(AppError::Internal("get_config_audit_entries not implemented for PostgreSQL".into()))

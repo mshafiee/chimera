@@ -10,11 +10,11 @@ interface WalletsResponse {
 export function useWallets(status?: string) {
   return useQuery({
     queryKey: ['wallets', status],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams()
       if (status) params.set('status', status)
       
-      const { data } = await apiClient.get<WalletsResponse>('/wallets', { params })
+      const { data } = await apiClient.get<WalletsResponse>('/wallets', { params, signal })
       return data
     },
   })
@@ -23,8 +23,8 @@ export function useWallets(status?: string) {
 export function useWallet(address: string) {
   return useQuery({
     queryKey: ['wallet', address],
-    queryFn: async ({ signal: _signal }) => {
-      const { data } = await apiClient.get<Wallet>(`/wallets/${address}`)
+    queryFn: async ({ signal }) => {
+      const { data } = await apiClient.get<Wallet>(`/wallets/${address}`, { signal })
       return data
     },
     enabled: !!address,

@@ -150,8 +150,8 @@ export function useTradeLatency(timeRange?: string) {
 export function useRPCLatency() {
   return useQuery({
     queryKey: ['performance', 'rpc-latency'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<any>('/metrics/rpc-latency')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<any>('/metrics/rpc-latency', { signal })
       // Transform response to match expected format
       const data = response.data
       return {

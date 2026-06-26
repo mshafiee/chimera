@@ -153,7 +153,7 @@ export function useTriggerReconciliation() {
 
   return useMutation({
     mutationFn: async () => {
-      const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/reconciliation/trigger')
+      const response = await apiClient.post<{ run_id: string; scheduled_at: string }>('/reconciliation/trigger', {})
       return response.data
     },
     onSuccess: () => {

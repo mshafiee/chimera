@@ -231,10 +231,10 @@ impl KellySizer {
         };
 
         // Apply velocity multiplier to full Kelly first, then apply conservative multiplier.
-        // This prevents the velocity multiplier from amplifying the conservative fraction
-        // beyond full Kelly. The order is: apply velocity boost to full Kelly (capped),
-        // then take the conservative percentage of that boosted value.
-        let velocity_boosted_kelly = (full_kelly * velocity_multiplier).min(full_kelly);
+        // The velocity boost CAN exceed full Kelly — this is intentional, so that high-velocity
+        // regimes amplify sizing. The downstream .min(full_kelly) on conservative_kelly
+        // prevents the final recommendation from exceeding full Kelly.
+        let velocity_boosted_kelly = full_kelly * velocity_multiplier;
         let conservative_kelly = (velocity_boosted_kelly * self.conservative_multiplier)
             .min(full_kelly)
             .min(Decimal::ONE); // Clamp to 100% of capital for the recommendation

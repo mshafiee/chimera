@@ -5,6 +5,7 @@ use super::{
     dec_to_text, opt_text_to_dec, text_to_dec,
     ActivePositionEntry, ActivePositionSummary, CircuitBreakerState, ConfigAuditItem,
     Database, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData,
+    RetryableDlqItem, UpdateDlqItemParams,
     InsertPosition, InsertTrade, KillSwitchState, LatencyBucket, Position, PositionDetail,
     PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
     Trade, TradeDetail, TradeLatencyStats, TradeStatistics, UpdatePosition,
@@ -3196,6 +3197,89 @@ impl Database for SqliteBackend {
             .fetch_one(&self.pool)
             .await?;
         Ok(count.0)
+    }
+
+    async fn get_retryable_dlq_items(&self, limit: i64) -> AppResult<Vec<RetryableDlqItem>> {
+        let rows = sqlx::query_as::<_, (String, String, i64)>(
+            "SELECT trade_uuid, payload, retry_count FROM dead_letter_queue WHERE can_retry = 1 AND processed_at IS NULL LIMIT ?"
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(trade_uuid, payload, retry_count)| RetryableDlqItem {
+                trade_uuid,
+                payload,
+                retry_count,
+            })
+            .collect())
+    }
+
+    async fn update_dlq_item(
+        &self,
+        trade_uuid: &str,
+        retry_count: i64,
+        can_retry: bool,
+        mark_processed: bool,
+    ) -> AppResult<()> {
+        if mark_processed {
+            sqlx::query(
+                "UPDATE dead_letter_queue SET retry_count = ?, can_retry = ?, processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = ? AND processed_at IS NULL"
+            )
+            .bind(retry_count)
+            .bind(can_retry as i64)
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE dead_letter_queue SET retry_count = ?, can_retry = ? WHERE trade_uuid = ? AND processed_at IS NULL"
+            )
+            .bind(retry_count)
+            .bind(can_retry as i64)
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn update_dlq_items_batch(&self, items: Vec<UpdateDlqItemParams>) -> AppResult<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let mut processed_count = 0usize;
+        for item in &items {
+            let result = if item.mark_processed {
+                sqlx::query(
+                    "UPDATE dead_letter_queue SET retry_count = ?, can_retry = ?, processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = ? AND processed_at IS NULL"
+                )
+                .bind(item.retry_count)
+                .bind(item.can_retry as i64)
+                .bind(&item.trade_uuid)
+                .execute(&mut *tx)
+                .await?
+            } else {
+                sqlx::query(
+                    "UPDATE dead_letter_queue SET retry_count = ?, can_retry = ? WHERE trade_uuid = ? AND processed_at IS NULL"
+                )
+                .bind(item.retry_count)
+                .bind(item.can_retry as i64)
+                .bind(&item.trade_uuid)
+                .execute(&mut *tx)
+                .await?
+            };
+
+            processed_count += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(processed_count)
     }
 
     async fn get_config_audit_entries(&self, limit: i32, offset: i32) -> AppResult<Vec<ConfigAuditItem>> {

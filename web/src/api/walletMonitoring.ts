@@ -21,8 +21,8 @@ export interface WalletMonitoringStateItem {
 export function useWalletMonitoringStates() {
   return useQuery({
     queryKey: ['wallet-monitoring', 'states'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<WalletMonitoringStateResponse>('/monitoring/wallets/states')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<WalletMonitoringStateResponse>('/monitoring/wallets/states', { signal })
       return response.data
     },
     refetchInterval: 30000, // Poll every 30 seconds

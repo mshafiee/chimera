@@ -296,6 +296,23 @@ pub struct WalletMonitoringExtended {
     pub last_updated_url: Option<String>,
 }
 
+/// A retryable DLQ item (trade_uuid, payload, retry_count)
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RetryableDlqItem {
+    pub trade_uuid: String,
+    pub payload: String,
+    pub retry_count: i64,
+}
+
+/// Parameters for batch updating DLQ items
+#[derive(Debug, Clone)]
+pub struct UpdateDlqItemParams {
+    pub trade_uuid: String,
+    pub retry_count: i64,
+    pub can_retry: bool,
+    pub mark_processed: bool,
+}
+
 /// Dead letter queue item
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DeadLetterItem {

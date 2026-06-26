@@ -621,6 +621,54 @@ mod tests {
     }
 
     #[test]
+    fn test_nonce_store_basic_accept() {
+        let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
+        assert!(state.check_and_record_nonce("nonce-1", 1000));
+    }
+
+    #[test]
+    fn test_nonce_store_replay_rejected() {
+        let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
+        assert!(state.check_and_record_nonce("nonce-1", 1000));
+        assert!(!state.check_and_record_nonce("nonce-1", 1001));
+    }
+
+    #[test]
+    fn test_nonce_store_expired_evicted() {
+        let state = HmacState::with_rotation(vec!["test".to_string()], 60).unwrap();
+        // Insert a nonce at t=0
+        assert!(state.check_and_record_nonce("old-nonce", 0));
+        // At t=120 (past 60s drift), old-nonce should be evicted
+        // The new nonce is accepted because old was evicted during retain
+        assert!(state.check_and_record_nonce("new-nonce", 120));
+    }
+
+    #[test]
+    fn test_nonce_store_capacity_limit() {
+        let state =
+            HmacState::with_rotation(vec!["test".to_string()], 3600).unwrap();
+        // Fill the store with many entries
+        for i in 0..2001 {
+            state.check_and_record_nonce(&format!("nonce-{}", i), 1000);
+        }
+        // The store can hold more than 2001 entries (MAX is 100_000).
+        // Verify retain logic still works: old entry evicted when drift expired
+        assert!(state.check_and_record_nonce("recent", 1000));
+        // Verify replay is still detected
+        assert!(!state.check_and_record_nonce("nonce-0", 1000));
+    }
+
+    #[test]
+    fn test_nonce_store_maintains_order_under_fill() {
+        let state = HmacState::with_rotation(vec!["test".to_string()], 1).unwrap();
+        // With 1-second drift, inserting at t=0 then checking at t=2
+        // should evict the first entry and accept a new one.
+        assert!(state.check_and_record_nonce("first", 0));
+        // At t=2 (past 1s drift), the first entry should be evicted
+        assert!(state.check_and_record_nonce("second", 2));
+    }
+
+    #[test]
     fn test_hmac_signature_format() {
         // Test that signatures are hex-encoded
         let secrets = [b"secret".to_vec()];

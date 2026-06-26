@@ -600,12 +600,10 @@ impl WebhookLifecycleManager {
                 info!("Webhook URL changed, updating all webhooks");
                 let updates: Vec<(String, String)> = db_webhooks
                     .iter()
-                    .filter(|dw| dw.helius_webhook_id.is_some())
-                    .map(|dw| {
-                        (
-                            dw.helius_webhook_id.clone().unwrap(),
-                            self.config.webhook_url.clone(),
-                        )
+                    .filter_map(|dw| {
+                        dw.helius_webhook_id.clone().map(|id| {
+                            (id, self.config.webhook_url.clone())
+                        })
                     })
                     .collect();
 

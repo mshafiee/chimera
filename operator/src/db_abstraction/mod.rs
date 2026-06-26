@@ -11,6 +11,7 @@ pub mod types;
 pub use types::{
     ActivePositionEntry, ActivePositionSummary, ConfigAuditItem, DatabaseBackend,
     DatabaseConfig, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats,
+    RetryableDlqItem, UpdateDlqItemParams,
     ExitTargetData, InsertPosition, InsertTrade, LatencyBucket, PositionDetail,
     PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
     TradeDetail, TradeLatencyStats, UpdatePosition, UpdateTradeStatus,
@@ -521,6 +522,21 @@ pub trait Database: Send + Sync {
 
     /// Count dead letter queue items
     async fn count_dead_letter_entries(&self) -> AppResult<i64>;
+
+    /// Get retryable DLQ items (can_retry = true, processed_at IS NULL)
+    async fn get_retryable_dlq_items(&self, limit: i64) -> AppResult<Vec<RetryableDlqItem>>;
+
+    /// Update DLQ item retry count and optionally mark as processed
+    async fn update_dlq_item(
+        &self,
+        trade_uuid: &str,
+        retry_count: i64,
+        can_retry: bool,
+        mark_processed: bool,
+    ) -> AppResult<()>;
+
+    /// Batch update multiple DLQ items in a single transaction
+    async fn update_dlq_items_batch(&self, items: Vec<UpdateDlqItemParams>) -> AppResult<usize>;
 
     /// Get config audit log
     async fn get_config_audit_entries(&self, limit: i32, offset: i32) -> AppResult<Vec<ConfigAuditItem>>;

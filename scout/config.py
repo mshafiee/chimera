@@ -509,7 +509,11 @@ class ScoutConfig:
     @staticmethod
     def get_model_dir() -> str:
         """Get directory for storing trained models."""
-        return os.getenv("SCOUT_MODEL_DIR", "../models")
+        env_dir = os.getenv("SCOUT_MODEL_DIR")
+        if env_dir:
+            return env_dir
+        # Resolve relative to this config.py file
+        return str(Path(__file__).resolve().parent.parent / "models")
 
     @staticmethod
     def get_xgboost_model_path() -> str:

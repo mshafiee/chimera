@@ -70,13 +70,22 @@ impl std::fmt::Display for CircuitBreakerState {
 #[derive(Debug, Clone)]
 pub enum TripReason {
     /// 24h losses exceeded threshold
-    MaxLoss24h { loss: f64, threshold: f64 },
+    MaxLoss24h {
+        loss: Decimal,
+        threshold: Decimal,
+    },
     /// Consecutive losses exceeded threshold
     ConsecutiveLosses { count: u32, threshold: u32 },
     /// Drawdown from peak exceeded threshold
-    MaxDrawdown { drawdown: f64, threshold: f64 },
+    MaxDrawdown {
+        drawdown: Decimal,
+        threshold: Decimal,
+    },
     /// 24h SOL-denominated loss exceeded threshold (portfolio stop)
-    PortfolioStop24h { loss_pct: f64, threshold: f64 },
+    PortfolioStop24h {
+        loss_pct: Decimal,
+        threshold: Decimal,
+    },
     /// Manual trip by admin
     Manual { reason: String },
 }
@@ -87,8 +96,9 @@ impl std::fmt::Display for TripReason {
             Self::MaxLoss24h { loss, threshold } => {
                 write!(
                     f,
-                    "24h loss ${:.2} exceeded threshold ${:.2}",
-                    loss, threshold
+                    "24h loss ${} exceeded threshold ${}",
+                    loss.round_dp(2),
+                    threshold.round_dp(2)
                 )
             }
             Self::ConsecutiveLosses { count, threshold } => {
@@ -104,8 +114,9 @@ impl std::fmt::Display for TripReason {
             } => {
                 write!(
                     f,
-                    "Drawdown {:.1}% exceeded threshold {:.1}%",
-                    drawdown, threshold
+                    "Drawdown {}% exceeded threshold {}%",
+                    drawdown.round_dp(1),
+                    threshold.round_dp(1)
                 )
             }
             Self::PortfolioStop24h {
@@ -114,8 +125,9 @@ impl std::fmt::Display for TripReason {
             } => {
                 write!(
                     f,
-                    "24h realized SOL loss {:.2}% exceeded threshold {:.2}% (portfolio stop)",
-                    loss_pct, threshold
+                    "24h realized SOL loss {}% exceeded threshold {}% (portfolio stop)",
+                    loss_pct.round_dp(2),
+                    threshold.round_dp(2)
                 )
             }
             Self::Manual { reason } => write!(f, "Manual: {}", reason),
@@ -289,12 +301,8 @@ impl CircuitBreaker {
             let loss_threshold = -self.config.portfolio_stop_loss_percent;
             if daily_loss_percent < loss_threshold {
                 return Ok(Some(TripReason::PortfolioStop24h {
-                    loss_pct: daily_loss_percent.abs().to_f64().unwrap_or(0.0),
-                    threshold: self
-                        .config
-                        .portfolio_stop_loss_percent
-                        .to_f64()
-                        .unwrap_or(0.0),
+                    loss_pct: daily_loss_percent.abs(),
+                    threshold: self.config.portfolio_stop_loss_percent,
                 }));
             }
         }
@@ -327,8 +335,8 @@ impl CircuitBreaker {
                     && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
                 {
                     return Ok(Some(TripReason::MaxLoss24h {
-                        loss: total_pnl_usd.abs().to_f64().unwrap_or(0.0),
-                        threshold: self.config.max_loss_24h_usd.to_f64().unwrap_or(0.0),
+                        loss: total_pnl_usd.abs(),
+                        threshold: self.config.max_loss_24h_usd,
                     }));
                 }
             } else {
@@ -354,8 +362,8 @@ impl CircuitBreaker {
         let drawdown = self.db.get_max_drawdown_percent(total_capital).await?;
         if drawdown >= self.config.max_drawdown_percent {
             return Ok(Some(TripReason::MaxDrawdown {
-                drawdown: drawdown.to_f64().unwrap_or(0.0),
-                threshold: self.config.max_drawdown_percent.to_f64().unwrap_or(0.0),
+                drawdown,
+                threshold: self.config.max_drawdown_percent,
             }));
         }
 
@@ -687,8 +695,8 @@ mod tests {
     #[test]
     fn test_trip_reason_max_loss_24h() {
         let reason = TripReason::MaxLoss24h {
-            loss: 525.50,
-            threshold: 500.0,
+            loss: dec!(525.50),
+            threshold: dec!(500),
         };
         let display = reason.to_string();
         assert!(
@@ -717,8 +725,8 @@ mod tests {
     #[test]
     fn test_trip_reason_max_drawdown() {
         let reason = TripReason::MaxDrawdown {
-            drawdown: 18.5,
-            threshold: 15.0,
+            drawdown: dec!(18.5),
+            threshold: dec!(15.0),
         };
         let display = reason.to_string();
         assert!(display.contains("18.5"), "Should include actual drawdown");

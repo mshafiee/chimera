@@ -6,6 +6,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from decimal import Decimal
 from core.wqs import WalletMetrics, calculate_wqs, calculate_wqs_with_confidence, classify_wallet
 
 
@@ -18,7 +19,7 @@ def test_wqs_basic_calculation():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # avoid dust-trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # avoid dust-trader penalty
         profit_factor=2.0,       # positive proof of profitability
     )
 
@@ -37,7 +38,7 @@ def test_wqs_low_trade_count_penalty():
         trade_count_30d=2,  # Very low closes - should be heavily discounted
         max_drawdown_30d=5.0,
         profit_factor=1.5,
-        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
     )
 
     wallet_high = WalletMetrics(
@@ -48,7 +49,7 @@ def test_wqs_low_trade_count_penalty():
         trade_count_30d=25,  # High count - near full confidence
         max_drawdown_30d=5.0,
         profit_factor=1.5,
-        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
     )
     
     score_low = calculate_wqs_with_confidence(wallet_low).adjusted_score
@@ -69,7 +70,7 @@ def test_wqs_medium_trade_count_penalty():
         roi_7d=10.0,
         trade_count_30d=10,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
     )
 
     wallet_high = WalletMetrics(
@@ -79,7 +80,7 @@ def test_wqs_medium_trade_count_penalty():
         roi_7d=10.0,
         trade_count_30d=25,  # High count - no penalty
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
     )
     
     score_medium = calculate_wqs(wallet_medium)
@@ -128,7 +129,7 @@ def test_wqs_anti_pump_and_dump():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # avoid dust-trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # avoid dust-trader penalty
         profit_factor=1.5,       # neutral profit factor (no bonus/penalty)
     )
 
@@ -140,7 +141,7 @@ def test_wqs_anti_pump_and_dump():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,
+        avg_trade_size_sol=Decimal('0.5'),
         profit_factor=1.5,
     )
     
@@ -187,7 +188,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # non-dust so penalty section 5 is not triggered
+        avg_trade_size_sol=Decimal('0.5'),  # non-dust so penalty section 5 is not triggered
         profit_factor=1.5,
     )
 
@@ -199,7 +200,7 @@ def test_wqs_anti_pump_and_dump_edge_cases():
         win_streak_consistency=0.8,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,
+        avg_trade_size_sol=Decimal('0.5'),
         profit_factor=1.5,
     )
 
@@ -280,7 +281,7 @@ def test_wqs_roi_capping():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
         profit_factor=1.5,
     )
 
@@ -291,7 +292,7 @@ def test_wqs_roi_capping():
         roi_7d=10.0,
         trade_count_30d=25,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
         profit_factor=1.5,
     )
 
@@ -496,7 +497,7 @@ def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
         win_streak_consistency=1.0,
         trade_count_30d=1,  # confidence = 0.18 (profit_factor > 3 boosts to 0.80, then size-weighted)
         max_drawdown_30d=0.0,
-        avg_trade_size_sol=1.0,
+        avg_trade_size_sol=Decimal('1'),
     )
 
     wallet_25_wins = WalletMetrics(
@@ -507,7 +508,7 @@ def test_wqs_profit_factor_single_win_heavily_penalized_by_confidence():
         win_streak_consistency=1.0,
         trade_count_30d=25,  # confidence = 1.0
         max_drawdown_30d=0.0,
-        avg_trade_size_sol=1.0,
+        avg_trade_size_sol=Decimal('1'),
     )
 
     score_1 = calculate_wqs_with_confidence(wallet_1_win).adjusted_score
@@ -574,7 +575,7 @@ def test_wqs_confidence_multiplier_applied_once_not_doubled():
         win_streak_consistency=0.8,
         roi_7d=10.0,
         max_drawdown_30d=5.0,
-        avg_trade_size_sol=1.0,
+        avg_trade_size_sol=Decimal('1'),
     )
 
     wallet_2 = WalletMetrics(address="tc_2", trade_count_30d=2, **base_metrics)
@@ -651,7 +652,7 @@ def test_wqs_high_winrate_alone_insufficient_when_profit_factor_low():
         win_rate=0.80,          # High win rate — looks great superficially
         max_drawdown_30d=35.0,  # Large drawdown from the infrequent but massive losses
         profit_factor=0.85,     # LOSING: total gross losses > total gross wins
-        avg_trade_size_sol=0.2,
+        avg_trade_size_sol=Decimal('0.2'),
     )
 
     score = calculate_wqs(metrics)
@@ -681,8 +682,8 @@ def test_dust_trader_penalty_applies_below_0_05_sol():
     """M2: avg_trade_size_sol < 0.05 → -10 pt dust penalty; >= 0.05 → no penalty."""
     base = dict(address="w", roi_30d=50.0, roi_7d=10.0, trade_count_30d=25, max_drawdown_30d=5.0)
 
-    score_dust = calculate_wqs(WalletMetrics(**base, avg_trade_size_sol=0.04))
-    score_fine = calculate_wqs(WalletMetrics(**base, avg_trade_size_sol=0.05))
+    score_dust = calculate_wqs(WalletMetrics(**base, avg_trade_size_sol=Decimal('0.04')))
+    score_fine = calculate_wqs(WalletMetrics(**base, avg_trade_size_sol=Decimal('0.05')))
 
     assert score_fine > score_dust, "Trade size 0.05 SOL should not incur dust penalty"
     assert abs((score_fine - score_dust) - 10.0) < 1.5, (
@@ -720,7 +721,7 @@ def test_mev_protection_adds_bonus_independently_of_sniper_penalty():
     """M4: uses_mev_protection=True adds +10 pts but does NOT waive the sniper penalty."""
     base = dict(address="w", roi_30d=60.0, roi_7d=10.0, trade_count_30d=25,
                 max_drawdown_30d=5.0, avg_entry_delay_seconds=50.0,
-                avg_trade_size_sol=0.5, profit_factor=2.0)  # avoid dust/unproven penalties
+                avg_trade_size_sol=Decimal('0.5'), profit_factor=2.0)  # avoid dust/unproven penalties
 
     score_no_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=False))
     score_mev = calculate_wqs(WalletMetrics(**base, uses_mev_protection=True))

@@ -17,6 +17,7 @@ import os
 import logging
 import numpy as np
 from datetime import datetime
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
@@ -65,7 +66,7 @@ class ProfitabilityFeatures:
 
     # Trading behavior features
     trade_count_30d: Optional[int] = None
-    avg_trade_size_sol: Optional[float] = None
+    avg_trade_size_sol: Optional[Decimal] = None
     avg_hold_time_hours: Optional[float] = None
     entry_delay_seconds: Optional[float] = None
 
@@ -99,7 +100,7 @@ class ProfitabilityFeatures:
             self.max_drawdown or 0.0,
             self.sortino_ratio or 0.0,
             self.trade_count_30d or 0,
-            self.avg_trade_size_sol or 0.0,
+            self.avg_trade_size_sol or Decimal(0),
             self.avg_hold_time_hours or 0.0,
             self.entry_delay_seconds or 0.0,
             1.0 if self.uses_mev_protection else 0.0,

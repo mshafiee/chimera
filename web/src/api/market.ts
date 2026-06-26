@@ -47,8 +47,8 @@ export interface MarketConditionsResponse {
 export function useMarketRegime() {
   return useQuery({
     queryKey: ['market', 'regime'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<MarketRegimeResponse>('/market/regime')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<MarketRegimeResponse>('/market/regime', { signal })
       return response.data
     },
     refetchInterval: 60000,
@@ -67,8 +67,8 @@ export function useMarketRegime() {
 export function useMarketConditions() {
   return useQuery({
     queryKey: ['market', 'conditions'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<MarketConditionsResponse>('/market/conditions')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<MarketConditionsResponse>('/market/conditions', { signal })
       return response.data
     },
     refetchInterval: 30000,

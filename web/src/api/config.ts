@@ -5,8 +5,8 @@ import type { ConfigResponse } from '../types'
 export function useConfig() {
   return useQuery({
     queryKey: ['config'],
-    queryFn: async ({ signal: _signal }) => {
-      const { data } = await apiClient.get<ConfigResponse>('/config')
+    queryFn: async ({ signal }) => {
+      const { data } = await apiClient.get<ConfigResponse>('/config', { signal })
       return data
     },
   })
@@ -125,7 +125,7 @@ export function useResetCircuitBreaker() {
 
   return useMutation({
     mutationFn: async () => {
-      const { data } = await apiClient.post<CircuitBreakerResetResponse>('/config/circuit-breaker/reset')
+      const { data } = await apiClient.post<CircuitBreakerResetResponse>('/config/circuit-breaker/reset', {})
       return data
     },
     onSuccess: () => {

@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.wqs import calculate_wqs, WalletMetrics
+from decimal import Decimal
 
 
 class TestWQSBaseScore:
@@ -62,7 +63,7 @@ class TestWQSBaseScore:
             trade_count_30d=25,  # > 20, no penalty
             win_rate=0.6,
             max_drawdown_30d=5.0,  # Should subtract 5 * 0.2 = 1 point
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
             win_streak_consistency=0.5,  # Should add +5 points
             profit_factor=1.5,  # +5 points — avoid -20 unproven penalty
@@ -86,7 +87,7 @@ class TestWQSBaseScore:
             trade_count_30d=25,
             win_rate=0.4,
             max_drawdown_30d=10.0,  # Should subtract 10 * 0.2 = 2 points
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at="2025-01-01T00:00:00",
             win_streak_consistency=0.3,  # Should add 0.3 * 20 = 6 points
         )
@@ -111,7 +112,7 @@ class TestWQSBaseScore:
             trade_count_30d=8,
             win_rate=0.6,
             max_drawdown_30d=5.0,
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=recent,
             win_streak_consistency=0.5,
             profit_factor=1.5,
@@ -127,7 +128,7 @@ class TestWQSBaseScore:
             trade_count_30d=15,
             win_rate=0.6,
             max_drawdown_30d=5.0,
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=recent,
             win_streak_consistency=0.5,
             profit_factor=1.5,
@@ -143,7 +144,7 @@ class TestWQSBaseScore:
             trade_count_30d=25,  # >= 20, no penalty
             win_rate=0.6,
             max_drawdown_30d=5.0,
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=recent,
             win_streak_consistency=0.5,
             profit_factor=1.5,
@@ -168,7 +169,7 @@ class TestWQSBaseScore:
             trade_count_30d=25,
             win_rate=0.6,
             max_drawdown_30d=5.0,
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=recent_ts,
             win_streak_consistency=0.5,
         )
@@ -183,7 +184,7 @@ class TestWQSBaseScore:
             trade_count_30d=25,
             win_rate=0.6,
             max_drawdown_30d=5.0,
-            avg_trade_size_sol=0.5,
+            avg_trade_size_sol=Decimal('0.5'),
             last_trade_at=recent_ts,
             win_streak_consistency=0.5,
         )

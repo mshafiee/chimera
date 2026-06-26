@@ -6,6 +6,7 @@ Uses Hypothesis to test that WQS properties hold for all valid inputs.
 
 from hypothesis import given, strategies as st, example
 from typing import Optional
+from decimal import Decimal
 from scout.core.wqs import calculate_wqs, WalletMetrics
 
 
@@ -255,7 +256,7 @@ class TestWQSProperties:
                 win_rate=0.65,
                 profit_factor=pf,
                 max_drawdown_30d=5.0,
-                avg_trade_size_sol=0.5,  # Set to avoid dust trader penalty
+                avg_trade_size_sol=Decimal('0.5'),  # Set to avoid dust trader penalty
             ))
 
         wqs_12 = wqs_for_pf(1.2)

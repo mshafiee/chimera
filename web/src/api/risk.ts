@@ -123,8 +123,8 @@ export interface SizeBucket {
 export function usePortfolioRisk() {
   return useQuery({
     queryKey: ['risk', 'portfolio'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<PortfolioRiskResponse>('/risk/portfolio')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<PortfolioRiskResponse>('/risk/portfolio', { signal })
       return response.data
     },
     refetchInterval: 15000,
@@ -136,10 +136,11 @@ export function usePortfolioRisk() {
 export function useStopLossMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['risk', 'stop-loss', timeRange],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const days = timeRangeToDays(timeRange)
       const response = await apiClient.get<StopLossMetricsResponse>('/risk/stop-loss', {
         params: days ? { days } : undefined,
+        signal,
       })
       return response.data
     },
@@ -151,10 +152,11 @@ export function useStopLossMetrics(timeRange?: string) {
 export function useProfitTargetMetrics(timeRange?: string) {
   return useQuery({
     queryKey: ['risk', 'profit-targets', timeRange],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const days = timeRangeToDays(timeRange)
       const response = await apiClient.get<ProfitTargetMetricsResponse>('/risk/profit-target', {
         params: days ? { days } : undefined,
+        signal,
       })
       return response.data
     },
@@ -166,8 +168,8 @@ export function useProfitTargetMetrics(timeRange?: string) {
 export function usePositionSizeAnalysis() {
   return useQuery({
     queryKey: ['risk', 'position-size'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<PositionSizeAnalysisResponse>('/risk/position-size')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<PositionSizeAnalysisResponse>('/risk/position-size', { signal })
       return response.data
     },
     staleTime: 300000, // 5 minutes

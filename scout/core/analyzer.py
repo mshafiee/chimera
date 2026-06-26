@@ -340,16 +340,26 @@ class WalletAnalyzer:
         self._token_meta_cache: OrderedDict = OrderedDict()
         self._token_creation_cache: OrderedDict = OrderedDict()
         self._price_cache: OrderedDict = OrderedDict()  # Cache for token prices
+        self._wallet_age_cache: Dict[str, Optional[float]] = {}
         self._sol_price_usd: Optional[float] = None  # Cached SOL price
+        self._sol_price_lock = asyncio.Lock()
         self._safety_check_total: int = 0  # Cumulative token safety check count
         self._safety_check_failures: int = 0  # Cumulative safety check failures
 
         # Lock for thread-safe token safety cache access
         self._safety_cache_lock = asyncio.Lock()
 
+        # Locks for thread-safe cache access
+        self._metrics_cache_lock = asyncio.Lock()
+        self._trades_cache_lock = asyncio.Lock()
+        self._token_meta_cache_lock = asyncio.Lock()
+        self._token_creation_cache_lock = asyncio.Lock()
+        self._wallet_age_cache_lock = asyncio.Lock()
+
         # Parse cache for improved reliability - cache successful parse results by tx signature
         # Bounded with maxlen to prevent unbounded growth (worst offender for memory leaks)
         self._parse_cache: OrderedDict = OrderedDict()
+        self._parse_cache_lock = asyncio.Lock()
         self._parse_cache_hits = 0
         self._parse_cache_misses = 0
         
@@ -473,32 +483,41 @@ class WalletAnalyzer:
             # Try discovery or fall back to sample data
             await self._try_discover_wallets_async()
 
-    def clear_wallet_cache(self, address: str):
+    async def clear_wallet_cache(self, address: str):
         """Clear cached data for a specific wallet to free memory."""
-        self._metrics_cache.pop(address, None)
-        self._trades_cache.pop(address, None)
+        async with self._metrics_cache_lock:
+            self._metrics_cache.pop(address, None)
+        async with self._trades_cache_lock:
+            self._trades_cache.pop(address, None)
         # Note: We keep _token_meta_cache as that is reusable across wallets
 
-    def _metrics_cache_set(self, key: str, value: Any):
-        self._metrics_cache[key] = value
-        self._metrics_cache.move_to_end(key)
-        if len(self._metrics_cache) > self._metrics_cache_maxlen:
-            self._metrics_cache.popitem(last=False)
+    async def _metrics_cache_set(self, key: str, value: Any):
+        async with self._metrics_cache_lock:
+            self._metrics_cache[key] = value
+            self._metrics_cache.move_to_end(key)
+            if len(self._metrics_cache) > self._metrics_cache_maxlen:
+                self._metrics_cache.popitem(last=False)
 
-    def _trades_cache_set(self, key: str, value: Any):
-        self._trades_cache[key] = value
-        self._trades_cache.move_to_end(key)
-        if len(self._trades_cache) > self._trades_cache_maxlen:
-            self._trades_cache.popitem(last=False)
+    async def _trades_cache_set(self, key: str, value: Any):
+        async with self._trades_cache_lock:
+            self._trades_cache[key] = value
+            self._trades_cache.move_to_end(key)
+            if len(self._trades_cache) > self._trades_cache_maxlen:
+                self._trades_cache.popitem(last=False)
 
-    def clear_all_caches(self):
+    async def clear_all_caches(self):
         """Clear all cached data to free memory."""
-        self._metrics_cache.clear()
-        self._trades_cache.clear()
-        self._token_meta_cache.clear()
-        self._token_creation_cache.clear()
+        async with self._metrics_cache_lock:
+            self._metrics_cache.clear()
+        async with self._trades_cache_lock:
+            self._trades_cache.clear()
+        async with self._token_meta_cache_lock:
+            self._token_meta_cache.clear()
+        async with self._token_creation_cache_lock:
+            self._token_creation_cache.clear()
         self._price_cache.clear()
-        self._parse_cache.clear()
+        async with self._parse_cache_lock:
+            self._parse_cache.clear()
 
     def _parse_cache_set(self, key: str, value: Optional[Dict[str, Any]], maxlen: int = 5000):
         """Helper to set parse cache with automatic eviction (move to end on insertion)."""
@@ -809,7 +828,7 @@ class WalletAnalyzer:
                     token_address=token_addr,
                     token_symbol=token_symbol,
                     action=action,
-                    amount_sol=Decimal(str(metrics.avg_trade_size_sol or 0.5)),
+                    amount_sol=(metrics.avg_trade_size_sol or Decimal('0.5')),
                     price_at_trade=Decimal(str(random.uniform(0.00001, 10.0))),
                     timestamp=utcnow() - timedelta(days=days_ago, hours=random.randint(0, 23)),
                     tx_signature=f"{wallet[:8]}_{i}",
@@ -890,10 +909,10 @@ class WalletAnalyzer:
             WalletMetrics object or None if wallet not found
         """
         print(f"  [{address[:8]}] Checking cache...")
-        # Check cache first
-        if address in self._metrics_cache:
-            print(f"  [{address[:8]}] Found in cache")
-            return self._metrics_cache[address]
+        async with self._metrics_cache_lock:
+            if address in self._metrics_cache:
+                print(f"  [{address[:8]}] Found in cache")
+                return self._metrics_cache[address]
 
         print(f"  [{address[:8]}] Not in cache, checking database...")
         # Try to load from database first (if wallet exists there)
@@ -945,7 +964,7 @@ class WalletAnalyzer:
                                 last_trade_at=last_trade_at,
                                 win_streak_consistency=None,
                             )
-                            self._metrics_cache_set(address, metrics)
+                            await self._metrics_cache_set(address, metrics)
                             return metrics
                 finally:
                     conn.close()
@@ -957,7 +976,7 @@ class WalletAnalyzer:
             try:
                 metrics = await self._fetch_real_wallet_metrics(address)
                 if metrics:
-                    self._metrics_cache_set(address, metrics)
+                    await self._metrics_cache_set(address, metrics)
                     return metrics
             except Exception as e:
                 logger.warning("Failed to fetch metrics for %s: %s", address[:8], e)
@@ -1007,9 +1026,12 @@ class WalletAnalyzer:
             tx_sig = tx.get("signature", "")
             swap = None
 
-            if tx_sig in self._parse_cache:
+            # Use async lock to prevent race conditions on the OrderedDict between coroutines
+            async with self._parse_cache_lock:
+                cached = self._parse_cache.get(tx_sig)
+            if cached is not None:
                 self._parse_cache_hits += 1
-                swap = self._parse_cache[tx_sig]
+                swap = cached
             else:
                 self._parse_cache_misses += 1
                 # Attempt standard parsing
@@ -1021,7 +1043,8 @@ class WalletAnalyzer:
                     swap = self.helius_client.parse_swap_transaction(tx, wallet_address=None)
 
                 # Cache the result (even if None) to avoid re-parsing
-                self._parse_cache[tx_sig] = swap
+                async with self._parse_cache_lock:
+                    self._parse_cache[tx_sig] = swap
 
             if swap:
                 self._parse_stats["swaps_parsed"] += 1
@@ -1140,8 +1163,8 @@ class WalletAnalyzer:
                     ):
                         sandwich_suspicious += 1
                 mev_risk_score = sandwich_suspicious / max(1, len(swap_txs))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"MEV risk check failed for {address}: {e}", exc_info=True)
 
         print(f"  [{address[:8]}] Calculating metrics from {len(trades)} trades...")
         # Calculate metrics from trades
@@ -1195,8 +1218,8 @@ class WalletAnalyzer:
                     if usd_amount > Decimal('0') and sol_price_usd > Decimal('0'):
                         sol_amount = safe_decimal_divide(usd_amount, sol_price_usd)
                         price_sol = safe_decimal_divide(sol_amount, token_amount) if token_amount > Decimal('0') else Decimal('0')
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Token price estimation failed: {e}")
 
             # Token metadata enrichment (symbol/decimals)
             token_symbol = swap.get("token_symbol") or None
@@ -1230,7 +1253,7 @@ class WalletAnalyzer:
             print(f"[Analyzer] Error parsing swap: {e}")
             return None
 
-    def _get_token_symbol(self, token_mint: str) -> Optional[str]:
+    async def _get_token_symbol(self, token_mint: str) -> Optional[str]:
         """Best-effort token symbol lookup with caching."""
         if not token_mint:
             return None
@@ -1243,20 +1266,23 @@ class WalletAnalyzer:
                 cached_json = self._redis_client.get(cache_key)
                 if cached_json:
                     cached_meta = json.loads(cached_json)
-                    self._token_meta_cache[token_mint] = cached_meta
+                    async with self._token_meta_cache_lock:
+                        self._token_meta_cache[token_mint] = cached_meta
                     return cached_meta.get("symbol")
             except Exception as e:
                 logger.debug(f"Redis cache read failed for token meta: {e}")
         
         # Check in-memory cache
-        if token_mint in self._token_meta_cache:
-            return self._token_meta_cache[token_mint].get("symbol")
+        async with self._token_meta_cache_lock:
+            if token_mint in self._token_meta_cache:
+                return self._token_meta_cache[token_mint].get("symbol")
 
         # 1) Known tokens map
         if hasattr(self.liquidity_provider, "KNOWN_TOKENS") and token_mint in self.liquidity_provider.KNOWN_TOKENS:
             symbol = self.liquidity_provider.KNOWN_TOKENS[token_mint][0]
             meta = {"symbol": symbol}
-            self._token_meta_cache[token_mint] = meta
+            async with self._token_meta_cache_lock:
+                self._token_meta_cache[token_mint] = meta
             # Cache in Redis
             if self._redis_client and self._redis_client.is_available():
                 try:
@@ -1267,7 +1293,8 @@ class WalletAnalyzer:
                     pass
             return symbol
 
-        self._token_meta_cache[token_mint] = {}
+        async with self._token_meta_cache_lock:
+            self._token_meta_cache[token_mint] = {}
         # Cache empty result in Redis to avoid repeated API calls
         if self._redis_client and self._redis_client.is_available():
             try:
@@ -1281,7 +1308,7 @@ class WalletAnalyzer:
     async def _get_token_symbol_async(self, token_mint: str) -> Optional[str]:
         """Async variant of _get_token_symbol that also queries Birdeye when available."""
         # Check sync caches first (avoids an I/O round-trip for already-known tokens)
-        symbol = self._get_token_symbol(token_mint)
+        symbol = await self._get_token_symbol(token_mint)
         if symbol:
             return symbol
 
@@ -1293,7 +1320,8 @@ class WalletAnalyzer:
             meta = await birdeye.get_token_metadata(token_mint)
             if meta and meta.get("symbol"):
                 enriched = {"symbol": meta["symbol"]}
-                self._token_meta_cache[token_mint] = enriched
+                async with self._token_meta_cache_lock:
+                    self._token_meta_cache[token_mint] = enriched
                 if self._redis_client and self._redis_client.is_available():
                     try:
                         import json as _json
@@ -1450,8 +1478,9 @@ class WalletAnalyzer:
                 logger.debug(f"Redis cache read failed for token creation: {e}")
         
         # Check in-memory cache
-        if token_address in self._token_creation_cache:
-            return self._token_creation_cache[token_address]
+        async with self._token_creation_cache_lock:
+            if token_address in self._token_creation_cache:
+                return self._token_creation_cache[token_address]
             
         timestamp = None
         
@@ -1499,7 +1528,8 @@ class WalletAnalyzer:
                 logger.debug(f"Redis cache write failed for token creation: {e}")
         
         # Also cache in-memory for fast access
-        self._token_creation_cache[token_address] = timestamp
+        async with self._token_creation_cache_lock:
+            self._token_creation_cache[token_address] = timestamp
         return timestamp
 
     async def _is_token_safe(self, token_address: str) -> bool:
@@ -1620,7 +1650,6 @@ class WalletAnalyzer:
 
                                     # mint_authority == 0 means fixed supply (safe);
                                     # rely on RugCheck for comprehensive mint authority analysis
-                                    int.from_bytes(raw[0:4], 'little')
         except Exception as e:
             import traceback
             logger.warning(f"Token safety check failed for {token_address}: {e}\n{traceback.format_exc()}")
@@ -1653,28 +1682,26 @@ class WalletAnalyzer:
         Returns:
             SOL price in USD, or 1.0 as fallback
         """
-        if self._sol_price_usd is not None:
-            return self._sol_price_usd
-        
-        try:
-            # Try to get from Jupiter Price API
-            sol_mint = "So11111111111111111111111111111111111111112"
-            prices = await PortfolioTracker.fetch_bulk_prices([sol_mint])
-            price = prices.get(sol_mint, 0.0)
-            if price > 0:
-                self._sol_price_usd = price
-                # Feed historical SOL price to liquidity provider for market regime detection
-                if hasattr(self.liquidity_provider, 'cache_historical_sol_price'):
-                    from datetime import timezone
-                    self.liquidity_provider.cache_historical_sol_price(
-                        datetime.now(timezone.utc), price
-                    )
-                return price
-        except Exception as e:
-            logger.debug(f"Failed to fetch SOL price: {e}")
-        
-        # Fallback to 1.0 (will use SOL amounts directly)
-        return 1.0
+        async with self._sol_price_lock:
+            if self._sol_price_usd is not None:
+                return self._sol_price_usd
+
+            try:
+                sol_mint = "So11111111111111111111111111111111111111112"
+                prices = await PortfolioTracker.fetch_bulk_prices([sol_mint])
+                price = prices.get(sol_mint, 0.0)
+                if price > 0:
+                    self._sol_price_usd = price
+                    if hasattr(self.liquidity_provider, 'cache_historical_sol_price'):
+                        from datetime import timezone
+                        self.liquidity_provider.cache_historical_sol_price(
+                            datetime.now(timezone.utc), price
+                        )
+                    return price
+            except Exception as e:
+                logger.debug(f"Failed to fetch SOL price: {e}")
+
+            return 1.0
     
     def determine_archetype(
         self, 
@@ -1696,7 +1723,7 @@ class WalletAnalyzer:
             return TraderArchetype.INSIDER
         
         # 2. WHALE: Average trade size > 50 SOL
-        if metrics.avg_trade_size_sol and metrics.avg_trade_size_sol > 50.0:
+        if metrics.avg_trade_size_sol and metrics.avg_trade_size_sol > Decimal(50):
             return TraderArchetype.WHALE
         
         # 3. SNIPER: Buys < 2 mins after launch on average
@@ -1859,20 +1886,19 @@ class WalletAnalyzer:
         Returns:
             Unix timestamp of first transaction, or None
         """
-        if not hasattr(self, '_wallet_age_cache'):
-            self._wallet_age_cache = {}
-
-        if address in self._wallet_age_cache:
-            return self._wallet_age_cache[address]
+        async with self._wallet_age_cache_lock:
+            if address in self._wallet_age_cache:
+                return self._wallet_age_cache[address]
 
         creation_time = None
         if self.helius_client and hasattr(self.helius_client, 'get_wallet_first_transaction'):
             try:
                 creation_time = await self.helius_client.get_wallet_first_transaction(address)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Wallet first transaction fetch failed for {address[:8]}: {e}")
 
-        self._wallet_age_cache[address] = creation_time
+        async with self._wallet_age_cache_lock:
+            self._wallet_age_cache[address] = creation_time
         return creation_time
 
     async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None, mev_risk_score: Optional[float] = None) -> Optional[WalletMetrics]:
@@ -2251,8 +2277,8 @@ class WalletAnalyzer:
                     correlated_with_scam = not await check_wallet_correlation(
                         address, funder=funder
                     )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Scam check failed for {address}: {e}", exc_info=True)
 
         # Phase 2c: Token category concentration
         token_symbols = set(t.token_symbol for t in trades if t.token_symbol and t.token_symbol != "UNKNOWN")
@@ -2271,7 +2297,7 @@ class WalletAnalyzer:
                 roi_7d=roi_7d,
                 roi_30d=roi_30d,
                 trade_count_30d=len(close_trades_30d),
-                avg_trade_size_sol=float(avg_trade_size) if avg_trade_size else None,
+                avg_trade_size_sol=avg_trade_size if avg_trade_size else None,
                 avg_entry_delay_seconds=avg_entry_delay,
                 is_fresh_wallet=is_fresh_wallet,
             )
@@ -2290,7 +2316,6 @@ class WalletAnalyzer:
         except Exception as e:
             print(f"  [{address[:8]}] Warning: Could not calculate trajectory: {e}")
 
-        # Convert Decimal values to float for WalletMetrics
         return WalletMetrics(
             address=address,
             roi_7d=roi_7d,
@@ -2299,7 +2324,7 @@ class WalletAnalyzer:
             trade_count_30d=len(close_trades_30d),
             win_rate=win_rate,
             max_drawdown_30d=max_drawdown,
-            avg_trade_size_sol=float(avg_trade_size) if avg_trade_size else None,
+            avg_trade_size_sol=avg_trade_size if avg_trade_size else None,
             last_trade_at=last_trade_at,
             win_streak_consistency=win_streak_consistency,
             avg_entry_delay_seconds=avg_entry_delay,
@@ -2308,9 +2333,9 @@ class WalletAnalyzer:
             is_unproven=(profit_factor is None or is_unproven_from_parse),
             sortino_ratio=sortino_ratio,
             parse_rate=parse_rate,
-            total_unrealized_loss_sol=float(total_unrealized_loss_sol) if total_unrealized_loss_sol else None,
-            total_realized_profit_sol=float(total_realized_profit_sol) if total_realized_profit_sol else None,
-            total_unrealized_gain_sol=float(total_unrealized_gain_sol) if total_unrealized_gain_sol else None,
+            total_unrealized_loss_sol=total_unrealized_loss_sol,
+            total_realized_profit_sol=total_realized_profit_sol,
+            total_unrealized_gain_sol=total_unrealized_gain_sol,
             dex_diversity_score=dex_diversity_score,
             uses_limit_orders=uses_limit_orders,
             uses_mev_protection=uses_mev_protection,
@@ -2321,18 +2346,18 @@ class WalletAnalyzer:
             trajectory=trajectory,
         )
 
-    def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[float]]:
+    def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[Any]]:
         """
         Compute additional wallet stats from realized PnL (SOL) for persistence.
         
         Uses Decimal internally for all financial calculations to avoid floating-point errors.
-        Converts to float at the boundary for API compatibility.
+        Monetary values are returned as Decimal; ratios remain float.
 
         Returns:
-          - avg_win_sol
-          - avg_loss_sol
-          - profit_factor (sum_wins / sum_losses)
-          - realized_pnl_30d_sol (sum of realized pnl over SELL trades)
+          - avg_win_sol (float)
+          - avg_loss_sol (float)
+          - profit_factor (float, sum_wins / sum_losses)
+          - realized_pnl_30d_sol (Decimal, sum of realized pnl over SELL trades)
         """
         if not trades:
             return {
@@ -2348,7 +2373,7 @@ class WalletAnalyzer:
                 "avg_win_sol": None,
                 "avg_loss_sol": None,
                 "profit_factor": None,
-                "realized_pnl_30d_sol": 0.0,
+                "realized_pnl_30d_sol": Decimal(0),
             }
 
         wins = [p for p in pnls if p > Decimal('0')]
@@ -2430,7 +2455,7 @@ class WalletAnalyzer:
             "avg_win_sol": avg_win,
             "avg_loss_sol": avg_loss,
             "profit_factor": profit_factor,
-            "realized_pnl_30d_sol": decimal_to_float(total_realized_pnl), # realized only
+            "realized_pnl_30d_sol": total_realized_pnl, # monetary value stays Decimal
         }
     
     @staticmethod
@@ -2834,16 +2859,17 @@ class WalletAnalyzer:
             List of HistoricalTrade objects
         """
         # Check cache first
-        if address in self._trades_cache:
-            cutoff = utcnow() - timedelta(days=days)
-            return [t for t in self._trades_cache[address] if t.timestamp >= cutoff]
-        
+        async with self._trades_cache_lock:
+            if address in self._trades_cache:
+                cutoff = utcnow() - timedelta(days=days)
+                return [t for t in self._trades_cache[address] if t.timestamp >= cutoff]
+
         # Fetch real data if Helius client is available
         if self.helius_client.api_key:
             try:
                 trades = await self._fetch_real_historical_trades(address, days)
                 if trades:
-                    self._trades_cache_set(address, trades)
+                    await self._trades_cache_set(address, trades)
                     return trades
             except Exception as e:
                 logger.warning("Failed to fetch trades for %s: %s", address[:8], e)
@@ -2981,18 +3007,18 @@ class WalletAnalyzer:
             return "no_primary_token"
 
         # Check for direction ambiguities
-        sol_delta = token_deltas.get("So11111111111111111111111111111111111111112", 0.0)
+        sol_delta = Decimal(str(token_deltas.get("So11111111111111111111111111111111111111112", 0)))
         native_transfers = tx.get("nativeTransfers") or []
         for nt in native_transfers:
             if nt.get("fromUserAccount") == wallet_address:
-                sol_delta -= float(nt.get("amount", 0))
+                sol_delta -= Decimal(str(nt.get("amount", 0)))
             if nt.get("toUserAccount") == wallet_address:
-                sol_delta += float(nt.get("amount", 0))
+                sol_delta += Decimal(str(nt.get("amount", 0)))
 
         non_sol_mints = [m for m in token_deltas if m != "So11111111111111111111111111111111111111112"]
         has_positive = any(token_deltas[m] > 0 for m in non_sol_mints)
         has_negative = any(token_deltas[m] < 0 for m in non_sol_mints)
-        has_sol_movement = abs(sol_delta) > 0.001
+        has_sol_movement = abs(sol_delta) > Decimal('0.001')
 
         if not has_sol_movement and (not has_positive or not has_negative):
             return "direction_ambiguous"

@@ -11,11 +11,11 @@ interface PositionsResponse {
 export function usePositions(state?: string) {
   return useQuery({
     queryKey: ['positions', state],
-    queryFn: async ({ signal: _signal }) => {
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams()
       if (state) params.set('state', state)
       
-      const { data } = await apiClient.get<PositionsResponse>('/positions', { params })
+      const { data } = await apiClient.get<PositionsResponse>('/positions', { params, signal })
       return data
     },
     refetchInterval: 10000, // Poll every 10 seconds
@@ -25,8 +25,8 @@ export function usePositions(state?: string) {
 export function usePosition(tradeUuid: string) {
   return useQuery({
     queryKey: ['position', tradeUuid],
-    queryFn: async ({ signal: _signal }) => {
-      const { data } = await apiClient.get<Position>(`/positions/${tradeUuid}`)
+    queryFn: async ({ signal }) => {
+      const { data } = await apiClient.get<Position>(`/positions/${tradeUuid}`, { signal })
       return data
     },
     enabled: !!tradeUuid,

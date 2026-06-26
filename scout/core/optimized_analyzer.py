@@ -194,7 +194,7 @@ class OptimizedWalletAnalyzer:
         """Clear all cached data."""
         # Clear base analyzer cache
         if hasattr(self._analyzer, 'clear_all_caches'):
-            self._analyzer.clear_all_caches()
+            await self._analyzer.clear_all_caches()
 
         # Clear optimization cache - invalidate all wallet entries
         if self._optimization_enabled and self._optimizer:

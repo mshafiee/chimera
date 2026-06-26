@@ -91,8 +91,8 @@ export interface AggregatedSignal {
 export function useConsensus() {
   return useQuery({
     queryKey: ['consensus'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<ConsensusResponse>('/signals/consensus')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<ConsensusResponse>('/signals/consensus', { signal })
       return response.data
     },
     refetchInterval: 15000,
@@ -111,8 +111,8 @@ export function useConsensus() {
 export function useWalletClustering() {
   return useQuery({
     queryKey: ['consensus', 'clustering'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<WalletClusteringResponse>('/signals/clustering')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<WalletClusteringResponse>('/signals/clustering', { signal })
       return response.data
     },
     refetchInterval: 60000,
@@ -131,8 +131,8 @@ export function useWalletClustering() {
 export function useSignalAggregation() {
   return useQuery({
     queryKey: ['consensus', 'aggregation'],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<SignalAggregationResponse>('/signals/aggregation')
+    queryFn: async ({ signal }) => {
+      const response = await apiClient.get<SignalAggregationResponse>('/signals/aggregation', { signal })
       return response.data
     },
     refetchInterval: 10000,

@@ -27,14 +27,6 @@ use chimera_operator::config::AppConfig;
 use chimera_operator::db_abstraction;
 use chimera_operator::db_abstraction::ActivePositionEntry;
 use chimera_operator::db_abstraction::DbPool;
-use chimera_operator::error::AppError;
-
-fn sqlite_pool(db: &Arc<dyn chimera_operator::db_abstraction::Database>) -> Result<sqlx::Pool<sqlx::Sqlite>, AppError> {
-    match db.pool() {
-        DbPool::SQLite(p) => Ok(p),
-        _ => Err(AppError::Internal("Only SQLite backend supported".to_string())),
-    }
-}
 use chimera_operator::engine::{
     self, MarketRegimeDetector, MomentumExit, PortfolioHeat, PositionSizer, ProfitTargetAction,
     ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager, VolumeCache,
@@ -273,25 +265,18 @@ async fn main() -> anyhow::Result<()> {
     // Restore kill-switch if it was active before last restart.
     // Reads from kill_switch_state (single-row UPSERT table) which is written synchronously
     // by the kill-switch API handler before tripping the circuit breaker in memory.
-    // Falls back to config_audit if kill_switch_state row is absent (pre-migration DBs).
     {
-        let is_active = if db_pool.get_kill_switch_state().await.map(|s| s.state == "ACTIVE").unwrap_or(true) {
-            true
-        } else {
-            // Fallback: config_audit (legacy path for DBs without kill_switch_state row)
-            // Fail-safe: return true on DB error to prevent unintended trading
-            let kill_pool = sqlite_pool(&db_pool)?;
-            match sqlx::query_scalar::<_, String>(
-                "SELECT new_value FROM config_audit WHERE key = 'kill_switch' ORDER BY changed_at DESC LIMIT 1",
-            )
-            .fetch_optional(&kill_pool)
-            .await
-            {
-                Ok(row) => row.as_deref() == Some("ACTIVE"),
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to read kill-switch from config_audit — assuming ACTIVE for safety");
-                    true
-                }
+        let is_active = match db_pool.get_kill_switch_state().await {
+            Ok(state) => {
+                tracing::info!("Kill-switch state loaded: {}", state.state);
+                state.state == "ACTIVE"
+            },
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "FAIL-SAFE: Failed to read kill-switch state — assuming ACTIVE to prevent unintended trading"
+                );
+                true
             }
         };
 
@@ -552,13 +537,6 @@ async fn main() -> anyhow::Result<()> {
     let dlq_pool = db_pool.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
-        let sqlite_dlq = match sqlite_pool(&dlq_pool) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!(error = %e, "DLQ worker requires SQLite backend");
-                return;
-            }
-        };
         loop {
             tokio::select! {
                 _ = dlq_token.cancelled() => {
@@ -566,67 +544,84 @@ async fn main() -> anyhow::Result<()> {
                     break;
                 }
                 _ = interval.tick() => {
-                    // Fetch retryable items from DLQ
-                    match sqlx::query_as::<_, (String, String, i64)>(
-                        "SELECT trade_uuid, payload, retry_count FROM dead_letter_queue WHERE can_retry = 1 AND processed_at IS NULL LIMIT 50"
-                    )
-                    .fetch_all(&sqlite_dlq)
-                    .await {
+                    // Fetch retryable items from DLQ via the Database trait
+                    match dlq_pool.get_retryable_dlq_items(50).await {
                         Ok(items) => {
                             const MAX_DLQ_RETRIES: i64 = 3;
                             tracing::info!(count = items.len(), "Processing DLQ retry items");
-                            for (trade_uuid, payload_str, retry_count) in items {
-                                // Increment retry_count and enforce max-retry limit
-                                let new_count = retry_count + 1;
-                                let can_still_retry = if new_count >= MAX_DLQ_RETRIES { 0i64 } else { 1i64 };
-                                if let Err(e) = sqlx::query(
-                                    "UPDATE dead_letter_queue SET retry_count = ?, can_retry = ? WHERE trade_uuid = ? AND processed_at IS NULL"
-                                )
-                                .bind(new_count)
-                                .bind(can_still_retry)
-                                .bind(&trade_uuid)
-                                .execute(&sqlite_dlq)
-                                .await {
-                                    tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to increment DLQ retry_count");
-                                    continue;
-                                }
-
-                                if can_still_retry == 0 {
+                            
+                            // Phase 1: Increment retry counts for all items
+                            let update_params: Vec<chimera_operator::db_abstraction::UpdateDlqItemParams> = items
+                                .iter()
+                                .map(|item| {
+                                    let new_count = item.retry_count + 1;
+                                    let can_still_retry = new_count < MAX_DLQ_RETRIES;
+                                    chimera_operator::db_abstraction::UpdateDlqItemParams {
+                                        trade_uuid: item.trade_uuid.clone(),
+                                        retry_count: new_count,
+                                        can_retry: can_still_retry,
+                                        mark_processed: false,
+                                    }
+                                })
+                                .collect();
+                            
+                            if let Err(e) = dlq_pool.update_dlq_items_batch(update_params).await {
+                                tracing::error!(error = %e, "Failed to batch update DLQ retry counts");
+                                continue;
+                            }
+                            
+                            // Phase 2: Parse payloads and mark successful ones as processed
+                            let mut processed_items: Vec<chimera_operator::db_abstraction::UpdateDlqItemParams> = Vec::new();
+                            let mut status_updates: Vec<chimera_operator::db_abstraction::UpdateTradeStatus> = Vec::new();
+                            
+                            for item in &items {
+                                let new_count = item.retry_count + 1;
+                                let can_still_retry = new_count < MAX_DLQ_RETRIES;
+                                
+                                if !can_still_retry {
                                     tracing::warn!(
-                                        uuid = %trade_uuid,
+                                        uuid = %item.trade_uuid,
                                         retry_count = new_count,
                                         "DLQ item permanently failed after max retries"
                                     );
                                     continue;
                                 }
-
-                                // Parse payload and re-queue
-                                match serde_json::from_str::<serde_json::Value>(&payload_str) {
+                                
+                                // Parse payload and prepare for re-queue
+                                match serde_json::from_str::<serde_json::Value>(&item.payload) {
                                     Ok(_) => {
-                                        // Mark as processed and update trade status to RETRY
-                                        if let Err(e) = sqlx::query(
-                                            "UPDATE dead_letter_queue SET processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = ?"
-                                        )
-                                        .bind(&trade_uuid)
-                                        .execute(&sqlite_dlq)
-                                        .await {
-                                            tracing::warn!(error = %e, "Failed to mark DLQ item as processed");
-                                        } else if let Err(e) = dlq_pool.update_trade_status(
-                                            &db_abstraction::UpdateTradeStatus {
-                                                trade_uuid: trade_uuid.clone(),
-                                                status: "RETRY".to_string(),
-                                                tx_signature: None,
-                                                error_message: None,
-                                            },
-                                        ).await {
-                                            tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to update trade status to RETRY");
-                                        } else {
-                                            tracing::info!(uuid = %trade_uuid, retry_count = new_count, "DLQ item re-queued to RETRY");
-                                        }
+                                        processed_items.push(chimera_operator::db_abstraction::UpdateDlqItemParams {
+                                            trade_uuid: item.trade_uuid.clone(),
+                                            retry_count: new_count,
+                                            can_retry: can_still_retry,
+                                            mark_processed: true,
+                                        });
+                                        status_updates.push(chimera_operator::db_abstraction::UpdateTradeStatus {
+                                            trade_uuid: item.trade_uuid.clone(),
+                                            status: "RETRY".to_string(),
+                                            tx_signature: None,
+                                            error_message: None,
+                                        });
                                     }
                                     Err(e) => {
-                                        tracing::warn!(error = %e, uuid = %trade_uuid, "Failed to parse DLQ payload");
+                                        tracing::warn!(error = %e, uuid = %item.trade_uuid, "Failed to parse DLQ payload");
                                     }
+                                }
+                            }
+                            
+                            // Phase 3: Batch mark items as processed
+                            if !processed_items.is_empty() {
+                                if let Err(e) = dlq_pool.update_dlq_items_batch(processed_items).await {
+                                    tracing::error!(error = %e, "Failed to batch mark DLQ items as processed");
+                                } else {
+                                    // Phase 4: Batch update trade statuses
+                                    let mut updated_count = 0;
+                                    for status_update in &status_updates {
+                                        if dlq_pool.update_trade_status(status_update).await.is_ok() {
+                                            updated_count += 1;
+                                        }
+                                    }
+                                    tracing::info!("DLQ batch: {}/{} items re-queued to RETRY", updated_count, status_updates.len());
                                 }
                             }
                         }

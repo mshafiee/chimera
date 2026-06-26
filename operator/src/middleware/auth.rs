@@ -259,11 +259,10 @@ pub async fn bearer_auth(
         query_token
     };
 
-    let token_str = token.as_ref().unwrap();
-
-    if token_str.is_empty() {
-        return auth_error(StatusCode::BAD_REQUEST, "Authentication token is empty");
-    }
+    let token_str = match token.as_ref() {
+        Some(t) if !t.is_empty() => t,
+        _ => return auth_error(StatusCode::UNAUTHORIZED, "Missing authentication token"),
+    };
 
     // Authenticate
     match state.authenticate(token_str).await {

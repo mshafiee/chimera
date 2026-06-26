@@ -28,6 +28,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectAttempts = useRef(0)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  const hasConnectedRef = useRef(false)
   const queryClient = useQueryClient()
 
   const connect = useCallback(() => {
@@ -68,6 +69,7 @@ export function useWebSocket(options: UseWebSocketOptions) {
         setIsConnected(true)
         setIsConnecting(false)
         setConnectionError(null)
+        hasConnectedRef.current = true
         reconnectAttempts.current = 0
       }
 
@@ -78,8 +80,12 @@ export function useWebSocket(options: UseWebSocketOptions) {
         setIsConnecting(false)
         wsRef.current = null
 
-        // Attempt reconnect if not a normal closure and not explicitly closed by client
-        if (event.code !== 1000 && event.code !== 1005 && reconnectAttempts.current < maxReconnectAttempts) {
+        // Reconnect unless explicitly closed by the client after ever having been open.
+        // Code 1000/1001 from the server after a successful connection is a clean shutdown.
+        // But code 1000/1001 during initial connection (hasConnectedRef == false) is likely
+        // a connection failure (e.g., timeout, DNS error, TLS failure) — always retry those.
+        const isCleanShutdown = hasConnectedRef.current && (event.code === 1000 || event.code === 1001)
+        if (!isCleanShutdown && reconnectAttempts.current < maxReconnectAttempts) {
           reconnectAttempts.current++
           const backoffDelay = reconnectInterval * Math.min(reconnectAttempts.current, 5) // Exponential backoff
           console.log(
@@ -96,11 +102,10 @@ export function useWebSocket(options: UseWebSocketOptions) {
         }
       }
 
-      ws.onerror = (error) => {
+      ws.onerror = (_event: Event) => {
         clearTimeout(connectionTimeout)
-        console.error('[WebSocket] Error:', error)
-        setConnectionError('Connection error - check browser console for details')
-        // Don't immediately reconnect on error, let the onclose handle it
+        console.error('[WebSocket] Error')
+        setConnectionError('Connection error')
       }
 
       ws.onmessage = (event) => {

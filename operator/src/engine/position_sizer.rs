@@ -139,9 +139,9 @@ impl PositionSizer {
                     // non-zero base.
                     let confidence =
                         Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
-                            .unwrap_or(Decimal::ONE);
+                            .unwrap_or(dec!(0.05));
                     let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
-                        .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
+                        .unwrap_or(Decimal::from_str("0.5").unwrap_or(dec!(0.5)));
                     // Set a conservative capital cap so the multiplicative chain (regime,
                     // consensus, quality) cannot push an unproven wallet past a modest
                     // fraction of total capital. Scales linearly: 0 trades → 2%, 14 trades → 9.5%.
@@ -166,9 +166,9 @@ impl PositionSizer {
                 .await
                 .unwrap_or(0);
             let confidence = Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
-                .unwrap_or(Decimal::ONE);
+                .unwrap_or(dec!(0.05));
             let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
-                .unwrap_or(Decimal::from_str("0.5").unwrap_or(Decimal::ONE));
+                .unwrap_or(Decimal::from_str("0.5").unwrap_or(dec!(0.5)));
             (self.config.base_size_sol * wqs_factor * confidence).min(self.config.max_size_sol)
         };
 

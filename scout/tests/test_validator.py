@@ -53,7 +53,7 @@ async def test_validator_rejects_insufficient_trades():
         roi_30d=50.0,
         trade_count_30d=20,  # Enough for WQS
         win_rate=0.7,
-        avg_trade_size_sol=0.5,  # avoid dust-trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # avoid dust-trader penalty
         profit_factor=2.0,       # positive proof of profitability
     )
 
@@ -99,7 +99,7 @@ async def test_validator_rejects_insufficient_closes():
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
-        avg_trade_size_sol=0.5,
+        avg_trade_size_sol=Decimal('0.5'),
         profit_factor=2.0,
     )
 
@@ -164,7 +164,7 @@ async def test_validator_rejects_negative_simulated_pnl():
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
-        avg_trade_size_sol=0.5,
+        avg_trade_size_sol=Decimal('0.5'),
         profit_factor=2.0,
     )
 
@@ -228,7 +228,7 @@ async def test_validator_rejects_high_rejection_rate():
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
-        avg_trade_size_sol=0.5,
+        avg_trade_size_sol=Decimal('0.5'),
         profit_factor=2.0,
     )
 
@@ -291,7 +291,7 @@ async def test_validator_passes_good_wallet():
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.7,
-        avg_trade_size_sol=0.5,
+        avg_trade_size_sol=Decimal('0.5'),
         profit_factor=2.0,
     )
 
@@ -451,7 +451,7 @@ async def test_realistic_profitable_wallet_reaches_active():
         trade_count_30d=30,
         win_rate=0.70,
         max_drawdown_30d=8.0,
-        avg_trade_size_sol=0.5,        # Avoids dust-trader (-10 pt) penalty
+        avg_trade_size_sol=Decimal('0.5'),        # Avoids dust-trader (-10 pt) penalty
         win_streak_consistency=0.6,
         avg_entry_delay_seconds=180.0, # Smart money sweet spot (+15 pts)
         profit_factor=2.8,             # +5 pts (> 1.5)
@@ -567,7 +567,7 @@ async def test_profit_factor_threshold_1_2_enforced():
         roi_30d=50.0,
         trade_count_30d=20,
         win_rate=0.70,
-        avg_trade_size_sol=0.5,  # Avoid dust-trader penalty
+        avg_trade_size_sol=Decimal('0.5'),  # Avoid dust-trader penalty
         profit_factor=1.5,  # +5 pts — needed to reach WQS > 30 threshold
     )
 

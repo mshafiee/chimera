@@ -13,6 +13,7 @@ use chimera_operator::db_abstraction::{
 };
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use sqlx::Pool;
 use sqlx::Sqlite;
 use std::str::FromStr;
@@ -149,8 +150,8 @@ async fn test_cooldown_duration_calculation() {
 #[tokio::test]
 async fn test_trip_reason_formatting() {
     let reason = TripReason::MaxLoss24h {
-        loss: 525.50,
-        threshold: 500.0,
+        loss: dec!(525.50),
+        threshold: dec!(500),
     };
     let display = reason.to_string();
     assert!(display.contains("525.50"));
