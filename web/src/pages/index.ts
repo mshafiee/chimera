@@ -14,3 +14,7 @@ export { Performance } from './Performance'
 export { Operations } from './Operations'
 export { Consensus } from './Consensus'
 export { WalletMonitoring } from './WalletMonitoring'
+
+// Risk and Signals Analysis Dashboards
+export { RiskDashboard } from './RiskDashboard'
+export { SignalsDashboard } from './SignalsDashboard'

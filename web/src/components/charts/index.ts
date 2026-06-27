@@ -1,1 +1,7 @@
 export { PnLChart } from './PnLChart'
+export { PortfolioHeatChart } from './PortfolioHeatChart'
+export { ConcentrationRiskChart } from './ConcentrationRiskChart'
+export { DrawdownChart } from './DrawdownChart'
+export { StopLossProfitChart } from './StopLossProfitChart'
+export { SignalQualityChart } from './SignalQualityChart'
+export { SignalConsensusChart } from './SignalConsensusChart'

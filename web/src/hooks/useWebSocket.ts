@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, useCallback } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
 interface WebSocketMessage {
-  type: 'position_update' | 'health_update' | 'alert' | 'trade_update' | 'webhook_status' | 'webhook_health' | 'webhook_audit'
+  type: 'position_update' | 'health_update' | 'alert' | 'trade_update' | 'webhook_status' | 'webhook_health' | 'webhook_audit' |
+         'risk_update' | 'signal_update' | 'portfolio_heat_update' | 'consensus_alert' | 'quality_change'
   data: unknown
 }
 
@@ -125,6 +126,30 @@ export function useWebSocket(options: UseWebSocketOptions) {
             case 'trade_update':
               queryClient.invalidateQueries({ queryKey: ['trades'] })
               queryClient.invalidateQueries({ queryKey: ['positions'] })
+              break
+            case 'risk_update':
+              // Invalidate all risk-related queries
+              queryClient.invalidateQueries({ queryKey: ['risk', 'portfolio'] })
+              queryClient.invalidateQueries({ queryKey: ['risk', 'stop-loss'] })
+              queryClient.invalidateQueries({ queryKey: ['risk', 'profit-target'] })
+              queryClient.invalidateQueries({ queryKey: ['risk', 'position-size'] })
+              break
+            case 'signal_update':
+              // Invalidate all signal-related queries
+              queryClient.invalidateQueries({ queryKey: ['signals', 'quality'] })
+              queryClient.invalidateQueries({ queryKey: ['signals', 'sources'] })
+              queryClient.invalidateQueries({ queryKey: ['signals', 'consensus'] })
+              queryClient.invalidateQueries({ queryKey: ['signals', 'aggregation'] })
+              queryClient.invalidateQueries({ queryKey: ['signals', 'clustering'] })
+              break
+            case 'portfolio_heat_update':
+              queryClient.invalidateQueries({ queryKey: ['risk', 'portfolio'] })
+              break
+            case 'consensus_alert':
+              queryClient.invalidateQueries({ queryKey: ['signals', 'consensus'] })
+              break
+            case 'quality_change':
+              queryClient.invalidateQueries({ queryKey: ['signals', 'quality'] })
               break
             case 'webhook_status':
             case 'webhook_health':
