@@ -161,6 +161,15 @@ except ImportError:
     TimeSeriesFeatures = None
     print("[Scout] Warning: Time-series features not available")
 
+# Import advanced risk features for sophisticated risk management
+try:
+    from core.advanced_risk_features import AdvancedRiskFeatures
+    ADVANCED_RISK_FEATURES_AVAILABLE = True
+except ImportError:
+    ADVANCED_RISK_FEATURES_AVAILABLE = False
+    AdvancedRiskFeatures = None
+    print("[Scout] Warning: Advanced risk features not available")
+
 # Import config module if available
 try:
     from config import ScoutConfig
@@ -813,6 +822,33 @@ async def analyze_wallets(
                     print(f"[Scout] Warning: Time-series feature extraction failed for {wallet_address[:8]}...: {e}")
                     time_series_features = None
 
+            # Extract advanced risk features if available
+            advanced_risk_features = None
+            if ADVANCED_RISK_FEATURES_AVAILABLE and AdvancedRiskFeatures and trades:
+                try:
+                    print(f"[Scout] Computing advanced risk features for {wallet_address[:8]}...")
+                    risk_extractor = AdvancedRiskFeatures(confidence_levels=[0.90, 0.95, 0.99])
+
+                    # Build trade history for risk analysis
+                    trade_history = []
+                    for trade in trades:
+                        if trade.get('pnl_sol') or trade.get('pnl'):
+                            trade_history.append({
+                                'pnl_sol': trade.get('pnl_sol', trade.get('pnl', 0.0)),
+                                'pnl': trade.get('pnl', 0.0),
+                                'timestamp': trade.get('timestamp'),
+                            })
+
+                    if len(trade_history) >= 5:  # Minimum sample requirement
+                        advanced_risk_features = risk_extractor.extract_features(trade_history)
+                        print("[Scout] Advanced risk features computed")
+                    else:
+                        print("[Scout] Insufficient trade history for advanced risk features (min 5 trades)")
+
+                except Exception as e:
+                    print(f"[Scout] Warning: Advanced risk feature extraction failed for {wallet_address[:8]}...: {e}")
+                    advanced_risk_features = None
+
             result = {
                 "address": wallet_address,
                 "metrics": metrics,
@@ -829,6 +865,7 @@ async def analyze_wallets(
                 "archetype": _archetype,
                 "network_features": network_features,
                 "time_series_features": time_series_features,
+                "advanced_risk_features": advanced_risk_features,
             }
             
             print(f"[Scout] ✓ Completed {wallet_address[:8]}... (WQS={wqs_score:.1f}, Status={final_status})")
@@ -1001,6 +1038,47 @@ async def analyze_wallets(
                 notes_parts.append("Time-series: Performance persistence detected")
             elif time_series_features.get('mean_reverting'):
                 notes_parts.append("Time-series: Mean-reverting pattern")
+
+        # Add advanced risk feature highlights if available
+        advanced_risk_features = res.get('advanced_risk_features')
+        if advanced_risk_features and advanced_risk_features.get('extraction_success'):
+            # CVaR (Conditional Value at Risk) - Tail risk measure
+            cvar_95 = advanced_risk_features.get('cvar_95')
+            if cvar_95:
+                if cvar_95 < -0.20:  # More than 20% loss in worst 5% cases
+                    notes_parts.append(f"Risk: High tail risk (CVaR95={cvar_95:.1%})")
+                elif cvar_95 < -0.10:
+                    notes_parts.append(f"Risk: Moderate tail risk (CVaR95={cvar_95:.1%})")
+
+            # Tail risk metrics
+            tail_ratio = advanced_risk_features.get('tail_ratio')
+            if tail_ratio:
+                if tail_ratio < 0.8:  # Poor risk-adjusted returns in tail
+                    notes_parts.append(f"Risk: Weak tail protection (ratio={tail_ratio:.2f})")
+
+            # Ulcer Index - Measures downside duration and severity
+            ulcer_index = advanced_risk_features.get('ulcer_index')
+            if ulcer_index:
+                if ulcer_index > 10.0:  # High prolonged drawdown
+                    notes_parts.append(f"Risk: High ulcer index ({ulcer_index:.1f})")
+                elif ulcer_index > 5.0:
+                    notes_parts.append(f"Risk: Moderate ulcer index ({ulcer_index:.1f})")
+
+            # Maximum drawdown duration
+            max_dd_duration = advanced_risk_features.get('max_drawdown_duration_days')
+            if max_dd_duration:
+                if max_dd_duration > 30:  # More than 30 days in drawdown
+                    notes_parts.append(f"Risk: Extended drawdown ({max_dd_duration:.0f} days)")
+                elif max_dd_duration > 14:
+                    notes_parts.append(f"Risk: Notable drawdown ({max_dd_duration:.0f} days)")
+
+            # Risk regime classification
+            risk_regime = advanced_risk_features.get('risk_regime')
+            if risk_regime:
+                if risk_regime == 'high_risk':
+                    notes_parts.append("Risk: High volatility regime")
+                elif risk_regime == 'low_risk':
+                    notes_parts.append("Risk: Stable regime")
 
         notes_parts.append(f"Analyzed at {utcnow().isoformat()}")
 
