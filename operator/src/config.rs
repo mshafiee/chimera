@@ -9,6 +9,50 @@ use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TradeMode {
+    Devnet,
+    Paper,
+    #[default]
+    Live,
+}
+
+/// Resolve trade mode from an optional explicit override, config value, and RPC URL.
+///
+/// Rules, in order:
+/// 1. `explicit` is `Some` → return it (user chose explicitly via env).
+/// 2. `config_mode` is non-default (not `Live`) → return it (set in YAML config).
+/// 3. `rpc_url` contains `"devnet"` → `Devnet` (auto-detect with log).
+/// 4. else `Live`.
+pub fn resolve_trade_mode(
+    explicit: Option<TradeMode>,
+    config_mode: TradeMode,
+    rpc_url: &str,
+) -> TradeMode {
+    if let Some(mode) = explicit {
+        return mode;
+    }
+    if config_mode != TradeMode::Live {
+        return config_mode;
+    }
+    if rpc_url.contains("devnet") {
+        tracing::info!(rpc_url = %rpc_url, "Auto-detected devnet RPC URL → TradeMode::Devnet");
+        return TradeMode::Devnet;
+    }
+    TradeMode::Live
+}
+
+impl std::fmt::Display for TradeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TradeMode::Devnet => write!(f, "DEVNET"),
+            TradeMode::Paper => write!(f, "PAPER"),
+            TradeMode::Live => write!(f, "LIVE"),
+        }
+    }
+}
+
 /// Root configuration structure
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -26,6 +70,9 @@ pub struct AppConfig {
     pub strategy: StrategyConfig,
     /// Jito tip configuration
     pub jito: JitoConfig,
+    /// Trade mode: devnet, paper, or live
+    #[serde(default)]
+    pub trade_mode: TradeMode,
     /// Jupiter API configuration
     #[serde(default)]
     pub jupiter: JupiterConfig,
@@ -429,9 +476,6 @@ pub struct JupiterConfig {
     /// Jupiter API base URL
     #[serde(default = "default_jupiter_api_url")]
     pub api_url: String,
-    /// Enable devnet simulation mode (skip Jupiter API, simulate trades)
-    #[serde(default)]
-    pub devnet_simulation_mode: bool,
     /// Enable V0 message reconstruction on blockhash expiry
     #[serde(default = "default_reconstruct_v0")]
     pub reconstruct_v0_on_blockhash_expiry: bool,
@@ -1163,7 +1207,7 @@ impl AppConfig {
             .add_source(File::with_name("config/config").required(false))
             // Override with environment variables (highest priority - loaded last)
             // CHIMERA_SERVER__PORT=8081 -> server.port = 8081
-            // CHIMERA_JUPITER__DEVNET_SIMULATION_MODE=true -> jupiter.devnet_simulation_mode = true
+            // CHIMERA_TRADE_MODE=paper -> trade_mode = Paper
             .add_source(
                 Environment::with_prefix("CHIMERA")
                     .separator("__")
@@ -1245,7 +1289,9 @@ impl AppConfig {
 
         // Validate worker threads
         if self.server.worker_threads == 0 {
-            return Err(ConfigError::Message("server.worker_threads must be > 0".into()));
+            return Err(ConfigError::Message(
+                "server.worker_threads must be > 0".into(),
+            ));
         }
 
         // Validate RPC timeout bounds
@@ -1348,7 +1394,12 @@ impl AppConfig {
         if let Some(ref monitoring_config) = self.monitoring {
             if monitoring_config.enabled {
                 // If monitoring is enabled, validate required API key
-                if monitoring_config.helius_api_key.as_ref().map(|k| k.is_empty()).unwrap_or(true) {
+                if monitoring_config
+                    .helius_api_key
+                    .as_ref()
+                    .map(|k| k.is_empty())
+                    .unwrap_or(true)
+                {
                     return Err(ConfigError::Message(
                         "Monitoring is enabled but helius_api_key is not set or empty".to_string(),
                     ));
@@ -1357,7 +1408,9 @@ impl AppConfig {
                 if let Some(ref webhook_url) = monitoring_config.helius_webhook_url {
                     if !webhook_url.is_empty() {
                         // Validate URL format
-                        if !webhook_url.starts_with("http://") && !webhook_url.starts_with("https://") {
+                        if !webhook_url.starts_with("http://")
+                            && !webhook_url.starts_with("https://")
+                        {
                             return Err(ConfigError::Message(format!(
                                 "Monitoring webhook URL must start with http:// or https://, got: {}",
                                 webhook_url

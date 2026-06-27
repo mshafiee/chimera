@@ -7,22 +7,23 @@ use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::tips::TipManager;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
-use crate::models::{Signal, Strategy};
+use crate::models::{Action, Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use crate::price_cache::PriceCache;
 use crate::vault::load_secrets_with_fallback;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
+use rand::Rng;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_commitment_config::CommitmentConfig;
+use solana_sdk::signature::Signer;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 use tokio::time::timeout;
-use rand::Rng;
 
 /// Maximum transaction size in bytes (raw, before base64 encoding)
 /// Solana's limit is 1232 bytes for raw transaction size
@@ -50,6 +51,59 @@ pub struct RpcHealth {
     pub last_check: DateTime<Utc>,
     /// Latency in milliseconds (if healthy)
     pub latency_ms: Option<u64>,
+}
+
+/// Outcome from a single trade execution — returned by `execute()` instead of
+/// mutating shared `parking_lot::Mutex` fields. Carries all per-signal results
+/// so concurrent workers never clobber each other's state.
+#[derive(Debug, Clone, Default)]
+pub struct ExecutionOutcome {
+    /// Transaction signature (simulated prefix for paper mode)
+    pub signature: String,
+    /// Whether the transaction was confirmed on-chain
+    pub confirmed: bool,
+    /// Fill price in SOL per whole token (pre-converted from lamports/base-unit)
+    pub fill_price_sol_per_token: Option<Decimal>,
+    /// Price impact percentage from Jupiter quote (e.g. 1.5 for 1.5%)
+    pub price_impact_pct: Option<Decimal>,
+    /// Virtual token amount from paper/devnet BUY (for DB storage)
+    pub token_amount: Option<u64>,
+    /// Estimated network fee in SOL (paper/devnet only; Live records real on-chain fees)
+    pub estimated_fee_sol: Option<Decimal>,
+}
+
+impl ExecutionOutcome {
+    fn live(
+        signature: String,
+        confirmed: bool,
+        fill_price_sol_per_token: Option<Decimal>,
+        price_impact_pct: Option<Decimal>,
+    ) -> Self {
+        Self {
+            signature,
+            confirmed,
+            fill_price_sol_per_token,
+            price_impact_pct,
+            token_amount: None,
+            estimated_fee_sol: None,
+        }
+    }
+}
+
+/// Convert lamports-per-base-unit to SOL-per-whole-token.
+///
+/// Formula: `lamports_per_base * 10^decimals / 1e9`
+/// - 9-decimal token: factor = 1e9/1e9 = 1
+/// - 6-decimal token: factor = 1e6/1e9 = 0.001
+///
+/// Returns `None` when `decimals` is `None` (unknown).
+pub fn lamports_per_base_to_sol_per_token(
+    lamports_per_base: Decimal,
+    decimals: Option<u8>,
+) -> Option<Decimal> {
+    let d = decimals?;
+    let token_units = Decimal::from(10u64.pow(d as u32));
+    Some(lamports_per_base * token_units / Decimal::from(1_000_000_000u64))
 }
 
 /// Mutable execution state — wrapped in a Mutex so `execute` can take `&self`,
@@ -94,13 +148,6 @@ pub struct Executor {
     /// [R-L1] Previously a new MarketRegimeDetector was instantiated on every check_execution_costs
     /// call; now it is a field so the internal price_history is preserved across calls.
     market_regime_detector: Option<Arc<crate::engine::market_regime::MarketRegimeDetector>>,
-    /// Price impact from the most recent Jupiter quote (set by execute_jito/execute_standard)
-    last_price_impact: parking_lot::Mutex<Option<Decimal>>,
-    /// Fill price (lamports per token base unit) from the most recent Jupiter quote
-    last_fill_price_lamports_per_base: parking_lot::Mutex<Option<Decimal>>,
-    /// Token decimals corresponding to the last fill price (None if unknown)
-    /// [B-M1] Used by get_last_fill_price_sol_per_token to avoid hardcoding 9 decimals.
-    last_fill_price_token_decimals: parking_lot::Mutex<Option<u8>>,
 }
 
 impl Executor {
@@ -170,9 +217,6 @@ impl Executor {
             jito_searcher,
             price_cache: None,
             market_regime_detector: None,
-            last_price_impact: parking_lot::Mutex::new(None),
-            last_fill_price_lamports_per_base: parking_lot::Mutex::new(None),
-            last_fill_price_token_decimals: parking_lot::Mutex::new(None),
         }
     }
 
@@ -255,9 +299,9 @@ impl Executor {
 
     /// Execute a trade signal
     ///
-    /// Returns the transaction signature on success
+    /// Returns an `ExecutionOutcome` carrying all per-signal results.
     #[tracing::instrument(skip(self, signal))]
-    pub async fn execute(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
+    pub async fn execute(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -316,14 +360,14 @@ impl Executor {
                 ));
             }
 
-            // Reset price impact at the start of each execution attempt to avoid stale data
-            // from a previous attempt being used in slippage cost calculation on BlockhashExpired retries.
-            *self.last_price_impact.lock() = None;
-
             // Execute based on mode
-            let result = match rpc_mode {
-                RpcMode::Jito => self.execute_jito(signal).await,
-                RpcMode::Standard => self.execute_standard(signal).await,
+            let result = match self.config.trade_mode {
+                crate::config::TradeMode::Devnet => self.execute_devnet(signal).await,
+                crate::config::TradeMode::Paper => self.execute_paper(signal).await,
+                crate::config::TradeMode::Live => match rpc_mode {
+                    RpcMode::Jito => self.execute_jito(signal).await,
+                    RpcMode::Standard => self.execute_standard(signal).await,
+                },
             };
 
             // Handle retry for expired blockhash
@@ -377,11 +421,11 @@ impl Executor {
 
             // Handle result and track failures
             match &result {
-                Ok((sig, _confirmed)) => {
+                Ok(outcome) => {
                     self.mutable.lock().failure_count = 0;
                     tracing::info!(
                         trade_uuid = %signal.trade_uuid,
-                        signature = %sig,
+                        signature = %outcome.signature,
                         "Trade executed successfully"
                     );
 
@@ -392,7 +436,7 @@ impl Executor {
                             if let Err(e) = tip_manager
                                 .record_tip(
                                     tip,
-                                    Some(sig),
+                                    Some(&outcome.signature),
                                     signal.payload.strategy,
                                     true, // success
                                 )
@@ -419,7 +463,7 @@ impl Executor {
                     // reflects that illiquid tokens ($5k liquidity) with a 0.5 SOL trade
                     // have ~5% slippage, not the flat 0.5% the old config-based fallback used.
                     // Falls back to the config value when neither liquidity nor price is available.
-                    let slippage_percent = self.last_price_impact.lock().take()
+                    let slippage_percent = outcome.price_impact_pct
                         .map(|pct| pct / Decimal::from(100)) // convert 1.5% → 0.015 fraction
                         .unwrap_or_else(|| {
                             // Try liquidity-aware estimate first
@@ -457,13 +501,15 @@ impl Executor {
                     let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
 
                     // Update trade costs in database
-                    if let Err(e) = self.db.update_trade_costs(
-                        &signal.trade_uuid,
-                        jito_tip,
-                        dex_fee_sol,
-                        slippage_cost_sol,
-                    )
-                    .await
+                    if let Err(e) = self
+                        .db
+                        .update_trade_costs(
+                            &signal.trade_uuid,
+                            jito_tip,
+                            dex_fee_sol,
+                            slippage_cost_sol,
+                        )
+                        .await
                     {
                         tracing::warn!(
                             trade_uuid = %signal.trade_uuid,
@@ -498,13 +544,15 @@ impl Executor {
                     // Record costs even for failed trades — Jito tip was still paid
                     if rpc_mode == RpcMode::Jito {
                         let jito_tip = self.calculate_jito_tip(signal);
-                        if let Err(cost_err) = self.db.update_trade_costs(
-                            &signal.trade_uuid,
-                            jito_tip,
-                            Decimal::ZERO,
-                            Decimal::ZERO,
-                        )
-                        .await
+                        if let Err(cost_err) = self
+                            .db
+                            .update_trade_costs(
+                                &signal.trade_uuid,
+                                jito_tip,
+                                Decimal::ZERO,
+                                Decimal::ZERO,
+                            )
+                            .await
                         {
                             tracing::warn!(
                                 trade_uuid = %signal.trade_uuid,
@@ -704,14 +752,16 @@ impl Executor {
                 }
 
                 // Log recovery to config audit
-                if let Err(e) = self.db.log_config_change(
-                    "rpc_mode",
-                    Some("JITO"),
-                    "STANDARD",
-                    "SYSTEM_RECOVERY",
-                    Some("Primary RPC recovered, switching back from fallback"),
-                )
-                .await
+                if let Err(e) = self
+                    .db
+                    .log_config_change(
+                        "rpc_mode",
+                        Some("JITO"),
+                        "STANDARD",
+                        "SYSTEM_RECOVERY",
+                        Some("Primary RPC recovered, switching back from fallback"),
+                    )
+                    .await
                 {
                     tracing::error!(error = %e, "Failed to log RPC mode recovery");
                 }
@@ -905,21 +955,11 @@ impl Executor {
     }
 
     /// Execute via Jito bundle
-    async fn execute_jito(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
+    async fn execute_jito(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via Jito bundle"
         );
-
-        // Check if devnet simulation mode is enabled
-        if self.config.jupiter.devnet_simulation_mode {
-            tracing::info!(
-                trade_uuid = %signal.trade_uuid,
-                "Devnet simulation mode: skipping RPC submission, returning simulated signature"
-            );
-            // Return a simulated signature (format: "simulated_<uuid>")
-            return Ok((format!("simulated_{}", signal.trade_uuid), true));
-        }
 
         // Skip RPC health check - proceed with transaction
         let active_url = self.active_rpc_url();
@@ -936,10 +976,12 @@ impl Executor {
         // Build transaction (use active RPC client)
         let active_client = self.active_rpc_client();
         let transaction_builder =
-            TransactionBuilder::new(active_client.clone(), self.config.clone())
-                .map_err(|e| {
-                    ExecutorError::TransactionFailed(format!("Failed to create transaction builder: {}", e))
-                })?;
+            TransactionBuilder::new(active_client.clone(), self.config.clone()).map_err(|e| {
+                ExecutorError::TransactionFailed(format!(
+                    "Failed to create transaction builder: {}",
+                    e
+                ))
+            })?;
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
@@ -950,9 +992,13 @@ impl Executor {
         // Capture actual price impact and fill price from Jupiter quote.
         // [B-M1] Token decimals are now populated at webhook time from on-chain metadata,
         // enabling correct SOL-per-token conversion without hardcoding 9 decimals.
-        *self.last_price_impact.lock() = built_tx.price_impact_pct();
-        *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
-        *self.last_fill_price_token_decimals.lock() = signal.token_decimals;
+        let price_impact = built_tx.price_impact_pct();
+        let fill_price_sol = lamports_per_base_to_sol_per_token(
+            built_tx
+                .fill_price_lamports_per_base()
+                .unwrap_or(Decimal::ZERO),
+            signal.token_decimals,
+        );
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
@@ -1019,7 +1065,12 @@ impl Executor {
                     let confirmed = self
                         .poll_signature_confirmation(&signature, &signal.trade_uuid)
                         .await?;
-                    return Ok((signature, confirmed));
+                    return Ok(ExecutionOutcome::live(
+                        signature,
+                        confirmed,
+                        fill_price_sol,
+                        price_impact,
+                    ));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1066,7 +1117,12 @@ impl Executor {
                         let confirmed = self
                             .poll_signature_confirmation(&signature, &signal.trade_uuid)
                             .await?;
-                        return Ok((signature, confirmed));
+                        return Ok(ExecutionOutcome::live(
+                            signature,
+                            confirmed,
+                            fill_price_sol,
+                            price_impact,
+                        ));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1109,7 +1165,12 @@ impl Executor {
             }
         };
 
-        Ok((signature, confirmed))
+        Ok(ExecutionOutcome::live(
+            signature,
+            confirmed,
+            fill_price_sol,
+            price_impact,
+        ))
     }
 
     /// Submit transaction via Helius Sender API (Jito bundles)
@@ -1210,21 +1271,11 @@ impl Executor {
     }
 
     /// Execute via standard TPU
-    async fn execute_standard(&self, signal: &Signal) -> Result<(String, bool), ExecutorError> {
+    async fn execute_standard(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via standard TPU"
         );
-
-        // Check if devnet simulation mode is enabled
-        if self.config.jupiter.devnet_simulation_mode {
-            tracing::info!(
-                trade_uuid = %signal.trade_uuid,
-                "Devnet simulation mode: skipping RPC submission, returning simulated signature"
-            );
-            // Return a simulated signature (format: "simulated_<uuid>")
-            return Ok((format!("simulated_{}", signal.trade_uuid), true));
-        }
 
         // Skip RPC health check for devnet - just proceed with transaction
         // The actual transaction submission will fail if RPC is unavailable
@@ -1242,10 +1293,12 @@ impl Executor {
         // Build transaction (use active RPC client)
         let active_client = self.active_rpc_client();
         let transaction_builder =
-            TransactionBuilder::new(active_client.clone(), self.config.clone())
-                .map_err(|e| {
-                    ExecutorError::TransactionFailed(format!("Failed to create transaction builder: {}", e))
-                })?;
+            TransactionBuilder::new(active_client.clone(), self.config.clone()).map_err(|e| {
+                ExecutorError::TransactionFailed(format!(
+                    "Failed to create transaction builder: {}",
+                    e
+                ))
+            })?;
         let built_tx = transaction_builder
             .build_swap_transaction(signal, &wallet_keypair)
             .await
@@ -1255,9 +1308,13 @@ impl Executor {
 
         // Capture actual price impact and fill price from Jupiter quote.
         // [B-M1] Also capture token decimals for correct SOL-per-token conversion.
-        *self.last_price_impact.lock() = built_tx.price_impact_pct();
-        *self.last_fill_price_lamports_per_base.lock() = built_tx.fill_price_lamports_per_base();
-        *self.last_fill_price_token_decimals.lock() = signal.token_decimals;
+        let price_impact = built_tx.price_impact_pct();
+        let fill_price_sol = lamports_per_base_to_sol_per_token(
+            built_tx
+                .fill_price_lamports_per_base()
+                .unwrap_or(Decimal::ZERO),
+            signal.token_decimals,
+        );
 
         // Check total execution cost cap
         self.check_execution_costs(signal, built_tx.price_impact_pct(), Decimal::ZERO)?;
@@ -1286,7 +1343,12 @@ impl Executor {
             }
         };
 
-        Ok((signature, confirmed))
+        Ok(ExecutionOutcome::live(
+            signature,
+            confirmed,
+            fill_price_sol,
+            price_impact,
+        ))
     }
 
     /// Validate transaction size before submission
@@ -1757,7 +1819,9 @@ impl Executor {
                 let regime = detector.detect_token_regime(signal.token_address());
 
                 let multiplier = match regime {
-                    MarketRegime::Bull | MarketRegime::Bear => Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2)), // Allow 50% more slippage in fast markets
+                    MarketRegime::Bull | MarketRegime::Bear => {
+                        Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2))
+                    } // Allow 50% more slippage in fast markets
                     MarketRegime::Sideways => Decimal::ONE,
                 };
 
@@ -1818,14 +1882,16 @@ impl Executor {
             .await;
 
             // Log to config audit
-            if let Err(e) = self.db.log_config_change(
-                "rpc_mode",
-                Some("JITO"),
-                "STANDARD",
-                "SYSTEM_FAILOVER",
-                Some(&reason),
-            )
-            .await
+            if let Err(e) = self
+                .db
+                .log_config_change(
+                    "rpc_mode",
+                    Some("JITO"),
+                    "STANDARD",
+                    "SYSTEM_FAILOVER",
+                    Some(&reason),
+                )
+                .await
             {
                 tracing::error!(error = %e, "Failed to log RPC mode change");
             }
@@ -1849,36 +1915,189 @@ impl Executor {
         self.mutable.lock().fallback_since.is_some()
     }
 
-    /// Get fill price in SOL per token from the most recent Jupiter quote.
+    /// Estimate network fee in SOL for paper/devnet PnL realism.
     ///
-    /// Uses the token decimals stored alongside the fill price to compute the correct
-    /// SOL-per-whole-token price. Returns None if the fill price or token decimals are
-    /// unavailable (caller should fall back to the price cache).
-    ///
-    /// [B-M1] Previously hardcoded 9 decimals (standard SPL); now uses the stored decimals
-    /// so that 6-decimal tokens (e.g. USDC) are priced correctly.
-    pub fn get_last_fill_price_sol_per_token(&self) -> Option<Decimal> {
-        let lamports_per_base = (*self.last_fill_price_lamports_per_base.lock())?;
+    /// Approximation: base fee (5000 lamports) + median priority fee × estimated CU / 1e6,
+    /// then convert lamports to SOL (÷ 1e9).
+    async fn estimate_network_fee(&self) -> Decimal {
+        let client = self.active_rpc_client();
+        let base_fee_lamports: u64 = 5000;
 
-        // Look up token decimals from the cache stored at execution time.
-        let token_decimals = match *self.last_fill_price_token_decimals.lock() {
-            Some(d) => d,
-            None => {
-                tracing::warn!(
-                    "get_last_fill_price_sol_per_token: token decimals unknown (no metadata cache hit); \
-                     returning None so caller uses price-cache fallback"
+        let priority_fee_lamports: u64 = client
+            .get_recent_prioritization_fees(&[])
+            .await
+            .ok()
+            .and_then(|fees| {
+                let mut sorted = fees
+                    .iter()
+                    .map(|f| f.prioritization_fee)
+                    .collect::<Vec<_>>();
+                sorted.sort();
+                sorted.get(sorted.len() / 2).copied()
+            })
+            .unwrap_or(100_000);
+
+        let estimated_cu: u64 = 200_000;
+        let total_lamports = base_fee_lamports
+            + (priority_fee_lamports as u128 * estimated_cu as u128 / 1_000_000) as u64;
+        Decimal::from(total_lamports) / Decimal::from(1_000_000_000u64)
+    }
+
+    /// Fetch real Jupiter quotes for paper/devnet modes. Returns the data needed
+    /// to build an `ExecutionOutcome` without mutating any shared state.
+    async fn get_paper_prices(
+        &self,
+        signal: &Signal,
+    ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>), ExecutorError> {
+        let active_client = self.active_rpc_client();
+        let tx_builder = TransactionBuilder::new(active_client.clone(), self.config.clone())
+            .map_err(|e| ExecutorError::TransactionFailed(format!("TransactionBuilder: {}", e)))?;
+
+        let sol_mint = crate::constants::mints::SOL;
+
+        match signal.payload.action {
+            Action::Buy => {
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
+                let result = tx_builder
+                    .get_quote_prices(sol_mint, signal.token_address(), amount_lamports)
+                    .await
+                    .map_err(|e| {
+                        ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
+                    })?;
+
+                let fill_price_sol = lamports_per_base_to_sol_per_token(
+                    result.fill_price_lamports_per_base.unwrap_or(Decimal::ZERO),
+                    signal.token_decimals,
                 );
-                return None;
+                Ok((
+                    result.price_impact_pct,
+                    fill_price_sol,
+                    Some(result.out_amount),
+                ))
             }
-        };
+            Action::Sell => {
+                let position = self
+                    .db
+                    .get_position_by_trade_uuid(&signal.trade_uuid)
+                    .await
+                    .map_err(|e| ExecutorError::TransactionFailed(format!("DB lookup: {}", e)))?
+                    .ok_or_else(|| {
+                        ExecutorError::TransactionFailed(format!(
+                            "No position found for SELL: {}",
+                            signal.trade_uuid
+                        ))
+                    })?;
 
-        // Convert: lamports_per_base_unit → SOL_per_whole_token
-        // SOL/token = lamports_per_base * 10^token_decimals / 1e9
-        // For 9-decimal token: factor = 1e9/1e9 = 1
-        // For 6-decimal token: factor = 1e6/1e9 = 0.001
-        let token_units_per_token = Decimal::from(10u64.pow(token_decimals as u32));
-        let lamports_per_sol = Decimal::from(1_000_000_000u64);
-        Some(lamports_per_base * token_units_per_token / lamports_per_sol)
+                let token_amount =
+                    position
+                        .token_amount
+                        .and_then(|d| d.to_u64())
+                        .ok_or_else(|| {
+                            ExecutorError::TransactionFailed(
+                                "No token_amount in position for paper SELL".to_string(),
+                            )
+                        })?;
+
+                let exit_fraction = signal.payload.exit_fraction.unwrap_or(Decimal::ONE);
+                let sell_amount = (Decimal::from(token_amount) * exit_fraction)
+                    .to_u64()
+                    .unwrap_or(0);
+
+                let result = tx_builder
+                    .get_quote_prices(signal.token_address(), sol_mint, sell_amount)
+                    .await
+                    .map_err(|e| {
+                        ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
+                    })?;
+
+                let fill_price_sol = lamports_per_base_to_sol_per_token(
+                    result.fill_price_lamports_per_base.unwrap_or(Decimal::ZERO),
+                    signal.token_decimals,
+                );
+                Ok((result.price_impact_pct, fill_price_sol, None))
+            }
+        }
+    }
+
+    async fn execute_paper(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+        tracing::info!(
+            trade_uuid = %signal.trade_uuid,
+            action = %signal.payload.action,
+            "Paper mode: fetching real Jupiter quote, no on-chain submission"
+        );
+
+        let (price_impact, fill_price_sol, token_amount) = self.get_paper_prices(signal).await?;
+        let estimated_fee_sol = self.estimate_network_fee().await;
+
+        Ok(ExecutionOutcome {
+            signature: format!("simulated_{}", signal.trade_uuid),
+            confirmed: true,
+            fill_price_sol_per_token: fill_price_sol,
+            price_impact_pct: price_impact,
+            token_amount,
+            estimated_fee_sol: Some(estimated_fee_sol),
+        })
+    }
+
+    async fn execute_devnet(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+        tracing::info!(
+            trade_uuid = %signal.trade_uuid,
+            "Devnet mode: real Jupiter quote + minimal tx on devnet"
+        );
+
+        let (price_impact, fill_price_sol, token_amount) = self.get_paper_prices(signal).await?;
+        let estimated_fee_sol = self.estimate_network_fee().await;
+
+        let secrets = load_secrets_with_fallback().map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
+        })?;
+        let wallet_keypair = load_wallet_keypair(&secrets).map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e))
+        })?;
+
+        let blockhash = self
+            .active_rpc_client()
+            .get_latest_blockhash()
+            .await
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Blockhash: {}", e)))?;
+
+        let noop_ix = solana_system_interface::instruction::transfer(
+            &wallet_keypair.pubkey(),
+            &wallet_keypair.pubkey(),
+            0,
+        );
+        let mut tx = Transaction::new_with_payer(&[noop_ix], Some(&wallet_keypair.pubkey()));
+        tx.sign(&[&wallet_keypair], blockhash);
+
+        let signature_str = self
+            .active_rpc_client()
+            .send_transaction(&tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "Devnet submission failed");
+                ExecutorError::TransactionFailed(format!("Devnet submission: {}", e))
+            })?
+            .to_string();
+
+        let confirmed = self
+            .poll_signature_confirmation(&signature_str, &signal.trade_uuid)
+            .await?;
+
+        tracing::info!(
+            trade_uuid = %signal.trade_uuid,
+            signature = %signature_str,
+            confirmed = confirmed,
+            "Devnet transaction submitted"
+        );
+
+        Ok(ExecutionOutcome {
+            signature: signature_str,
+            confirmed,
+            fill_price_sol_per_token: fill_price_sol,
+            price_impact_pct: price_impact,
+            token_amount,
+            estimated_fee_sol: Some(estimated_fee_sol),
+        })
     }
 
     /// Get time spent in fallback mode

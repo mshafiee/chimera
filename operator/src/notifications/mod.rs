@@ -89,25 +89,30 @@ impl NotificationEvent {
     }
 
     /// Format the event as a notification message
-    pub fn format_message(&self) -> String {
+    pub fn format_message(&self, trade_mode: &str) -> String {
+        let prefix = match trade_mode {
+            "paper" => "[PAPER] ",
+            "devnet" => "[DEVNET] ",
+            _ => "",
+        };
         match self {
             NotificationEvent::CircuitBreakerTriggered { reason } => {
-                format!("🚨 Circuit breaker triggered: {}", reason)
+                format!("{prefix}🚨 Circuit breaker triggered: {}", reason)
             }
             NotificationEvent::CircuitBreakerRecovered => {
-                "✅ Circuit breaker recovered - trading resumed".to_string()
+                format!("{prefix}✅ Circuit breaker recovered - trading resumed")
             }
             NotificationEvent::WalletDrained {
                 delta_sol,
                 timeframe,
             } => {
                 format!(
-                    "🚨 EMERGENCY: Balance dropped {:.4} SOL in {}",
+                    "{prefix}🚨 EMERGENCY: Balance dropped {:.4} SOL in {}",
                     delta_sol, timeframe
                 )
             }
             NotificationEvent::SystemCrash { component } => {
-                format!("🚨 System down: {}", component)
+                format!("{prefix}🚨 System down: {}", component)
             }
             NotificationEvent::PositionExited {
                 token,
@@ -122,16 +127,16 @@ impl NotificationEvent {
                     "📉"
                 };
                 format!(
-                    "{} {} {}: {:+.2}% ({:+.4} SOL)",
+                    "{prefix}{} {} {}: {:+.2}% ({:+.4} SOL)",
                     emoji, token, strategy, pnl_percent_f64, pnl_sol
                 )
             }
             NotificationEvent::RpcFallback { reason } => {
-                format!("⚠️ Switched to fallback RPC: {}", reason)
+                format!("{prefix}⚠️ Switched to fallback RPC: {}", reason)
             }
             NotificationEvent::WalletPromoted { address, wqs_score } => {
                 format!(
-                    "📊 Wallet promoted: {}...{} (WQS: {:.2})",
+                    "{prefix}📊 Wallet promoted: {}...{} (WQS: {:.2})",
                     &address[..4],
                     &address[address.len() - 4..],
                     wqs_score
@@ -149,7 +154,7 @@ impl NotificationEvent {
                     "📉"
                 };
                 format!(
-                    "{} Daily: {:+.2} USD | Trades: {} | Win: {:.1}%",
+                    "{prefix}{} Daily: {:+.2} USD | Trades: {} | Win: {:.1}%",
                     emoji, pnl_usd_f64, trade_count, win_rate
                 )
             }
@@ -160,16 +165,15 @@ impl NotificationEvent {
 /// Notification service trait
 #[async_trait::async_trait]
 pub trait NotificationService: Send + Sync {
-    /// Send a notification
-    async fn notify(&self, event: NotificationEvent) -> anyhow::Result<()>;
+    async fn notify(&self, event: &NotificationEvent, trade_mode: &str) -> anyhow::Result<()>;
 
-    /// Check if the service is enabled
     fn is_enabled(&self) -> bool;
 }
 
 /// Composite notifier that can send to multiple services
 pub struct CompositeNotifier {
     services: Vec<Arc<dyn NotificationService>>,
+    trade_mode: String,
 }
 
 impl CompositeNotifier {
@@ -177,7 +181,12 @@ impl CompositeNotifier {
     pub fn new() -> Self {
         Self {
             services: Vec::new(),
+            trade_mode: "live".to_string(),
         }
+    }
+
+    pub fn set_trade_mode(&mut self, mode: &str) {
+        self.trade_mode = mode.to_lowercase();
     }
 
     /// Add a notification service
@@ -187,9 +196,10 @@ impl CompositeNotifier {
 
     /// Send notification to all enabled services
     pub async fn notify(&self, event: NotificationEvent) {
+        let mode = self.trade_mode.as_str();
         for service in &self.services {
             if service.is_enabled() {
-                if let Err(e) = service.notify(event.clone()).await {
+                if let Err(e) = service.notify(&event, mode).await {
                     tracing::error!(
                         error = %e,
                         event = ?event.level(),
@@ -223,15 +233,15 @@ mod tests {
         let event = NotificationEvent::CircuitBreakerTriggered {
             reason: "Max loss exceeded".to_string(),
         };
-        assert!(event.format_message().contains("Circuit breaker"));
-        assert!(event.format_message().contains("🚨"));
+        assert!(event.format_message("live").contains("Circuit breaker"));
+        assert!(event.format_message("live").contains("🚨"));
     }
 
     #[test]
     fn test_circuit_breaker_recovered_event() {
         let event = NotificationEvent::CircuitBreakerRecovered;
-        assert!(event.format_message().contains("recovered"));
-        assert!(event.format_message().contains("trading resumed"));
+        assert!(event.format_message("live").contains("recovered"));
+        assert!(event.format_message("live").contains("trading resumed"));
         assert_eq!(event.level(), AlertLevel::Info);
     }
 

@@ -7,11 +7,11 @@
 use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::executor::{Executor, ExecutorError};
+use crate::engine::portfolio_heat::PortfolioHeat;
 use crate::handlers::{TradeUpdateData, WsEvent, WsState};
 use crate::metrics::MetricsState;
 use crate::models::{Action, Signal, Strategy};
 use crate::notifications::CompositeNotifier;
-use crate::engine::portfolio_heat::PortfolioHeat;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
 use chrono::{Timelike, Utc};
@@ -78,20 +78,28 @@ impl SignalProcessor {
         );
 
         // Update status to EXECUTING
-        if let Err(e) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-            trade_uuid: trade_uuid.clone(),
-            status: "EXECUTING".to_string(),
-            tx_signature: None,
-            error_message: None,
-        }).await
+        if let Err(e) = self
+            .db
+            .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                trade_uuid: trade_uuid.clone(),
+                status: "EXECUTING".to_string(),
+                tx_signature: None,
+                error_message: None,
+            })
+            .await
         {
             tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING — marking FAILED to prevent phantom-QUEUED state");
-            if let Err(e2) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                trade_uuid: trade_uuid.clone(),
-                status: "FAILED".to_string(),
-                tx_signature: None,
-                error_message: Some("DB error: failed to transition QUEUED->EXECUTING".to_string()),
-            }).await
+            if let Err(e2) = self
+                .db
+                .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                    trade_uuid: trade_uuid.clone(),
+                    status: "FAILED".to_string(),
+                    tx_signature: None,
+                    error_message: Some(
+                        "DB error: failed to transition QUEUED->EXECUTING".to_string(),
+                    ),
+                })
+                .await
             {
                 tracing::error!(error = %e2, trade_uuid = %trade_uuid, "Failed to mark trade FAILED after EXECUTING transition failed — trade is stuck in QUEUED");
             }
@@ -119,12 +127,14 @@ impl SignalProcessor {
                                     "Token rejected by slow-path safety check"
                                 );
 
-                                let _ = self.db.mark_trade_dead_letter(
-                                    &trade_uuid,
-                                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                    &reason,
-                                )
-                                .await;
+                                let _ = self
+                                    .db
+                                    .mark_trade_dead_letter(
+                                        &trade_uuid,
+                                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                        &reason,
+                                    )
+                                    .await;
 
                                 if let Some(ref ws) = self.ws_state {
                                     ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
@@ -147,12 +157,14 @@ impl SignalProcessor {
                                 "Slow-path token check error, rejecting trade"
                             );
 
-                            let _ = self.db.mark_trade_dead_letter(
-                                &trade_uuid,
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                &reason,
-                            )
-                            .await;
+                            let _ = self
+                                .db
+                                .mark_trade_dead_letter(
+                                    &trade_uuid,
+                                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                    &reason,
+                                )
+                                .await;
 
                             if let Some(ref ws) = self.ws_state {
                                 ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
@@ -173,12 +185,14 @@ impl SignalProcessor {
                         "BUY signal missing token_address, rejecting"
                     );
 
-                    let _ = self.db.mark_trade_dead_letter(
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
 
                     return;
                 }
@@ -189,24 +203,29 @@ impl SignalProcessor {
                     "force_slow_path is set but token_parser is None — rejecting trade to prevent unchecked token execution"
                 );
 
-                if let Err(e) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                    trade_uuid: trade_uuid.clone(),
-                    status: "DEAD_LETTER".to_string(),
-                    tx_signature: None,
-                    error_message: Some(reason.clone()),
-                }).await
+                if let Err(e) = self
+                    .db
+                    .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                        trade_uuid: trade_uuid.clone(),
+                        status: "DEAD_LETTER".to_string(),
+                        tx_signature: None,
+                        error_message: Some(reason.clone()),
+                    })
+                    .await
                 {
                     tracing::error!(error = %e, "Failed to update trade status to DEAD_LETTER");
                 }
 
-                let _ = self.db.insert_dlq(
-                    Some(&trade_uuid),
-                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                    "TOKEN_SLOW_SAFETY_UNAVAILABLE",
-                    Some(&reason),
-                    signal.source_ip.as_deref(),
-                )
-                .await;
+                let _ = self
+                    .db
+                    .insert_dlq(
+                        Some(&trade_uuid),
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        "TOKEN_SLOW_SAFETY_UNAVAILABLE",
+                        Some(&reason),
+                        signal.source_ip.as_deref(),
+                    )
+                    .await;
 
                 return;
             }
@@ -269,12 +288,14 @@ impl SignalProcessor {
                     let reason = "Portfolio heat limit reached at execution time".to_string();
                     tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: portfolio heat limit reached");
 
-                    let _ = self.db.mark_trade_dead_letter(
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
                     if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
@@ -308,12 +329,14 @@ impl SignalProcessor {
                     );
                     tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: strategy allocation limit reached");
 
-                    let _ = self.db.mark_trade_dead_letter(
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
                     if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
@@ -335,15 +358,24 @@ impl SignalProcessor {
         if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
             if let Some(ref token_address) = signal.payload.token_address {
                 let existing: i64 = match self.db.get_active_positions().await {
-                    Ok(positions) => positions.iter().filter(|p| p.token_address == *token_address).count() as i64,
+                    Ok(positions) => positions
+                        .iter()
+                        .filter(|p| p.token_address == *token_address)
+                        .count() as i64,
                     Err(e) => {
-                        let reason = format!("DB error during duplicate check — rejecting signal (fail-safe): {}", e);
+                        let reason = format!(
+                            "DB error during duplicate check — rejecting signal (fail-safe): {}",
+                            e
+                        );
                         tracing::error!(trade_uuid = %trade_uuid, error = %e, "DB error in duplicate position check — rejecting signal");
-                        let _ = self.db.mark_trade_dead_letter(
-                            &trade_uuid,
-                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                            &reason,
-                        ).await;
+                        let _ = self
+                            .db
+                            .mark_trade_dead_letter(
+                                &trade_uuid,
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                &reason,
+                            )
+                            .await;
                         return;
                     }
                 };
@@ -354,12 +386,14 @@ impl SignalProcessor {
                         token_address
                     );
                     tracing::warn!(trade_uuid = %trade_uuid, token_address = %token_address, "Duplicate token position rejected");
-                    let _ = self.db.mark_trade_dead_letter(
-                        &trade_uuid,
-                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                        &reason,
-                    )
-                    .await;
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
                     if let Some(ref ws) = self.ws_state {
                         ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                             trade_uuid: trade_uuid.clone(),
@@ -385,19 +419,16 @@ impl SignalProcessor {
         }
 
         match result {
-            Ok((tx_signature, confirmed)) => {
+            Ok(outcome) => {
                 tracing::info!(
                     trade_uuid = %trade_uuid,
-                    tx_signature = %tx_signature,
+                    tx_signature = %outcome.signature,
                     "Trade executed successfully"
                 );
 
                 // Handle BUY signals — activate trade and open position
                 if signal.payload.action == Action::Buy {
-                    let fill_price_sol = {
-                        let exec = self.executor.read().await;
-                        exec.get_last_fill_price_sol_per_token()
-                    };
+                    let fill_price_sol = outcome.fill_price_sol_per_token;
                     let sol_price_usd = self
                         .price_cache
                         .as_ref()
@@ -433,21 +464,33 @@ impl SignalProcessor {
                         * rust_decimal::Decimal::from_f64_retain(0.20)
                             .unwrap_or(rust_decimal::Decimal::ZERO);
 
-                    match self.db.atomic_portfolio_heat_check_and_open_position(
-                        &trade_uuid,
-                        &signal.payload.wallet_address,
-                        signal.token_address(),
-                        Some(&signal.payload.token),
-                        &signal.payload.strategy.to_string(),
-                        signal.payload.amount_sol,
-                        entry_price,
-                        &tx_signature,
-                        Some(max_heat_sol),
-                        Some(sol_price_usd),
-                    )
-                    .await
+                    match self
+                        .db
+                        .atomic_portfolio_heat_check_and_open_position(
+                            &trade_uuid,
+                            &signal.payload.wallet_address,
+                            signal.token_address(),
+                            Some(&signal.payload.token),
+                            &signal.payload.strategy.to_string(),
+                            signal.payload.amount_sol,
+                            entry_price,
+                            &outcome.signature,
+                            Some(max_heat_sol),
+                            Some(sol_price_usd),
+                        )
+                        .await
                     {
                         Ok(()) => {
+                            if let Some(token_amount) = outcome.token_amount {
+                                if let Err(e) = self
+                                    .db
+                                    .update_position_token_amount(&trade_uuid, token_amount)
+                                    .await
+                                {
+                                    tracing::warn!(error = %e, "Failed to set token_amount on position");
+                                }
+                            }
+
                             if let Some(ref ws) = self.ws_state {
                                 ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                                     trade_uuid: trade_uuid.clone(),
@@ -458,29 +501,32 @@ impl SignalProcessor {
                             }
                         }
                         Err(e) => {
-                            let reason = format!("Position row insert failed after on-chain BUY: {}", e);
+                            let reason =
+                                format!("Position row insert failed after on-chain BUY: {}", e);
                             tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to activate trade and open position — DEAD_LETTER-ing");
-                            let _ = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                                trade_uuid: trade_uuid.clone(),
-                                status: "DEAD_LETTER".to_string(),
-                                tx_signature: None,
-                                error_message: Some(reason.clone()),
-                            }).await;
-                            let _ = self.db.insert_dlq(
-                                Some(&trade_uuid),
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                "POSITION_ROW_INSERT_FAILED",
-                                Some(&reason),
-                                signal.source_ip.as_deref(),
-                            )
-                            .await;
+                            let _ = self
+                                .db
+                                .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                                    trade_uuid: trade_uuid.clone(),
+                                    status: "DEAD_LETTER".to_string(),
+                                    tx_signature: None,
+                                    error_message: Some(reason.clone()),
+                                })
+                                .await;
+                            let _ = self
+                                .db
+                                .insert_dlq(
+                                    Some(&trade_uuid),
+                                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                    "POSITION_ROW_INSERT_FAILED",
+                                    Some(&reason),
+                                    signal.source_ip.as_deref(),
+                                )
+                                .await;
                         }
                     }
                 } else if signal.payload.action == Action::Sell {
-                    let fill_price_sol = {
-                        let exec = self.executor.read().await;
-                        exec.get_last_fill_price_sol_per_token()
-                    };
+                    let fill_price_sol = outcome.fill_price_sol_per_token;
                     let sol_price_usd = self
                         .price_cache
                         .as_ref()
@@ -508,12 +554,15 @@ impl SignalProcessor {
                         .as_ref()
                         .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
 
-                    if let Err(e) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                        trade_uuid: trade_uuid.clone(),
-                        status: "EXITING".to_string(),
-                        tx_signature: Some(tx_signature.clone()),
-                        error_message: None,
-                    }).await
+                    if let Err(e) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "EXITING".to_string(),
+                            tx_signature: Some(outcome.signature.clone()),
+                            error_message: None,
+                        })
+                        .await
                     {
                         tracing::error!(error = %e, "Failed to update sell trade status to EXITING");
                     } else if let Some(ref ws) = self.ws_state {
@@ -539,27 +588,32 @@ impl SignalProcessor {
                         }
                     };
 
-                    if let Err(e) = self.db.close_position_full(
-                        &trade_uuid,
-                        &signal.payload.wallet_address,
-                        signal.token_address(),
-                        exit_price,
-                        &tx_signature,
-                        sol_price_usd_opt,
-                        exit_fraction,
-                        confirmed,
-                    )
-                    .await
+                    if let Err(e) = self
+                        .db
+                        .close_position_full(
+                            &trade_uuid,
+                            &signal.payload.wallet_address,
+                            signal.token_address(),
+                            exit_price,
+                            &outcome.signature,
+                            sol_price_usd_opt,
+                            exit_fraction,
+                            outcome.confirmed,
+                        )
+                        .await
                     {
                         tracing::error!(error = %e, "Failed to close position");
                     }
 
-                    if let Err(e) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                        trade_uuid: trade_uuid.clone(),
-                        status: "CLOSED".to_string(),
-                        tx_signature: Some(tx_signature.clone()),
-                        error_message: None,
-                    }).await
+                    if let Err(e) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "CLOSED".to_string(),
+                            tx_signature: Some(outcome.signature.clone()),
+                            error_message: None,
+                        })
+                        .await
                     {
                         tracing::error!(error = %e, "Failed to update trade status to CLOSED");
                     }
@@ -572,12 +626,15 @@ impl SignalProcessor {
                         reason = %reason,
                         "BUY trade deferred — market conditions unfavorable, reverting to PENDING"
                     );
-                    if let Err(db_err) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                        trade_uuid: trade_uuid.clone(),
-                        status: "PENDING".to_string(),
-                        tx_signature: None,
-                        error_message: Some(reason.to_string()),
-                    }).await
+                    if let Err(db_err) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "PENDING".to_string(),
+                            tx_signature: None,
+                            error_message: Some(reason.to_string()),
+                        })
+                        .await
                     {
                         tracing::error!(error = %db_err, "Failed to revert trade status to PENDING");
                     }
@@ -588,19 +645,25 @@ impl SignalProcessor {
                         action = %signal.payload.action,
                         "CRITICAL: EXIT signal deferred by market conditions — position may be stuck open"
                     );
-                    if let Err(db_err) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                        trade_uuid: trade_uuid.clone(),
-                        status: "FAILED".to_string(),
-                        tx_signature: None,
-                        error_message: Some(reason.to_string()),
-                    }).await
+                    if let Err(db_err) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "FAILED".to_string(),
+                            tx_signature: None,
+                            error_message: Some(reason.to_string()),
+                        })
+                        .await
                     {
                         tracing::error!(error = %db_err, "Failed to update exit trade status to FAILED");
                     }
                 }
             }
             Err(ExecutorError::ExecutionCostTooHigh {
-                cost, cost_pct, limit_pct, strategy,
+                cost,
+                cost_pct,
+                limit_pct,
+                strategy,
             }) => {
                 let reason = format!(
                     "Cost efficiency check failed: total cost {} SOL ({:.1}%) exceeds limit {:.1}% for strategy {:?}",
@@ -608,12 +671,14 @@ impl SignalProcessor {
                 );
                 tracing::warn!(trade_uuid = %trade_uuid, reason = %reason, "Trade rejected due to cost efficiency");
 
-                            let _ = self.db.mark_trade_dead_letter(
-                                &trade_uuid,
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                &reason,
-                            )
-                            .await;
+                let _ = self
+                    .db
+                    .mark_trade_dead_letter(
+                        &trade_uuid,
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        &reason,
+                    )
+                    .await;
 
                 if let Some(ref ws) = self.ws_state {
                     ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
@@ -631,12 +696,15 @@ impl SignalProcessor {
                     "Trade execution failed"
                 );
 
-                if let Err(db_err) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                    trade_uuid: trade_uuid.clone(),
-                    status: "FAILED".to_string(),
-                    tx_signature: None,
-                    error_message: Some(e.to_string()),
-                }).await
+                if let Err(db_err) = self
+                    .db
+                    .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                        trade_uuid: trade_uuid.clone(),
+                        status: "FAILED".to_string(),
+                        tx_signature: None,
+                        error_message: Some(e.to_string()),
+                    })
+                    .await
                 {
                     tracing::error!(error = %db_err, "Failed to update trade status to FAILED");
                 }

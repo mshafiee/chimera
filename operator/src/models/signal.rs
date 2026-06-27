@@ -158,8 +158,7 @@ pub struct Signal {
     /// than silently passed through.
     pub force_slow_path: bool,
     /// Token decimals (e.g. 9 for most SPL tokens, 6 for USDC).
-    /// [B-M1] Used by get_last_fill_price_sol_per_token to convert lamports/base_unit to
-    /// SOL/whole_token without hardcoding 9. None when not populated from token metadata.
+    /// None when not populated from token metadata.
     pub token_decimals: Option<u8>,
 }
 

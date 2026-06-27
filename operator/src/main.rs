@@ -29,20 +29,62 @@ use chimera_operator::engine::{
     ProfitTargetManager, RecoveryManager, StopLossAction, StopLossManager, TipManager, VolumeCache,
 };
 use chimera_operator::handlers::{
-    disable_wallet_monitoring, enable_wallet_monitoring, export_trades, get_config,
-    get_cost_metrics, get_health_check_details, get_market_conditions, get_market_regime,
-    get_monitoring_status, get_performance_metrics, get_position, get_rate_limit_status,
-    get_resources, get_secrets, get_scout_metrics, get_scout_status, get_strategy_performance,
-    get_wallet, get_wallet_monitoring_states, get_wqs_distribution, health_check, health_simple,
-    helius_webhook_handler,
-    list_config_audit, list_dead_letter_queue, list_positions, list_trades, list_wallets,
-    reset_circuit_breaker, roster_merge, roster_validate, trip_circuit_breaker, trigger_scout_run,
-    update_config, update_reconciliation_metrics, update_secret_rotation_metrics, update_wallet,
-    wallet_auth, webhook_handler, ws_handler,
+    bulk_cleanup_webhooks,
+    bulk_register_webhooks,
+    disable_wallet_monitoring,
+    enable_wallet_monitoring,
+    export_trades,
+    get_config,
+    get_cost_metrics,
+    get_health_check_details,
+    get_market_conditions,
+    get_market_regime,
+    get_monitoring_status,
+    get_performance_metrics,
+    get_position,
+    get_rate_limit_status,
+    get_resources,
+    get_scout_metrics,
+    get_scout_status,
+    get_secrets,
+    get_strategy_performance,
+    get_wallet,
+    get_wallet_monitoring_states,
+    get_webhook_audit_log,
     // Webhook lifecycle handlers
-    get_webhook_stats, bulk_register_webhooks, bulk_cleanup_webhooks, manual_reconcile_webhooks,
-    manual_health_check, get_webhook_audit_log, retry_webhook_registration, toggle_wallet_webhook,
-    ApiState, AppState, OperationsState, RosterState, WalletAuthState, WebhookState, WsState,
+    get_webhook_stats,
+    get_wqs_distribution,
+    health_check,
+    health_simple,
+    helius_webhook_handler,
+    list_config_audit,
+    list_dead_letter_queue,
+    list_positions,
+    list_trades,
+    list_wallets,
+    manual_health_check,
+    manual_reconcile_webhooks,
+    reset_circuit_breaker,
+    retry_webhook_registration,
+    roster_merge,
+    roster_validate,
+    toggle_wallet_webhook,
+    trigger_scout_run,
+    trip_circuit_breaker,
+    update_config,
+    update_reconciliation_metrics,
+    update_secret_rotation_metrics,
+    update_wallet,
+    wallet_auth,
+    webhook_handler,
+    ws_handler,
+    ApiState,
+    AppState,
+    OperationsState,
+    RosterState,
+    WalletAuthState,
+    WebhookState,
+    WsState,
 };
 use chimera_operator::metrics::{metrics_router, MetricsState};
 use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
@@ -54,6 +96,50 @@ use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, Tok
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
 
+async fn run_preflight(config: &AppConfig) -> anyhow::Result<()> {
+    match config.trade_mode {
+        chimera_operator::config::TradeMode::Paper => {
+            let jupiter_url = format!(
+                "{}/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v&amount=100000000&slippageBps=50",
+                config.jupiter.api_url
+            );
+            let client = reqwest::Client::new();
+            let resp = client
+                .get(&jupiter_url)
+                .timeout(std::time::Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Pre-flight Jupiter probe failed: {}", e))?;
+            if !resp.status().is_success() {
+                anyhow::bail!(
+                    "Pre-flight Jupiter probe returned HTTP {} — paper mode requires Jupiter API to be reachable",
+                    resp.status()
+                );
+            }
+            tracing::info!("Pre-flight passed: Jupiter API reachable (paper mode)");
+        }
+        chimera_operator::config::TradeMode::Devnet | chimera_operator::config::TradeMode::Live => {
+            let secrets = chimera_operator::vault::load_secrets_with_fallback()
+                .map_err(|e| anyhow::anyhow!("Pre-flight vault load failed: {}", e))?;
+            let _keypair =
+                chimera_operator::engine::transaction_builder::load_wallet_keypair(&secrets)
+                    .map_err(|e| anyhow::anyhow!("Pre-flight keypair load failed: {}", e))?;
+            let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new(
+                config.rpc.primary_url.clone(),
+            );
+            rpc_client
+                .get_latest_blockhash()
+                .await
+                .map_err(|e| anyhow::anyhow!("Pre-flight RPC probe failed: {}", e))?;
+            tracing::info!(
+                "Pre-flight passed: vault, keypair, and RPC reachable ({})",
+                config.trade_mode
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -62,53 +148,54 @@ async fn main() -> anyhow::Result<()> {
     // Load configuration
     let mut config = load_config()?;
 
-    // Explicitly override Jupiter simulation mode from environment if set
-    // This ensures the env var takes precedence over YAML/config defaults
-    if let Ok(sim_mode) = std::env::var("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE") {
-        let sim_mode_lower = sim_mode.to_lowercase();
-        let sim_mode_bool = match sim_mode_lower.as_str() {
-            "true" | "1" => {
-                tracing::info!("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE set to enabled");
-                true
-            }
-            "false" | "0" => {
-                tracing::info!("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE set to disabled");
-                false
-            }
-            _ => {
-                tracing::warn!(
-                    provided = %sim_mode,
-                    "Invalid value for CHIMERA_JUPITER__DEVNET_SIMULATION_MODE — must be 'true', 'false', '1', or '0'. Ignoring override."
-                );
-                // Don't apply the override — keep the config file value
-                config.jupiter.devnet_simulation_mode
-            }
-        };
+    use chimera_operator::config::{resolve_trade_mode, TradeMode};
 
-        if sim_mode_bool != config.jupiter.devnet_simulation_mode {
-            tracing::info!(
-                old_value = config.jupiter.devnet_simulation_mode,
-                new_value = sim_mode_bool,
-                "Overriding Jupiter simulation mode from environment variable"
-            );
-            config.jupiter.devnet_simulation_mode = sim_mode_bool;
+    let explicit_mode = {
+        let mut mode: Option<TradeMode> = None;
+        if let Ok(mode_str) = std::env::var("CHIMERA_TRADE_MODE") {
+            mode = match mode_str.to_lowercase().as_str() {
+                "devnet" => Some(TradeMode::Devnet),
+                "paper" => Some(TradeMode::Paper),
+                "live" => Some(TradeMode::Live),
+                _ => {
+                    tracing::warn!(provided = %mode_str, "Invalid CHIMERA_TRADE_MODE — must be devnet|paper|live. Ignoring.");
+                    None
+                }
+            };
+        }
+        if let Ok(old_val) = std::env::var("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE") {
+            if (old_val == "true" || old_val == "1") && mode.is_none() {
+                tracing::warn!("CHIMERA_JUPITER__DEVNET_SIMULATION_MODE is deprecated — use CHIMERA_TRADE_MODE=paper");
+                mode = Some(TradeMode::Paper);
+            }
+        }
+        mode
+    };
+    config.trade_mode =
+        resolve_trade_mode(explicit_mode, config.trade_mode, &config.rpc.primary_url);
+
+    match config.trade_mode {
+        TradeMode::Paper => tracing::warn!("┌─────────────────────────────────────────┐"),
+        _ => tracing::info!("┌─────────────────────────────────────────┐"),
+    };
+    tracing::info!("│  TRADE MODE: {:<28}  │", config.trade_mode.to_string());
+    match config.trade_mode {
+        TradeMode::Paper => tracing::warn!("│  NO REAL TRANSACTIONS WILL BE SUBMITTED │"),
+        TradeMode::Devnet => tracing::info!("│  Transactions on DEVNET (test network)  │"),
+        TradeMode::Live => tracing::info!("│  LIVE TRADING — REAL SOL AT RISK        │"),
+    }
+    tracing::info!("└─────────────────────────────────────────┘");
+
+    match config.trade_mode {
+        TradeMode::Paper => {
+            tracing::info!("Paper mode: skipping vault validation (no keypair needed)");
+        }
+        TradeMode::Devnet | TradeMode::Live => {
+            let _startup_secrets = vault::load_secrets_with_fallback()
+                .map_err(|e| anyhow::anyhow!("Vault startup validation failed: {}", e))?;
+            tracing::info!("Vault/secrets validated at startup");
         }
     }
-
-    tracing::info!(host = %config.server.host, port = config.server.port, "Configuration loaded");
-    tracing::info!(
-        jupiter_simulation_mode = config.jupiter.devnet_simulation_mode,
-        jupiter_api_url = %config.jupiter.api_url,
-        "Jupiter configuration loaded"
-    );
-
-    // Validate vault/secrets early — fail loudly before any DB or network I/O.
-    // load_secrets_with_fallback() returns Err only when CHIMERA_VAULT_KEY is set but invalid
-    // or the vault file exists but cannot be decrypted; if vault is not configured it returns Ok
-    // with env-var secrets.
-    let _startup_secrets = vault::load_secrets_with_fallback()
-        .map_err(|e| anyhow::anyhow!("Vault startup validation failed: {}", e))?;
-    tracing::info!("Vault/secrets validated at startup");
 
     // Load API keys and JWT secret early for WebSocket state initialization
     let mut api_keys_map = std::collections::HashMap::new();
@@ -131,7 +218,9 @@ async fn main() -> anyhow::Result<()> {
             ));
         }
         Err(_) => {
-            tracing::warn!("JWT_SECRET not set — using development default (insecure, only for local testing)");
+            tracing::warn!(
+                "JWT_SECRET not set — using development default (insecure, only for local testing)"
+            );
             use std::fmt::Write;
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -156,6 +245,8 @@ async fn main() -> anyhow::Result<()> {
     db_pool.startup_integrity_check().await?;
     db_pool.recover_executing_trades().await?;
     tracing::info!("Database initialized");
+
+    run_preflight(&config).await?;
 
     let cancel_token = CancellationToken::new();
 
@@ -182,7 +273,11 @@ async fn main() -> anyhow::Result<()> {
         if monitoring_config.enabled {
             if let Some(ref webhook_url) = monitoring_config.helius_webhook_url {
                 if !webhook_url.is_empty() {
-                    match chimera_operator::monitoring::helius::validate_webhook_reachability(webhook_url).await {
+                    match chimera_operator::monitoring::helius::validate_webhook_reachability(
+                        webhook_url,
+                    )
+                    .await
+                    {
                         Ok(_) => {
                             tracing::info!("Webhook URL validated successfully: {}", webhook_url);
                         }
@@ -234,6 +329,8 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        composite.set_trade_mode(&config.trade_mode.to_string());
+
         Arc::new(composite)
     };
     tracing::info!("Notification service initialized");
@@ -267,7 +364,7 @@ async fn main() -> anyhow::Result<()> {
             Ok(state) => {
                 tracing::info!("Kill-switch state loaded: {}", state.state);
                 state.state == "ACTIVE"
-            },
+            }
             Err(e) => {
                 tracing::error!(
                     error = %e,
@@ -466,13 +563,14 @@ async fn main() -> anyhow::Result<()> {
                                 } else {
                                     rust_decimal::Decimal::ZERO
                                 };
-                                if let Err(e) = pnl_db.update_position_unrealized_pnl(
-                                    &pos.trade_uuid,
-                                    current_usd,
-                                    pnl_sol,
-                                    pnl_pct,
-                                )
-                                .await
+                                if let Err(e) = pnl_db
+                                    .update_position_unrealized_pnl(
+                                        &pos.trade_uuid,
+                                        current_usd,
+                                        pnl_sol,
+                                        pnl_pct,
+                                    )
+                                    .await
                                 {
                                     tracing::warn!(error = %e, token = %pos.token_address,
                                         "PnL refresh: failed to update position");
@@ -546,7 +644,7 @@ async fn main() -> anyhow::Result<()> {
                         Ok(items) => {
                             const MAX_DLQ_RETRIES: i64 = 3;
                             tracing::info!(count = items.len(), "Processing DLQ retry items");
-                            
+
                             // Phase 1: Increment retry counts for all items
                             let update_params: Vec<chimera_operator::db_abstraction::UpdateDlqItemParams> = items
                                 .iter()
@@ -561,20 +659,20 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 })
                                 .collect();
-                            
+
                             if let Err(e) = dlq_pool.update_dlq_items_batch(update_params).await {
                                 tracing::error!(error = %e, "Failed to batch update DLQ retry counts");
                                 continue;
                             }
-                            
+
                             // Phase 2: Parse payloads and mark successful ones as processed
                             let mut processed_items: Vec<chimera_operator::db_abstraction::UpdateDlqItemParams> = Vec::new();
                             let mut status_updates: Vec<chimera_operator::db_abstraction::UpdateTradeStatus> = Vec::new();
-                            
+
                             for item in &items {
                                 let new_count = item.retry_count + 1;
                                 let can_still_retry = new_count < MAX_DLQ_RETRIES;
-                                
+
                                 if !can_still_retry {
                                     tracing::warn!(
                                         uuid = %item.trade_uuid,
@@ -583,7 +681,7 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                     continue;
                                 }
-                                
+
                                 // Parse payload and prepare for re-queue
                                 match serde_json::from_str::<serde_json::Value>(&item.payload) {
                                     Ok(_) => {
@@ -605,7 +703,7 @@ async fn main() -> anyhow::Result<()> {
                                     }
                                 }
                             }
-                            
+
                             // Phase 3: Batch mark items as processed
                             if !processed_items.is_empty() {
                                 if let Err(e) = dlq_pool.update_dlq_items_batch(processed_items).await {
@@ -1135,6 +1233,7 @@ async fn main() -> anyhow::Result<()> {
         started_at: Utc::now(),
         circuit_breaker: circuit_breaker.clone(),
         price_cache: price_cache.clone(),
+        trade_mode: config.trade_mode.to_string().to_lowercase(),
     });
 
     // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
@@ -1151,14 +1250,15 @@ async fn main() -> anyhow::Result<()> {
     .ok();
 
     // Create webhook API rate limiter for lifecycle management operations
-    let webhook_api_rate_limiter: Arc<rate_limiter::RateLimiter> = Arc::new(rate_limiter::RateLimiter::new(
-        config
-            .monitoring
-            .as_ref()
-            .map(|m| m.webhook_processing_rate_limit)
-            .unwrap_or(40),
-        1,
-    ));
+    let webhook_api_rate_limiter: Arc<rate_limiter::RateLimiter> =
+        Arc::new(rate_limiter::RateLimiter::new(
+            config
+                .monitoring
+                .as_ref()
+                .map(|m| m.webhook_processing_rate_limit)
+                .unwrap_or(40),
+            1,
+        ));
 
     // Create API state
     let api_state = Arc::new(ApiState {
@@ -1176,8 +1276,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Run startup webhook management check
     // This ensures all ACTIVE wallets have registered webhooks before server starts
-    if config.monitoring.as_ref().map(|m| m.enabled).unwrap_or(false) {
-        if let Some(webhook_lifecycle_config) = config.monitoring
+    if config
+        .monitoring
+        .as_ref()
+        .map(|m| m.enabled)
+        .unwrap_or(false)
+    {
+        if let Some(webhook_lifecycle_config) = config
+            .monitoring
             .as_ref()
             .and_then(|m| m.webhook_lifecycle.as_ref())
         {
@@ -1185,7 +1291,8 @@ async fn main() -> anyhow::Result<()> {
                 if let Some(ref startup_helius) = helius_client {
                     let startup_db = db_pool.clone();
                     let startup_rate_limiter = webhook_api_rate_limiter.clone();
-                    let startup_webhook_url = config.monitoring
+                    let startup_webhook_url = config
+                        .monitoring
                         .as_ref()
                         .and_then(|m| m.helius_webhook_url.clone())
                         .unwrap_or_default();
@@ -1232,12 +1339,14 @@ async fn main() -> anyhow::Result<()> {
                         let reconcile_db = db_pool.clone();
                         let reconcile_helius_client = reconcile_helius.clone();
                         let reconcile_rate_limiter = webhook_api_rate_limiter.clone();
-                        let reconcile_webhook_url = config.monitoring
+                        let reconcile_webhook_url = config
+                            .monitoring
                             .as_ref()
                             .and_then(|m| m.helius_webhook_url.clone())
                             .unwrap_or_default();
                         let reconcile_config = chimera_operator::monitoring::WebhookHealthConfig {
-                            check_interval_secs: webhook_lifecycle_config.health_check_interval_secs,
+                            check_interval_secs: webhook_lifecycle_config
+                                .health_check_interval_secs,
                             stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
                             webhook_url: reconcile_webhook_url,
                         };
@@ -1301,9 +1410,7 @@ async fn main() -> anyhow::Result<()> {
         .burst_size(100)
         .key_extractor(middleware::ProxyAwareKeyExtractor)
         .finish()
-        .ok_or_else(|| {
-            anyhow::anyhow!("Failed to build public API rate limiter")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Failed to build public API rate limiter"))?;
     let public_api_limiter_conf = std::sync::Arc::new(public_api_limiter_conf);
     let public_api_governor_layer = tower_governor::GovernorLayer {
         config: public_api_limiter_conf,
@@ -1318,21 +1425,60 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics/strategy", get(get_strategy_performance))
         .route("/metrics/performance", get(get_performance_metrics))
         .route("/metrics/costs", get(get_cost_metrics))
-        .route("/metrics/trade-latency", get(chimera_operator::handlers::get_trade_latency))
-        .route("/metrics/database-performance", get(chimera_operator::handlers::get_database_performance))
-        .route("/metrics/request-rate", get(chimera_operator::handlers::get_request_rate))
-        .route("/metrics/rpc-latency", get(chimera_operator::handlers::get_rpc_latency))
-        .route("/risk/portfolio", get(chimera_operator::handlers::get_portfolio_risk))
-        .route("/risk/stop-loss", get(chimera_operator::handlers::get_stop_loss_metrics))
-        .route("/risk/profit-target", get(chimera_operator::handlers::get_profit_target_metrics))
-        .route("/risk/position-size", get(chimera_operator::handlers::get_position_size_analysis))
+        .route(
+            "/metrics/trade-latency",
+            get(chimera_operator::handlers::get_trade_latency),
+        )
+        .route(
+            "/metrics/database-performance",
+            get(chimera_operator::handlers::get_database_performance),
+        )
+        .route(
+            "/metrics/request-rate",
+            get(chimera_operator::handlers::get_request_rate),
+        )
+        .route(
+            "/metrics/rpc-latency",
+            get(chimera_operator::handlers::get_rpc_latency),
+        )
+        .route(
+            "/risk/portfolio",
+            get(chimera_operator::handlers::get_portfolio_risk),
+        )
+        .route(
+            "/risk/stop-loss",
+            get(chimera_operator::handlers::get_stop_loss_metrics),
+        )
+        .route(
+            "/risk/profit-target",
+            get(chimera_operator::handlers::get_profit_target_metrics),
+        )
+        .route(
+            "/risk/position-size",
+            get(chimera_operator::handlers::get_position_size_analysis),
+        )
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
         .route("/incidents/config-audit", get(list_config_audit))
-        .route("/signals/consensus", get(chimera_operator::handlers::get_consensus))
-        .route("/signals/clustering", get(chimera_operator::handlers::get_wallet_clustering))
-        .route("/signals/aggregation", get(chimera_operator::handlers::get_signal_aggregation))
-        .route("/signals/quality", get(chimera_operator::handlers::get_signal_quality))
-        .route("/signals/sources", get(chimera_operator::handlers::get_signal_sources))
+        .route(
+            "/signals/consensus",
+            get(chimera_operator::handlers::get_consensus),
+        )
+        .route(
+            "/signals/clustering",
+            get(chimera_operator::handlers::get_wallet_clustering),
+        )
+        .route(
+            "/signals/aggregation",
+            get(chimera_operator::handlers::get_signal_aggregation),
+        )
+        .route(
+            "/signals/quality",
+            get(chimera_operator::handlers::get_signal_quality),
+        )
+        .route(
+            "/signals/sources",
+            get(chimera_operator::handlers::get_signal_sources),
+        )
         .route("/market/regime", get(get_market_regime))
         .route("/market/conditions", get(get_market_conditions))
         // Scout intelligence endpoints
@@ -1341,7 +1487,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/scout/metrics", get(get_scout_metrics))
         .route("/scout/run", post(trigger_scout_run))
         .with_state(api_state.clone())
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(2 * 1024 * 1024))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            2 * 1024 * 1024,
+        ))
         .layer(public_api_governor_layer.clone());
 
     // Build operations API routes (use OperationsState)
@@ -1369,10 +1517,22 @@ async fn main() -> anyhow::Result<()> {
             post(update_secret_rotation_metrics),
         )
         // Reconciliation API endpoints
-        .route("/reconciliation/status", get(chimera_operator::handlers::get_reconciliation_status))
-        .route("/reconciliation/history", get(chimera_operator::handlers::get_reconciliation_history))
-        .route("/reconciliation/stats", get(chimera_operator::handlers::get_reconciliation_stats))
-        .route("/reconciliation/trigger", post(chimera_operator::handlers::trigger_reconciliation))
+        .route(
+            "/reconciliation/status",
+            get(chimera_operator::handlers::get_reconciliation_status),
+        )
+        .route(
+            "/reconciliation/history",
+            get(chimera_operator::handlers::get_reconciliation_history),
+        )
+        .route(
+            "/reconciliation/stats",
+            get(chimera_operator::handlers::get_reconciliation_stats),
+        )
+        .route(
+            "/reconciliation/trigger",
+            post(chimera_operator::handlers::trigger_reconciliation),
+        )
         .route(
             "/reconciliation/discrepancies/:id/resolve",
             post(chimera_operator::handlers::resolve_discrepancy),
@@ -1588,8 +1748,9 @@ async fn main() -> anyhow::Result<()> {
     // Build roster routes
     // In devnet, allow roster merge without auth for easier testing
     let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
-    let is_devnet =
-        chimera_env == "devnet" || config.database.path.to_string_lossy().contains("devnet");
+    let is_devnet = chimera_env == "devnet"
+        || config.database.path.to_string_lossy().contains("devnet")
+        || config.trade_mode == TradeMode::Devnet;
 
     let roster_routes = if is_devnet {
         tracing::info!("Devnet mode: roster merge endpoint does not require authentication");
@@ -1678,10 +1839,22 @@ async fn main() -> anyhow::Result<()> {
                 )
                 // Webhook lifecycle management routes (require operator role)
                 .route("/monitoring/webhooks/stats", get(get_webhook_stats))
-                .route("/monitoring/webhooks/bulk-register", post(bulk_register_webhooks))
-                .route("/monitoring/webhooks/bulk-cleanup", post(bulk_cleanup_webhooks))
-                .route("/monitoring/webhooks/reconcile", post(manual_reconcile_webhooks))
-                .route("/monitoring/webhooks/health-check", post(manual_health_check))
+                .route(
+                    "/monitoring/webhooks/bulk-register",
+                    post(bulk_register_webhooks),
+                )
+                .route(
+                    "/monitoring/webhooks/bulk-cleanup",
+                    post(bulk_cleanup_webhooks),
+                )
+                .route(
+                    "/monitoring/webhooks/reconcile",
+                    post(manual_reconcile_webhooks),
+                )
+                .route(
+                    "/monitoring/webhooks/health-check",
+                    post(manual_health_check),
+                )
                 .route("/monitoring/webhooks/audit", get(get_webhook_audit_log))
                 .route(
                     "/monitoring/webhooks/:wallet_address/retry",
@@ -1692,7 +1865,10 @@ async fn main() -> anyhow::Result<()> {
                     post(toggle_wallet_webhook),
                 )
                 // Wallet monitoring state (requires readonly+)
-                .route("/monitoring/wallets/states", get(get_wallet_monitoring_states))
+                .route(
+                    "/monitoring/wallets/states",
+                    get(get_wallet_monitoring_states),
+                )
                 .with_state(monitoring_state_arc)
                 .layer(axum_middleware::from_fn_with_state(
                     auth_state.clone(),
@@ -1728,7 +1904,9 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", monitoring_routes)
         .merge(metrics_routes)
         .layer(cors)
-        .layer(tower_http::limit::RequestBodyLimitLayer::new(10 * 1024 * 1024))
+        .layer(tower_http::limit::RequestBodyLimitLayer::new(
+            10 * 1024 * 1024,
+        ))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
                 tracing::info_span!(
@@ -1747,7 +1925,12 @@ async fn main() -> anyhow::Result<()> {
         Ok(addr) => addr,
         Err(e) => {
             tracing::error!(error = %e, host = %config.server.host, port = %config.server.port, "Invalid server address");
-            return Err(anyhow::anyhow!("Invalid server address {}:{} - check config: {}", config.server.host, config.server.port, e));
+            return Err(anyhow::anyhow!(
+                "Invalid server address {}:{} - check config: {}",
+                config.server.host,
+                config.server.port,
+                e
+            ));
         }
     };
 
@@ -1913,16 +2096,17 @@ async fn generate_daily_summary(
         .to_string();
 
     // Query trades from yesterday
-    let trades = db.get_trades_filtered(
-        Some(&yesterday_start),
-        Some(&yesterday_end),
-        Some("CLOSED"),
-        None,
-        None, // No wallet_address filter for daily summary
-        1000,
-        0,
-    )
-    .await?;
+    let trades = db
+        .get_trades_filtered(
+            Some(&yesterday_start),
+            Some(&yesterday_end),
+            Some("CLOSED"),
+            None,
+            None, // No wallet_address filter for daily summary
+            1000,
+            0,
+        )
+        .await?;
 
     if trades.is_empty() {
         return Ok((rust_decimal::Decimal::ZERO, 0, 0.0));
