@@ -25,6 +25,13 @@ try:
 except ImportError:
     CACHE_AVAILABLE = False
 
+# Import activity-based caching wrapper
+try:
+    from .caching import HeliusCachingWrapper
+    ACTIVITY_CACHE_AVAILABLE = True
+except ImportError:
+    ACTIVITY_CACHE_AVAILABLE = False
+
 try:
     from ..config import ScoutConfig
 except ImportError:
@@ -172,6 +179,15 @@ class HeliusClient:
 
         # Redis client for persistent caching (discovery cache, dedup set)
         self._redis = redis_client
+
+        # Activity-based caching wrapper for transaction data
+        self._activity_cache = None
+        if ACTIVITY_CACHE_AVAILABLE:
+            try:
+                self._activity_cache = HeliusCachingWrapper()
+                print("[Helius] Activity-based caching enabled")
+            except Exception as e:
+                print(f"[Helius] Warning: Failed to initialize activity cache: {e}")
 
     @staticmethod
     def _redact_api_key(s: str) -> str:
@@ -1780,6 +1796,12 @@ class HeliusClient:
     def get_discovery_stats(self) -> Dict[str, int]:
         """Return discovery quality statistics from the most recent run."""
         return dict(self._discovery_stats)
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """Return activity-based cache statistics if available."""
+        if self._activity_cache:
+            return self._activity_cache.get_cache_stats()
+        return {}
     
     async def _query_token_transactions(
         self,
@@ -2541,6 +2563,7 @@ class HeliusClient:
         wallet_address: str,
         days: int = 30,
         limit: int = 100,
+        wqs_score: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get transaction history for a wallet.
@@ -2549,6 +2572,7 @@ class HeliusClient:
             wallet_address: Wallet address to query
             days: Number of days to look back
             limit: Maximum number of transactions to return
+            wqs_score: Optional WQS score for cache optimization
 
         Returns:
             List of transaction dictionaries
@@ -2556,6 +2580,15 @@ class HeliusClient:
         if not self.api_key:
             return []
 
+        # Check activity-based cache first (higher priority than basic cache)
+        if self._activity_cache:
+            cached_result = self._activity_cache.get_cached_transactions(
+                wallet_address, days, limit
+            )
+            if cached_result is not None:
+                return cached_result
+
+        # Fallback to basic cache (if activity cache not available)
         # Check cache first (using wallet transactions category with 10-minute TTL)
         if CACHE_AVAILABLE:
             cache = get_cache()
@@ -2646,7 +2679,13 @@ class HeliusClient:
 
         result = all_txs[:target]
 
-        # Store result in cache for future requests
+        # Store result in activity-based cache (higher priority)
+        if self._activity_cache and result:
+            self._activity_cache.cache_transactions(
+                wallet_address, result, days, limit, wqs_score
+            )
+
+        # Store result in basic cache for fallback (if activity cache not available)
         if CACHE_AVAILABLE and result:
             cache = get_cache()
             cache_key = f"{wallet_address}:{days}:{limit}"

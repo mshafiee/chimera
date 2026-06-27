@@ -29,6 +29,14 @@ from .liquidity import LiquidityProvider
 from .decimal_utils import float_to_decimal, decimal_to_float, safe_decimal_divide
 from .denylist import is_known_scam_address, check_wallet_correlation
 
+# Import state persistence for multi-timeframe discovery tracking
+try:
+    from .state_persistence import StatePersistence
+    STATE_PERSISTENCE_AVAILABLE = True
+except ImportError:
+    STATE_PERSISTENCE_AVAILABLE = False
+    StatePersistence = None
+
 # Import config and security client
 try:
     from config import ScoutConfig
@@ -301,21 +309,26 @@ class WalletAnalyzer:
         rpc_url: Optional[str] = None,
         discover_wallets: bool = True,
         max_wallets: int = 50,
+        budget_manager: Optional['PredictiveBudgetManager'] = None,
     ):
         """
         Initialize the wallet analyzer.
-        
+
         Args:
             helius_api_key: Helius API key for transaction data
             rpc_url: Solana RPC URL for on-chain queries
             discover_wallets: Whether to discover wallets from on-chain data
             max_wallets: Maximum number of wallets to discover
+            budget_manager: Optional PredictiveBudgetManager for API quota management
         """
         self.helius_api_key = helius_api_key
         self.rpc_url = rpc_url
         self._discover_wallets = discover_wallets
         self._max_wallets = max_wallets
-        
+
+        # Initialize budget manager if provided
+        self._budget_manager = budget_manager
+
         # Initialize Helius client
         self.helius_client = HeliusClient(helius_api_key)
         
@@ -420,6 +433,93 @@ class WalletAnalyzer:
             "wallets_with_no_trades": 0,
         }
 
+    def can_spend_budget(self, estimated_credits: int = 100, category: Optional[str] = None) -> tuple[bool, str]:
+        """
+        Check if we have enough budget for an operation.
+
+        Args:
+            estimated_credits: Estimated credit cost for the operation
+            category: Budget category (e.g., "discovery", "analysis", "validation")
+
+        Returns:
+            Tuple of (can_proceed: bool, reason: str)
+        """
+        if not self._budget_manager:
+            return True, "No budget manager configured"
+
+        try:
+            from core.predictive_budget_manager import BudgetCategory
+
+            # Map string category to BudgetCategory enum
+            budget_category = BudgetCategory.ANALYSIS  # Default
+            if category:
+                category_map = {
+                    "discovery": BudgetCategory.DISCOVERY,
+                    "analysis": BudgetCategory.ANALYSIS,
+                    "validation": BudgetCategory.VALIDATION,
+                    "enrichment": BudgetCategory.ENRICHMENT,
+                    "monitoring": BudgetCategory.MONITORING,
+                }
+                budget_category = category_map.get(category.lower(), BudgetCategory.ANALYSIS)
+
+            # Get current snapshot
+            snapshot = self._budget_manager.get_realtime_snapshot()
+
+            # Check if we have enough credits remaining
+            if snapshot.credits_remaining < estimated_credits:
+                return False, f"Insufficient credits: {snapshot.credits_remaining:,} < {estimated_credits:,}"
+
+            # Check alert level - block operations if critical
+            if snapshot.alert_level.value in ["critical", "depleted"]:
+                return False, f"Budget alert level: {snapshot.alert_level.value}"
+
+            return True, "Budget OK"
+
+        except Exception as e:
+            logger.warning(f"Budget check failed: {e}. Proceeding with operation.")
+            return True, f"Budget check failed: {e}"
+
+    def record_credit_usage(self, credits: int, category: str = "analysis", value: float = 0.0):
+        """
+        Record credit usage after an operation.
+
+        Args:
+            credits: Number of credits consumed
+            category: Budget category (discovery, analysis, validation, etc.)
+            value: Value generated (e.g., high-WQS wallet found)
+        """
+        if not self._budget_manager:
+            return
+
+        try:
+            from core.predictive_budget_manager import BudgetCategory
+
+            # Map string category to BudgetCategory enum
+            category_map = {
+                "discovery": BudgetCategory.DISCOVERY,
+                "analysis": BudgetCategory.ANALYSIS,
+                "validation": BudgetCategory.VALIDATION,
+                "enrichment": BudgetCategory.ENRICHMENT,
+                "monitoring": BudgetCategory.MONITORING,
+            }
+            budget_category = category_map.get(category.lower(), BudgetCategory.ANALYSIS)
+
+            self._budget_manager.record_category_usage(budget_category, credits, value)
+            logger.debug(f"Recorded {credits} credits for {category}")
+
+        except Exception as e:
+            logger.warning(f"Failed to record credit usage: {e}")
+
+    def get_budget_summary(self) -> dict:
+        """Get current budget summary as a dict."""
+        if not self._budget_manager:
+            return {"status": "No budget manager configured"}
+
+        try:
+            return self._budget_manager.get_daily_summary()
+        except Exception as e:
+            return {"status": f"Error: {e}"}
+
     @classmethod
     async def create(
         cls,
@@ -427,6 +527,7 @@ class WalletAnalyzer:
         rpc_url: Optional[str] = None,
         discover_wallets: bool = False,
         max_wallets: int = 20,
+        budget_manager: Optional['PredictiveBudgetManager'] = None,
     ):
         """
         Async factory method to create WalletAnalyzer with async initialization.
@@ -438,6 +539,7 @@ class WalletAnalyzer:
             rpc_url: Solana RPC URL (optional)
             discover_wallets: If True, discover wallets from on-chain data
             max_wallets: Maximum number of wallets to discover/analyze
+            budget_manager: Optional PredictiveBudgetManager for API quota management
 
         Returns:
             Initialized WalletAnalyzer instance with wallets loaded
@@ -455,6 +557,7 @@ class WalletAnalyzer:
             rpc_url=rpc_url,
             discover_wallets=discover_wallets,
             max_wallets=max_wallets,
+            budget_manager=budget_manager,
         )
         
         # Perform async initialization
@@ -541,141 +644,171 @@ class WalletAnalyzer:
         if self._discover_wallets and self.helius_client.api_key:
             print("[Analyzer] Attempting to discover wallets from on-chain data...")
             try:
-                # Get configuration from environment variables
-                hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
-                min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
-
-                # Phase 4a: Multi-timeframe discovery
-                _multi_timeframe = os.getenv("SCOUT_MULTI_TIMEFRAME_DISCOVERY", "true").lower() == "true"
-
-                if _multi_timeframe and CONFIG_AVAILABLE and ScoutConfig:
-                    # Cap deep_hours at user_hours * 4 (max 720h default)
-                    # This respects user intent while still allowing established-wallet discovery
-                    user_hours_cap = hours_back * 4
-                    deep_hours = min(ScoutConfig.get_discovery_deep_hours(), max(user_hours_cap, 24))
-                    fast_hours = ScoutConfig.get_discovery_fast_hours()
-                    trending_hours = ScoutConfig.get_discovery_trending_hours()
-                    tier1_max = ScoutConfig.get_max_wallets_tier1()
-                    tier2_max = ScoutConfig.get_max_wallets_tier2()
-
-                    print("[Analyzer] Multi-timeframe discovery enabled:")
-                    print(f"  Deep scan: {deep_hours}h (established wallets)")
-                    print(f"  Fast scan: {fast_hours}h (emerging wallets)")
-                    print(f"  Trending scan: {trending_hours}h (narrative wallets)")
-                    print(f"  Tier limits: {tier1_max} deep, {tier2_max} fast")
+                # Check if sophisticated multi-timeframe discovery is enabled
+                if CONFIG_AVAILABLE and ScoutConfig and ScoutConfig.get_multi_timeframe_enabled():
+                    await self._discover_with_multi_timeframe_system()
                 else:
-                    # Single-window mode
-                    deep_hours = hours_back
-                    fast_hours = 0
-                    trending_hours = 0
-                    tier1_max = self._max_wallets * 2
-                    tier2_max = 0
-                    _multi_timeframe = False
-
-                # When profitability pre-screen is enabled, discover 2x wallets
-                # Only apply multiplier when max_wallets >= 50 (avoid explosion for small targets)
-                _profit_filter = os.getenv("SCOUT_DISCOVERY_PROFITABILITY_FILTER", "true").lower() == "true"
-
-                discovered_all: List[str] = []
-
-                # --- Deep scan: established wallets ---
-                if deep_hours > 0 or not _multi_timeframe:
-                    # Only apply 2x multiplier when max_wallets >= 50
-                    profit_multiplier = 2 if _profit_filter and self._max_wallets >= 50 else 1
-                    _discover_deep = self._max_wallets * profit_multiplier if not _multi_timeframe else tier1_max * profit_multiplier
-                    print(f"[Analyzer] Running deep scan ({deep_hours}h window, max={_discover_deep})...")
-                    deep_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
-                    try:
-                        deep_discovered = await asyncio.wait_for(
-                            self.helius_client.discover_wallets_from_recent_swaps(
-                                limit=1000,
-                                min_trade_count=min_trade_count + 2,
-                                max_wallets=_discover_deep if _discover_deep else tier1_max,
-                                hours_back=deep_hours if deep_hours > 0 else hours_back,
-                            ),
-                            timeout=deep_timeout
-                        )
-                    except asyncio.TimeoutError:
-                        print(f"[Analyzer] Deep scan timeout after {deep_timeout}s, using partial results")
-                        deep_discovered = []
-                    if deep_discovered:
-                        print(f"[Analyzer] Deep scan found {len(deep_discovered)} wallets")
-                        discovered_all.extend(deep_discovered)
-
-                # --- Fast scan: emerging wallets ---
-                if _multi_timeframe and fast_hours > 0:
-                    # Only apply 2x multiplier when max_wallets >= 50
-                    profit_multiplier = 2 if _profit_filter and self._max_wallets >= 50 else 1
-                    _discover_fast = tier2_max * profit_multiplier
-                    print(f"[Analyzer] Running fast scan ({fast_hours}h window, max={_discover_fast})...")
-                    fast_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
-                    try:
-                        fast_discovered = await asyncio.wait_for(
-                            self.helius_client.discover_wallets_from_recent_swaps(
-                                limit=1000,
-                                min_trade_count=min_trade_count,
-                                max_wallets=_discover_fast if _discover_fast else tier2_max,
-                                hours_back=fast_hours,
-                            ),
-                            timeout=fast_timeout
-                        )
-                    except asyncio.TimeoutError:
-                        print(f"[Analyzer] Fast scan timeout after {fast_timeout}s, using partial results")
-                        fast_discovered = []
-                    if fast_discovered:
-                        print(f"[Analyzer] Fast scan found {len(fast_discovered)} wallets")
-                        # Append new wallets not already in deep scan
-                        existing = set(discovered_all)
-                        new_fast = [w for w in fast_discovered if w not in existing]
-                        discovered_all.extend(new_fast)
-                        print(f"[Analyzer] Fast scan added {len(new_fast)} new wallets")
-
-                # --- Trending scan: narrative wallets ---
-                if _multi_timeframe and trending_hours > 0:
-                    _discover_trending = min(50, tier2_max)
-                    print(f"[Analyzer] Running trending scan ({trending_hours}h window, max={_discover_trending})...")
-                    trending_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
-                    try:
-                        trending_discovered = await asyncio.wait_for(
-                            self.helius_client.discover_wallets_from_recent_swaps(
-                                limit=500,
-                                min_trade_count=1,
-                                max_wallets=_discover_trending,
-                                hours_back=trending_hours,
-                            ),
-                            timeout=trending_timeout
-                        )
-                    except asyncio.TimeoutError:
-                        print(f"[Analyzer] Trending scan timeout after {trending_timeout}s, using partial results")
-                        trending_discovered = []
-                    if trending_discovered:
-                        print(f"[Analyzer] Trending scan found {len(trending_discovered)} wallets")
-                        existing = set(discovered_all)
-                        new_trending = [w for w in trending_discovered if w not in existing]
-                        discovered_all.extend(new_trending)
-                        print(f"[Analyzer] Trending scan added {len(new_trending)} new wallets")
-                
-                if discovered_all:
-                    # Deduplicate
-                    discovered = list(dict.fromkeys(discovered_all))  # Preserve order, dedup
-                    # Run profitability pre-screen if enabled
-                    if _profit_filter and len(discovered) > self._max_wallets:
-                        discovered = await self._profitability_pre_screen(discovered, self._max_wallets)
-                    else:
-                        discovered = discovered[:self._max_wallets]
-
-                    self._candidate_wallets = discovered
-                    print(f"[Analyzer] Discovered {len(self._candidate_wallets)} candidate wallets "
-                          f"(from {len(discovered_all)} total across all timeframes)")
-                    return
-                else:
-                    print("[Analyzer] No wallets discovered, falling back to database or sample data")
+                    # Fallback to manual sequential implementation
+                    await self._discover_with_manual_implementation()
             except Exception as e:
                 print(f"[Analyzer] Warning: Failed to discover wallets: {e}")
                 import traceback
                 if os.getenv("SCOUT_VERBOSE", "false").lower() == "true":
                     traceback.print_exc()
-        
+
+    async def _discover_with_multi_timeframe_system(self):
+        """Use sophisticated multi-timeframe discovery system (Sprint 4)."""
+        from core.multitimeframe_discovery import get_multi_timeframe_discovery, DiscoveryTimeframe
+
+        print("[Analyzer] Using sophisticated multi-timeframe discovery system...")
+
+        # Initialize multi-timeframe discovery system
+        mt_discovery = get_multi_timeframe_discovery(helius_client=self.helius_client)
+
+        # Get configuration
+        parallel = ScoutConfig.get_multi_timeframe_parallel()
+        discovery_goal = ScoutConfig.get_multi_timeframe_goal()
+
+        # Get max API calls budget
+        max_api_calls = ScoutConfig.get_max_api_calls_per_run() if CONFIG_AVAILABLE else 500
+
+        print(f"[Analyzer] Multi-timeframe configuration:")
+        print(f"  Parallel execution: {parallel}")
+        print(f"  Discovery goal: {discovery_goal}")
+        print(f"  API budget: {max_api_calls} calls")
+
+        try:
+            # Execute multi-timeframe discovery with coordination
+            result = await mt_discovery.discover_all_timeframes(
+                budget_credits=max_api_calls,
+                parallel=parallel,
+                timeframes=[
+                    DiscoveryTimeframe.DEEP,    # 720h historical
+                    DiscoveryTimeframe.FAST,    # 24h recent
+                    DiscoveryTimeframe.TRENDING # 4h trending
+                ]
+            )
+
+            # Extract high-quality wallets from cross-timeframe ranking
+            if result.cross_timeframe_ranking:
+                # Use cross-timeframe deduplicated and ranked results
+                ranked_wallets = [wallet for wallet, score in result.cross_timeframe_ranking]
+
+                # Apply profitability pre-screen if enabled
+                _profit_filter = ScoutConfig.get_discovery_profitability_filter() if CONFIG_AVAILABLE else True
+                if _profit_filter and len(ranked_wallets) > self._max_wallets:
+                    discovered = await self._profitability_pre_screen(ranked_wallets, self._max_wallets)
+                else:
+                    discovered = ranked_wallets[:self._max_wallets]
+
+                self._candidate_wallets = discovered
+
+                # Log sophisticated statistics
+                print(f"[Multi-Timeframe] Discovery completed successfully:")
+                print(f"  Total discovered: {result.total_unique_wallets} unique wallets")
+                print(f"  Selected: {len(self._candidate_wallets)} for analysis")
+                print(f"  Deduplication ratio: {result.deduplication_stats.get('deduplication_ratio', 0):.2%}")
+                print(f"  Multi-timeframe wallets: {result.deduplication_stats.get('multi_timeframe_wallets', 0)}")
+                print(f"  Total execution time: {result.total_execution_time_seconds:.1f}s")
+                print(f"  Credits consumed: {result.total_credits_consumed}")
+
+                # Log timeframe breakdown
+                for tf, tf_result in result.timeframe_results.items():
+                    print(f"  {tf.value}: {len(tf_result.wallets_discovered)} wallets, "
+                          f"{tf_result.execution_time_seconds:.1f}s, "
+                          f"{tf_result.credits_consumed} credits")
+
+                # Save multi-timeframe discovery statistics to state persistence
+                if STATE_PERSISTENCE_AVAILABLE and StatePersistence:
+                    try:
+                        persistence = StatePersistence()
+                        persistence.save_multi_timeframe_discovery_stats(
+                            result=result,
+                            parallel=parallel,
+                            discovery_goal=discovery_goal
+                        )
+                        print("[Multi-Timeframe] Statistics saved to state persistence")
+                    except Exception as e:
+                        print(f"[Multi-Timeframe] Failed to save statistics: {e}")
+
+                return
+            else:
+                print("[Multi-Timeframe] No wallets discovered, falling back")
+
+        except Exception as e:
+            print(f"[Multi-Timeframe] Discovery failed: {e}, falling back to manual implementation")
+            import traceback
+            traceback.print_exc()
+            # Fall through to manual implementation
+
+    async def _discover_with_manual_implementation(self):
+        """Fallback manual sequential implementation (legacy)."""
+        print("[Analyzer] Using manual sequential discovery implementation...")
+
+        # Get configuration from environment variables
+        hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
+        min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
+
+        # When profitability pre-screen is enabled, discover 2x wallets
+        _profit_filter = os.getenv("SCOUT_DISCOVERY_PROFITABILITY_FILTER", "true").lower() == "true"
+
+        discovered_all: List[str] = []
+
+        try:
+            # Only apply 2x multiplier when max_wallets >= 50
+            profit_multiplier = 2 if _profit_filter and self._max_wallets >= 50 else 1
+            _discover = self._max_wallets * profit_multiplier
+
+            print(f"[Analyzer] Running manual discovery scan ({hours_back}h window, max={_discover})...")
+            manual_timeout = ScoutConfig.get_discovery_timeout_seconds() if CONFIG_AVAILABLE and ScoutConfig else 300
+
+            # Check budget before calling Helius (estimate: 200 credits for discovery)
+            estimated_credits = 200
+            can_proceed, reason = self.can_spend_budget(estimated_credits, "discovery")
+            if not can_proceed:
+                print(f"[Analyzer] Budget check failed: {reason}")
+                print(f"[Analyzer] Skipping wallet discovery due to budget constraints")
+                return
+
+            discovered = await asyncio.wait_for(
+                self.helius_client.discover_wallets_from_recent_swaps(
+                    limit=1000,
+                    min_trade_count=min_trade_count,
+                    max_wallets=_discover,
+                    hours_back=hours_back,
+                ),
+                timeout=manual_timeout
+            )
+
+            # Record credit usage (value = number of wallets discovered)
+            credits_used = estimated_credits if discovered else 50
+            self.record_credit_usage(credits_used, "discovery", value=len(discovered) if discovered else 0)
+
+            if discovered:
+                print(f"[Analyzer] Manual discovery found {len(discovered)} wallets")
+                discovered_all.extend(discovered)
+
+        except asyncio.TimeoutError:
+            print(f"[Analyzer] Manual discovery timeout after {manual_timeout}s, using partial results")
+        except Exception as e:
+            print(f"[Analyzer] Manual discovery failed: {e}")
+
+        if discovered_all:
+            # Deduplicate
+            discovered = list(dict.fromkeys(discovered_all))  # Preserve order, dedup
+
+            # Run profitability pre-screen if enabled
+            if _profit_filter and len(discovered) > self._max_wallets:
+                discovered = await self._profitability_pre_screen(discovered, self._max_wallets)
+            else:
+                discovered = discovered[:self._max_wallets]
+
+            self._candidate_wallets = discovered
+            print(f"[Analyzer] Manual discovery completed: {len(self._candidate_wallets)} candidate wallets")
+            return
+        else:
+            print("[Analyzer] Manual discovery found no wallets, loading from database...")
+
         # Fallback: Try to load from existing roster database
         try:
             roster_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
@@ -864,11 +997,22 @@ class WalletAnalyzer:
             return []
         
         print(f"[Analyzer] Profitability pre-screen: checking {len(wallets)} candidates...")
-        
+
+        # Check budget before calling Helius (estimate: 10 credits per wallet)
+        estimated_credits = len(wallets) * 10
+        can_proceed, reason = self.can_spend_budget(estimated_credits, "discovery")
+        if not can_proceed:
+            print(f"[Analyzer] Budget check failed: {reason}")
+            print(f"[Analyzer] Skipping profitability pre-screen, using first {max_wallets} wallets")
+            return wallets[:max_wallets]
+
         try:
             balances = await self.helius_client.get_wallet_sol_balances(wallets)
-            
+
             non_zero = {w: b for w, b in balances.items() if b > 0.01}
+
+            # Record credit usage (value = number of non-zero wallets found)
+            self.record_credit_usage(estimated_credits, "discovery", value=len(non_zero))
             print(f"[Analyzer] Pre-screen: {len(non_zero)}/{len(wallets)} wallets have > 0.01 SOL balance")
             
             scored = [(w, balances.get(w, 0.0)) for w in wallets]
@@ -987,12 +1131,26 @@ class WalletAnalyzer:
     async def _fetch_real_wallet_metrics(self, address: str) -> Optional[WalletMetrics]:
         """Fetch real wallet metrics from Helius API."""
         print(f"  [{address[:8]}] Fetching transactions (limit={self._wallet_tx_limit})...")
+
+        # Check budget before calling Helius (estimate: 50 credits per wallet fetch)
+        estimated_credits = 50
+        can_proceed, reason = self.can_spend_budget(estimated_credits, "analysis")
+        if not can_proceed:
+            print(f"  [{address[:8]}] Budget check failed: {reason}")
+            print(f"  [{address[:8]}] Skipping wallet analysis due to budget constraints")
+            return None
+
         # Get transaction history
         transactions = await self.helius_client.get_wallet_transactions(
             address,
             days=30,
             limit=self._wallet_tx_limit,
         )
+
+        # Record credit usage (value = 1 if we got transactions, 0 otherwise)
+        credits_used = estimated_credits if transactions else 10  # Partial credit even if no results
+        self.record_credit_usage(credits_used, "analysis", value=1 if transactions else 0)
+
         print(f"  [{address[:8]}] Received {len(transactions) if transactions else 0} transactions")
         
         if not transactions:
@@ -2882,7 +3040,7 @@ class WalletAnalyzer:
     async def _fetch_real_historical_trades(self, address: str, days: int) -> List[HistoricalTrade]:
         """
         Fetch real historical trades from Helius API.
-        
+
         Also collects *current* liquidity snapshots to build a time-series liquidity
         database for future backtesting.
 
@@ -2891,11 +3049,23 @@ class WalletAnalyzer:
         trade timestamp. That would poison the historical liquidity table and cause
         the backtester to believe it has true historical liquidity for old timestamps.
         """
+        # Check budget before calling Helius (estimate: 50 credits per wallet fetch)
+        estimated_credits = 50
+        can_proceed, reason = self.can_spend_budget(estimated_credits, "analysis")
+        if not can_proceed:
+            print(f"  [{address[:8]}] Budget check failed: {reason}")
+            print(f"  [{address[:8]}] Skipping historical trades fetch due to budget constraints")
+            return []
+
         transactions = await self.helius_client.get_wallet_transactions(
             address,
             days=days,
             limit=self._wallet_tx_limit,
         )
+
+        # Record credit usage (value = number of trades fetched)
+        credits_used = estimated_credits if transactions else 10
+        self.record_credit_usage(credits_used, "analysis", value=len(transactions) if transactions else 0)
         
         trades = []
         liquidity_snapshots = []

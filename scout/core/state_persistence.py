@@ -30,6 +30,14 @@ from contextlib import contextmanager
 
 from .db import get_connection
 
+# Import for multi-timeframe discovery tracking (avoid circular import)
+try:
+    from .multitimeframe_discovery import DiscoveryTimeframe, MultiTimeframeResult
+except ImportError:
+    # Fallback if multitimeframe_discovery not available
+    DiscoveryTimeframe = None
+    MultiTimeframeResult = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,11 +192,39 @@ class StatePersistence:
                 )
             """)
 
+            # Multi-timeframe discovery statistics table (Sprint 4)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS multi_timeframe_discovery_stats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    discovery_timestamp REAL NOT NULL,
+                    total_unique_wallets INTEGER NOT NULL,
+                    total_raw_wallets INTEGER NOT NULL,
+                    deduplication_ratio REAL NOT NULL,
+                    multi_timeframe_wallets INTEGER NOT NULL,
+                    total_credits_consumed INTEGER NOT NULL,
+                    total_execution_time_seconds REAL NOT NULL,
+                    deep_wallets_discovered INTEGER DEFAULT 0,
+                    deep_execution_time REAL DEFAULT 0.0,
+                    deep_credits_consumed INTEGER DEFAULT 0,
+                    fast_wallets_discovered INTEGER DEFAULT 0,
+                    fast_execution_time REAL DEFAULT 0.0,
+                    fast_credits_consumed INTEGER DEFAULT 0,
+                    trending_wallets_discovered INTEGER DEFAULT 0,
+                    trending_execution_time REAL DEFAULT 0.0,
+                    trending_credits_consumed INTEGER DEFAULT 0,
+                    cross_timeframe_quality_avg REAL DEFAULT 0.0,
+                    parallel_execution BOOLEAN DEFAULT 0,
+                    discovery_goal TEXT DEFAULT 'balanced',
+                    created_at REAL DEFAULT (strftime('%s', 'now'))
+                )
+            """)
+
             # Create indexes
             conn.execute("CREATE INDEX IF NOT EXISTS idx_credit_history_timestamp ON credit_history(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_performance_updated ON wallet_performance_history(last_updated)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_roi_metrics_category ON roi_metrics(category)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_roi_metrics_timestamp ON roi_metrics(timestamp)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_multi_timeframe_discovery_timestamp ON multi_timeframe_discovery_stats(discovery_timestamp)")
 
             logger.info("Database schema initialized")
 
@@ -417,6 +453,169 @@ class StatePersistence:
 
                 logger.debug(f"Loaded {len(records)} ROI metrics records")
                 return records
+
+    def save_multi_timeframe_discovery_stats(
+        self,
+        result: 'MultiTimeframeResult',  # Type hint string to avoid circular import
+        parallel: bool = False,
+        discovery_goal: str = 'balanced'
+    ) -> None:
+        """
+        Save multi-timeframe discovery statistics for cross-session learning.
+
+        Args:
+            result: MultiTimeframeResult object from discovery
+            parallel: Whether parallel execution was used
+            discovery_goal: Discovery goal (quality/quantity/balanced/speed)
+        """
+        with self._lock:
+            # Extract timeframe-specific data
+            deep_result = result.timeframe_results.get(DiscoveryTimeframe.DEEP) if hasattr(result, 'timeframe_results') else None
+            fast_result = result.timeframe_results.get(DiscoveryTimeframe.FAST) if hasattr(result, 'timeframe_results') else None
+            trending_result = result.timeframe_results.get(DiscoveryTimeframe.TRENDING) if hasattr(result, 'timeframe_results') else None
+
+            # Calculate cross-timeframe quality average
+            if result.combined_quality_scores:
+                cross_timeframe_quality_avg = sum(result.combined_quality_scores.values()) / len(result.combined_quality_scores)
+            else:
+                cross_timeframe_quality_avg = 0.0
+
+            with self._get_connection() as conn:
+                conn.execute("""
+                    INSERT INTO multi_timeframe_discovery_stats
+                    (discovery_timestamp, total_unique_wallets, total_raw_wallets, deduplication_ratio,
+                     multi_timeframe_wallets, total_credits_consumed, total_execution_time_seconds,
+                     deep_wallets_discovered, deep_execution_time, deep_credits_consumed,
+                     fast_wallets_discovered, fast_execution_time, fast_credits_consumed,
+                     trending_wallets_discovered, trending_execution_time, trending_credits_consumed,
+                     cross_timeframe_quality_avg, parallel_execution, discovery_goal)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    result.timestamp,
+                    len(result.combined_wallets),
+                    result.deduplication_stats.get('total_raw_wallets', 0),
+                    result.deduplication_stats.get('deduplication_ratio', 0.0),
+                    result.deduplication_stats.get('multi_timeframe_wallets', 0),
+                    result.total_credits_consumed,
+                    result.total_execution_time_seconds,
+                    len(deep_result.wallets_discovered) if deep_result else 0,
+                    deep_result.execution_time_seconds if deep_result else 0.0,
+                    deep_result.credits_consumed if deep_result else 0,
+                    len(fast_result.wallets_discovered) if fast_result else 0,
+                    fast_result.execution_time_seconds if fast_result else 0.0,
+                    fast_result.credits_consumed if fast_result else 0,
+                    len(trending_result.wallets_discovered) if trending_result else 0,
+                    trending_result.execution_time_seconds if trending_result else 0.0,
+                    trending_result.credits_consumed if trending_result else 0,
+                    cross_timeframe_quality_avg,
+                    1 if parallel else 0,  # Convert boolean to integer
+                    discovery_goal
+                ))
+
+                logger.debug(f"Saved multi-timeframe discovery stats: {len(result.combined_wallets)} unique wallets")
+
+    def load_multi_timeframe_discovery_stats(self, days: int = 30) -> List[Dict[str, Any]]:
+        """
+        Load multi-timeframe discovery statistics for analysis.
+
+        Args:
+            days: Number of days to look back
+
+        Returns:
+            List of discovery statistics records
+        """
+        with self._lock:
+            cutoff = time.time() - (days * 86400)
+
+            with self._get_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT discovery_timestamp, total_unique_wallets, total_raw_wallets,
+                           deduplication_ratio, multi_timeframe_wallets, total_credits_consumed,
+                           total_execution_time_seconds, deep_wallets_discovered, deep_execution_time,
+                           deep_credits_consumed, fast_wallets_discovered, fast_execution_time,
+                           fast_credits_consumed, trending_wallets_discovered, trending_execution_time,
+                           trending_credits_consumed, cross_timeframe_quality_avg, parallel_execution,
+                           discovery_goal, created_at
+                    FROM multi_timeframe_discovery_stats
+                    WHERE discovery_timestamp >= ?
+                    ORDER BY discovery_timestamp DESC
+                """, (cutoff,))
+
+                records = []
+                for row in cursor:
+                    records.append({
+                        'discovery_timestamp': row[0],
+                        'total_unique_wallets': row[1],
+                        'total_raw_wallets': row[2],
+                        'deduplication_ratio': row[3],
+                        'multi_timeframe_wallets': row[4],
+                        'total_credits_consumed': row[5],
+                        'total_execution_time_seconds': row[6],
+                        'deep_wallets_discovered': row[7],
+                        'deep_execution_time': row[8],
+                        'deep_credits_consumed': row[9],
+                        'fast_wallets_discovered': row[10],
+                        'fast_execution_time': row[11],
+                        'fast_credits_consumed': row[12],
+                        'trending_wallets_discovered': row[13],
+                        'trending_execution_time': row[14],
+                        'trending_credits_consumed': row[15],
+                        'cross_timeframe_quality_avg': row[16],
+                        'parallel_execution': bool(row[17]),
+                        'discovery_goal': row[18],
+                        'created_at': row[19],
+                    })
+
+                logger.debug(f"Loaded {len(records)} multi-timeframe discovery stats records")
+                return records
+
+    def get_multi_timeframe_summary(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Get summary statistics for multi-timeframe discovery performance.
+
+        Args:
+            days: Number of days to summarize
+
+        Returns:
+            Summary statistics
+        """
+        with self._lock:
+            cutoff = time.time() - (days * 86400)
+
+            with self._get_connection() as conn:
+                cursor = conn.execute("""
+                    SELECT COUNT(*) as total_runs,
+                           AVG(total_unique_wallets) as avg_unique_wallets,
+                           AVG(deduplication_ratio) as avg_deduplication_ratio,
+                           AVG(multi_timeframe_wallets) as avg_multi_timeframe_wallets,
+                           AVG(total_credits_consumed) as avg_credits,
+                           AVG(total_execution_time_seconds) as avg_execution_time,
+                           AVG(cross_timeframe_quality_avg) as avg_quality
+                    FROM multi_timeframe_discovery_stats
+                    WHERE discovery_timestamp >= ?
+                """, (cutoff,))
+
+                row = cursor.fetchone()
+                if row and row[0] > 0:
+                    return {
+                        'total_runs': row[0],
+                        'avg_unique_wallets': row[1] or 0,
+                        'avg_deduplication_ratio': row[2] or 0.0,
+                        'avg_multi_timeframe_wallets': row[3] or 0,
+                        'avg_credits_consumed': row[4] or 0,
+                        'avg_execution_time_seconds': row[5] or 0.0,
+                        'avg_cross_timeframe_quality': row[6] or 0.0,
+                    }
+                else:
+                    return {
+                        'total_runs': 0,
+                        'avg_unique_wallets': 0,
+                        'avg_deduplication_ratio': 0.0,
+                        'avg_multi_timeframe_wallets': 0,
+                        'avg_credits_consumed': 0,
+                        'avg_execution_time_seconds': 0.0,
+                        'avg_cross_timeframe_quality': 0.0,
+                    }
 
     def get_credit_summary(self, days: int = 7) -> Dict[str, Any]:
         """

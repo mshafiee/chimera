@@ -308,6 +308,25 @@ class ScoutConfig:
         """Timeout per discovery strategy (deep/fast/trending)."""
         return int(os.getenv("SCOUT_DISCOVERY_TIMEOUT_SECONDS", "300"))
 
+    # ========================================================================
+    # Multi-Timeframe Discovery Configuration (Sprint 4)
+    # ========================================================================
+
+    @staticmethod
+    def get_multi_timeframe_enabled() -> bool:
+        """Get whether multi-timeframe discovery is enabled."""
+        return os.getenv("SCOUT_MULTI_TIMEFRAME_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_multi_timeframe_parallel() -> bool:
+        """Get whether parallel multi-timeframe execution is enabled."""
+        return os.getenv("SCOUT_MULTI_TIMEFRAME_PARALLEL", "true").lower() == "true"
+
+    @staticmethod
+    def get_multi_timeframe_goal() -> str:
+        """Get multi-timeframe discovery goal: 'quality', 'quantity', 'balanced', or 'speed'."""
+        return os.getenv("SCOUT_MULTI_TIMEFRAME_GOAL", "balanced")
+
     @staticmethod
     def get_discovery_profitability_filter() -> bool:
         """

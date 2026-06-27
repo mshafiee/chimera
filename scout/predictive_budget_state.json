@@ -1,0 +1,35 @@
+{
+  "performance": {
+    "discovery": {
+      "credits_consumed": 0,
+      "value_generated": 0.0,
+      "operations_count": 0
+    },
+    "analysis": {
+      "credits_consumed": 0,
+      "value_generated": 0.0,
+      "operations_count": 0
+    },
+    "validation": {
+      "credits_consumed": 0,
+      "value_generated": 0.0,
+      "operations_count": 0
+    },
+    "enrichment": {
+      "credits_consumed": 0,
+      "value_generated": 0.0,
+      "operations_count": 0
+    },
+    "monitoring": {
+      "credits_consumed": 0,
+      "value_generated": 0.0,
+      "operations_count": 0
+    },
+    "reserve": {
+      "credits_consumed": 0,
+      "value_generated": 0.0,
+      "operations_count": 0
+    }
+  },
+  "last_save": 1782597980.982856
+}

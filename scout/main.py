@@ -123,6 +123,26 @@ except ImportError:
     TradingSignal = None
     print("[Scout] Warning: Signal Quality Filter not available")
 
+# Import PredictiveBudgetManager for Helius API quota management
+try:
+    from core.predictive_budget_manager import PredictiveBudgetManager, BudgetCategory, CreditAlertLevel
+    BUDGET_MANAGER_AVAILABLE = True
+except ImportError:
+    BUDGET_MANAGER_AVAILABLE = False
+    PredictiveBudgetManager = None
+    BudgetCategory = None
+    CreditAlertLevel = None
+    print("[Scout] Warning: PredictiveBudgetManager not available")
+
+# Import HighConvictionIntegration for WQS-based prioritization
+try:
+    from integrations.high_conviction_integration import create_high_conviction_integration
+    HIGH_CONVICTIION_AVAILABLE = True
+except ImportError:
+    HIGH_CONVICTIION_AVAILABLE = False
+    create_high_conviction_integration = None
+    print("[Scout] Warning: High-conviction integration not available")
+
 # Import config module if available
 try:
     from config import ScoutConfig
@@ -377,6 +397,7 @@ async def analyze_wallets(
     skip_backtest: bool = False,
     verbose: bool = False,
     optimizer: Optional['ScoutOptimizer'] = None,
+    high_conviction: Optional['HighConvictionIntegration'] = None,
 ) -> Tuple[List[WalletRecord], dict, list]:
     """
     Analyze wallets in parallel and generate roster records.
@@ -401,12 +422,38 @@ async def analyze_wallets(
     
     candidates = analyzer.get_candidate_wallets()
     stats["total"] = len(candidates)
-    
+
+    # Apply high-conviction prioritization if enabled
+    if high_conviction and HIGH_CONVICTIION_AVAILABLE:
+        print("[Scout] Applying high-conviction prioritization...")
+        # Get WQS scores for prioritization (use cached metrics if available)
+        wqs_scores = {}
+        for addr in candidates:
+            cached_metrics = analyzer._metrics_cache.get(addr)
+            if cached_metrics and hasattr(cached_metrics, 'wqs_score'):
+                wqs_scores[addr] = cached_metrics.wqs_score or 0
+            else:
+                wqs_scores[addr] = 0  # Unknown wallets get lowest priority
+
+        candidates = high_conviction.prioritize_wallets_for_analysis(candidates, wqs_scores)
+
     print(f"[Scout] Analyzing {len(candidates)} candidate wallets (Parallel, max 10 concurrent)...")
 
     # Define a single wallet processor function (async)
     async def process_wallet(wallet_address):
         try:
+            # Check high-conviction budget before processing
+            if high_conviction and HIGH_CONVICTIION_AVAILABLE:
+                # For budget checks, we need a preliminary WQS estimate
+                # Use cached metrics or default to medium priority
+                cached_metrics = analyzer._metrics_cache.get(wallet_address)
+                estimated_wqs = cached_metrics.wqs_score if cached_metrics else 50.0
+
+                can_analyze, reason = high_conviction.should_analyze_wallet(wallet_address, estimated_wqs)
+                if not can_analyze:
+                    print(f"[Scout] Skipping {wallet_address[:8]}...: {reason}")
+                    return None
+
             print(f"[Scout] Starting analysis for {wallet_address[:8]}...")
             metrics = await analyzer.get_wallet_metrics(wallet_address)
             if metrics is None:
@@ -1416,11 +1463,82 @@ async def main_async():
             print(f"[Scout] ⚠ Failed to initialize Signal Quality Filter: {e}")
             signal_quality_filter = None
 
+        # Initialize PredictiveBudgetManager for Helius API quota management
+        budget_manager = None
+        if BUDGET_MANAGER_AVAILABLE:
+            try:
+                # Check if budget tracking is enabled via config or env
+                budget_enabled = False
+                if CONFIG_AVAILABLE and ScoutConfig:
+                    budget_enabled = ScoutConfig.get_budget_tracking_enabled()
+                elif os.getenv("SCOUT_BUDGET_TRACKING_ENABLED", "false").lower() == "true":
+                    budget_enabled = True
+
+                if budget_enabled:
+                    budget_manager = PredictiveBudgetManager()
+                    print("[Scout] ✓ PredictiveBudgetManager initialized")
+
+                    # Get current snapshot and alert level
+                    snapshot = budget_manager.get_realtime_snapshot()
+                    print(f"[Scout]   Credits: {snapshot.credits_remaining:,} / {snapshot.credits_total:,} remaining")
+                    print(f"[Scout]   Daily target: {snapshot.daily_target:,} credits")
+                    print(f"[Scout]   Alert level: {snapshot.alert_level.value}")
+
+                    # Run 7-day forecast
+                    forecast = budget_manager.forecast_credit_needs(horizon_hours=168)  # 7 days
+                    print(f"[Scout]   7-day forecast: {forecast.projected_usage:,} credits projected")
+                    print(f"[Scout]   Forecast trend: {forecast.trend} (confidence: {forecast.confidence:.1%})")
+
+                    # Generate and display optimization suggestions
+                    suggestions = budget_manager.suggest_credit_optimization()
+                    if suggestions:
+                        print("[Scout] Optimization suggestions:")
+                        for suggestion in suggestions[:5]:  # Show top 5
+                            print(f"  [{suggestion.priority.upper()}] {suggestion.action}: {suggestion.description}")
+                            if suggestion.expected_savings > 0:
+                                print(f"     Expected savings: {suggestion.expected_savings:,} credits")
+                else:
+                    print("[Scout] Budget tracking disabled (enable with SCOUT_BUDGET_TRACKING_ENABLED=true)")
+
+            except Exception as e:
+                print(f"[Scout] ⚠ Failed to initialize PredictiveBudgetManager: {e}")
+                budget_manager = None
+
+        # Initialize High-Conviction Integration for WQS-based prioritization
+        high_conviction = None
+        if HIGH_CONVICTIION_AVAILABLE:
+            try:
+                # Check if high conviction is enabled via config or env
+                conviction_enabled = False
+                if CONFIG_AVAILABLE and ScoutConfig:
+                    conviction_enabled = ScoutConfig.get_high_conviction_enabled()
+                elif os.getenv("SCOUT_HIGH_CONVICTION_ENABLED", "false").lower() == "true":
+                    conviction_enabled = True
+
+                if conviction_enabled:
+                    # Get total credits budget (default to Helius Developer Plan monthly / 30 days)
+                    total_credits = int(os.getenv("SCOUT_TOTAL_ANALYSIS_CREDITS", "333333"))  # Daily budget
+
+                    high_conviction = create_high_conviction_integration(
+                        total_credits=total_credits,
+                        enabled=True
+                    )
+                    print("[Scout] ✓ High-Conviction Integration initialized")
+                    print(f"[Scout]   Analysis budget: {total_credits:,} credits")
+                    print(f"[Scout]   High-conviction priority: WQS 70+")
+                else:
+                    print("[Scout] High-conviction prioritization disabled")
+
+            except Exception as e:
+                print(f"[Scout] ⚠ Failed to initialize High-Conviction Integration: {e}")
+                high_conviction = None
+
         # Use async factory for proper wallet discovery
         base_analyzer = await WalletAnalyzer.create(
             helius_api_key=helius_api_key,
             discover_wallets=True,  # Enable wallet discovery from on-chain data
             max_wallets=args.max_wallets,
+            budget_manager=budget_manager,  # Pass budget manager for API quota tracking
         )
 
         # Wrap with optimized analyzer if available
@@ -1558,6 +1676,7 @@ async def main_async():
         skip_backtest=args.skip_backtest,
         verbose=args.verbose,
         optimizer=optimizer,
+        high_conviction=high_conviction,
     )
 
     analysis_duration = time.time() - analysis_start
@@ -1913,6 +2032,85 @@ async def main_async():
 
         except Exception as e:
             print(f"[Scout] WARNING: Optimization report generation failed: {e}")
+
+    # Print budget summary if enabled
+    if budget_manager and BUDGET_MANAGER_AVAILABLE:
+        try:
+            # Record daily usage for forecasting
+            try:
+                from core.predictive_budget_manager import BudgetCategory
+                snapshot = budget_manager.get_realtime_snapshot()
+                daily_credits = snapshot.daily_used
+                category_breakdown = {
+                    BudgetCategory.DISCOVERY: 0,
+                    BudgetCategory.ANALYSIS: 0,
+                    BudgetCategory.VALIDATION: 0,
+                    BudgetCategory.ENRICHMENT: 0,
+                    BudgetCategory.MONITORING: 0,
+                }
+                # The analyzer has been tracking usage by category during the run
+                # We could get this from analyzer if we exposed the method, but for now just record total
+                budget_manager.record_daily_usage(daily_credits, category_breakdown)
+            except Exception as record_err:
+                print(f"[Scout] Warning: Failed to record daily usage: {record_err}")
+
+            print("\n" + "=" * 70)
+            print("BUDGET MANAGEMENT REPORT")
+            print("=" * 70)
+
+            # Get daily summary
+            summary = budget_manager.get_daily_summary()
+
+            # Print snapshot
+            snapshot = summary.get('snapshot', {})
+            print(f"Credit Usage:")
+            print(f"  Credits Used: {snapshot.get('credits_used', 0):,}")
+            print(f"  Credits Remaining: {snapshot.get('credits_remaining', 0):,}")
+            print(f"  Usage Percentage: {snapshot.get('usage_percentage', 0):.1f}%")
+            print(f"  Daily Target: {snapshot.get('daily_target', 0):,}")
+            print(f"  Daily Used: {snapshot.get('daily_used', 0):,}")
+            print(f"  Alert Level: {snapshot.get('alert_level', 'unknown').upper()}")
+
+            # Print allocations
+            print(f"\nBudget Allocations:")
+            for category, allocation in summary.get('allocations', {}).items():
+                print(f"  {category}: {allocation}")
+
+            # Print category performance
+            print(f"\nCategory Performance:")
+            for category, perf in summary.get('category_performance', {}).items():
+                print(f"  {category}:")
+                print(f"    Credits Used: {perf.get('credits_used', 0):,}")
+                print(f"    Operations: {perf.get('operations', 0)}")
+                print(f"    ROI: {perf.get('roi', 0):.2f}")
+
+            # Print forecast
+            print(f"\nForecasts:")
+            forecast = summary.get('forecast', {})
+            print(f"  24h Projected: {forecast.get('24h_projected', 0):,} credits")
+            print(f"  7d Projected: {forecast.get('7d_projected', 0):,} credits")
+
+            # Get and display optimization suggestions
+            suggestions = budget_manager.suggest_credit_optimization()
+            if suggestions:
+                print(f"\nBudget Optimization Suggestions:")
+                for suggestion in suggestions[:5]:  # Show top 5
+                    print(f"  [{suggestion.priority.upper()}] {suggestion.action}")
+                    print(f"     {suggestion.description}")
+                    if suggestion.expected_savings > 0:
+                        print(f"     Expected Savings: {suggestion.expected_savings:,} credits")
+
+            print("=" * 70)
+
+        except Exception as e:
+            print(f"[Scout] WARNING: Budget report generation failed: {e}")
+
+    # Print high-conviction allocation report if enabled
+    if high_conviction and HIGH_CONVICTIION_AVAILABLE:
+        try:
+            high_conviction.print_allocation_report()
+        except Exception as e:
+            print(f"[Scout] WARNING: High-conviction report generation failed: {e}")
 
     # Clean up resources
     try:
