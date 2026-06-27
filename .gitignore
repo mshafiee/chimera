@@ -70,3 +70,12 @@ docker/haproxy/geoip/*.mmdb
 /.claude
 .crush.json
 /.kilo
+
+# Test artifacts
+playwright-report/
+test-results/
+*.webm
+
+# Backup files
+backups/
+*.backup
