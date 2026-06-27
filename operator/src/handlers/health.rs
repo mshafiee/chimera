@@ -33,6 +33,9 @@ pub struct HealthResponse {
     pub price_cache: PriceCacheHealth,
     /// Current trade mode
     pub trade_mode: String,
+    /// Time spent in fallback mode (if applicable)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_duration_secs: Option<i64>,
 }
 
 /// Health status enum
@@ -117,10 +120,13 @@ pub async fn health_check(
                 HealthStatus::Unhealthy
             };
             let latency = health.latency_ms.unwrap_or(0);
-            let message = if health.healthy {
-                None
-            } else {
+            let is_fallback = state.engine.is_in_fallback();
+            let message = if !health.healthy {
                 Some("RPC health check failed".to_string())
+            } else if is_fallback {
+                Some("Running in fallback mode (Spear disabled)".to_string())
+            } else {
+                None
             };
             (status, latency, message)
         }
@@ -134,6 +140,9 @@ pub async fn health_check(
             )
         }
     };
+
+    // Get fallback duration (time spent in fallback mode)
+    let fallback_duration_secs = state.engine.fallback_duration().await.map(|d| d.num_seconds());
 
     let rpc_health = ComponentHealth {
         status: rpc_health_status,
@@ -186,6 +195,7 @@ pub async fn health_check(
         circuit_breaker: circuit_breaker_health,
         price_cache: price_cache_health,
         trade_mode: state.trade_mode.clone(),
+        fallback_duration_secs,
     };
 
     (status_code, Json(response))

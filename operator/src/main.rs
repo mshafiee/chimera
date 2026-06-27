@@ -268,6 +268,10 @@ async fn main() -> anyhow::Result<()> {
     // Track SOL for volatility calculation
     price_cache.track_token("So11111111111111111111111111111111111111112");
 
+    // Initialize volume cache for liquidity drop detection
+    let _volume_cache = Arc::new(engine::volume_cache::VolumeCache::new());
+    tracing::info!("✓ Volume Cache initialized for liquidity monitoring");
+
     // Validate webhook URL reachability if monitoring is enabled
     if let Some(ref monitoring_config) = config.monitoring {
         if monitoring_config.enabled {
@@ -1105,6 +1109,11 @@ async fn main() -> anyhow::Result<()> {
         metrics_state.circuit_breaker_trips.clone(),
     );
 
+    // Create exit detector early for use in both polling task and monitoring state
+    let exit_detector = chimera_operator::monitoring::ExitDetector::new()
+        .with_db(db_pool.clone());
+    let exit_detector = Arc::new(exit_detector);
+
     // Spawn metrics update task
     let metrics_state_clone = metrics_state.clone();
     let circuit_breaker_clone = circuit_breaker.clone();
@@ -1188,6 +1197,7 @@ async fn main() -> anyhow::Result<()> {
         let polling_token = cancel_token.clone();
         let polling_cb = circuit_breaker.clone();
         let polling_tp = token_parser.clone();
+        let polling_ed = exit_detector.clone();
 
         tokio::spawn(async move {
             chimera_operator::monitoring::start_polling_task(
@@ -1197,6 +1207,7 @@ async fn main() -> anyhow::Result<()> {
                 polling_token,
                 polling_cb,
                 polling_tp,
+                polling_ed,
             )
             .await;
         });
@@ -1260,6 +1271,46 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or(40),
             1,
         ));
+
+    // Spawn webhook health monitoring task
+    if let Some(ref monitoring_config) = config.monitoring {
+        if let Some(ref webhook_lifecycle_config) = monitoring_config.webhook_lifecycle {
+            if webhook_lifecycle_config.health_check_interval_secs > 0 {
+                if let Some(ref helius) = helius_client {
+                    let webhook_db = db_pool.clone();
+                    let webhook_helius = helius.clone();
+                    let webhook_limiter = webhook_api_rate_limiter.clone();
+                    let webhook_token = cancel_token.clone();
+                    let webhook_url = monitoring_config
+                        .helius_webhook_url
+                        .clone()
+                        .unwrap_or_default();
+
+                    let health_config = chimera_operator::monitoring::WebhookHealthConfig {
+                        check_interval_secs: webhook_lifecycle_config.health_check_interval_secs,
+                        stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
+                        webhook_url: webhook_url.clone(),
+                    };
+
+                    tokio::spawn(async move {
+                        chimera_operator::monitoring::webhook_health_task::start_webhook_health_task(
+                            webhook_db,
+                            webhook_helius,
+                            webhook_limiter,
+                            health_config,
+                            webhook_token,
+                        )
+                        .await;
+                    });
+
+                    tracing::info!(
+                        interval_secs = webhook_lifecycle_config.health_check_interval_secs,
+                        "Webhook health monitoring task started"
+                    );
+                }
+            }
+        }
+    }
 
     // Create API state
     let api_state = Arc::new(ApiState {
@@ -1817,6 +1868,7 @@ async fn main() -> anyhow::Result<()> {
         ms.with_circuit_breaker(circuit_breaker.clone())
             .with_token_parser(token_parser.clone())
             .with_portfolio_heat(portfolio_heat.clone())
+            .with_exit_detector(exit_detector.clone())
     }) {
         Ok(monitoring_state) => {
             let monitoring_state_arc = Arc::new(monitoring_state);

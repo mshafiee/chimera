@@ -165,7 +165,105 @@ class ScoutConfig:
     def get_jito_tip_sol() -> float:
         """Get Jito tip cost per trade (SOL)."""
         return float(os.getenv("SCOUT_JITO_TIP_SOL", "0.0001"))
-    
+
+    # ========================================================================
+    # Advanced Cache Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_cache_memory_mb() -> int:
+        """Get L1 cache size in MB."""
+        return int(os.getenv("SCOUT_CACHE_MEMORY_MB", "10"))
+
+    @staticmethod
+    def get_redis_enabled() -> bool:
+        """Get whether Redis L2 cache is enabled."""
+        return os.getenv("SCOUT_REDIS_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_redis_url() -> str:
+        """Get Redis connection URL."""
+        return os.getenv("SCOUT_REDIS_URL", "redis://localhost:6379")
+
+    @staticmethod
+    def get_cache_warming_enabled() -> bool:
+        """Get whether cache warming is enabled."""
+        return os.getenv("SCOUT_CACHE_WARMING", "true").lower() == "true"
+
+    @staticmethod
+    def get_aggressive_eviction() -> bool:
+        """Get whether aggressive cache eviction is enabled."""
+        return os.getenv("SCOUT_AGGRESSIVE_EVICTION", "false").lower() == "true"
+
+    @staticmethod
+    def get_growth_optimized() -> bool:
+        """Get whether growth-aware caching is enabled."""
+        return os.getenv("SCOUT_GROWTH_OPTIMIZED", "true").lower() == "true"
+
+    @staticmethod
+    def get_cache_ttl_wallet_metrics() -> int:
+        """Get cache TTL for wallet metrics in seconds."""
+        return int(os.getenv("SCOUT_CACHE_TTL_WALLET_METRICS", "300"))
+
+    @staticmethod
+    def get_cache_ttl_high_wqs_wallet_data() -> int:
+        """Get cache TTL for high-WQS wallet data in seconds."""
+        return int(os.getenv("SCOUT_CACHE_TTL_HIGH_WQS_WALLET_DATA", "3600"))
+
+    # ========================================================================
+    # Stop-Loss Optimizer Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_stop_loss_enabled() -> bool:
+        """Get whether stop-loss optimization is enabled."""
+        return os.getenv("SCOUT_STOP_LOSS_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_atr_period() -> int:
+        """Get ATR calculation period."""
+        return int(os.getenv("SCOUT_STOP_LOSS_ATR_PERIOD", "14"))
+
+    @staticmethod
+    def get_atr_multiplier_default() -> float:
+        """Get default ATR multiplier."""
+        return float(os.getenv("SCOUT_STOP_LOSS_DEFAULT_MULTIPLIER", "1.5"))
+
+    @staticmethod
+    def get_bull_multiplier() -> float:
+        """Get bull market multiplier."""
+        return float(os.getenv("SCOUT_STOP_LOSS_BULL_MULTIPLIER", "1.5"))
+
+    @staticmethod
+    def get_bear_multiplier() -> float:
+        """Get bear market multiplier."""
+        return float(os.getenv("SCOUT_STOP_LOSS_BEAR_MULTIPLIER", "1.0"))
+
+    @staticmethod
+    def get_volatile_multiplier() -> float:
+        """Get volatile market multiplier."""
+        return float(os.getenv("SCOUT_STOP_LOSS_VOLATILE_MULTIPLIER", "2.0"))
+
+    @staticmethod
+    def get_min_risk_reward() -> float:
+        """Get minimum risk/reward ratio."""
+        return float(os.getenv("SCOUT_STOP_LOSS_MIN_RISK_REWARD", "2.0"))
+
+    @staticmethod
+    def get_trailing_activate_pct() -> float:
+        """Get trailing stop activation percentage."""
+        return float(os.getenv("SCOUT_STOP_LOSS_TRAILING_ACTIVATE_PCT", "0.02"))
+
+    @staticmethod
+    def get_trailing_distance_pct() -> float:
+        """Get trailing stop distance percentage."""
+        return float(os.getenv("SCOUT_STOP_LOSS_TRAILING_DISTANCE_PCT", "0.03"))
+
+    @staticmethod
+    def get_max_risk_per_trade() -> float:
+        """Get maximum risk percentage per trade."""
+        return float(os.getenv("SCOUT_STOP_LOSS_MAX_RISK_PER_TRADE", "0.03"))
+
     # ========================================================================
     # Wallet Discovery & Analysis
     # ========================================================================
@@ -802,6 +900,381 @@ class ScoutConfig:
     def get_redis_url() -> str:
         """Get Redis connection URL."""
         return os.getenv("REDIS_URL", "redis://localhost:6379")
+
+    # ========================================================================
+    # Validation Reporter Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_validation_enabled() -> bool:
+        """Get whether ML validation reporting is enabled."""
+        return os.getenv("SCOUT_VALIDATION_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_alert_webhook_url() -> str:
+        """Get webhook URL for validation alerts."""
+        return os.getenv("SCOUT_ALERT_WEBHOOK_URL", "")
+
+    @staticmethod
+    def get_alert_high_error_threshold() -> float:
+        """Get high error threshold for alerts (SOL)."""
+        return float(os.getenv("SCOUT_ALERT_HIGH_ERROR_THRESHOLD", "0.5"))
+
+    @staticmethod
+    def get_alert_drift_threshold() -> float:
+        """Get drift threshold for alerts (15% = 0.15)."""
+        return float(os.getenv("SCOUT_ALERT_DRIFT_THRESHOLD", "0.15"))
+
+    @staticmethod
+    def get_alert_low_accuracy_threshold() -> float:
+        """Get low accuracy threshold for alerts (50% = 0.5)."""
+        return float(os.getenv("SCOUT_ALERT_LOW_ACCURACY_THRESHOLD", "0.5"))
+
+    @staticmethod
+    def get_alert_dir() -> str:
+        """Get directory for storing alert logs."""
+        return os.getenv("SCOUT_ALERT_DIR", "data/alerts")
+
+    @staticmethod
+    def get_validation_report_schedule() -> str:
+        """Get validation report generation schedule ('daily', 'weekly')."""
+        return os.getenv("SCOUT_VALIDATION_SCHEDULE", "weekly")
+
+    @staticmethod
+    def get_validation_time_window() -> str:
+        """Get default time window for validation reports ('7d', '30d', 'all')."""
+        return os.getenv("SCOUT_VALIDATION_TIME_WINDOW", "7d")
+
+    @staticmethod
+    def get_validation_report_format() -> str:
+        """Get default validation report format ('json', 'html', 'dict')."""
+        return os.getenv("SCOUT_VALIDATION_FORMAT", "json")
+
+    # ========================================================================
+    # State Persistence Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_state_persistence_enabled() -> bool:
+        """Get whether state persistence is enabled."""
+        return os.getenv("SCOUT_STATE_PERSISTENCE_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_state_persistence_db_path() -> str:
+        """Get state persistence database path."""
+        return os.getenv("SCOUT_STATE_PERSISTENCE_DB_PATH", "scout_persistence.db")
+
+    @staticmethod
+    def get_state_persistence_max_days() -> int:
+        """Get maximum days of history to keep (default 90)."""
+        return int(os.getenv("SCOUT_STATE_PERSISTENCE_MAX_DAYS", "90"))
+
+    @staticmethod
+    def get_state_persistence_backup_enabled() -> bool:
+        """Get whether automatic backups are enabled."""
+        return os.getenv("SCOUT_STATE_PERSISTENCE_BACKUP_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_state_persistence_backup_interval() -> int:
+        """Get backup interval in hours (default 24)."""
+        return int(os.getenv("SCOUT_STATE_PERSISTENCE_BACKUP_INTERVAL", "24"))
+
+    @staticmethod
+    def get_state_persistence_vacuum_interval() -> int:
+        """Get vacuum interval in days (default 7)."""
+        return int(os.getenv("SCOUT_STATE_PERSISTENCE_VACUUM_INTERVAL", "7"))
+
+    @staticmethod
+    def get_state_persistence_credit_history_enabled() -> bool:
+        """Get whether credit history tracking is enabled."""
+        return os.getenv("SCOUT_STATE_PERSISTENCE_CREDIT_HISTORY_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_state_persistence_wallet_performance_enabled() -> bool:
+        """Get whether wallet performance persistence is enabled."""
+        return os.getenv("SCOUT_STATE_PERSISTENCE_WALLET_PERFORMANCE_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_state_persistence_roi_metrics_enabled() -> bool:
+        """Get whether ROI metrics persistence is enabled."""
+        return os.getenv("SCOUT_STATE_PERSISTENCE_ROI_METRICS_ENABLED", "true").lower() == "true"
+
+    # ========================================================================
+    # Signal Quality Filter Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_signal_quality_filter_enabled() -> bool:
+        """Get whether signal quality filtering is enabled."""
+        return os.getenv("SCOUT_SIGNAL_QUALITY_FILTER_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_wqs_weight() -> float:
+        """Get WQS factor weight (default 0.30 = 30%)."""
+        return float(os.getenv("SCOUT_WQS_WEIGHT", "0.30"))
+
+    @staticmethod
+    def get_timing_weight() -> float:
+        """Get timing factor weight (default 0.25 = 25%)."""
+        return float(os.getenv("SCOUT_TIMING_WEIGHT", "0.25"))
+
+    @staticmethod
+    def get_regime_weight() -> float:
+        """Get regime factor weight (default 0.20 = 20%)."""
+        return float(os.getenv("SCOUT_REGIME_WEIGHT", "0.20"))
+
+    @staticmethod
+    def get_ensemble_weight() -> float:
+        """Get ensemble factor weight (default 0.15 = 15%)."""
+        return float(os.getenv("SCOUT_ENSEMBLE_WEIGHT", "0.15"))
+
+    @staticmethod
+    def get_freshness_weight() -> float:
+        """Get freshness factor weight (default 0.10 = 10%)."""
+        return float(os.getenv("SCOUT_FRESHNESS_WEIGHT", "0.10"))
+
+    @staticmethod
+    def get_top_percentile_target() -> float:
+        """Get target percentile for execution (default 20.0 = top 20%)."""
+        return float(os.getenv("SCOUT_TOP_PERCENTILE_TARGET", "20.0"))
+
+    @staticmethod
+    def get_min_percentile_threshold() -> float:
+        """Get minimum percentile threshold (default 10.0 = never below top 10%)."""
+        return float(os.getenv("SCOUT_MIN_PERCENTILE_THRESHOLD", "10.0"))
+
+    @staticmethod
+    def get_max_percentile_threshold() -> float:
+        """Get maximum percentile threshold (default 40.0 = never exceed top 40%)."""
+        return float(os.getenv("SCOUT_MAX_PERCENTILE_THRESHOLD", "40.0"))
+
+    @staticmethod
+    def get_wqs_max() -> float:
+        """Get maximum WQS score for normalization (default 100.0)."""
+        return float(os.getenv("SCOUT_WQS_MAX", "100.0"))
+
+    @staticmethod
+    def get_wqs_min() -> float:
+        """Get minimum WQS score for normalization (default 0.0)."""
+        return float(os.getenv("SCOUT_WQS_MIN", "0.0"))
+
+    @staticmethod
+    def get_freshness_max_age_seconds() -> int:
+        """Get maximum signal age in seconds (default 300 = 5 minutes)."""
+        return int(os.getenv("SCOUT_FRESHNESS_MAX_AGE_SECONDS", "300"))
+
+    @staticmethod
+    def get_freshness_optimal_age_seconds() -> int:
+        """Get optimal signal age in seconds (default 60 = 1 minute)."""
+        return int(os.getenv("SCOUT_FRESHNESS_OPTIMAL_AGE_SECONDS", "60"))
+
+    @staticmethod
+    def get_ensemble_min_confidence() -> float:
+        """Get minimum ensemble confidence (default 0.6 = 60%)."""
+        return float(os.getenv("SCOUT_ENSEMBLE_MIN_CONFIDENCE", "0.6"))
+
+    @staticmethod
+    def get_timing_min_score() -> float:
+        """Get minimum timing score (default 0.5 = 50%)."""
+        return float(os.getenv("SCOUT_TIMING_MIN_SCORE", "0.5"))
+
+    @staticmethod
+    def get_signal_quality_adaptive_threshold() -> bool:
+        """Get whether adaptive threshold adjustment is enabled."""
+        return os.getenv("SCOUT_SIGNAL_QUALITY_ADAPTIVE_THRESHOLD", "true").lower() == "true"
+
+    @staticmethod
+    def get_signal_quality_state_file() -> str:
+        """Get state file for quality filter persistence."""
+        return os.getenv("SCOUT_SIGNAL_QUALITY_STATE_FILE", "data/signal_quality_state.json")
+
+    @staticmethod
+    def get_quality_adjustment_window() -> int:
+        """Get adjustment window for quality threshold (number of trades)."""
+        return int(os.getenv("SCOUT_QUALITY_ADJUSTMENT_WINDOW", "15"))
+
+    @staticmethod
+    def get_quality_adjustment_sensitivity() -> float:
+        """Get sensitivity of quality threshold adjustment (0.0-1.0)."""
+        return float(os.getenv("SCOUT_QUALITY_ADJUSTMENT_SENSITIVITY", "0.5"))
+
+    @staticmethod
+    def get_quality_min_samples() -> int:
+        """Get minimum samples before quality threshold adjustment."""
+        return int(os.getenv("SCOUT_QUALITY_MIN_SAMPLES", "10"))
+
+    @staticmethod
+    def get_signal_fresh_seconds() -> int:
+        """Get threshold for fresh signals in seconds."""
+        return int(os.getenv("SCOUT_SIGNAL_FRESH_SECONDS", "60"))
+
+    @staticmethod
+    def get_signal_stale_seconds() -> int:
+        """Get threshold for stale signals in seconds."""
+        return int(os.getenv("SCOUT_SIGNAL_STALE_SECONDS", "600"))
+
+    @staticmethod
+    def get_signal_max_age_seconds() -> int:
+        """Get maximum signal age in seconds."""
+        return int(os.getenv("SCOUT_SIGNAL_MAX_AGE_SECONDS", "300"))
+
+    @staticmethod
+    def get_quality_excellent_threshold() -> float:
+        """Get threshold for excellent quality (0.0-1.0)."""
+        return float(os.getenv("SCOUT_QUALITY_EXCELLENT_THRESHOLD", "0.9"))
+
+    @staticmethod
+    def get_quality_high_threshold() -> float:
+        """Get threshold for high quality (0.0-1.0)."""
+        return float(os.getenv("SCOUT_QUALITY_HIGH_THRESHOLD", "0.75"))
+
+    @staticmethod
+    def get_quality_good_threshold() -> float:
+        """Get threshold for good quality (0.0-1.0)."""
+        return float(os.getenv("SCOUT_QUALITY_GOOD_THRESHOLD", "0.6"))
+
+    # ========================================================================
+    # Advanced Cache Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_advanced_cache_enabled() -> bool:
+        """Get whether advanced multi-level caching is enabled."""
+        return os.getenv("SCOUT_ADVANCED_CACHE_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_cache_l1_enabled() -> bool:
+        """Get whether L1 memory cache is enabled."""
+        return os.getenv("SCOUT_CACHE_L1_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_cache_l2_enabled() -> bool:
+        """Get whether L2 Redis cache is enabled."""
+        return os.getenv("SCOUT_CACHE_L2_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_cache_l3_enabled() -> bool:
+        """Get whether L3 SQLite cache is enabled."""
+        return os.getenv("SCOUT_CACHE_L3_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_cache_l1_ttl_seconds() -> int:
+        """Get L1 cache TTL in seconds (default 600 = 10 minutes)."""
+        return int(os.getenv("SCOUT_CACHE_L1_TTL_SECONDS", "600"))
+
+    @staticmethod
+    def get_cache_l2_ttl_seconds() -> int:
+        """Get L2 cache TTL in seconds (default 3600 = 1 hour)."""
+        return int(os.getenv("SCOUT_CACHE_L2_TTL_SECONDS", "3600"))
+
+    @staticmethod
+    def get_cache_l3_ttl_seconds() -> int:
+        """Get L3 cache TTL in seconds (default 86400 = 24 hours)."""
+        return int(os.getenv("SCOUT_CACHE_L3_TTL_SECONDS", "86400"))
+
+    @staticmethod
+    def get_cache_growth_aware_ttl() -> bool:
+        """Get whether growth-aware TTL is enabled (longer cache for high WQS)."""
+        return os.getenv("SCOUT_CACHE_GROWTH_AWARE_TTL", "true").lower() == "true"
+
+    @staticmethod
+    def get_cache_exceptional_wqs_multiplier() -> float:
+        """Get TTL multiplier for exceptional WQS wallets (90+)."""
+        return float(os.getenv("SCOUT_CACHE_EXCEPTIONAL_WQS_MULTIPLIER", "4.0"))
+
+    @staticmethod
+    def get_cache_high_wqs_multiplier() -> float:
+        """Get TTL multiplier for high WQS wallets (75-89)."""
+        return float(os.getenv("SCOUT_CACHE_HIGH_WQS_MULTIPLIER", "2.5"))
+
+    @staticmethod
+    def get_cache_average_wqs_multiplier() -> float:
+        """Get TTL multiplier for average WQS wallets (60-74)."""
+        return float(os.getenv("SCOUT_CACHE_AVERAGE_WQS_MULTIPLIER", "1.5"))
+
+    @staticmethod
+    def get_cache_below_average_wqs_multiplier() -> float:
+        """Get TTL multiplier for below-average WQS wallets (<60)."""
+        return float(os.getenv("SCOUT_CACHE_BELOW_AVERAGE_WQS_MULTIPLIER", "1.0"))
+
+    # ========================================================================
+    # Stop-Loss Optimizer Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_stop_loss_optimizer_enabled() -> bool:
+        """Get whether stop-loss optimizer is enabled."""
+        return os.getenv("SCOUT_STOP_LOSS_OPTIMIZER_ENABLED", "true").lower() == "true"
+
+    @staticmethod
+    def get_atr_period_default() -> int:
+        """Get default ATR calculation period."""
+        return int(os.getenv("SCOUT_ATR_PERIOD_DEFAULT", "14"))
+
+    @staticmethod
+    def get_atr_threshold_period() -> int:
+        """Get ATR threshold calculation period."""
+        return int(os.getenv("SCOUT_ATR_THRESHOLD_PERIOD", "14"))
+
+    @staticmethod
+    def get_bull_regime_multiplier() -> float:
+        """Get stop-loss multiplier for bull markets."""
+        return float(os.getenv("SCOUT_BULL_REGIME_MULTIPLIER", "1.5"))
+
+    @staticmethod
+    def get_bear_regime_multiplier() -> float:
+        """Get stop-loss multiplier for bear markets."""
+        return float(os.getenv("SCOUT_BEAR_REGIME_MULTIPLIER", "1.0"))
+
+    @staticmethod
+    def get_volatile_regime_multiplier() -> float:
+        """Get stop-loss multiplier for volatile markets."""
+        return float(os.getenv("SCOUT_VOLATILE_REGIME_MULTIPLIER", "2.0"))
+
+    @staticmethod
+    def get_neutral_regime_multiplier() -> float:
+        """Get stop-loss multiplier for neutral markets."""
+        return float(os.getenv("SCOUT_NEUTRAL_REGIME_MULTIPLIER", "1.25"))
+
+    @staticmethod
+    def get_stop_loss_risk_multiplier() -> float:
+        """Get risk multiplier for stop-loss calculation."""
+        return float(os.getenv("SCOUT_STOP_LOSS_RISK_MULTIPLIER", "2.0"))
+
+    @staticmethod
+    def get_stop_loss_noise_tolerance_percent() -> float:
+        """Get noise tolerance percentage for stop-loss."""
+        return float(os.getenv("SCOUT_STOP_LOSS_NOISE_TOLERANCE_PERCENT", "5.0"))
+
+    @staticmethod
+    def get_position_size_risk_percent() -> float:
+        """Get position size as percentage of capital."""
+        return float(os.getenv("SCOUT_POSITION_SIZE_RISK_PERCENT", "1.0"))
+
+    @staticmethod
+    def get_position_size_max_percent() -> float:
+        """Get maximum position size percentage."""
+        return float(os.getenv("SCOUT_POSITION_SIZE_MAX_PERCENT", "5.0"))
+
+    @staticmethod
+    def get_risk_reward_ratio_target() -> float:
+        """Get target risk/reward ratio."""
+        return float(os.getenv("SCOUT_RISK_REWARD_RATIO_TARGET", "2.0"))
+
+    @staticmethod
+    def get_max_total_risk_percent() -> float:
+        """Get maximum total risk percentage across all positions."""
+        return float(os.getenv("SCOUT_MAX_TOTAL_RISK_PERCENT", "10.0"))
+
+    @staticmethod
+    def get_regime_atr_multiplier() -> float:
+        """Get regime-based ATR multiplier."""
+        return float(os.getenv("SCOUT_REGIME_ATR_MULTIPLIER", "1.5"))
+
+    @staticmethod
+    def get_stop_loss_trailing_enabled() -> bool:
+        """Get whether trailing stop-loss is enabled."""
+        return os.getenv("SCOUT_STOP_LOSS_TRAILING_ENABLED", "true").lower() == "true"
 
     @staticmethod
     def validate_config() -> tuple[bool, list[str]]:

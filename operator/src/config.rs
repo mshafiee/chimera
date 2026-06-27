@@ -940,6 +940,27 @@ pub struct ProfitManagementConfig {
     /// than this amount trigger a full exit instead, avoiding dust positions.
     #[serde(default = "default_min_size_sol")]
     pub min_size_sol: Decimal,
+    /// ATR-based stop-loss multiplier (1.5x for ATR-based dynamic stops)
+    #[serde(default = "default_atr_multiplier")]
+    pub atr_multiplier: Decimal,
+    /// ATR period for calculation (default 14)
+    #[serde(default = "default_atr_period")]
+    pub atr_period: u32,
+    /// Market regime: BULL (widen stops), BEAR (tighten stops), VOLATILE (widen stops)
+    #[serde(default = "default_market_regime")]
+    pub market_regime: String,
+    /// Bull market multiplier for ATR stops (default 1.5x)
+    #[serde(default = "default_bull_market_multiplier")]
+    pub bull_market_multiplier: Decimal,
+    /// Bear market multiplier for ATR stops (default 1.0x)
+    #[serde(default = "default_bear_market_multiplier")]
+    pub bear_market_multiplier: Decimal,
+    /// Volatile market multiplier for ATR stops (default 2.0x)
+    #[serde(default = "default_volatile_market_multiplier")]
+    pub volatile_market_multiplier: Decimal,
+    /// Enable ATR-based stop-loss (default false for backward compatibility)
+    #[serde(default = "default_atr_stop_loss_enabled")]
+    pub atr_stop_loss_enabled: bool,
 }
 
 fn default_profit_targets() -> Vec<Decimal> {
@@ -998,6 +1019,13 @@ impl Default for ProfitManagementConfig {
             losing_time_exit_hours_spear: default_losing_time_exit_hours_spear(),
             losing_time_exit_threshold_percent: default_losing_time_exit_threshold(),
             min_size_sol: default_min_size_sol(),
+            atr_multiplier: default_atr_multiplier(),
+            atr_period: default_atr_period(),
+            market_regime: default_market_regime(),
+            bull_market_multiplier: default_bull_market_multiplier(),
+            bear_market_multiplier: default_bear_market_multiplier(),
+            volatile_market_multiplier: default_volatile_market_multiplier(),
+            atr_stop_loss_enabled: default_atr_stop_loss_enabled(),
         }
     }
 }
@@ -1052,6 +1080,34 @@ fn default_max_size_sol() -> Decimal {
 
 fn default_min_size_sol() -> Decimal {
     dec!(0.05)
+}
+
+fn default_atr_multiplier() -> Decimal {
+    dec!(1.5)
+}
+
+fn default_atr_period() -> u32 {
+    14
+}
+
+fn default_market_regime() -> String {
+    "NEUTRAL".to_string()
+}
+
+fn default_bull_market_multiplier() -> Decimal {
+    dec!(1.5)
+}
+
+fn default_bear_market_multiplier() -> Decimal {
+    dec!(1.0)
+}
+
+fn default_volatile_market_multiplier() -> Decimal {
+    dec!(2.0)
+}
+
+fn default_atr_stop_loss_enabled() -> bool {
+    false
 }
 
 fn default_shield_max_size_sol() -> Decimal {

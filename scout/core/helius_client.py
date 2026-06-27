@@ -18,6 +18,13 @@ from collections import defaultdict
 import threading
 import aiohttp
 
+# Import advanced cache for API optimization
+try:
+    from .advanced_cache import get_cache, CacheCategory
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
+
 try:
     from ..config import ScoutConfig
 except ImportError:
@@ -1363,6 +1370,15 @@ class HeliusClient:
         Returns:
             True if wallet meets aggressive activity criteria
         """
+        # Check cache first (validation results with 5-minute TTL)
+        if CACHE_AVAILABLE:
+            cache = get_cache()
+            cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+            cached_result = cache.get("wallet_validation", wallet_address, cache_key,
+                                    category=CacheCategory.WALLET_METRICS)
+            if cached_result is not None:
+                return cached_result
+
         try:
             # ENVIRONMENT CONFIGURATION OVERRIDES
             # Allow runtime configuration of validation strictness
@@ -1371,12 +1387,24 @@ class HeliusClient:
 
             if not validate_by_default:
                 # If validation is disabled by config, accept all wallets
-                return True
+                result = True
+                if CACHE_AVAILABLE:
+                    cache = get_cache()
+                    cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                    cache.set("wallet_validation", wallet_address, result, cache_key,
+                             category=CacheCategory.WALLET_METRICS)
+                return result
 
             # VALIDATION CRITERIA 1: Minimum trade count
             transactions = await self.get_wallet_transactions(wallet_address, days=days_back, limit=min_trades_config + 10)
             if len(transactions) < min_trades_config:
-                return False
+                result = False
+                if CACHE_AVAILABLE:
+                    cache = get_cache()
+                    cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                    cache.set("wallet_validation", wallet_address, result, cache_key,
+                             category=CacheCategory.WALLET_METRICS)
+                return result
 
             # VALIDATION CRITERIA 2: Trading frequency check
             # Wallets should have consistent trading activity, not just one burst
@@ -1392,7 +1420,13 @@ class HeliusClient:
                 # Require trades on at least 2 different days for quality wallets
                 # (unless min_trades is very low, then 1 day is acceptable)
                 if min_trades_config >= 5 and len(trades_by_day) < 2:
-                    return False
+                    result = False
+                    if CACHE_AVAILABLE:
+                        cache = get_cache()
+                        cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                        cache.set("wallet_validation", wallet_address, cache_key, result,
+                                 category=CacheCategory.WALLET_METRICS)
+                    return result
 
             # VALIDATION CRITERIA 3: SOL balance check
             # Filter out programs and vaults that have zero SOL balance
@@ -1401,7 +1435,13 @@ class HeliusClient:
                 try:
                     sol_balance = await self._get_wallet_sol_balance(wallet_address)
                     if sol_balance < min_sol_balance:
-                        return False
+                        result = False
+                        if CACHE_AVAILABLE:
+                            cache = get_cache()
+                            cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                            cache.set("wallet_validation", wallet_address, cache_key, result,
+                                     category=CacheCategory.WALLET_METRICS)
+                        return result
                 except Exception:
                     # If balance check fails, log but don't fail the validation
                     pass
@@ -1424,14 +1464,33 @@ class HeliusClient:
             recent_trades = [tx for tx in transactions if tx.get("timestamp", 0) > (time.time() - 86400)]
             if not recent_trades and min_trades_config >= 5:
                 # For higher min_trades thresholds, require recent activity
-                return False
+                result = False
+                if CACHE_AVAILABLE:
+                    cache = get_cache()
+                    cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                    cache.set("wallet_validation", wallet_address, result, cache_key,
+                             category=CacheCategory.WALLET_METRICS)
+                return result
 
-            return True
+            # Successful validation
+            result = True
+            if CACHE_AVAILABLE:
+                cache = get_cache()
+                cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                cache.set("wallet_validation", wallet_address, cache_key, result,
+                         category=CacheCategory.WALLET_METRICS)
+            return result
 
         except Exception as e:
             # AGGRESSIVE VALIDATION: Fail closed - if validation fails, wallet is invalid
             print(f"[Helius] Validation failed for wallet {wallet_address[:8]}...: {e}")
-            return False
+            result = False
+            if CACHE_AVAILABLE:
+                cache = get_cache()
+                cache_key = f"{wallet_address}:{min_trades}:{days_back}"
+                cache.set("wallet_validation", wallet_address, cache_key, result,
+                         category=CacheCategory.WALLET_METRICS)
+            return result
 
     async def _get_wallet_sol_balance(self, wallet_address: str) -> float:
         """Get SOL balance for a single wallet."""
@@ -2497,6 +2556,15 @@ class HeliusClient:
         if not self.api_key:
             return []
 
+        # Check cache first (using wallet transactions category with 10-minute TTL)
+        if CACHE_AVAILABLE:
+            cache = get_cache()
+            cache_key = f"{wallet_address}:{days}:{limit}"
+            cached_result = cache.get("wallet_txs", wallet_address, cache_key,
+                                    category=CacheCategory.WALLET_TXS)
+            if cached_result is not None:
+                return cached_result
+
         endpoint = f"/addresses/{wallet_address}/transactions"
 
         # Target total transactions to fetch
@@ -2575,7 +2643,17 @@ class HeliusClient:
         # Helius API versions that omit the type field.
         if not all_txs:
             all_txs = await _paginate_with_type(None)
-        return all_txs[:target]
+
+        result = all_txs[:target]
+
+        # Store result in cache for future requests
+        if CACHE_AVAILABLE and result:
+            cache = get_cache()
+            cache_key = f"{wallet_address}:{days}:{limit}"
+            cache.set("wallet_txs", wallet_address, result, cache_key,
+                     category=CacheCategory.WALLET_TXS)
+
+        return result
 
     def parse_defi_transaction(self, tx: Dict[str, Any], wallet_address: str) -> Optional[Dict[str, Any]]:
         """

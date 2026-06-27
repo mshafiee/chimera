@@ -4,6 +4,8 @@
 //! - Hard stop-loss at -15% (never let losses run)
 //! - Dynamic stops (tighter for low-WQS wallets, wider for high-WQS)
 //! - Portfolio-level stop (pause all trading if daily loss >5%)
+//! - ATR-based stop-loss optimization with market regime adjustment
+//! - Market regime detection (BULL/BEAR/VOLATILE/NEUTRAL)
 
 use crate::config::ProfitManagementConfig;
 use crate::db_abstraction::Database;
@@ -13,6 +15,37 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Market regime for stop-loss adjustment
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarketRegime {
+    Bull,    // Widen stops (follow trends)
+    Bear,    // Tighten stops (preserve capital)
+    Volatile, // Widen stops significantly (avoid wick-outs)
+    Neutral, // Standard parameters
+}
+
+impl MarketRegime {
+    /// Get regime multiplier for ATR-based stops
+    pub fn atr_multiplier(&self) -> Decimal {
+        match self {
+            MarketRegime::Bull => dec!(1.5),
+            MarketRegime::Bear => dec!(1.0),
+            MarketRegime::Volatile => dec!(2.0),
+            MarketRegime::Neutral => dec!(1.25),
+        }
+    }
+
+    /// Parse from string (for config loading)
+    pub fn from_str(s: &str) -> Self {
+        match s.to_uppercase().as_str() {
+            "BULL" => MarketRegime::Bull,
+            "BEAR" => MarketRegime::Bear,
+            "VOLATILE" => MarketRegime::Volatile,
+            _ => MarketRegime::Neutral,
+        }
+    }
+}
 
 /// Stop-loss manager
 pub struct StopLossManager {
@@ -51,6 +84,87 @@ impl StopLossManager {
     /// the in-memory cache instead of issuing a DB query on every position tick.
     pub async fn set_signal_aggregator(&self, agg: Arc<SignalAggregator>) {
         *self.signal_aggregator.write().await = Some(agg);
+    }
+
+    /// Calculate ATR (Average True Range) from price history
+    ///
+    /// ATR measures market volatility by analyzing the range of price movements
+    /// over a specified period. Used for dynamic stop-loss calculation.
+    pub fn calculate_atr(&self, price_history: &[Decimal], period: usize) -> Option<Decimal> {
+        if price_history.len() < period {
+            return None;
+        }
+
+        let mut true_ranges = Vec::with_capacity(price_history.len() - 1);
+
+        // Calculate True Range for each period
+        for i in 1..price_history.len() {
+            let high = price_history[i];
+            let low = price_history[i];
+            let prev_close = price_history[i - 1];
+
+            // True Range = max(high - low, abs(high - prev_close), abs(low - prev_close))
+            let tr = (high - low)
+                .abs()
+                .max((high - prev_close).abs())
+                .max((low - prev_close).abs());
+
+            true_ranges.push(tr);
+        }
+
+        // Calculate ATR as average of true ranges
+        if true_ranges.is_empty() {
+            return None;
+        }
+
+        let sum: Decimal = true_ranges.iter().sum();
+        let atr = sum / Decimal::from(true_ranges.len());
+
+        Some(atr)
+    }
+
+    /// Get current market regime from configuration
+    pub fn get_market_regime(&self) -> MarketRegime {
+        MarketRegime::from_str(&self.config.market_regime)
+    }
+
+    /// Calculate ATR-based stop-loss price
+    ///
+    /// # Arguments
+    /// * `entry_price` - Position entry price
+    /// * `atr_value` - Current ATR value
+    /// * `regime` - Market regime for adjustment
+    ///
+    /// # Returns
+    /// Stop-loss price calculated as: entry_price - (atr * multiplier * regime_factor)
+    pub fn calculate_atr_stop_loss(
+        &self,
+        entry_price: Decimal,
+        atr_value: Decimal,
+        regime: MarketRegime,
+    ) -> Decimal {
+        // Get base ATR multiplier from config
+        let atr_multiplier = self.config.atr_multiplier;
+
+        // Get regime multiplier
+        let regime_multiplier = regime.atr_multiplier();
+
+        // Calculate ATR-based stop distance
+        let atr_distance = atr_value * atr_multiplier * regime_multiplier;
+
+        // Calculate stop-loss price (for long positions)
+        let stop_loss_price = entry_price - (entry_price * atr_distance / dec!(100.0));
+
+        tracing::debug!(
+            entry_price = %entry_price,
+            atr_value = %atr_value,
+            atr_multiplier = %atr_multiplier,
+            regime_multiplier = %regime_multiplier,
+            stop_loss_price = %stop_loss_price,
+            "ATR-based stop-loss calculated"
+        );
+
+        stop_loss_price
     }
 
     /// Check stop-loss for a position
@@ -165,6 +279,30 @@ impl StopLossManager {
         } else {
             dec!(-10) // Low WQS: tighter stop
         };
+
+        // ATR-based stop-loss override (if enabled and ATR calculation is available)
+        if self.config.atr_stop_loss_enabled {
+            if let Some(volatility_f64) = self.price_cache.calculate_volatility(token_address) {
+                let market_regime = self.get_market_regime();
+                let atr_value = Decimal::from_f64(volatility_f64).unwrap_or(Decimal::ZERO);
+                let atr_stop_price = self.calculate_atr_stop_loss(entry_price, atr_value, market_regime);
+
+                // Convert ATR stop price to percentage threshold
+                let atr_loss_percent = ((atr_stop_price - entry_price) / entry_price) * dec!(100.0);
+
+                // Use ATR-based threshold if it's more conservative than the WQS-based threshold
+                if atr_loss_percent > stop_loss_threshold {
+                    stop_loss_threshold = atr_loss_percent;
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        atr_loss_percent = %atr_loss_percent,
+                        market_regime = ?market_regime,
+                        "ATR-based stop-loss applied (overrides WQS-based threshold)"
+                    );
+                }
+            }
+        }
 
         // Adaptive stop-loss: adjust based on token volatility (ATR-like calculation).
         // If token is highly volatile, widen stops to avoid getting wicked out.

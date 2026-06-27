@@ -140,6 +140,12 @@ impl MonitoringState {
         self.portfolio_heat = Some(ph);
         self
     }
+
+    /// Attach an exit detector (for shared state with polling task)
+    pub fn with_exit_detector(mut self, ed: Arc<ExitDetector>) -> Self {
+        self.exit_detector = ed;
+        self
+    }
 }
 
 // Re-export types for convenience

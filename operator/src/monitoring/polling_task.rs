@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use super::{rpc_polling, RateLimiter, RpcPollingState};
+use super::{rpc_polling, ExitDetector, RateLimiter, RpcPollingState};
 use crate::circuit_breaker::CircuitBreaker;
 use crate::db_abstraction::Database;
 use crate::engine::EngineHandle;
 use crate::models::{Action, Signal, SignalPayload, Strategy};
 use crate::token::TokenParser;
+use tokio::sync::RwLock;
 
 /// Configuration for the polling task
 #[derive(Debug, Clone)]
@@ -41,6 +42,7 @@ pub async fn start_polling_task(
     cancel_token: CancellationToken,
     circuit_breaker: Arc<CircuitBreaker>,
     token_parser: Arc<TokenParser>,
+    exit_detector: Arc<ExitDetector>,
 ) {
     tracing::info!(
         interval_secs = config.interval_secs,
@@ -63,6 +65,51 @@ pub async fn start_polling_task(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     let mut poll_count = 0u64;
+
+    // Shared state for pending exit signals
+    let pending_exits: Arc<RwLock<Vec<super::ExitSignal>>> = Arc::new(RwLock::new(Vec::new()));
+    let pending_exits_clone = pending_exits.clone();
+    let exit_detector_clone = exit_detector.clone();
+    let cancel_token_clone = cancel_token.clone();
+
+    // Background task to process pending exit signals
+    tokio::spawn(async move {
+        let mut exit_interval = tokio::time::interval(Duration::from_secs(5));
+        exit_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = cancel_token_clone.cancelled() => {
+                    tracing::info!("Exit signal processor shutting down");
+                    break;
+                }
+                _ = exit_interval.tick() => {
+                    let mut pending = pending_exits_clone.write().await;
+                    let mut to_remove = Vec::new();
+
+                    for (idx, exit_signal) in pending.iter().enumerate() {
+                        if exit_detector_clone.should_generate_exit(exit_signal).await {
+                            tracing::info!(
+                                wallet = %exit_signal.wallet_address,
+                                token = %exit_signal.token_address,
+                                exit_type = ?exit_signal.exit_type,
+                                "Generating delayed exit signal"
+                            );
+
+                            // Mark as processed
+                            exit_detector_clone.mark_exit_processed(exit_signal).await;
+                            to_remove.push(idx);
+                        }
+                    }
+
+                    // Remove processed signals (in reverse order to maintain indices)
+                    for idx in to_remove.into_iter().rev() {
+                        pending.remove(idx);
+                    }
+                }
+            }
+        }
+    });
 
     loop {
         tokio::select! {
@@ -128,7 +175,15 @@ pub async fn start_polling_task(
                 for tx in transactions {
                     let result = tokio::time::timeout(
                         Duration::from_secs(30),
-                        process_transaction(db.as_ref(), &engine, tx, &circuit_breaker, &token_parser),
+                        process_transaction(
+                            db.as_ref(),
+                            &engine,
+                            tx,
+                            &circuit_breaker,
+                            &token_parser,
+                            &exit_detector,
+                            &pending_exits,
+                        ),
                     )
                     .await;
                     match result {
@@ -159,6 +214,8 @@ async fn process_transaction(
     tx: rpc_polling::WalletTransaction,
     circuit_breaker: &CircuitBreaker,
     token_parser: &TokenParser,
+    exit_detector: &ExitDetector,
+    pending_exits: &Arc<RwLock<Vec<super::ExitSignal>>>,
 ) -> Result<()> {
     // Gate 1: circuit breaker — same check as webhook handler
     if !circuit_breaker.is_trading_allowed() {
@@ -217,6 +274,40 @@ async fn process_transaction(
             return Ok(());
         }
     };
+
+    // For SELL transactions, check if this is an exit from a tracked position
+    if matches!(direction, Action::Sell) {
+        // Convert WalletTransaction to ParsedSwap for exit detection
+        let swap_direction = super::transaction_parser::SwapDirection::Sell;
+        let parsed_swap = super::transaction_parser::ParsedSwap {
+            direction: swap_direction,
+            token_in: token_address.clone(),
+            token_out: "So11111111111111111111111111111111111111112".to_string(), // SOL
+            amount_in: amount_sol,
+            amount_out: amount_sol, // Simplified - would need actual conversion
+            dex: "unknown".to_string(), // Not available from polling data
+            slippage: None, // Not available from polling data
+        };
+
+        // Detect exit with configurable delay (default 5 seconds)
+        let delay_secs = 5; // TODO: make configurable
+        if let Some(exit_signal) = exit_detector
+            .detect_exit(&tx.wallet_address, &parsed_swap, delay_secs)
+            .await
+        {
+            tracing::info!(
+                wallet = %exit_signal.wallet_address,
+                token = %exit_signal.token_address,
+                exit_type = ?exit_signal.exit_type,
+                delay_secs = exit_signal.delay_secs,
+                "Detected exit signal, queueing for delayed generation"
+            );
+
+            // Store pending exit for background processing
+            let mut exits = pending_exits.write().await;
+            exits.push(exit_signal);
+        }
+    }
 
     // Polling-generated signals always use Shield: we cannot verify strategy intent
     // from on-chain data alone, so use the conservative path which enforces strict

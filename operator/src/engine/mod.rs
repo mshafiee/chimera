@@ -136,6 +136,15 @@ impl EngineHandle {
         }
     }
 
+    /// Get time spent in fallback mode (async)
+    pub async fn fallback_duration(&self) -> Option<chrono::Duration> {
+        if let Some(ref executor) = self.executor {
+            executor.read().await.fallback_duration()
+        } else {
+            None
+        }
+    }
+
     /// Get the active RPC client from the executor (async)
     pub async fn active_rpc_client(
         &self,

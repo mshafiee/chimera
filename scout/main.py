@@ -18,9 +18,9 @@ The Scout writes to roster_new.db atomically. The Rust Operator then
 merges this into the main database via SIGHUP or API call.
 """
 
-from _version import __version__
-
 from __future__ import annotations
+
+from _version import __version__
 
 import argparse
 import json
@@ -62,6 +62,14 @@ from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
 from core.correlation_reader import CorrelationReader
 from core.feature_store import FeatureStore
+# Import profit tracking for growth monitoring
+try:
+    from core.realtime_profit_tracker import RealtimeProfitTracker, TrackerConfig
+    PROFIT_TRACKER_AVAILABLE = True
+except ImportError:
+    PROFIT_TRACKER_AVAILABLE = False
+    RealtimeProfitTracker = None
+    TrackerConfig = None
 # Import optimization modules
 try:
     from core.scout_optimizer import get_scout_optimizer
@@ -70,6 +78,50 @@ try:
 except ImportError:
     OPTIMIZATION_AVAILABLE = False
     print("[Scout] Warning: Optimization modules not available")
+
+# Import stop-loss optimization modules
+try:
+    from core.stop_loss_optimizer import StopLossOptimizer
+    from core.position_manager import PositionManager
+    from core.market_regime_detector import MarketRegimeDetector
+    STOP_LOSS_OPTIMIZER_AVAILABLE = True
+except ImportError:
+    STOP_LOSS_OPTIMIZER_AVAILABLE = False
+    print("[Scout] Warning: Stop-loss optimization modules not available")
+
+# Import validation reporter for ML monitoring
+try:
+    from core.validation_reporter import ValidationReporter, AlertConfig
+    VALIDATION_REPORTER_AVAILABLE = True
+except ImportError:
+    VALIDATION_REPORTER_AVAILABLE = False
+    ValidationReporter = None
+    AlertConfig = None
+    print("[Scout] Warning: Validation Reporter not available")
+
+# Import state persistence for cross-session learning
+try:
+    from core.state_persistence import StatePersistence, PersistenceConfig, CreditHistory, WalletPerformance, ROIMetrics
+    STATE_PERSISTENCE_AVAILABLE = True
+except ImportError:
+    STATE_PERSISTENCE_AVAILABLE = False
+    StatePersistence = None
+    PersistenceConfig = None
+    CreditHistory = None
+    WalletPerformance = None
+    ROIMetrics = None
+    print("[Scout] Warning: State Persistence not available")
+
+# Import signal quality filter for trade quality improvement
+try:
+    from core.signal_quality_filter import SignalQualityFilter, FilterConfig, TradingSignal
+    SIGNAL_QUALITY_FILTER_AVAILABLE = True
+except ImportError:
+    SIGNAL_QUALITY_FILTER_AVAILABLE = False
+    SignalQualityFilter = None
+    FilterConfig = None
+    TradingSignal = None
+    print("[Scout] Warning: Signal Quality Filter not available")
 
 # Import config module if available
 try:
@@ -1245,6 +1297,125 @@ async def main_async():
             else:
                 print("[Scout] Optimization modules not available, using base analyzer")
 
+        # Initialize Stop-Loss Optimizer and Position Manager
+        position_manager = None
+        stop_loss_optimizer = None
+        try:
+            from core.stop_loss_optimizer import StopLossOptimizer
+            from core.position_manager import PositionManager, set_position_manager
+            from core.market_regime_detector import MarketRegimeDetector
+
+            # Initialize stop-loss optimizer
+            stop_loss_optimizer = StopLossOptimizer()
+            print("[Scout] ✓ Stop-Loss Optimizer initialized")
+
+            # Initialize market regime detector
+            regime_detector = MarketRegimeDetector()
+            print("[Scout] ✓ Market regime detector initialized")
+
+            # Initialize position manager with stop-loss optimizer
+            position_manager = PositionManager(stop_loss_optimizer, regime_detector)
+            set_position_manager(position_manager)
+            print("[Scout] ✓ Position Manager initialized")
+
+        except Exception as e:
+            print(f"[Scout] ⚠ Failed to initialize stop-loss optimization: {e}")
+            print("[Scout]   Position management will use default stop-losses")
+
+        # Initialize Validation Reporter for ML monitoring
+        validation_reporter = None
+        try:
+            from core.validation_reporter import ValidationReporter, AlertConfig
+
+            # Load alert configuration from config if available
+            alert_config = None
+            if CONFIG_AVAILABLE and ScoutConfig.get_validation_enabled():
+                alert_config = AlertConfig(
+                    webhook_url=ScoutConfig.get_alert_webhook_url(),
+                    high_error_threshold=ScoutConfig.get_alert_high_error_threshold(),
+                    drift_threshold=ScoutConfig.get_alert_drift_threshold(),
+                    low_accuracy_threshold=ScoutConfig.get_alert_low_accuracy_threshold(),
+                    alert_dir=ScoutConfig.get_alert_dir(),
+                )
+
+            # Initialize validation reporter
+            db_path = str(args.output) if args.output else "data/roster_new.db"
+            validation_reporter = ValidationReporter(db_path=db_path, alert_config=alert_config)
+            print("[Scout] ✓ Validation Reporter initialized")
+
+        except Exception as e:
+            print(f"[Scout] ⚠ Failed to initialize Validation Reporter: {e}")
+            validation_reporter = None
+
+        # Initialize State Persistence for cross-session learning
+        state_persistence = None
+        try:
+            from core.state_persistence import StatePersistence, PersistenceConfig
+
+            # Load persistence configuration from config if available
+            persistence_config = None
+            if CONFIG_AVAILABLE and ScoutConfig.get_state_persistence_enabled():
+                persistence_config = PersistenceConfig(
+                    db_path=ScoutConfig.get_state_persistence_db_path(),
+                    max_history_days=ScoutConfig.get_state_persistence_max_days(),
+                    backup_enabled=ScoutConfig.get_state_persistence_backup_enabled(),
+                    backup_interval_hours=ScoutConfig.get_state_persistence_backup_interval(),
+                    vacuum_interval_days=ScoutConfig.get_state_persistence_vacuum_interval(),
+                )
+
+            # Initialize state persistence
+            state_persistence = StatePersistence(config=persistence_config)
+            print("[Scout] ✓ State Persistence initialized")
+
+            # Get database stats
+            stats = state_persistence.get_database_stats()
+            print(f"[Scout]   Database: {stats['database_path']}")
+            print(f"[Scout]   Records: {stats['total_records']}")
+            print(f"[Scout]   Database size: {stats['database_size_mb']:.2f} MB")
+
+        except Exception as e:
+            print(f"[Scout] ⚠ Failed to initialize State Persistence: {e}")
+            state_persistence = None
+
+        # Initialize Signal Quality Filter for trade quality improvement
+        signal_quality_filter = None
+        try:
+            from core.signal_quality_filter import SignalQualityFilter, FilterConfig
+
+            # Load filter configuration from config if available
+            filter_config = None
+            if CONFIG_AVAILABLE and ScoutConfig.get_signal_quality_filter_enabled():
+                filter_config = FilterConfig(
+                    WQS_WEIGHT=ScoutConfig.get_wqs_weight(),
+                    TIMING_WEIGHT=ScoutConfig.get_timing_weight(),
+                    REGIME_WEIGHT=ScoutConfig.get_regime_weight(),
+                    ENSEMBLE_WEIGHT=ScoutConfig.get_ensemble_weight(),
+                    FRESHNESS_WEIGHT=ScoutConfig.get_freshness_weight(),
+                    TOP_PERCENTILE_TARGET=ScoutConfig.get_top_percentile_target(),
+                    MIN_PERCENTILE_THRESHOLD=ScoutConfig.get_min_percentile_threshold(),
+                    MAX_PERCENTILE_THRESHOLD=ScoutConfig.get_max_percentile_threshold(),
+                    WQS_MAX=ScoutConfig.get_wqs_max(),
+                    WQS_MIN=ScoutConfig.get_wqs_min(),
+                    FRESHNESS_MAX_AGE_SECONDS=ScoutConfig.get_freshness_max_age_seconds(),
+                    FRESHNESS_OPTIMAL_AGE_SECONDS=ScoutConfig.get_freshness_optimal_age_seconds(),
+                    ENSEMBLE_MIN_CONFIDENCE=ScoutConfig.get_ensemble_min_confidence(),
+                    TIMING_MIN_SCORE=ScoutConfig.get_timing_min_score(),
+                )
+
+            # Initialize signal quality filter
+            signal_quality_filter = SignalQualityFilter(config=filter_config)
+            print("[Scout] ✓ Signal Quality Filter initialized")
+
+            # Get filter statistics
+            stats = signal_quality_filter.get_filter_stats()
+            print(f"[Scout]   Current threshold: top {stats['current_threshold']:.1f}%")
+            print(f"[Scout]   Total evaluated: {stats['total_signals_evaluated']}")
+            print(f"[Scout]   Execution rate: {stats['execution_rate']:.1f}%")
+
+        except Exception as e:
+            print(f"[Scout] ⚠ Failed to initialize Signal Quality Filter: {e}")
+            signal_quality_filter = None
+
         # Use async factory for proper wallet discovery
         base_analyzer = await WalletAnalyzer.create(
             helius_api_key=helius_api_key,
@@ -1354,7 +1525,24 @@ async def main_async():
     metrics = get_metrics()
     if metrics:
         metrics.start_server()
-    
+
+    # Initialize profit tracker for growth monitoring
+    profit_tracker = None
+    if PROFIT_TRACKER_AVAILABLE and os.getenv("SCOUT_PROFIT_TRACKER_ENABLED", "false").lower() == "true":
+        try:
+            # Get starting capital from environment or use default
+            starting_capital = float(os.getenv("SCOUT_STARTING_CAPITAL", "200.0"))
+            target_capital = float(os.getenv("SCOUT_TARGET_CAPITAL", "1000.0"))
+
+            tracker_config = TrackerConfig(
+                STARTING_CAPITAL=starting_capital,
+                TARGET_CAPITAL=target_capital,
+            )
+            profit_tracker = RealtimeProfitTracker(config=tracker_config)
+            print(f"[Scout] ✓ Profit tracker initialized (${starting_capital:.0f} → ${target_capital:.0f})")
+        except Exception as e:
+            print(f"[Scout] Warning: Failed to initialize profit tracker: {e}")
+
     # Analyze wallets
     print("\n[Scout] Analyzing wallets...")
     print(f"  Min WQS for ACTIVE: {args.min_wqs_active}")
@@ -1447,6 +1635,58 @@ async def main_async():
     except Exception as e:
         if args.verbose:
             print(f"[Scout] PnL feedback loop skipped: {e}")
+
+    # Update profit tracker with realized PnL data
+    if profit_tracker and PROFIT_TRACKER_AVAILABLE:
+        try:
+            corr_reader = CorrelationReader()
+            if corr_reader.table_exists():
+                pnl_records = corr_reader.get_all_records(min_trades=5)
+                total_capital_change = 0.0
+
+                # Update tracker with each wallet's PnL
+                for rec in pnl_records:
+                    if rec.actual_copy_pnl_30d_sol is not None:
+                        # Use WQS score as a proxy for wallet quality (stored in wqs_score_at_promotion)
+                        wqs_score = rec.wqs_score_at_promotion or 0.0
+
+                        # Update profit tracker with this wallet's performance
+                        profit_tracker.update_profit(
+                            trade_id=f"{rec.wallet_address}_30d",
+                            pnl=float(rec.actual_copy_pnl_30d_sol),
+                            wqs=wqs_score,
+                            category="copy_trading"
+                        )
+                        total_capital_change += float(rec.actual_copy_pnl_30d_sol)
+
+                # Print profit tracking summary
+                if pnl_records and total_capital_change != 0:
+                    tracker_summary = profit_tracker.get_tracker_summary()
+                    velocity = profit_tracker.get_profit_velocity()
+                    eta = profit_tracker.get_eta_to_1000()
+
+                    print(f"\n[Scout] === Growth Tracking ===")
+                    print(f"  Current capital: ${tracker_summary['capital']['current']:.2f}")
+                    print(f"  Total profit: ${tracker_summary['capital']['profit']:.2f} "
+                          f"({tracker_summary['capital']['profit_pct']:.1f}%)")
+                    print(f"  Growth stage: {tracker_summary['capital']['growth_stage']}")
+                    print(f"  Velocity: ${velocity.daily_rate:.2f}/day ({velocity.trend})")
+                    if eta.days_remaining < float('inf'):
+                        print(f"  ETA to $1,000: {eta.days_remaining:.1f} days (confidence: {eta.confidence:.1%})")
+                    else:
+                        print(f"  ETA to $1,000: Unable to calculate (negative velocity)")
+                    print(f"  Win rate: {tracker_summary['performance']['win_rate']:.1%}")
+
+                    # Check for optimization triggers
+                    optimization_actions = profit_tracker.trigger_optimization_if_needed()
+                    if optimization_actions:
+                        print(f"\n[Scout] Optimization Actions:")
+                        for action in optimization_actions:
+                            print(f"  [{action.priority.upper()}] {action.action}: {action.description}")
+
+        except Exception as e:
+            if args.verbose:
+                print(f"[Scout] Profit tracker update failed: {e}")
 
     # Prediction matching + validation metrics
     if os.getenv("SCOUT_PREDICTION_MATCHING_ENABLED", "true").lower() == "true":

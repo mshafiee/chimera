@@ -353,6 +353,69 @@ pub async fn update_wallet(
         }
     }
 
+    // Trigger automatic webhook cleanup for demoted wallet
+    let was_demoted = existing.as_ref().map(|w| w.status.as_str()) == Some("ACTIVE")
+        && body.status != "ACTIVE";
+
+    if was_demoted {
+        let config = state.config.read().await;
+        if config
+            .monitoring
+            .as_ref()
+            .and_then(|m| m.webhook_lifecycle.as_ref())
+            .map(|wl| wl.auto_cleanup_enabled)
+            .unwrap_or(true)
+        {
+            let db_clone = state.db.clone();
+            let helius_client = state.helius_client.clone();
+            let rate_limiter = state.webhook_rate_limiter.clone();
+            let webhook_url = config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.helius_webhook_url.clone())
+                .unwrap_or_default();
+
+            let address_clone = address.clone();
+
+            // Only spawn webhook cleanup if resources are available
+            if let (Some(helius), Some(limiter)) = (helius_client, rate_limiter) {
+                tokio::spawn(async move {
+                    use crate::monitoring::webhook_lifecycle::{
+                        WebhookLifecycleConfig, WebhookLifecycleManager,
+                    };
+
+                    let lifecycle_config = WebhookLifecycleConfig {
+                        auto_register_enabled: true,
+                        auto_cleanup_enabled: true,
+                        health_check_interval_secs: 3600,
+                        stale_threshold_days: 7,
+                        max_registration_retries: 3,
+                        webhook_url: webhook_url.clone(),
+                    };
+
+                    let manager =
+                        WebhookLifecycleManager::new(db_clone, helius, limiter, lifecycle_config);
+
+                    match manager.cleanup_wallet_webhook(&address_clone).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                wallet = %address_clone,
+                                "Auto-cleaned webhook for demoted wallet"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                wallet = %address_clone,
+                                error = %e,
+                                "Webhook cleanup for demoted wallet failed or webhook not found"
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
     // Fetch updated wallet
     let wallet = state.db.get_wallet(&address).await?;
 
