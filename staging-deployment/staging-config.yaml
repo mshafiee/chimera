@@ -1,0 +1,120 @@
+# Staging Environment Configuration - Project Chimera
+# This configuration simulates a staging deployment environment for comprehensive validation
+
+staging:
+  environment: "staging"
+  deployment_date: "2025-06-27"
+  version: "1.0.0"
+
+# Staging Server Configuration
+server:
+  host: "localhost"
+  port: 8080
+  protocol: "http"
+  timeout_ms: 30000
+
+# Staging Database Configuration
+database:
+  type: "sqlite"
+  path: "../data/chimera.db"
+  wal_mode: true
+  backup_path: "../backups/chimera.db.backup.20260627"
+
+# Staging Monitoring Configuration
+monitoring:
+  prometheus:
+    enabled: true
+    port: 9090
+    scrape_interval: "5s"
+
+  grafana:
+    enabled: true
+    port: 3000
+    dashboard_refresh: "10s"
+
+# Staging Security Configuration
+security:
+  hmac_enabled: true
+  webhook_secret: "staging-secret-key-for-testing"
+  rate_limiting:
+    enabled: true
+    requests_per_second: 100
+  geographic_filtering:
+    enabled: true
+    mode: "testing" # Reduced restrictions for staging
+
+# Staging Component Deployment
+components:
+  multi_timeframe_discovery:
+    enabled: true
+    parallel: true
+
+  advanced_cache:
+    enabled: true
+    l1_cache_size_mb: 10
+    target_hit_rate: 0.80
+
+  stop_loss_optimizer:
+    enabled: true
+
+  signal_quality_filter:
+    enabled: true
+    threshold: 0.50
+
+  profit_targets:
+    enabled: true
+    tiered_targets: [0.25, 0.50, 1.00]
+
+  jito_searcher:
+    enabled: true
+    direct_mode: true
+
+  risk_dashboard:
+    enabled: true
+    websocket_refresh: "15s"
+
+  signals_dashboard:
+    enabled: true
+    websocket_refresh: "20s"
+
+# Staging Testing Configuration
+testing:
+  integration_tests:
+    enabled: true
+    parallel: true
+
+  load_tests:
+    enabled: true
+    target_rps: 100
+
+  performance_tests:
+    enabled: true
+    max_response_time_ms: 500
+
+  security_tests:
+    enabled: true
+
+# Staging Validation Criteria
+validation:
+  success_criteria:
+    test_success_rate: 1.0 # 100%
+    performance_targets_met: true
+    security_measures_operational: true
+    rollback_procedures_validated: true
+
+  performance_targets:
+    api_response_time_p95_ms: 500
+    api_response_time_p99_ms: 1000
+    cache_hit_rate: 0.80
+    dashboard_load_time_ms: 3000
+
+  monitoring_requirements:
+    prometheus_metrics_available: true
+    grafana_dashboards_accessible: true
+    alert_rules_configured: true
+
+  security_requirements:
+    hmac_authentication_working: true
+    geographic_access_control_operational: true
+    rate_limiting_enforcing: true
+    security_monitoring_active: true
