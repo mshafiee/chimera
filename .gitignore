@@ -42,7 +42,7 @@ logs/
 tmp/
 temp/
 *.tmp
- *.md
+*.md
 # Track important project docs
 !README.md
 !AGENTS.md
@@ -51,8 +51,22 @@ temp/
 !docs/**/*.md
 !ops/**/*.md
 !docker/**/*.md
+!scout/**/*.md
+!tools/**/*.md
+!ssl/README.md
+
+# Secrets / generated TLS material
+ssl/certbot/
+ssl/work/
+*.key
+*.pem
+*.crt
+# MaxMind GeoIP databases (licensed, downloaded at runtime)
+docker/haproxy/geoip/*.mmdb
+
 /.hypothesis
 /operator/.hypothesis
 /scout/.hypothesis
 /.claude
 .crush.json
+/.kilo
