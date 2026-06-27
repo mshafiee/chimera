@@ -13,6 +13,7 @@ use super::{
     WebhookAuditLog,
 };
 use crate::error::{AppError, AppResult};
+use crate::engine::retry_sqlite_async; // Import the async retry function
 use rust_decimal::prelude::*;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::Row;
@@ -167,23 +168,32 @@ impl Database for SqliteBackend {
 
     #[tracing::instrument(skip(self, trade))]
     async fn insert_trade(&self, trade: &InsertTrade) -> AppResult<i64> {
-        let result = sqlx::query(
-            r#"
-            INSERT INTO trades (
-                trade_uuid, wallet_address, token_address, token_symbol,
-                strategy, side, amount_sol, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&trade.trade_uuid)
-        .bind(&trade.wallet_address)
-        .bind(&trade.token_address)
-        .bind(&trade.token_symbol)
-        .bind(&trade.strategy)
-        .bind(&trade.side)
-        .bind(dec_to_text(&trade.amount_sol))
-        .bind(&trade.status)
-        .execute(&self.pool)
+        let trade_clone = trade.clone();
+        let pool_ref = &self.pool;
+
+        let result = retry_sqlite_async(|| {
+            let trade = trade_clone.clone();
+            async move {
+                sqlx::query(
+                    r#"
+                    INSERT INTO trades (
+                        trade_uuid, wallet_address, token_address, token_symbol,
+                        strategy, side, amount_sol, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    "#,
+                )
+                .bind(&trade.trade_uuid)
+                .bind(&trade.wallet_address)
+                .bind(&trade.token_address)
+                .bind(&trade.token_symbol)
+                .bind(&trade.strategy)
+                .bind(&trade.side)
+                .bind(dec_to_text(&trade.amount_sol))
+                .bind(&trade.status)
+                .execute(pool_ref)
+                .await
+            }
+        })
         .await?;
 
         Ok(result.last_insert_rowid())
@@ -191,36 +201,53 @@ impl Database for SqliteBackend {
 
     #[tracing::instrument(skip(self, update))]
     async fn update_trade_status(&self, update: &UpdateTradeStatus) -> AppResult<()> {
+        let update_clone = update.clone();
+        let pool_ref = &self.pool;
+
         let result = if let Some(sig) = &update.tx_signature {
-            sqlx::query(
-                r#"
-                UPDATE trades
-                SET status = ?, tx_signature = ?, error_message = ?,
-                    network_fee_sol = COALESCE(?, network_fee_sol)
-                WHERE trade_uuid = ?
-                "#,
-            )
-            .bind(&update.status)
-            .bind(sig)
-            .bind(&update.error_message)
-            .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
-            .bind(&update.trade_uuid)
-            .execute(&self.pool)
+            let sig_clone = sig.clone();
+            retry_sqlite_async(|| {
+                let update = update_clone.clone();
+                let sig = sig_clone.clone();
+                async move {
+                    sqlx::query(
+                        r#"
+                        UPDATE trades
+                        SET status = ?, tx_signature = ?, error_message = ?,
+                            network_fee_sol = COALESCE(?, network_fee_sol)
+                        WHERE trade_uuid = ?
+                        "#,
+                    )
+                    .bind(&update.status)
+                    .bind(&sig)
+                    .bind(&update.error_message)
+                    .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
+                    .bind(&update.trade_uuid)
+                    .execute(pool_ref)
+                    .await
+                }
+            })
             .await?
         } else {
-            sqlx::query(
-                r#"
-                UPDATE trades
-                SET status = ?, error_message = COALESCE(?, error_message),
-                    network_fee_sol = COALESCE(?, network_fee_sol)
-                WHERE trade_uuid = ?
-                "#,
-            )
-            .bind(&update.status)
-            .bind(&update.error_message)
-            .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
-            .bind(&update.trade_uuid)
-            .execute(&self.pool)
+            retry_sqlite_async(|| {
+                let update = update_clone.clone();
+                async move {
+                    sqlx::query(
+                        r#"
+                        UPDATE trades
+                        SET status = ?, error_message = COALESCE(?, error_message),
+                            network_fee_sol = COALESCE(?, network_fee_sol)
+                        WHERE trade_uuid = ?
+                        "#,
+                    )
+                    .bind(&update.status)
+                    .bind(&update.error_message)
+                    .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
+                    .bind(&update.trade_uuid)
+                    .execute(pool_ref)
+                    .await
+                }
+            })
             .await?
         };
 

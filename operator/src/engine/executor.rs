@@ -256,6 +256,16 @@ impl Executor {
         Duration::from_millis(millis.min(30000)) // Cap at 30s
     }
 
+    /// Detect if an error message indicates RPC rate limiting
+    fn is_rate_limit_error(error: &str) -> bool {
+        let error_lower = error.to_lowercase();
+        error_lower.contains("rate limit") ||
+        error_lower.contains("429") ||
+        error_lower.contains("too many requests") ||
+        error_lower.contains("ratelimit") ||
+        error_lower.contains("rate-limit")
+    }
+
     /// Send notification if notifier is configured and rules allow it
     async fn notify(&self, event: NotificationEvent) {
         if let Some(ref notifier) = self.notifier {
@@ -414,6 +424,30 @@ impl Executor {
                             error = %e,
                             "V0 reconstruction failed after maximum retries. Transaction failed."
                         );
+                    }
+                }
+                Err(ExecutorError::Rpc(ref rpc_err)) => {
+                    // Check if this is a rate limit error and handle with degradation system
+                    if Self::is_rate_limit_error(rpc_err) && self.config.degradation.rpc_rate_limit_enabled {
+                        if attempts < 10 {
+                            let backoff = crate::engine::handle_rpc_rate_limit().await;
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                attempt = attempts,
+                                backoff_ms = backoff.as_millis(),
+                                error = %rpc_err,
+                                "RPC rate limit detected. Applying degradation backoff..."
+                            );
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        } else {
+                            tracing::error!(
+                                trade_uuid = %signal.trade_uuid,
+                                attempts = attempts,
+                                error = %rpc_err,
+                                "RPC rate limit: maximum retries exceeded"
+                            );
+                        }
                     }
                 }
                 _ => {}

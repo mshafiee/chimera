@@ -910,6 +910,93 @@ async fn main() -> anyhow::Result<()> {
     });
     tracing::info!("RPC health check task started");
 
+    // Spawn periodic memory and disk pressure monitoring task
+    let config_clone = config.clone();
+    let monitor_token = cancel_token.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = monitor_token.cancelled() => break,
+                _ = interval.tick() => {
+                    if config_clone.degradation.memory_monitoring_enabled {
+                        match crate::engine::check_memory_pressure().await {
+                            Ok(usage) => {
+                                if usage >= config_clone.degradation.memory_pressure_threshold {
+                                    tracing::warn!(
+                                        memory_usage_pct = usage * 100.0,
+                                        threshold_pct = config_clone.degradation.memory_pressure_threshold * 100.0,
+                                        "Memory pressure detected"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        memory_usage_pct = usage * 100.0,
+                                        "Memory usage normal"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to check memory pressure");
+                            }
+                        }
+                    }
+
+                    if config_clone.degradation.disk_monitoring_enabled {
+                        // Check disk space in current directory
+                        let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                        match crate::engine::check_disk_space(&current_dir).await {
+                            Ok(free_space) => {
+                                if free_space <= config_clone.degradation.disk_space_warning_threshold {
+                                    tracing::warn!(
+                                        free_space_pct = free_space * 100.0,
+                                        threshold_pct = config_clone.degradation.disk_space_warning_threshold * 100.0,
+                                        "Disk space low"
+                                    );
+                                } else {
+                                    tracing::debug!(
+                                        free_space_pct = free_space * 100.0,
+                                        "Disk space normal"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to check disk space");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    tracing::info!("Memory and disk pressure monitoring task started");
+
+    // Spawn periodic log pruning task
+    let config_prune = config.clone();
+    let prune_token = cancel_token.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 minutes
+        loop {
+            tokio::select! {
+                _ = prune_token.cancelled() => break,
+                _ = interval.tick() => {
+                    if config_prune.degradation.log_pruning_enabled {
+                        let log_dir = std::path::PathBuf::from("logs");
+                        let max_age_days = 7; // Default: prune logs older than 7 days
+                        match crate::engine::prune_logs_if_needed(&log_dir, max_age_days).await {
+                            Ok(_) => {
+                                tracing::debug!("Log pruning check completed");
+                            }
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to prune logs");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    tracing::info!("Log pruning task started");
+
     // Build position risk managers and spawn monitoring loop
     let market_regime_detector = Arc::new(MarketRegimeDetector::new(price_cache.clone()));
     // Create SignalAggregator early so the stop-loss manager can read consensus from

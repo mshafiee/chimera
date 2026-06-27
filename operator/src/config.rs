@@ -96,6 +96,9 @@ pub struct AppConfig {
     /// MEV protection configuration
     #[serde(default)]
     pub mev_protection: MevProtectionConfig,
+    /// Degradation and reliability monitoring configuration
+    #[serde(default)]
+    pub degradation: DegradationConfig,
 }
 
 /// HTTP server configuration
@@ -1200,6 +1203,74 @@ impl Default for MevProtectionConfig {
             exit_tip_sol: default_exit_tip_sol(),
             consensus_tip_sol: default_consensus_tip_sol(),
             standard_tip_sol: default_standard_tip_sol(),
+        }
+    }
+}
+
+/// Degradation and reliability monitoring configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct DegradationConfig {
+    /// Memory pressure threshold (0.0-1.0, default: 0.90)
+    #[serde(default = "default_memory_pressure_threshold")]
+    pub memory_pressure_threshold: f64,
+    /// Disk space warning threshold (0.0-1.0, default: 0.10)
+    #[serde(default = "default_disk_space_warning_threshold")]
+    pub disk_space_warning_threshold: f64,
+    /// Enable automatic log pruning when disk space is low
+    #[serde(default = "default_log_pruning_enabled")]
+    pub log_pruning_enabled: bool,
+    /// Maximum log file size in MB before pruning
+    #[serde(default = "default_max_log_size_mb")]
+    pub max_log_size_mb: u64,
+    /// Enable memory pressure monitoring
+    #[serde(default = "default_memory_monitoring_enabled")]
+    pub memory_monitoring_enabled: bool,
+    /// Enable disk space monitoring
+    #[serde(default = "default_disk_monitoring_enabled")]
+    pub disk_monitoring_enabled: bool,
+    /// Enable RPC rate limit degradation handling
+    #[serde(default = "default_rpc_rate_limit_enabled")]
+    pub rpc_rate_limit_enabled: bool,
+}
+
+fn default_memory_pressure_threshold() -> f64 {
+    0.90
+}
+
+fn default_disk_space_warning_threshold() -> f64 {
+    0.10
+}
+
+fn default_log_pruning_enabled() -> bool {
+    true
+}
+
+fn default_max_log_size_mb() -> u64 {
+    100
+}
+
+fn default_memory_monitoring_enabled() -> bool {
+    true
+}
+
+fn default_disk_monitoring_enabled() -> bool {
+    true
+}
+
+fn default_rpc_rate_limit_enabled() -> bool {
+    true
+}
+
+impl Default for DegradationConfig {
+    fn default() -> Self {
+        Self {
+            memory_pressure_threshold: default_memory_pressure_threshold(),
+            disk_space_warning_threshold: default_disk_space_warning_threshold(),
+            log_pruning_enabled: default_log_pruning_enabled(),
+            max_log_size_mb: default_max_log_size_mb(),
+            memory_monitoring_enabled: default_memory_monitoring_enabled(),
+            disk_monitoring_enabled: default_disk_monitoring_enabled(),
+            rpc_rate_limit_enabled: default_rpc_rate_limit_enabled(),
         }
     }
 }

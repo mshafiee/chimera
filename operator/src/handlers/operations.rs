@@ -24,6 +24,7 @@ pub struct ResourceUsageResponse {
     pub memory: ResourceMetric,
     pub disk: ResourceMetric,
     pub network: NetworkMetric,
+    pub degradation: DegradationStatus,
     pub timestamp: String,
 }
 
@@ -53,6 +54,15 @@ pub struct NetworkMetric {
     pub packets_sent: u64,
     pub packets_received: u64,
     pub error_rate: f64,
+}
+
+/// Degradation system status
+#[derive(Debug, Serialize)]
+pub struct DegradationStatus {
+    pub memory_pressure_active: bool,
+    pub disk_space_warning: bool,
+    pub rpc_rate_limit_active: bool,
+    pub rpc_backoff_multiplier: u64,
 }
 
 /// Shared state for operations handlers
@@ -137,6 +147,20 @@ pub async fn get_resources(
 
     let error_rate = 0.0; // Network error rate would need more detailed monitoring
 
+    // Get degradation status from the monitoring system
+    let memory_pressure_active = crate::engine::is_memory_pressure_high();
+
+    // Check disk space (using current directory as proxy)
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let disk_space_warning = match crate::engine::check_disk_space(&current_dir).await {
+        Ok(free_space) => free_space <= 0.10, // Warning if less than 10% free
+        Err(_) => false,
+    };
+
+    // Get RPC rate limit status (check if backoff is active)
+    let rpc_backoff_multiplier = crate::engine::get_rpc_backoff_multiplier();
+    let rpc_rate_limit_active = rpc_backoff_multiplier > 1;
+
     let response = ResourceUsageResponse {
         cpu: ResourceMetric {
             current: cpu_current,
@@ -162,6 +186,12 @@ pub async fn get_resources(
             packets_sent,
             packets_received,
             error_rate,
+        },
+        degradation: DegradationStatus {
+            memory_pressure_active,
+            disk_space_warning,
+            rpc_rate_limit_active,
+            rpc_backoff_multiplier,
         },
         timestamp: Utc::now().to_rfc3339(),
     };

@@ -21,7 +21,6 @@ const INITIAL_BACKOFF_MS: u64 = 100;
 const MAX_BACKOFF_MS: u64 = 5000;
 
 /// Memory pressure threshold (percentage)
-#[allow(dead_code)] // Reserved for future memory pressure monitoring
 const MEMORY_PRESSURE_THRESHOLD: f64 = 0.90;
 
 /// Disk space warning threshold (percentage free)
@@ -75,6 +74,65 @@ where
                         backoff_ms = backoff_ms,
                         error = %e,
                         "SQLite lock detected, retrying with backoff"
+                    );
+
+                    sleep(Duration::from_millis(backoff_ms)).await;
+
+                    // Exponential backoff: double the delay, cap at max
+                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+                } else {
+                    // Not a lock error, return immediately
+                    return Err(e);
+                }
+            }
+        }
+    }
+}
+
+/// Retry async SQLite operation with exponential backoff
+///
+/// This is designed for SQLx async operations that might encounter lock contention.
+pub async fn retry_sqlite_async<F, Fut, T, E>(operation: F) -> Result<T, E>
+where
+    F: Fn() -> Fut + Send + Sync,
+    Fut: std::future::Future<Output = Result<T, E>> + Send,
+    E: std::fmt::Display + Send + Sync,
+{
+    let mut attempt = 0;
+    let mut backoff_ms = INITIAL_BACKOFF_MS;
+
+    loop {
+        match operation().await {
+            Ok(result) => {
+                // Reset backoff on success
+                RPC_BACKOFF_MULTIPLIER.store(1, Ordering::Relaxed);
+                return Ok(result);
+            }
+            Err(e) => {
+                let error_str = e.to_string().to_lowercase();
+
+                // Check if it's a lock error
+                if error_str.contains("locked")
+                    || error_str.contains("database is locked")
+                    || error_str.contains("busy")
+                    || error_str.contains("database is busy")
+                {
+                    attempt += 1;
+
+                    if attempt >= MAX_SQLITE_RETRIES {
+                        tracing::error!(
+                            attempt = attempt,
+                            error = %e,
+                            "Async SQLite operation failed after max retries"
+                        );
+                        return Err(e);
+                    }
+
+                    tracing::warn!(
+                        attempt = attempt,
+                        backoff_ms = backoff_ms,
+                        error = %e,
+                        "Async SQLite lock detected, retrying with backoff"
                     );
 
                     sleep(Duration::from_millis(backoff_ms)).await;
@@ -206,6 +264,11 @@ pub async fn handle_rpc_rate_limit() -> Duration {
 /// Reset RPC backoff (call after successful request)
 pub fn reset_rpc_backoff() {
     RPC_BACKOFF_MULTIPLIER.store(1, Ordering::Relaxed);
+}
+
+/// Get current RPC backoff multiplier (for monitoring)
+pub fn get_rpc_backoff_multiplier() -> u64 {
+    RPC_BACKOFF_MULTIPLIER.load(Ordering::Relaxed)
 }
 
 /// Prune old log files if disk space is below the warning threshold.
