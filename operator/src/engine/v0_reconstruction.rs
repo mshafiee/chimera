@@ -3,10 +3,9 @@
 //! This module provides utilities to reconstruct V0 (Address Lookup Table) messages
 //! with updated blockhashes, allowing client-side blockhash updates for V0 transactions.
 
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_address_lookup_table_interface::state::AddressLookupTable;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_message::AddressLookupTableAccount;
-use solana_transaction::CompiledInstruction;
 use solana_sdk::{
     message::{
         v0::{self, MessageAddressTableLookup},
@@ -15,6 +14,7 @@ use solana_sdk::{
     pubkey::Pubkey,
     transaction::VersionedTransaction,
 };
+use solana_transaction::CompiledInstruction;
 use std::sync::Arc;
 
 /// Extract components from a V0 message for reconstruction

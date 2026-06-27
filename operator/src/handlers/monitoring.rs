@@ -62,18 +62,20 @@ pub async fn helius_webhook_handler(
                 );
 
                 // Add wallet with minimal info (will be analyzed by Scout later)
-                let _ = state.db.upsert_wallet(
-                    &wallet_address,
-                    None,                 // wqs_score - will be calculated by Scout
-                    None,                 // roi_7d
-                    None,                 // roi_30d
-                    Some(1),              // trade_count_30d - at least 1 trade detected
-                    None,                 // win_rate
-                    None,                 // max_drawdown_30d
-                    Some(swap.amount_in), // avg_trade_size_sol
-                    Some("Auto-added from webhook detection"), // notes
-                )
-                .await;
+                let _ = state
+                    .db
+                    .upsert_wallet(
+                        &wallet_address,
+                        None,                 // wqs_score - will be calculated by Scout
+                        None,                 // roi_7d
+                        None,                 // roi_30d
+                        Some(1),              // trade_count_30d - at least 1 trade detected
+                        None,                 // win_rate
+                        None,                 // max_drawdown_30d
+                        Some(swap.amount_in), // avg_trade_size_sol
+                        Some("Auto-added from webhook detection"), // notes
+                    )
+                    .await;
 
                 // Fetch the newly added wallet
                 match state.db.get_wallet(&wallet_address).await {
@@ -115,7 +117,11 @@ pub async fn helius_webhook_handler(
 
                 // FIX 2: Determine strategy, downgrading Spear to Shield when in RPC fallback
                 let in_fallback = state.engine.is_in_fallback();
-                let strategy = if wallet.wqs_score.map(|s| s >= rust_decimal::Decimal::from(70)).unwrap_or(false) {
+                let strategy = if wallet
+                    .wqs_score
+                    .map(|s| s >= rust_decimal::Decimal::from(70))
+                    .unwrap_or(false)
+                {
                     Strategy::Shield
                 } else if in_fallback {
                     // Cannot run Spear when primary RPC is unavailable; use Shield
@@ -338,9 +344,10 @@ pub async fn enable_wallet_monitoring(
     };
 
     // Update database
-    if let Err(e) =
-        state.db.upsert_wallet_monitoring(&wallet_address, Some(&webhook_id), true)
-            .await
+    if let Err(e) = state
+        .db
+        .upsert_wallet_monitoring(&wallet_address, Some(&webhook_id), true)
+        .await
     {
         tracing::error!(
             wallet = %wallet_address,
@@ -374,9 +381,7 @@ pub async fn disable_wallet_monitoring(
     tracing::info!(wallet = %wallet_address, "Disable monitoring requested");
 
     // Get current monitoring record
-    let monitoring = match state.db.get_wallet_monitoring(&wallet_address)
-        .await
-    {
+    let monitoring = match state.db.get_wallet_monitoring(&wallet_address).await {
         Ok(Some(m)) => m,
         Ok(None) => {
             tracing::warn!(wallet = %wallet_address, "Wallet monitoring not found");
@@ -408,12 +413,14 @@ pub async fn disable_wallet_monitoring(
     }
 
     // Update database to disable monitoring
-    if let Err(e) = state.db.upsert_wallet_monitoring(
-        &wallet_address,
-        None,  // Clear webhook_id
-        false, // Disable monitoring
-    )
-    .await
+    if let Err(e) = state
+        .db
+        .upsert_wallet_monitoring(
+            &wallet_address,
+            None,  // Clear webhook_id
+            false, // Disable monitoring
+        )
+        .await
     {
         tracing::error!(
             wallet = %wallet_address,
@@ -479,7 +486,9 @@ pub async fn get_wallet_monitoring_states(
         .into_iter()
         .map(|wm| {
             // Determine method: webhook if helius_webhook_id exists, otherwise polling
-            let method = if wm.helius_webhook_id.is_some() && !wm.helius_webhook_id.as_ref().unwrap().is_empty() {
+            let method = if wm.helius_webhook_id.is_some()
+                && !wm.helius_webhook_id.as_ref().unwrap().is_empty()
+            {
                 "webhook".to_string()
             } else {
                 "polling".to_string()
@@ -488,9 +497,10 @@ pub async fn get_wallet_monitoring_states(
             // Determine status based on monitoring_enabled and webhook_health_status
             let status = if wm.monitoring_enabled == 0 {
                 "inactive".to_string()
-            } else if wm.webhook_health_status.as_deref() == Some("error") ||
-                     wm.webhook_health_status.as_deref() == Some("unhealthy") ||
-                     wm.webhook_status.as_deref() == Some("failed") {
+            } else if wm.webhook_health_status.as_deref() == Some("error")
+                || wm.webhook_health_status.as_deref() == Some("unhealthy")
+                || wm.webhook_status.as_deref() == Some("failed")
+            {
                 "error".to_string()
             } else {
                 "active".to_string()
@@ -503,7 +513,8 @@ pub async fn get_wallet_monitoring_states(
             } else {
                 let base_rate = 100.0;
                 // Penalize for failed registration attempts
-                let failure_penalty = (wm.last_registration_error.as_ref().is_some() as i32 as f64) * 10.0;
+                let failure_penalty =
+                    (wm.last_registration_error.as_ref().is_some() as i32 as f64) * 10.0;
                 (base_rate - failure_penalty).max(0.0)
             };
 
@@ -511,7 +522,8 @@ pub async fn get_wallet_monitoring_states(
             let failed_fetches = wm.registration_attempts;
 
             // Set last_activity from last_monitored_at, fallback to created_at
-            let last_activity = wm.last_monitored_at
+            let last_activity = wm
+                .last_monitored_at
                 .clone()
                 .or(Some(wm.created_at))
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
@@ -526,7 +538,7 @@ pub async fn get_wallet_monitoring_states(
                     chrono::Utc::now()
                         .checked_add_signed(chrono::Duration::minutes(15))
                         .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::minutes(15))
-                        .to_rfc3339()
+                        .to_rfc3339(),
                 )
             } else {
                 None

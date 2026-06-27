@@ -8,17 +8,15 @@ pub mod postgres;
 pub mod sqlite;
 pub mod types;
 
-pub use types::{
-    ActivePositionEntry, ActivePositionSummary, ConfigAuditItem, DatabaseBackend,
-    DatabaseConfig, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats,
-    RetryableDlqItem, UpdateDlqItemParams,
-    ExitTargetData, InsertPosition, InsertTrade, LatencyBucket, PositionDetail,
-    PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
-    TradeDetail, TradeLatencyStats, UpdatePosition, UpdateTradeStatus,
-    WalletCopyPerformance, WalletDetail, WalletMonitoring, WalletMonitoringExtended,
-    WebhookAuditLog, WebhookEligibility, WebhookStats,
-};
 pub use export::{trades_to_csv, trades_to_pdf};
+pub use types::{
+    ActivePositionEntry, ActivePositionSummary, ConfigAuditItem, DatabaseBackend, DatabaseConfig,
+    DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData, InsertPosition,
+    InsertTrade, LatencyBucket, PositionDetail, PositionRecord, ReconciliationRun,
+    ReconciliationStats, ReconciliationStatus, RetryableDlqItem, TradeDetail, TradeLatencyStats,
+    UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus, WalletCopyPerformance, WalletDetail,
+    WalletMonitoring, WalletMonitoringExtended, WebhookAuditLog, WebhookEligibility, WebhookStats,
+};
 
 use crate::error::{AppError, AppResult};
 use std::str::FromStr;
@@ -177,7 +175,10 @@ pub trait Database: Send + Sync {
     async fn get_recent_trades(&self, limit: i64, offset: i64) -> AppResult<Vec<Trade>>;
 
     /// Get wallet performance
-    async fn get_wallet_performance(&self, wallet_address: &str) -> AppResult<Option<WalletPerformance>>;
+    async fn get_wallet_performance(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<Option<WalletPerformance>>;
 
     // ========================================================================
     // JITO TIP HISTORY
@@ -206,7 +207,11 @@ pub trait Database: Send + Sync {
     // ========================================================================
 
     /// Get PnL for a trailing window (from_hours to to_hours ago)
-    async fn get_pnl_window(&self, from_hours: &str, to_hours: Option<&str>) -> AppResult<rust_decimal::Decimal>;
+    async fn get_pnl_window(
+        &self,
+        from_hours: &str,
+        to_hours: Option<&str>,
+    ) -> AppResult<rust_decimal::Decimal>;
 
     /// Get total PnL for the last 24 hours
     async fn get_pnl_24h(&self) -> AppResult<rust_decimal::Decimal>;
@@ -218,7 +223,11 @@ pub trait Database: Send + Sync {
     async fn get_pnl_30d(&self) -> AppResult<rust_decimal::Decimal>;
 
     /// Get strategy performance metrics (win rate, avg return, trade count)
-    async fn get_strategy_performance(&self, strategy: &str, days: i32) -> AppResult<(f64, rust_decimal::Decimal, u32)>;
+    async fn get_strategy_performance(
+        &self,
+        strategy: &str,
+        days: i32,
+    ) -> AppResult<(f64, rust_decimal::Decimal, u32)>;
 
     // ========================================================================
     // LOSS TRACKING
@@ -228,7 +237,10 @@ pub trait Database: Send + Sync {
     async fn get_consecutive_losses(&self) -> AppResult<u32>;
 
     /// Get max drawdown percent from peak
-    async fn get_max_drawdown_percent(&self, total_capital_sol: rust_decimal::Decimal) -> AppResult<rust_decimal::Decimal>;
+    async fn get_max_drawdown_percent(
+        &self,
+        total_capital_sol: rust_decimal::Decimal,
+    ) -> AppResult<rust_decimal::Decimal>;
 
     // ========================================================================
     // POSITIONS - ADVANCED OPERATIONS
@@ -278,6 +290,12 @@ pub trait Database: Send + Sync {
         sol_price_usd: Option<rust_decimal::Decimal>,
         exit_fraction: rust_decimal::Decimal,
         confirmed: bool,
+    ) -> AppResult<()>;
+
+    async fn update_position_token_amount(
+        &self,
+        trade_uuid: &str,
+        token_amount: u64,
     ) -> AppResult<()>;
 
     /// Revert a failed exit transaction for a position back to ACTIVE state
@@ -346,7 +364,10 @@ pub trait Database: Send + Sync {
     // ========================================================================
 
     /// Get wallet monitoring information
-    async fn get_wallet_monitoring(&self, wallet_address: &str) -> AppResult<Option<WalletMonitoring>>;
+    async fn get_wallet_monitoring(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<Option<WalletMonitoring>>;
 
     /// Insert or update wallet monitoring record
     async fn upsert_wallet_monitoring(
@@ -357,7 +378,11 @@ pub trait Database: Send + Sync {
     ) -> AppResult<()>;
 
     /// Update wallet monitoring last transaction signature
-    async fn update_wallet_monitoring_signature(&self, wallet_address: &str, signature: &str) -> AppResult<()>;
+    async fn update_wallet_monitoring_signature(
+        &self,
+        wallet_address: &str,
+        signature: &str,
+    ) -> AppResult<()>;
 
     /// Get wallets that need webhook registration (ACTIVE but no webhook)
     async fn get_wallets_needing_webhook_registration(&self) -> AppResult<Vec<String>>;
@@ -377,7 +402,11 @@ pub trait Database: Send + Sync {
     ) -> AppResult<()>;
 
     /// Update webhook status (active, paused, failed, orphaned)
-    async fn update_webhook_status(&self, wallet_address: &str, webhook_status: &str) -> AppResult<()>;
+    async fn update_webhook_status(
+        &self,
+        wallet_address: &str,
+        webhook_status: &str,
+    ) -> AppResult<()>;
 
     /// Log webhook lifecycle event with comprehensive tracking
     #[allow(clippy::too_many_arguments)]
@@ -403,7 +432,12 @@ pub trait Database: Send + Sync {
     async fn get_webhook_configuration(&self, key: &str) -> AppResult<Option<String>>;
 
     /// Update webhook configuration with audit trail
-    async fn update_webhook_configuration(&self, key: &str, value: &str, updated_by: &str) -> AppResult<()>;
+    async fn update_webhook_configuration(
+        &self,
+        key: &str,
+        value: &str,
+        updated_by: &str,
+    ) -> AppResult<()>;
 
     /// Get orphaned webhooks (exist in Helius but not in our database)
     async fn get_orphaned_webhooks(&self, helius_webhook_ids: &[String]) -> AppResult<Vec<String>>;
@@ -449,7 +483,10 @@ pub trait Database: Send + Sync {
     ) -> AppResult<i64>;
 
     /// Get current reconciliation status with recent discrepancies
-    async fn get_reconciliation_status(&self, discrepancies_limit: i32) -> AppResult<ReconciliationStatus>;
+    async fn get_reconciliation_status(
+        &self,
+        discrepancies_limit: i32,
+    ) -> AppResult<ReconciliationStatus>;
 
     /// Get reconciliation history (grouped by day)
     async fn get_reconciliation_history(&self, limit: i32) -> AppResult<Vec<ReconciliationRun>>;
@@ -461,7 +498,12 @@ pub trait Database: Send + Sync {
     async fn get_reconciliation_stats(&self, time_range: &str) -> AppResult<ReconciliationStats>;
 
     /// Resolve a discrepancy by ID
-    async fn resolve_discrepancy(&self, id: i64, resolved_by: &str, resolution: &str) -> AppResult<()>;
+    async fn resolve_discrepancy(
+        &self,
+        id: i64,
+        resolved_by: &str,
+        resolution: &str,
+    ) -> AppResult<()>;
 
     // ========================================================================
     // TRADES - FILTERED QUERIES
@@ -500,10 +542,19 @@ pub trait Database: Send + Sync {
     ) -> AppResult<()>;
 
     /// Update trade net PnL (after costs)
-    async fn update_trade_net_pnl(&self, trade_uuid: &str, net_pnl_sol: rust_decimal::Decimal) -> AppResult<()>;
+    async fn update_trade_net_pnl(
+        &self,
+        trade_uuid: &str,
+        net_pnl_sol: rust_decimal::Decimal,
+    ) -> AppResult<()>;
 
     /// Atomically mark a trade as DEAD_LETTER and insert into DLQ
-    async fn mark_trade_dead_letter(&self, trade_uuid: &str, payload: &str, error: &str) -> AppResult<()>;
+    async fn mark_trade_dead_letter(
+        &self,
+        trade_uuid: &str,
+        payload: &str,
+        error: &str,
+    ) -> AppResult<()>;
 
     // ========================================================================
     // CONFIG AUDIT
@@ -524,7 +575,11 @@ pub trait Database: Send + Sync {
     // ========================================================================
 
     /// Get dead letter queue items
-    async fn get_dead_letter_entries(&self, limit: i32, offset: i32) -> AppResult<Vec<DeadLetterItem>>;
+    async fn get_dead_letter_entries(
+        &self,
+        limit: i32,
+        offset: i32,
+    ) -> AppResult<Vec<DeadLetterItem>>;
 
     /// Count dead letter queue items
     async fn count_dead_letter_entries(&self) -> AppResult<i64>;
@@ -545,7 +600,11 @@ pub trait Database: Send + Sync {
     async fn update_dlq_items_batch(&self, items: Vec<UpdateDlqItemParams>) -> AppResult<usize>;
 
     /// Get config audit log
-    async fn get_config_audit_entries(&self, limit: i32, offset: i32) -> AppResult<Vec<ConfigAuditItem>>;
+    async fn get_config_audit_entries(
+        &self,
+        limit: i32,
+        offset: i32,
+    ) -> AppResult<Vec<ConfigAuditItem>>;
 
     /// Count config audit entries
     async fn count_config_audit_entries(&self) -> AppResult<i64>;
@@ -574,13 +633,20 @@ pub trait Database: Send + Sync {
     async fn get_closed_trade_count_for_wallet(&self, wallet_address: &str) -> AppResult<i64>;
 
     /// Get wallet copy performance metrics
-    async fn get_wallet_copy_performance(&self, wallet_address: &str) -> AppResult<Option<WalletCopyPerformance>>;
+    async fn get_wallet_copy_performance(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<Option<WalletCopyPerformance>>;
 
     /// Get trade latency statistics including percentiles
     async fn get_trade_latency_stats(&self, hours: i32) -> AppResult<TradeLatencyStats>;
 
     /// Get trade latency histogram data for visualization
-    async fn get_trade_latency_histogram(&self, hours: i32, bucket_bounds: &[f64]) -> AppResult<Vec<LatencyBucket>>;
+    async fn get_trade_latency_histogram(
+        &self,
+        hours: i32,
+        bucket_bounds: &[f64],
+    ) -> AppResult<Vec<LatencyBucket>>;
 
     // ========================================================================
     // API CONVENIENCE METHODS
@@ -600,7 +666,14 @@ pub trait Database: Send + Sync {
     fn pool(&self) -> DbPool;
 
     /// Get circuit breaker evaluation data: (unrealized_sol, realized_sol_24h, realized_usd_24h, null_price_sol_24h)
-    async fn get_evaluation_data(&self) -> AppResult<(rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)>;
+    async fn get_evaluation_data(
+        &self,
+    ) -> AppResult<(
+        rust_decimal::Decimal,
+        rust_decimal::Decimal,
+        rust_decimal::Decimal,
+        rust_decimal::Decimal,
+    )>;
 }
 
 // ========================================================================
@@ -658,6 +731,7 @@ pub struct Position {
     pub opened_at: chrono::DateTime<chrono::Utc>,
     pub last_updated: chrono::DateTime<chrono::Utc>,
     pub closed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub token_amount: Option<rust_decimal::Decimal>,
 }
 
 /// Wallet record

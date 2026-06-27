@@ -213,7 +213,10 @@ pub async fn get_market_conditions(
 ///
 /// Uses standard deviation of prices as a percentage of the mean price.
 fn calculate_volatility(
-    price_history: &std::collections::VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>,
+    price_history: &std::collections::VecDeque<(
+        chrono::DateTime<chrono::Utc>,
+        rust_decimal::Decimal,
+    )>,
 ) -> f64 {
     if price_history.len() < 2 {
         return 0.0;
@@ -246,7 +249,10 @@ fn calculate_volatility(
 ///
 /// Returns the percentage change from the oldest to newest price.
 fn calculate_trend_strength(
-    price_history: &std::collections::VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>,
+    price_history: &std::collections::VecDeque<(
+        chrono::DateTime<chrono::Utc>,
+        rust_decimal::Decimal,
+    )>,
 ) -> f64 {
     if price_history.len() < 2 {
         return 0.0;

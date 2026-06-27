@@ -31,6 +31,8 @@ pub struct HealthResponse {
     pub circuit_breaker: CircuitBreakerHealth,
     /// Price cache status
     pub price_cache: PriceCacheHealth,
+    /// Current trade mode
+    pub trade_mode: String,
 }
 
 /// Health status enum
@@ -83,6 +85,8 @@ pub struct AppState {
     pub circuit_breaker: Arc<CircuitBreaker>,
     /// Price cache
     pub price_cache: Arc<PriceCache>,
+    /// Current trade mode
+    pub trade_mode: String,
 }
 
 /// Health check handler
@@ -181,6 +185,7 @@ pub async fn health_check(
         rpc: rpc_health,
         circuit_breaker: circuit_breaker_health,
         price_cache: price_cache_health,
+        trade_mode: state.trade_mode.clone(),
     };
 
     (status_code, Json(response))
@@ -212,6 +217,8 @@ async fn check_database(db: &dyn Database) -> ComponentHealth {
 
 /// Get the timestamp of the last trade
 async fn get_last_trade_time(db: &dyn Database) -> Option<String> {
-    db.get_recent_trades(1, 0).await.ok()
+    db.get_recent_trades(1, 0)
+        .await
+        .ok()
         .and_then(|trades| trades.first().map(|t| t.created_at.to_rfc3339()))
 }

@@ -159,7 +159,12 @@ impl MetricsState {
             "chimera_reconciliation_discrepancies_total",
             "Total number of reconciliation discrepancies found",
         ))
-        .map_err(|e| format!("Failed to create reconciliation_discrepancies counter: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to create reconciliation_discrepancies counter: {}",
+                e
+            )
+        })?;
         registry
             .register(Box::new(reconciliation_discrepancies.clone()))
             .map_err(|e| format!("Failed to register reconciliation_discrepancies: {}", e))?;
@@ -189,7 +194,12 @@ impl MetricsState {
             "chimera_secret_rotation_days_until_due",
             "Number of days until next secret rotation is due",
         ))
-        .map_err(|e| format!("Failed to create secret_rotation_days_until_due gauge: {}", e))?;
+        .map_err(|e| {
+            format!(
+                "Failed to create secret_rotation_days_until_due gauge: {}",
+                e
+            )
+        })?;
         registry
             .register(Box::new(secret_rotation_days_until_due.clone()))
             .map_err(|e| format!("Failed to register secret_rotation_days_until_due: {}", e))?;

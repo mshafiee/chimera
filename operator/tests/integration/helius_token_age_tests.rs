@@ -10,8 +10,7 @@ use std::env;
 #[ignore] // Requires Helius API key - run with: cargo test -- --ignored
 async fn test_helius_token_age_fetching() {
     // Get API key from environment or use test key
-    let api_key = env::var("HELIUS_API_KEY")
-        .expect("HELIUS_API_KEY must be set for this test");
+    let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set for this test");
 
     let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
 
@@ -37,8 +36,7 @@ async fn test_helius_token_age_fetching() {
 #[tokio::test]
 #[ignore]
 async fn test_helius_token_age_caching() {
-    let api_key = env::var("HELIUS_API_KEY")
-        .expect("HELIUS_API_KEY must be set for this test");
+    let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set for this test");
 
     let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
     let token_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";

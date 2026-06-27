@@ -180,9 +180,9 @@ impl HeliusClient {
         HeliusMetrics {
             cache_hits: cache_size, // Approximate: current cache entries as proxy for hits
             cache_misses: 0,        // Not actively tracked without additional state
-            successful_requests: 0,  // Not actively tracked without additional state
-            retried_requests: 0,     // Not actively tracked without additional state
-            failed_requests: 0,      // Not actively tracked without additional state
+            successful_requests: 0, // Not actively tracked without additional state
+            retried_requests: 0,    // Not actively tracked without additional state
+            failed_requests: 0,     // Not actively tracked without additional state
         }
     }
 
@@ -255,39 +255,45 @@ impl HeliusClient {
         let client = self.client.clone();
 
         // Use retry logic with Helius best practices
-        let result = retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            let mint = mint.clone(); // Clone for each attempt
-            async move {
-                let response = client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to fetch token transactions")?;
+        let result = retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                let mint = mint.clone(); // Clone for each attempt
+                async move {
+                    let response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .context("Failed to fetch token transactions")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    tracing::warn!(
-                        mint = mint,
-                        status = status,
-                        error = %error_text,
-                        "Failed to fetch token creation time"
-                    );
-                    // Return error with status so retry logic can determine if retryable
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Failed to fetch token creation time: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        tracing::warn!(
+                            mint = mint,
+                            status = status,
+                            error = %error_text,
+                            "Failed to fetch token creation time"
+                        );
+                        // Return error with status so retry logic can determine if retryable
+                        return Err(anyhow!("HTTP error: {}", status).context(format!(
+                            "Failed to fetch token creation time: {}",
+                            error_text
+                        )));
+                    }
+
+                    let transactions: Vec<serde_json::Value> = response
+                        .json()
+                        .await
+                        .context("Failed to parse transactions response")?;
+
+                    Ok(transactions)
                 }
-
-                let transactions: Vec<serde_json::Value> = response
-                    .json()
-                    .await
-                    .context("Failed to parse transactions response")?;
-
-                Ok(transactions)
-            }
-        }, 5).await;
+            },
+            5,
+        )
+        .await;
 
         match result {
             Ok(transactions) => {
@@ -377,33 +383,37 @@ impl HeliusClient {
         let client = self.client.clone();
 
         // Use retry logic with Helius best practices
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            let registration = registration.clone();
-            async move {
-                let response = client
-                    .post(&url)
-                    .json(&registration)
-                    .send()
-                    .await
-                    .context("Failed to send webhook registration request")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                let registration = registration.clone();
+                async move {
+                    let response = client
+                        .post(&url)
+                        .json(&registration)
+                        .send()
+                        .await
+                        .context("Failed to send webhook registration request")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Webhook registration failed: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Webhook registration failed: {}", error_text)));
+                    }
+
+                    let webhook_response: WebhookResponse = response
+                        .json()
+                        .await
+                        .context("Failed to parse webhook response")?;
+
+                    Ok(webhook_response.webhook_id)
                 }
-
-                let webhook_response: WebhookResponse = response
-                    .json()
-                    .await
-                    .context("Failed to parse webhook response")?;
-
-                Ok(webhook_response.webhook_id)
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// Delete a webhook
@@ -415,26 +425,30 @@ impl HeliusClient {
         let client = self.client.clone();
 
         // Use retry logic with Helius best practices
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            async move {
-                let response = client
-                    .delete(&url)
-                    .send()
-                    .await
-                    .context("Failed to delete webhook")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                async move {
+                    let response = client
+                        .delete(&url)
+                        .send()
+                        .await
+                        .context("Failed to delete webhook")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Failed to delete webhook: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Failed to delete webhook: {}", error_text)));
+                    }
+
+                    Ok(())
                 }
-
-                Ok(())
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// List all webhooks
@@ -443,31 +457,35 @@ impl HeliusClient {
         let client = self.client.clone();
 
         // Use retry logic with Helius best practices
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            async move {
-                let response = client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to list webhooks")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .context("Failed to list webhooks")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Failed to list webhooks: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Failed to list webhooks: {}", error_text)));
+                    }
+
+                    let webhooks: Vec<serde_json::Value> = response
+                        .json()
+                        .await
+                        .context("Failed to parse webhooks response")?;
+
+                    Ok(webhooks)
                 }
-
-                let webhooks: Vec<serde_json::Value> = response
-                    .json()
-                    .await
-                    .context("Failed to parse webhooks response")?;
-
-                Ok(webhooks)
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// Get specific webhook by ID (GET endpoint)
@@ -478,31 +496,35 @@ impl HeliusClient {
         );
         let client = self.client.clone();
 
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            async move {
-                let response = client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to get webhook")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .context("Failed to get webhook")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Failed to get webhook: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Failed to get webhook: {}", error_text)));
+                    }
+
+                    let webhook: serde_json::Value = response
+                        .json()
+                        .await
+                        .context("Failed to parse webhook response")?;
+
+                    Ok(webhook)
                 }
-
-                let webhook: serde_json::Value = response
-                    .json()
-                    .await
-                    .context("Failed to parse webhook response")?;
-
-                Ok(webhook)
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// Get specific webhook by ID with typed return
@@ -513,31 +535,35 @@ impl HeliusClient {
         );
         let client = self.client.clone();
 
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            async move {
-                let response = client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to get webhook")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .context("Failed to get webhook")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Failed to get webhook: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Failed to get webhook: {}", error_text)));
+                    }
+
+                    let webhook: HeliusWebhook = response
+                        .json()
+                        .await
+                        .context("Failed to parse webhook response")?;
+
+                    Ok(webhook)
                 }
-
-                let webhook: HeliusWebhook = response
-                    .json()
-                    .await
-                    .context("Failed to parse webhook response")?;
-
-                Ok(webhook)
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// List all webhooks with typed return
@@ -545,31 +571,35 @@ impl HeliusClient {
         let url = format!("{}/webhooks?api-key={}", self.base_url, self.api_key);
         let client = self.client.clone();
 
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            async move {
-                let response = client
-                    .get(&url)
-                    .send()
-                    .await
-                    .context("Failed to list webhooks")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                async move {
+                    let response = client
+                        .get(&url)
+                        .send()
+                        .await
+                        .context("Failed to list webhooks")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Failed to list webhooks: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Failed to list webhooks: {}", error_text)));
+                    }
+
+                    let webhooks: Vec<HeliusWebhook> = response
+                        .json()
+                        .await
+                        .context("Failed to parse webhooks response")?;
+
+                    Ok(webhooks)
                 }
-
-                let webhooks: Vec<HeliusWebhook> = response
-                    .json()
-                    .await
-                    .context("Failed to parse webhooks response")?;
-
-                Ok(webhooks)
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// Update an existing webhook configuration (PUT endpoint)
@@ -583,28 +613,32 @@ impl HeliusClient {
         );
         let client = self.client.clone();
 
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            let update = update.clone();
-            async move {
-                let response = client
-                    .put(&url)
-                    .json(&update)
-                    .send()
-                    .await
-                    .context("Failed to update webhook")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                let update = update.clone();
+                async move {
+                    let response = client
+                        .put(&url)
+                        .json(&update)
+                        .send()
+                        .await
+                        .context("Failed to update webhook")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Webhook update failed: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Webhook update failed: {}", error_text)));
+                    }
+
+                    Ok(())
                 }
-
-                Ok(())
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// Toggle webhook enabled/disabled without deletion (PATCH endpoint)
@@ -619,28 +653,32 @@ impl HeliusClient {
         let client = self.client.clone();
         let toggle = WebhookToggle { is_active: enabled };
 
-        retry_with_backoff(|| {
-            let url = url.clone();
-            let client = client.clone();
-            let toggle = toggle.clone();
-            async move {
-                let response = client
-                    .patch(&url)
-                    .json(&toggle)
-                    .send()
-                    .await
-                    .context("Failed to toggle webhook")?;
+        retry_with_backoff(
+            || {
+                let url = url.clone();
+                let client = client.clone();
+                let toggle = toggle.clone();
+                async move {
+                    let response = client
+                        .patch(&url)
+                        .json(&toggle)
+                        .send()
+                        .await
+                        .context("Failed to toggle webhook")?;
 
-                if !response.status().is_success() {
-                    let status = response.status().as_u16();
-                    let error_text = response.text().await.unwrap_or_default();
-                    return Err(anyhow!("HTTP error: {}", status)
-                        .context(format!("Webhook toggle failed: {}", error_text)));
+                    if !response.status().is_success() {
+                        let status = response.status().as_u16();
+                        let error_text = response.text().await.unwrap_or_default();
+                        return Err(anyhow!("HTTP error: {}", status)
+                            .context(format!("Webhook toggle failed: {}", error_text)));
+                    }
+
+                    Ok(())
                 }
-
-                Ok(())
-            }
-        }, 5).await
+            },
+            5,
+        )
+        .await
     }
 
     /// Bulk update webhook URLs for multiple webhooks
@@ -657,12 +695,15 @@ impl HeliusClient {
                 .await;
 
             let result = self
-                .update_webhook(&webhook_id, WebhookUpdate {
-                    webhook_url: Some(new_url.clone()),
-                    transaction_types: None,
-                    account_addresses: None,
-                    auth_header: None,
-                })
+                .update_webhook(
+                    &webhook_id,
+                    WebhookUpdate {
+                        webhook_url: Some(new_url.clone()),
+                        transaction_types: None,
+                        account_addresses: None,
+                        auth_header: None,
+                    },
+                )
                 .await;
 
             results.push((webhook_id, result));
@@ -705,10 +746,7 @@ pub async fn validate_webhook_reachability(webhook_url: &str) -> Result<()> {
         .context("Failed to reach webhook URL")?;
 
     // Any response (including 4xx) indicates the URL is reachable
-    tracing::info!(
-        "Webhook URL reachable, status: {}",
-        response.status()
-    );
+    tracing::info!("Webhook URL reachable, status: {}", response.status());
 
     // If we get any response, the URL is reachable
     // We don't require a specific status code since webhook endpoints may

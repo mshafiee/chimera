@@ -4,7 +4,9 @@
 //! for ACTIVE wallets with automatic health checking and reconciliation.
 
 use crate::db_abstraction::{Database, WebhookEligibility};
-use crate::monitoring::helius::{HeliusClient, WebhookReconciliationDetail, WebhookReconciliationResult, WebhookUpdate};
+use crate::monitoring::helius::{
+    HeliusClient, WebhookReconciliationDetail, WebhookReconciliationResult, WebhookUpdate,
+};
 use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -149,20 +151,27 @@ impl WebhookLifecycleManager {
         {
             Ok(webhook_id) => {
                 // Update database with webhook ID
-                if let Err(e) = self.db.upsert_wallet_monitoring(wallet, Some(&webhook_id), true).await {
+                if let Err(e) = self
+                    .db
+                    .upsert_wallet_monitoring(wallet, Some(&webhook_id), true)
+                    .await
+                {
                     warn!(wallet = %wallet, error = %e, "Database update failed, but webhook registered");
                 }
 
                 // Log successful registration
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "register",
-                    "success",
-                    Some(&webhook_id),
-                    Some(&format!("Registered webhook for wallet {}", wallet)),
-                    None,
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "register",
+                        "success",
+                        Some(&webhook_id),
+                        Some(&format!("Registered webhook for wallet {}", wallet)),
+                        None,
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 info!(
                     wallet = %wallet,
@@ -179,18 +188,24 @@ impl WebhookLifecycleManager {
             }
             Err(e) => {
                 // Increment retry count
-                let _ = self.db.increment_webhook_registration_attempts(wallet, Some(&e.to_string())).await;
+                let _ = self
+                    .db
+                    .increment_webhook_registration_attempts(wallet, Some(&e.to_string()))
+                    .await;
 
                 // Log failed registration
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "register",
-                    "failed",
-                    None,
-                    None,
-                    Some(&e.to_string()),
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "register",
+                        "failed",
+                        None,
+                        None,
+                        Some(&e.to_string()),
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 error!(wallet = %wallet, error = %e, "Webhook registration failed");
                 Ok(WebhookRegistrationResult {
@@ -210,7 +225,9 @@ impl WebhookLifecycleManager {
         info!(wallet = %wallet, "Starting webhook cleanup");
 
         // Get existing webhook ID
-        let monitoring = self.db.get_wallet_monitoring(wallet)
+        let monitoring = self
+            .db
+            .get_wallet_monitoring(wallet)
             .await?
             .context("Wallet monitoring not found")?;
 
@@ -230,15 +247,18 @@ impl WebhookLifecycleManager {
                 let _ = self.db.upsert_wallet_monitoring(wallet, None, false).await;
 
                 // Log successful cleanup
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "delete",
-                    "success",
-                    Some(&webhook_id),
-                    Some(&format!("Deleted webhook for wallet {}", wallet)),
-                    None,
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "delete",
+                        "success",
+                        Some(&webhook_id),
+                        Some(&format!("Deleted webhook for wallet {}", wallet)),
+                        None,
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 info!(
                     wallet = %wallet,
@@ -249,15 +269,18 @@ impl WebhookLifecycleManager {
             }
             Err(e) => {
                 // Log failed cleanup
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "delete",
-                    "failed",
-                    Some(&webhook_id),
-                    None,
-                    Some(&e.to_string()),
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "delete",
+                        "failed",
+                        Some(&webhook_id),
+                        None,
+                        Some(&e.to_string()),
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 error!(wallet = %wallet, error = %e, "Webhook cleanup failed");
                 Err(e)
@@ -271,7 +294,9 @@ impl WebhookLifecycleManager {
         info!(wallet = %wallet, new_url = %new_url, "Starting webhook update");
 
         // Get existing webhook ID
-        let monitoring = self.db.get_wallet_monitoring(wallet)
+        let monitoring = self
+            .db
+            .get_wallet_monitoring(wallet)
             .await?
             .context("Wallet monitoring not found")?;
 
@@ -287,32 +312,41 @@ impl WebhookLifecycleManager {
         // Update webhook URL
         match self
             .helius_client
-            .update_webhook(&webhook_id, WebhookUpdate {
-                webhook_url: Some(new_url.clone()),
-                transaction_types: None,
-                account_addresses: None,
-                auth_header: None,
-            })
+            .update_webhook(
+                &webhook_id,
+                WebhookUpdate {
+                    webhook_url: Some(new_url.clone()),
+                    transaction_types: None,
+                    account_addresses: None,
+                    auth_header: None,
+                },
+            )
             .await
         {
             Ok(()) => {
                 // Track the webhook URL update via configuration
-                let _ = self.db.update_webhook_configuration(
-                    &format!("webhook_url:{}", wallet),
-                    &new_url,
-                    "update_wallet_webhook",
-                ).await;
+                let _ = self
+                    .db
+                    .update_webhook_configuration(
+                        &format!("webhook_url:{}", wallet),
+                        &new_url,
+                        "update_wallet_webhook",
+                    )
+                    .await;
 
                 // Log successful update
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "update",
-                    "success",
-                    Some(&webhook_id),
-                    Some(&format!("Updated webhook URL to {}", new_url)),
-                    None,
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "update",
+                        "success",
+                        Some(&webhook_id),
+                        Some(&format!("Updated webhook URL to {}", new_url)),
+                        None,
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 info!(
                     wallet = %wallet,
@@ -323,15 +357,18 @@ impl WebhookLifecycleManager {
             }
             Err(e) => {
                 // Log failed update
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "update",
-                    "failed",
-                    Some(&webhook_id),
-                    None,
-                    Some(&e.to_string()),
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "update",
+                        "failed",
+                        Some(&webhook_id),
+                        None,
+                        Some(&e.to_string()),
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 error!(wallet = %wallet, error = %e, "Webhook update failed");
                 Err(e)
@@ -345,7 +382,9 @@ impl WebhookLifecycleManager {
         info!(wallet = %wallet, enabled = enabled, "Starting webhook toggle");
 
         // Get existing webhook ID
-        let monitoring = self.db.get_wallet_monitoring(wallet)
+        let monitoring = self
+            .db
+            .get_wallet_monitoring(wallet)
             .await?
             .context("Wallet monitoring not found")?;
 
@@ -359,22 +398,29 @@ impl WebhookLifecycleManager {
             .await;
 
         // Toggle webhook
-        match self.helius_client.toggle_webhook(&webhook_id, enabled).await {
+        match self
+            .helius_client
+            .toggle_webhook(&webhook_id, enabled)
+            .await
+        {
             Ok(()) => {
                 // Update database webhook status
                 let status = if enabled { "active" } else { "paused" };
                 let _ = self.db.update_webhook_status(wallet, status).await;
 
                 // Log successful toggle
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "toggle",
-                    "success",
-                    Some(&webhook_id),
-                    Some(&format!("Webhook toggled to {}", status)),
-                    None,
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "toggle",
+                        "success",
+                        Some(&webhook_id),
+                        Some(&format!("Webhook toggled to {}", status)),
+                        None,
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 info!(
                     wallet = %wallet,
@@ -386,15 +432,18 @@ impl WebhookLifecycleManager {
             }
             Err(e) => {
                 // Log failed toggle
-                let _ = self.db.log_webhook_lifecycle_event(
-                    wallet,
-                    "toggle",
-                    "failed",
-                    Some(webhook_id.as_str()),
-                    None,
-                    Some(&e.to_string()),
-                    Some(start.elapsed().as_millis() as i32),
-                ).await;
+                let _ = self
+                    .db
+                    .log_webhook_lifecycle_event(
+                        wallet,
+                        "toggle",
+                        "failed",
+                        Some(webhook_id.as_str()),
+                        None,
+                        Some(&e.to_string()),
+                        Some(start.elapsed().as_millis() as i32),
+                    )
+                    .await;
 
                 error!(wallet = %wallet, error = %e, "Webhook toggle failed");
                 Err(e)
@@ -403,7 +452,10 @@ impl WebhookLifecycleManager {
     }
 
     /// Bulk register webhooks for multiple wallets with detailed results
-    pub async fn bulk_register_webhooks(&self, wallets: Vec<String>) -> Result<BulkOperationResult> {
+    pub async fn bulk_register_webhooks(
+        &self,
+        wallets: Vec<String>,
+    ) -> Result<BulkOperationResult> {
         let start = Instant::now();
         info!(count = wallets.len(), "Starting bulk webhook registration");
 
@@ -535,25 +587,33 @@ impl WebhookLifecycleManager {
             .context("Failed to list Helius webhooks")?;
 
         // Get all webhooks from database
-        let db_webhooks = self.db.get_all_wallet_monitoring()
+        let db_webhooks = self
+            .db
+            .get_all_wallet_monitoring()
             .await
             .context("Failed to get database webhooks")?;
 
         // Extract webhook IDs from Helius response
         let helius_webhook_ids: Vec<String> = helius_webhooks
             .iter()
-            .filter_map(|hw| hw.get("webhookID").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .filter_map(|hw| {
+                hw.get("webhookID")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         // Find orphaned webhooks (in Helius but not in DB)
         let orphaned_webhooks: Vec<String> = helius_webhook_ids
             .iter()
-            .filter(|hw_id| !db_webhooks.iter().any(|dw| {
-                dw.helius_webhook_id
-                    .as_ref()
-                    .map(|id| id.as_str() == **hw_id)
-                    .unwrap_or(false)
-            }))
+            .filter(|hw_id| {
+                !db_webhooks.iter().any(|dw| {
+                    dw.helius_webhook_id
+                        .as_ref()
+                        .map(|id| id.as_str() == **hw_id)
+                        .unwrap_or(false)
+                })
+            })
             .cloned()
             .collect();
 
@@ -593,17 +653,19 @@ impl WebhookLifecycleManager {
         }
 
         // Check for webhook URL changes
-        if let Ok(Some(configured_url)) =
-            self.db.get_webhook_configuration("current_webhook_url").await
+        if let Ok(Some(configured_url)) = self
+            .db
+            .get_webhook_configuration("current_webhook_url")
+            .await
         {
             if configured_url != self.config.webhook_url {
                 info!("Webhook URL changed, updating all webhooks");
                 let updates: Vec<(String, String)> = db_webhooks
                     .iter()
                     .filter_map(|dw| {
-                        dw.helius_webhook_id.clone().map(|id| {
-                            (id, self.config.webhook_url.clone())
-                        })
+                        dw.helius_webhook_id
+                            .clone()
+                            .map(|id| (id, self.config.webhook_url.clone()))
                     })
                     .collect();
 
@@ -615,11 +677,14 @@ impl WebhookLifecycleManager {
                     Ok(results) => {
                         updated = results.len();
                         // Update configuration
-                        let _ = self.db.update_webhook_configuration(
-                            "current_webhook_url",
-                            &self.config.webhook_url,
-                            "reconcile",
-                        ).await;
+                        let _ = self
+                            .db
+                            .update_webhook_configuration(
+                                "current_webhook_url",
+                                &self.config.webhook_url,
+                                "reconcile",
+                            )
+                            .await;
                     }
                     Err(e) => {
                         warn!(error = %e, "Failed to bulk update webhook URLs");
@@ -652,8 +717,10 @@ impl WebhookLifecycleManager {
         info!("Starting webhook health check");
 
         // Get stale webhooks
-        let stale_wallets =
-            self.db.get_stale_webhook_wallets(self.config.stale_threshold_days as i32).await?;
+        let stale_wallets = self
+            .db
+            .get_stale_webhook_wallets(self.config.stale_threshold_days as i32)
+            .await?;
 
         let total_checked = stale_wallets.len();
         let mut healthy = 0;
@@ -665,17 +732,25 @@ impl WebhookLifecycleManager {
             match self.check_webhook_health(wallet).await {
                 Ok(true) => {
                     healthy += 1;
-                    let _ = self.db.update_webhook_health_status(wallet, "healthy", None).await;
+                    let _ = self
+                        .db
+                        .update_webhook_health_status(wallet, "healthy", None)
+                        .await;
                 }
                 Ok(false) => {
                     unhealthy += 1;
-                    let _ =
-                        self.db.update_webhook_health_status(wallet, "unhealthy", None).await;
+                    let _ = self
+                        .db
+                        .update_webhook_health_status(wallet, "unhealthy", None)
+                        .await;
                 }
                 Err(e) => {
                     warn!(wallet = %wallet, error = %e, "Webhook health check failed");
                     unhealthy += 1;
-                    let _ = self.db.update_webhook_health_status(wallet, "error", None).await;
+                    let _ = self
+                        .db
+                        .update_webhook_health_status(wallet, "error", None)
+                        .await;
                 }
             }
         }
@@ -695,7 +770,9 @@ impl WebhookLifecycleManager {
             for wallet in unhealthy_wallets {
                 match self.cleanup_wallet_webhook(&wallet).await {
                     Ok(()) => cleaned_up += 1,
-                    Err(e) => warn!(wallet = %wallet, error = %e, "Failed to cleanup unhealthy webhook"),
+                    Err(e) => {
+                        warn!(wallet = %wallet, error = %e, "Failed to cleanup unhealthy webhook")
+                    }
                 }
             }
         }
@@ -721,7 +798,9 @@ impl WebhookLifecycleManager {
     /// Check individual webhook health
     async fn check_webhook_health(&self, wallet: &str) -> Result<bool> {
         // Get webhook details from Helius
-        let monitoring = self.db.get_wallet_monitoring(wallet)
+        let monitoring = self
+            .db
+            .get_wallet_monitoring(wallet)
             .await?
             .context("Wallet monitoring not found")?;
 
@@ -766,7 +845,10 @@ impl WebhookLifecycleManager {
         let mut failed_deletions = 0;
         let mut details = Vec::new();
 
-        info!(total = total_webhooks, "Processing Helius webhooks for profitability");
+        info!(
+            total = total_webhooks,
+            "Processing Helius webhooks for profitability"
+        );
 
         for webhook in helius_webhooks {
             let webhook_id = webhook.webhook_id.clone();
@@ -891,7 +973,8 @@ impl WebhookLifecycleManager {
                 let confidence = if trade_count >= 20 {
                     rust_decimal::Decimal::ONE
                 } else {
-                    rust_decimal::Decimal::from_f64_retain(trade_count as f64 / 20.0).unwrap_or(rust_decimal::Decimal::ZERO)
+                    rust_decimal::Decimal::from_f64_retain(trade_count as f64 / 20.0)
+                        .unwrap_or(rust_decimal::Decimal::ZERO)
                 };
                 let threshold = match archetype {
                     "WHALE" => 55.0,
@@ -925,7 +1008,10 @@ impl WebhookLifecycleManager {
                             trade_count,
                             roi_7d: wallet.roi_7d,
                             roi_30d: wallet.roi_30d,
-                            reason: format!("WQS {:.1} below threshold {:.1} for archetype {}", wqs_f64, threshold, archetype),
+                            reason: format!(
+                                "WQS {:.1} below threshold {:.1} for archetype {}",
+                                wqs_f64, threshold, archetype
+                            ),
                         });
                     }
                 } else {
@@ -942,7 +1028,10 @@ impl WebhookLifecycleManager {
                     });
                 }
 
-                if confidence < rust_decimal::Decimal::from_f64_retain(0.70).unwrap_or(rust_decimal::Decimal::ZERO) {
+                if confidence
+                    < rust_decimal::Decimal::from_f64_retain(0.70)
+                        .unwrap_or(rust_decimal::Decimal::ZERO)
+                {
                     return Ok(WebhookEligibility {
                         eligible: false,
                         wqs_score: wallet.wqs_score,
@@ -952,7 +1041,10 @@ impl WebhookLifecycleManager {
                         trade_count,
                         roi_7d: wallet.roi_7d,
                         roi_30d: wallet.roi_30d,
-                        reason: format!("Confidence {:.2} below minimum 0.70", confidence.to_f64().unwrap_or(0.0)),
+                        reason: format!(
+                            "Confidence {:.2} below minimum 0.70",
+                            confidence.to_f64().unwrap_or(0.0)
+                        ),
                     });
                 }
 
@@ -981,7 +1073,10 @@ impl WebhookLifecycleManager {
                     roi_30d: wallet.roi_30d,
                     reason: format!(
                         "Eligible: WQS {:.1}, confidence {:.2}, {} trades, archetype {}",
-                        wallet.wqs_score.map(|v| v.to_f64().unwrap_or(0.0)).unwrap_or(0.0),
+                        wallet
+                            .wqs_score
+                            .map(|v| v.to_f64().unwrap_or(0.0))
+                            .unwrap_or(0.0),
                         confidence.to_f64().unwrap_or(0.0),
                         trade_count,
                         archetype
@@ -1016,11 +1111,13 @@ pub fn is_valid_solana_address(address: &str) -> bool {
         && address.len() <= 44
         && address.chars().all(|c| {
             c.is_alphanumeric()
-                || ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
-                    'G', 'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X',
-                    'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm', 'n', 'o', 'p',
-                    'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z']
-                    .contains(&c)
+                || [
+                    '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G',
+                    'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y',
+                    'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm', 'n', 'o', 'p',
+                    'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+                ]
+                .contains(&c)
         })
 }
 
@@ -1031,9 +1128,15 @@ mod tests {
     #[test]
     fn test_is_valid_solana_address() {
         // Valid addresses
-        assert!(is_valid_solana_address("52kpqW23KVMhAC5Lnt5AWRQ63AQtGxrC7paiC5ttf9Tz"));
-        assert!(is_valid_solana_address("7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"));
-        assert!(is_valid_solana_address("So11111111111111111111111111111111111111112"));
+        assert!(is_valid_solana_address(
+            "52kpqW23KVMhAC5Lnt5AWRQ63AQtGxrC7paiC5ttf9Tz"
+        ));
+        assert!(is_valid_solana_address(
+            "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+        ));
+        assert!(is_valid_solana_address(
+            "So11111111111111111111111111111111111111112"
+        ));
 
         // Invalid addresses
         assert!(!is_valid_solana_address(""));

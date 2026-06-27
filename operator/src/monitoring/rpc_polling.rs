@@ -9,9 +9,9 @@ use crate::monitoring::rate_limiter::RequestPriority;
 use crate::monitoring::transaction_parser;
 use anyhow::{Context, Result};
 use lru::LruCache;
-use solana_client::client_error::ClientError;
 use rust_decimal::Decimal;
 use serde_json::Value;
+use solana_client::client_error::ClientError;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -291,8 +291,9 @@ pub async fn poll_wallet_transactions(
 
     // Update last signature in database if we have new transactions and database access
     if let (Some(latest_sig), Some(db_pool)) = (latest_signature, db) {
-        if let Err(e) =
-            db_pool.update_wallet_monitoring_signature(wallet_address, &latest_sig).await
+        if let Err(e) = db_pool
+            .update_wallet_monitoring_signature(wallet_address, &latest_sig)
+            .await
         {
             tracing::warn!(
                 wallet = wallet_address,

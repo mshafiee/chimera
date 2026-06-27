@@ -37,7 +37,8 @@ impl MevProtection {
         // Consensus signals get higher priority (increased tip for consensus)
         if is_consensus {
             // Use higher tip for consensus (1.5x the standard consensus tip)
-            return self.config.consensus_tip_sol * Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2));
+            return self.config.consensus_tip_sol
+                * Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2));
         }
 
         // Standard signals get low priority

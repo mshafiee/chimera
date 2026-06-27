@@ -580,15 +580,22 @@ mod tests {
         // with_rotation must return an error when the secrets list is empty
         let result = HmacState::with_rotation(vec![], 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No valid HMAC secrets configured"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No valid HMAC secrets configured"));
     }
 
     #[test]
     fn test_hmac_state_all_empty_strings() {
         // with_rotation must return an error when all provided secrets are empty strings
-        let result = HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
+        let result =
+            HmacState::with_rotation(vec!["".to_string(), "".to_string(), "".to_string()], 60);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No valid HMAC secrets configured"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No valid HMAC secrets configured"));
     }
 
     #[test]
@@ -645,8 +652,7 @@ mod tests {
 
     #[test]
     fn test_nonce_store_capacity_limit() {
-        let state =
-            HmacState::with_rotation(vec!["test".to_string()], 3600).unwrap();
+        let state = HmacState::with_rotation(vec!["test".to_string()], 3600).unwrap();
         // Fill the store with many entries
         for i in 0..2001 {
             state.check_and_record_nonce(&format!("nonce-{}", i), 1000);

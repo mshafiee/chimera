@@ -90,17 +90,19 @@ impl WalletPerformanceTracker {
         let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
         let from_date_str = seven_days_ago.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-        let trades = self.db.get_trades_filtered(
-            Some(&from_date_str),
-            None,
-            Some("CLOSED"),
-            None,
-            Some(wallet_address),
-            1000,
-            0,
-        )
-        .await
-        .map_err(|e| format!("Failed to query trades: {}", e))?;
+        let trades = self
+            .db
+            .get_trades_filtered(
+                Some(&from_date_str),
+                None,
+                Some("CLOSED"),
+                None,
+                Some(wallet_address),
+                1000,
+                0,
+            )
+            .await
+            .map_err(|e| format!("Failed to query trades: {}", e))?;
 
         let copy_pnl_7d: Decimal = trades
             .iter()
@@ -156,13 +158,17 @@ impl WalletPerformanceTracker {
         metrics: &WalletCopyMetrics,
     ) -> Result<(), String> {
         // Get current wallet from database
-        let wallet = self.db.get_wallet(wallet_address)
+        let wallet = self
+            .db
+            .get_wallet(wallet_address)
             .await
             .map_err(|e| format!("Failed to get wallet: {}", e))?;
 
         if let Some(mut wallet) = wallet {
             // Get original wallet WQS (from Scout analysis)
-            let original_wqs = wallet.wqs_score.unwrap_or(rust_decimal::Decimal::from_f64_retain(50.0).unwrap_or(rust_decimal::Decimal::ZERO));
+            let original_wqs = wallet.wqs_score.unwrap_or(
+                rust_decimal::Decimal::from_f64_retain(50.0).unwrap_or(rust_decimal::Decimal::ZERO),
+            );
 
             // Calculate copy performance factor
             // If copy PnL < original PnL * 0.7 for 7 days, reduce WQS
@@ -176,25 +182,30 @@ impl WalletPerformanceTracker {
             };
 
             // Adjust WQS (but don't go below 40% of original)
-            let factor = rust_decimal::Decimal::from_f64_retain(copy_performance_factor).unwrap_or(rust_decimal::Decimal::ONE);
-            let min_wqs = original_wqs * rust_decimal::Decimal::from_f64_retain(0.4).unwrap_or(rust_decimal::Decimal::ZERO);
+            let factor = rust_decimal::Decimal::from_f64_retain(copy_performance_factor)
+                .unwrap_or(rust_decimal::Decimal::ONE);
+            let min_wqs = original_wqs
+                * rust_decimal::Decimal::from_f64_retain(0.4)
+                    .unwrap_or(rust_decimal::Decimal::ZERO);
             let adjusted_wqs = (original_wqs * factor).max(min_wqs);
 
             // Persist adjusted WQS back to the wallets table
             wallet.wqs_score = Some(adjusted_wqs);
 
-            if let Err(e) = self.db.upsert_wallet(
-                wallet_address,
-                Some(adjusted_wqs),
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
+            if let Err(e) = self
+                .db
+                .upsert_wallet(
+                    wallet_address,
+                    Some(adjusted_wqs),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
             {
                 tracing::warn!(
                     wallet_address = %wallet_address,
@@ -224,13 +235,15 @@ impl WalletPerformanceTracker {
                     metrics.copy_pnl_7d
                 );
 
-                match self.db.update_wallet_status_ext(
-                    wallet_address,
-                    "CANDIDATE",
-                    None, // No TTL
-                    Some(&reason),
-                )
-                .await
+                match self
+                    .db
+                    .update_wallet_status_ext(
+                        wallet_address,
+                        "CANDIDATE",
+                        None, // No TTL
+                        Some(&reason),
+                    )
+                    .await
                 {
                     Ok(true) => {
                         tracing::info!(
@@ -282,8 +295,9 @@ impl WalletPerformanceTracker {
 
                 // Calculate expected copy PnL (simplified: assume same ROI)
                 // In reality, we'd need to track original wallet's actual PnL
-                let expected_copy_pnl =
-                    original_roi_7d * rust_decimal::Decimal::from_f64_retain(0.01).unwrap_or(rust_decimal::Decimal::ZERO); // Rough estimate
+                let expected_copy_pnl = original_roi_7d
+                    * rust_decimal::Decimal::from_f64_retain(0.01)
+                        .unwrap_or(rust_decimal::Decimal::ZERO); // Rough estimate
 
                 // If copy PnL is significantly worse than expected (less than 70% of expected)
                 let threshold =

@@ -2,9 +2,7 @@
 
 #[cfg(test)]
 mod tests {
-    use chimera_operator::db_abstraction::{
-        create_database, Database, DatabaseConfig,
-    };
+    use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig};
     use chimera_operator::engine::momentum_exit::{MomentumExit, MomentumExitAction};
     use chimera_operator::price_cache::{PriceCache, PriceSource};
     use rust_decimal::prelude::*;

@@ -101,10 +101,7 @@ pub fn calculate_backoff(attempt: u32) -> Duration {
 ///     Ok(())
 /// }
 /// ```
-pub async fn retry_with_backoff<F, Fut, T>(
-    mut operation: F,
-    max_retries: u32,
-) -> Result<T>
+pub async fn retry_with_backoff<F, Fut, T>(mut operation: F, max_retries: u32) -> Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
@@ -156,7 +153,9 @@ where
 
     // This should be unreachable since we always return within the loop,
     // but return a proper error instead of panicking in production
-    Err(anyhow::anyhow!("Internal error: retry logic failed to return"))
+    Err(anyhow::anyhow!(
+        "Internal error: retry logic failed to return"
+    ))
 }
 
 #[cfg(test)]
@@ -190,16 +189,16 @@ mod tests {
         let backoff_0 = calculate_backoff(0);
         // 1s base with jitter, minimum 100ms enforced
         assert!(backoff_0.as_millis() >= 100);
-        assert!(backoff_0.as_millis() <= 1250);  // 1.25s max
+        assert!(backoff_0.as_millis() <= 1250); // 1.25s max
 
         let backoff_1 = calculate_backoff(1);
         // 2s base with jitter
-        assert!(backoff_1.as_millis() >= 1500);  // 2s * 0.75 = 1.5s minimum
-        assert!(backoff_1.as_millis() <= 2500);  // 2s * 1.25 = 2.5s maximum
+        assert!(backoff_1.as_millis() >= 1500); // 2s * 0.75 = 1.5s minimum
+        assert!(backoff_1.as_millis() <= 2500); // 2s * 1.25 = 2.5s maximum
 
-        let backoff_4 = calculate_backoff(4);  // 16s base
-        assert!(backoff_4.as_millis() >= 12000);   // 16s * 0.75 = 12s minimum
-        assert!(backoff_4.as_millis() <= 20000);   // 16s * 1.25 = 20s maximum
+        let backoff_4 = calculate_backoff(4); // 16s base
+        assert!(backoff_4.as_millis() >= 12000); // 16s * 0.75 = 12s minimum
+        assert!(backoff_4.as_millis() <= 20000); // 16s * 1.25 = 20s maximum
 
         // Test max cap (attempt 10 would be 1024s base, but capped at 30s)
         let backoff_capped = calculate_backoff(10);
@@ -232,9 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_with_backoff_exhausted() {
-        let operation = || async {
-            Err::<(), anyhow::Error>(anyhow::anyhow!("Permanent error"))
-        };
+        let operation = || async { Err::<(), anyhow::Error>(anyhow::anyhow!("Permanent error")) };
 
         let result = retry_with_backoff(operation, 3).await;
         assert!(result.is_err());

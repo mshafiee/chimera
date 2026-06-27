@@ -40,7 +40,10 @@ fn test_signal_trade_uuid_deterministic() {
     let payload2 = make_payload(Action::Buy, Strategy::Shield, "1.0");
     let signal1 = make_signal(payload1, 1700000000);
     let signal2 = make_signal(payload2, 1700000000);
-    assert_eq!(signal1.trade_uuid, signal2.trade_uuid, "Same payload should produce same UUID");
+    assert_eq!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Same payload should produce same UUID"
+    );
 }
 
 #[test]
@@ -49,7 +52,10 @@ fn test_signal_trade_uuid_differs_for_different_amounts() {
     let payload2 = make_payload(Action::Buy, Strategy::Shield, "2.0");
     let signal1 = make_signal(payload1, 1700000000);
     let signal2 = make_signal(payload2, 1700000000);
-    assert_ne!(signal1.trade_uuid, signal2.trade_uuid, "Different amounts should produce different UUIDs");
+    assert_ne!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Different amounts should produce different UUIDs"
+    );
 }
 
 #[test]
@@ -58,7 +64,10 @@ fn test_signal_trade_uuid_differs_for_different_actions() {
     let payload2 = make_payload(Action::Sell, Strategy::Shield, "1.0");
     let signal1 = make_signal(payload1, 1700000000);
     let signal2 = make_signal(payload2, 1700000000);
-    assert_ne!(signal1.trade_uuid, signal2.trade_uuid, "Different actions should produce different UUIDs");
+    assert_ne!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Different actions should produce different UUIDs"
+    );
 }
 
 #[test]
@@ -68,7 +77,10 @@ fn test_signal_trade_uuid_differs_for_different_wallets() {
     payload2.wallet_address = "9xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string();
     let signal1 = make_signal(payload1, 1700000000);
     let signal2 = make_signal(payload2, 1700000000);
-    assert_ne!(signal1.trade_uuid, signal2.trade_uuid, "Different wallets should produce different UUIDs");
+    assert_ne!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Different wallets should produce different UUIDs"
+    );
 }
 
 #[test]
@@ -90,13 +102,20 @@ fn test_signal_strategy_preserved() {
 #[test]
 fn test_signal_positive_amount() {
     let payload = make_payload(Action::Buy, Strategy::Shield, "1.5");
-    assert!(payload.amount_sol > Decimal::ZERO, "Signal amount must be positive");
+    assert!(
+        payload.amount_sol > Decimal::ZERO,
+        "Signal amount must be positive"
+    );
 }
 
 #[test]
 fn test_signal_amount_zero() {
     let payload = make_payload(Action::Buy, Strategy::Shield, "0.0");
-    assert_eq!(payload.amount_sol, Decimal::ZERO, "Signal amount can be zero");
+    assert_eq!(
+        payload.amount_sol,
+        Decimal::ZERO,
+        "Signal amount can be zero"
+    );
 }
 
 #[test]
@@ -104,7 +123,10 @@ fn test_signal_different_timestamps_same_uuid() {
     let payload = make_payload(Action::Buy, Strategy::Shield, "1.0");
     let signal1 = make_signal(payload.clone(), 1700000000);
     let signal2 = make_signal(payload, 1700000100);
-    assert_eq!(signal1.trade_uuid, signal2.trade_uuid, "Different timestamps should NOT change UUID (for dedup)");
+    assert_eq!(
+        signal1.trade_uuid, signal2.trade_uuid,
+        "Different timestamps should NOT change UUID (for dedup)"
+    );
 }
 
 #[test]

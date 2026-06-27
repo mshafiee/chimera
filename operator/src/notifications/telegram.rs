@@ -181,13 +181,13 @@ impl TelegramNotifier {
 
 #[async_trait::async_trait]
 impl NotificationService for TelegramNotifier {
-    async fn notify(&self, event: NotificationEvent) -> anyhow::Result<()> {
+    async fn notify(&self, event: &NotificationEvent, trade_mode: &str) -> anyhow::Result<()> {
         if !self.enabled {
             return Ok(());
         }
 
         // Check rate limit (skip for critical alerts)
-        let rate_key = RateLimiter::get_key(&event);
+        let rate_key = RateLimiter::get_key(event);
         if event.level() != AlertLevel::Critical && !self.rate_limiter.can_send(&rate_key) {
             tracing::debug!(
                 key = %rate_key,
@@ -197,7 +197,7 @@ impl NotificationService for TelegramNotifier {
         }
 
         let level = event.level();
-        let message = event.format_message();
+        let message = event.format_message(trade_mode);
         let formatted = self.format_with_level(level, &message);
 
         self.send_message(&formatted).await?;

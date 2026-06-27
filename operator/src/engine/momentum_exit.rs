@@ -42,7 +42,11 @@ pub struct MomentumExit {
 
 impl MomentumExit {
     /// Create a new momentum exit detector
-    pub fn new(db: Arc<dyn Database>, price_cache: Arc<PriceCache>, wick_protection_secs: u64) -> Self {
+    pub fn new(
+        db: Arc<dyn Database>,
+        price_cache: Arc<PriceCache>,
+        wick_protection_secs: u64,
+    ) -> Self {
         Self {
             db,
             price_cache,

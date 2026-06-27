@@ -55,8 +55,8 @@ pub type PostgresPool = Pool<Postgres>;
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     pub backend: DatabaseBackend,
-    pub path: std::path::PathBuf,     // For SQLite
-    pub url: Option<String>,           // For PostgreSQL
+    pub path: std::path::PathBuf, // For SQLite
+    pub url: Option<String>,      // For PostgreSQL
     pub max_connections: u32,
     pub acquire_timeout_seconds: u64,
 }
@@ -130,6 +130,7 @@ pub struct UpdateTradeStatus {
     pub status: String,
     pub tx_signature: Option<String>,
     pub error_message: Option<String>,
+    pub network_fee_sol: Option<rust_decimal::Decimal>,
 }
 
 /// Position insertion data

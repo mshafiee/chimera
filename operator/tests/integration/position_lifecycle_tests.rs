@@ -74,17 +74,18 @@ async fn test_duplicate_buy_uuid_idempotency() {
     .unwrap();
 
     // Second insert for the same UUID must fail (UNIQUE violation)
-    let second_insert = db.insert_trade(&InsertTrade {
-        trade_uuid: uuid.to_string(),
-        wallet_address: "wallet".to_string(),
-        token_address: "token".to_string(),
-        token_symbol: Some("T".to_string()),
-        strategy: "SHIELD".to_string(),
-        side: "BUY".to_string(),
-        amount_sol: Decimal::from_str("1.0").unwrap(),
-        status: "PENDING".to_string(),
-    })
-    .await;
+    let second_insert = db
+        .insert_trade(&InsertTrade {
+            trade_uuid: uuid.to_string(),
+            wallet_address: "wallet".to_string(),
+            token_address: "token".to_string(),
+            token_symbol: Some("T".to_string()),
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::from_str("1.0").unwrap(),
+            status: "PENDING".to_string(),
+        })
+        .await;
     assert!(
         second_insert.is_err(),
         "Duplicate trade_uuid must be rejected by UNIQUE constraint"
@@ -111,17 +112,18 @@ async fn test_close_position_no_active_position_is_noop() {
 
     let (db, _tmp) = create_test_db().await;
 
-    let result = db.close_position_full(
-        "uuid-nosell",
-        "wallet_nosell",
-        "token_nosell",
-        Decimal::from_str("2.0").unwrap(),
-        "sig_exit",
-        None,
-        Decimal::ONE,
-        true,
-    )
-    .await;
+    let result = db
+        .close_position_full(
+            "uuid-nosell",
+            "wallet_nosell",
+            "token_nosell",
+            Decimal::from_str("2.0").unwrap(),
+            "sig_exit",
+            None,
+            Decimal::ONE,
+            true,
+        )
+        .await;
 
     assert!(
         result.is_ok(),
@@ -301,6 +303,7 @@ async fn test_full_trade_status_progression() {
             status: status.to_string(),
             tx_signature: sig.map(|s| s.to_string()),
             error_message: None,
+            network_fee_sol: None,
         })
         .await
         .unwrap();
@@ -347,6 +350,7 @@ async fn test_full_trade_status_progression() {
         status: "CLOSED".to_string(),
         tx_signature: Some("sig_exit".to_string()),
         error_message: None,
+        network_fee_sol: None,
     })
     .await
     .unwrap();
@@ -396,6 +400,7 @@ async fn test_failed_trade_can_retry() {
         status: "FAILED".to_string(),
         tx_signature: None,
         error_message: Some("RPC timeout".to_string()),
+        network_fee_sol: None,
     })
     .await
     .unwrap();
@@ -404,6 +409,7 @@ async fn test_failed_trade_can_retry() {
         status: "RETRY".to_string(),
         tx_signature: None,
         error_message: None,
+        network_fee_sol: None,
     })
     .await
     .unwrap();
@@ -412,6 +418,7 @@ async fn test_failed_trade_can_retry() {
         status: "EXECUTING".to_string(),
         tx_signature: None,
         error_message: None,
+        network_fee_sol: None,
     })
     .await
     .unwrap();

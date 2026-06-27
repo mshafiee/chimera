@@ -2,14 +2,14 @@
 
 use chimera_operator::config::AppConfig;
 use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
+use chimera_operator::engine::executor::Executor;
 use chimera_operator::engine::signal_pipeline::SignalProcessor;
 use chimera_operator::engine::worker_pool::{WorkerPool, WorkerPoolConfig, WorkerPoolStats};
-use chimera_operator::engine::executor::Executor;
 use chimera_operator::engine::PriorityQueue;
 use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
 use rust_decimal::Decimal;
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -29,55 +29,102 @@ fn create_test_signal(trade_uuid: &str, strategy: Strategy, token: &str) -> Sign
 
 fn create_test_config() -> AppConfig {
     let config = config::Config::builder()
-        .set_default("server.host", "0.0.0.0").unwrap()
-        .set_default("server.port", 8080).unwrap()
-        .set_default("server.request_timeout_ms", 30000).unwrap()
-        .set_default("rpc.primary_provider", "helius").unwrap()
-        .set_default("rpc.primary_url", "https://api.mainnet-beta.solana.com").unwrap()
-        .set_default("rpc.rate_limit_per_second", 40).unwrap()
-        .set_default("rpc.timeout_ms", 2000).unwrap()
-        .set_default("rpc.max_consecutive_failures", 3).unwrap()
-        .set_default("database.path", "data/chimera.db").unwrap()
-        .set_default("database.max_connections", 5).unwrap()
-        .set_default("security.webhook_secret", "test-secret-that-is-thirty-two-chars-long!!").unwrap()
-        .set_default("security.max_timestamp_drift_secs", 60).unwrap()
-        .set_default("security.webhook_rate_limit", 100).unwrap()
-        .set_default("security.webhook_burst_size", 150).unwrap()
-        .set_default("queue.capacity", 100).unwrap()
-        .set_default("queue.load_shed_threshold_percent", 80).unwrap()
-        .set_default("queue.parallel_enabled", true).unwrap()
-        .set_default("queue.num_workers", 2).unwrap()
-        .set_default("queue.max_concurrent_rpc", 4).unwrap()
-        .set_default("strategy.shield_percent", 70).unwrap()
-        .set_default("strategy.spear_percent", 30).unwrap()
-        .set_default("strategy.max_position_sol", "1.0").unwrap()
-        .set_default("strategy.min_position_sol", "0.01").unwrap()
-        .set_default("jito.enabled", false).unwrap()
-        .set_default("jito.tip_floor_sol", "0.001").unwrap()
-        .set_default("jito.tip_ceiling_sol", "0.01").unwrap()
-        .set_default("jito.tip_percentile", 50).unwrap()
-        .set_default("jito.tip_percent_max", "0.10").unwrap()
-        .set_default("circuit_breakers.max_loss_24h_usd", "500.0").unwrap()
-        .set_default("circuit_breakers.max_consecutive_losses", 5).unwrap()
-        .set_default("circuit_breakers.max_drawdown_percent", "15.0").unwrap()
-        .set_default("circuit_breakers.portfolio_stop_loss_percent", "5.0").unwrap()
-        .set_default("circuit_breakers.cooldown_minutes", 30).unwrap()
+        .set_default("server.host", "0.0.0.0")
+        .unwrap()
+        .set_default("server.port", 8080)
+        .unwrap()
+        .set_default("server.request_timeout_ms", 30000)
+        .unwrap()
+        .set_default("rpc.primary_provider", "helius")
+        .unwrap()
+        .set_default("rpc.primary_url", "https://api.mainnet-beta.solana.com")
+        .unwrap()
+        .set_default("rpc.rate_limit_per_second", 40)
+        .unwrap()
+        .set_default("rpc.timeout_ms", 2000)
+        .unwrap()
+        .set_default("rpc.max_consecutive_failures", 3)
+        .unwrap()
+        .set_default("database.path", "data/chimera.db")
+        .unwrap()
+        .set_default("database.max_connections", 5)
+        .unwrap()
+        .set_default(
+            "security.webhook_secret",
+            "test-secret-that-is-thirty-two-chars-long!!",
+        )
+        .unwrap()
+        .set_default("security.max_timestamp_drift_secs", 60)
+        .unwrap()
+        .set_default("security.webhook_rate_limit", 100)
+        .unwrap()
+        .set_default("security.webhook_burst_size", 150)
+        .unwrap()
+        .set_default("queue.capacity", 100)
+        .unwrap()
+        .set_default("queue.load_shed_threshold_percent", 80)
+        .unwrap()
+        .set_default("queue.parallel_enabled", true)
+        .unwrap()
+        .set_default("queue.num_workers", 2)
+        .unwrap()
+        .set_default("queue.max_concurrent_rpc", 4)
+        .unwrap()
+        .set_default("strategy.shield_percent", 70)
+        .unwrap()
+        .set_default("strategy.spear_percent", 30)
+        .unwrap()
+        .set_default("strategy.max_position_sol", "1.0")
+        .unwrap()
+        .set_default("strategy.min_position_sol", "0.01")
+        .unwrap()
+        .set_default("jito.enabled", false)
+        .unwrap()
+        .set_default("jito.tip_floor_sol", "0.001")
+        .unwrap()
+        .set_default("jito.tip_ceiling_sol", "0.01")
+        .unwrap()
+        .set_default("jito.tip_percentile", 50)
+        .unwrap()
+        .set_default("jito.tip_percent_max", "0.10")
+        .unwrap()
+        .set_default("circuit_breakers.max_loss_24h_usd", "500.0")
+        .unwrap()
+        .set_default("circuit_breakers.max_consecutive_losses", 5)
+        .unwrap()
+        .set_default("circuit_breakers.max_drawdown_percent", "15.0")
+        .unwrap()
+        .set_default("circuit_breakers.portfolio_stop_loss_percent", "5.0")
+        .unwrap()
+        .set_default("circuit_breakers.cooldown_minutes", 30)
+        .unwrap()
         .build()
         .unwrap();
 
     config.try_deserialize().unwrap()
 }
 
-async fn create_signal_processor(config: &Arc<AppConfig>) -> (SignalProcessor, Arc<dyn chimera_operator::db_abstraction::Database>) {
+async fn create_signal_processor(
+    config: &Arc<AppConfig>,
+) -> (
+    SignalProcessor,
+    Arc<dyn chimera_operator::db_abstraction::Database>,
+) {
     let db_cfg = DatabaseConfig::sqlite(std::path::PathBuf::from(":memory:"));
-    let db = create_database(&db_cfg).await
+    let db = create_database(&db_cfg)
+        .await
         .expect("Failed to create test DB");
     let executor = Arc::new(RwLock::new(Executor::new((*config).clone(), db.clone())));
     let processor = SignalProcessor::new(
         db.clone(),
         executor,
         (*config).clone(),
-        None, None, None, None, None, None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     );
     (processor, db)
 }
@@ -101,12 +148,7 @@ async fn test_worker_pool_creation() {
     let worker_config = WorkerPoolConfig::from_app_config(&config);
     let cancel_token = CancellationToken::new();
 
-    let worker_pool = WorkerPool::new(
-        queue.clone(),
-        processor,
-        worker_config,
-        cancel_token,
-    );
+    let worker_pool = WorkerPool::new(queue.clone(), processor, worker_config, cancel_token);
 
     let stats = worker_pool.stats();
     assert_eq!(stats.active_workers, 0);
@@ -124,7 +166,10 @@ async fn test_concurrent_signal_processing() {
             Strategy::Shield,
             &format!("TOKEN{}", i),
         );
-        queue.push(signal, Some(75.0)).await.expect("Failed to push signal");
+        queue
+            .push(signal, Some(75.0))
+            .await
+            .expect("Failed to push signal");
     }
 
     assert_eq!(queue.len(), 10);
@@ -158,9 +203,18 @@ async fn test_priority_preservation() {
     let shield_signal = create_test_signal("trade_shield", Strategy::Shield, "SHIELD");
     let exit_signal = create_test_signal("trade_exit", Strategy::Exit, "EXIT");
 
-    queue.push(spear_signal, Some(60.0)).await.expect("Failed to push SPEAR");
-    queue.push(shield_signal, None).await.expect("Failed to push SHIELD");
-    queue.push(exit_signal, None).await.expect("Failed to push EXIT");
+    queue
+        .push(spear_signal, Some(60.0))
+        .await
+        .expect("Failed to push SPEAR");
+    queue
+        .push(shield_signal, None)
+        .await
+        .expect("Failed to push SHIELD");
+    queue
+        .push(exit_signal, None)
+        .await
+        .expect("Failed to push EXIT");
 
     let first = queue.pop().await;
     assert!(first.is_some());
@@ -190,12 +244,7 @@ async fn test_rate_limiting() {
 
     let cancel_token = CancellationToken::new();
 
-    let worker_pool = WorkerPool::new(
-        queue.clone(),
-        processor,
-        worker_config,
-        cancel_token,
-    );
+    let worker_pool = WorkerPool::new(queue.clone(), processor, worker_config, cancel_token);
 
     let stats = worker_pool.stats();
     assert_eq!(stats.rpc_semaphore_available, 2);
@@ -231,7 +280,10 @@ async fn test_database_concurrency() {
             Strategy::Shield,
             &format!("TOKEN{}", i),
         );
-        queue.push(signal, Some(75.0)).await.expect("Failed to push signal");
+        queue
+            .push(signal, Some(75.0))
+            .await
+            .expect("Failed to push signal");
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -280,7 +332,10 @@ async fn test_worker_pool_shutdown() {
             Strategy::Shield,
             &format!("TOKEN{}", i),
         );
-        queue.push(signal, Some(75.0)).await.expect("Failed to push signal");
+        queue
+            .push(signal, Some(75.0))
+            .await
+            .expect("Failed to push signal");
     }
 
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

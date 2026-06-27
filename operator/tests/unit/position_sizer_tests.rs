@@ -9,9 +9,7 @@
 //! - Low-WQS wallet gets performance penalty
 
 use chimera_operator::config::PositionSizingConfig;
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool,
-};
+use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use chimera_operator::engine::position_sizer::{PositionSizer, SizingFactors};
 use rust_decimal::Decimal;
 use sqlx::Pool;

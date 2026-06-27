@@ -177,13 +177,13 @@ impl DiscordNotifier {
 
 #[async_trait::async_trait]
 impl NotificationService for DiscordNotifier {
-    async fn notify(&self, event: NotificationEvent) -> anyhow::Result<()> {
+    async fn notify(&self, event: &NotificationEvent, trade_mode: &str) -> anyhow::Result<()> {
         if !self.enabled {
             return Ok(());
         }
 
         // Check rate limit (skip for critical alerts)
-        let rate_key = RateLimiter::get_key(&event);
+        let rate_key = RateLimiter::get_key(event);
         if event.level() != AlertLevel::Critical && !self.rate_limiter.can_send(&rate_key) {
             tracing::debug!(
                 key = %rate_key,
@@ -193,7 +193,7 @@ impl NotificationService for DiscordNotifier {
         }
 
         let level = event.level();
-        let message = event.format_message();
+        let message = event.format_message(trade_mode);
 
         self.send_message(&message, level).await?;
         self.rate_limiter.mark_sent(&rate_key);

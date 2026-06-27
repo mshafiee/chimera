@@ -15,10 +15,7 @@ fn test_recovery_action_display() {
         RecoveryAction::RevertedToActive.to_string(),
         "REVERTED_TO_ACTIVE"
     );
-    assert_eq!(
-        RecoveryAction::StillPending.to_string(),
-        "STILL_PENDING"
-    );
+    assert_eq!(RecoveryAction::StillPending.to_string(), "STILL_PENDING");
 }
 
 #[test]
@@ -65,12 +62,18 @@ fn test_recovery_action_variants() {
 #[allow(clippy::assertions_on_constants, clippy::nonminimal_bool)]
 fn test_stuck_detection_at_exact_threshold() {
     const EXACT_THRESHOLD: i64 = DEFAULT_STUCK_THRESHOLD_SECS;
-    assert!((EXACT_THRESHOLD <= DEFAULT_STUCK_THRESHOLD_SECS), "Position at exact threshold should NOT be stuck");
+    assert!(
+        (EXACT_THRESHOLD <= DEFAULT_STUCK_THRESHOLD_SECS),
+        "Position at exact threshold should NOT be stuck"
+    );
 }
 
 #[test]
 #[allow(clippy::assertions_on_constants)]
 fn test_stuck_detection_above_threshold() {
     const ABOVE_THRESHOLD: i64 = DEFAULT_STUCK_THRESHOLD_SECS + 1;
-    assert!(ABOVE_THRESHOLD > DEFAULT_STUCK_THRESHOLD_SECS, "Position above threshold SHOULD be stuck");
+    assert!(
+        ABOVE_THRESHOLD > DEFAULT_STUCK_THRESHOLD_SECS,
+        "Position above threshold SHOULD be stuck"
+    );
 }

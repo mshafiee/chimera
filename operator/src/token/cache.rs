@@ -34,9 +34,8 @@ impl TokenCache {
     /// * `ttl_seconds` - Time-to-live in seconds for each entry
     pub fn new(capacity: usize, ttl_seconds: i64) -> Self {
         // Default to 1000 if capacity is 0 (LRU cache requires non-zero capacity)
-        let cap = NonZeroUsize::new(capacity).unwrap_or_else(|| {
-            NonZeroUsize::new(1000).expect("Default capacity 1000 is valid")
-        });
+        let cap = NonZeroUsize::new(capacity)
+            .unwrap_or_else(|| NonZeroUsize::new(1000).expect("Default capacity 1000 is valid"));
         Self {
             cache: Mutex::new(LruCache::new(cap)),
             ttl: Duration::seconds(ttl_seconds),

@@ -696,6 +696,7 @@ async fn main() -> anyhow::Result<()> {
                                             status: "RETRY".to_string(),
                                             tx_signature: None,
                                             error_message: None,
+                                            network_fee_sol: None,
                                         });
                                     }
                                     Err(e) => {

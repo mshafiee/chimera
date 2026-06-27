@@ -279,12 +279,10 @@ async fn test_unique_uuid_for_different_inputs() {
 /// Test duplicate trade_uuid rejection
 #[tokio::test]
 async fn test_duplicate_trade_uuid_rejection() {
-    use chimera_operator::db_abstraction::{
-        create_database, DatabaseConfig, InsertTrade,
-    };
+    use chimera_operator::db_abstraction::{create_database, DatabaseConfig, InsertTrade};
     use rust_decimal::Decimal;
     use std::str::FromStr;
-    
+
     use tempfile::TempDir;
 
     // This test verifies that the idempotency check works
@@ -312,7 +310,8 @@ async fn test_duplicate_trade_uuid_rejection() {
     .expect("Failed to insert test trade");
 
     // Check that the UUID exists
-    let exists = db.trade_uuid_exists(test_uuid)
+    let exists = db
+        .trade_uuid_exists(test_uuid)
         .await
         .expect("Failed to check trade UUID");
 
@@ -320,7 +319,8 @@ async fn test_duplicate_trade_uuid_rejection() {
 
     // Check that a different UUID doesn't exist
     let different_uuid = "different-uuid-67890";
-    let not_exists = db.trade_uuid_exists(different_uuid)
+    let not_exists = db
+        .trade_uuid_exists(different_uuid)
         .await
         .expect("Failed to check different trade UUID");
 

@@ -3,9 +3,7 @@
 //! Tests that multiple wallets buying the same token within 5 minutes
 //! triggers consensus detection and improves signal quality.
 
-use chimera_operator::db_abstraction::{
-    create_database, DatabaseConfig,
-};
+use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
 use chimera_operator::monitoring::SignalAggregator;
 use rust_decimal::Decimal;
 use std::str::FromStr;

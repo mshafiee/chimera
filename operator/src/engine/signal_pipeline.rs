@@ -85,6 +85,7 @@ impl SignalProcessor {
                 status: "EXECUTING".to_string(),
                 tx_signature: None,
                 error_message: None,
+                network_fee_sol: None,
             })
             .await
         {
@@ -98,6 +99,7 @@ impl SignalProcessor {
                     error_message: Some(
                         "DB error: failed to transition QUEUED->EXECUTING".to_string(),
                     ),
+                    network_fee_sol: None,
                 })
                 .await
             {
@@ -210,6 +212,7 @@ impl SignalProcessor {
                         status: "DEAD_LETTER".to_string(),
                         tx_signature: None,
                         error_message: Some(reason.clone()),
+                        network_fee_sol: None,
                     })
                     .await
                 {
@@ -511,6 +514,7 @@ impl SignalProcessor {
                                     status: "DEAD_LETTER".to_string(),
                                     tx_signature: None,
                                     error_message: Some(reason.clone()),
+                                    network_fee_sol: None,
                                 })
                                 .await;
                             let _ = self
@@ -561,6 +565,7 @@ impl SignalProcessor {
                             status: "EXITING".to_string(),
                             tx_signature: Some(outcome.signature.clone()),
                             error_message: None,
+                            network_fee_sol: outcome.estimated_fee_sol,
                         })
                         .await
                     {
@@ -612,6 +617,7 @@ impl SignalProcessor {
                             status: "CLOSED".to_string(),
                             tx_signature: Some(outcome.signature.clone()),
                             error_message: None,
+                            network_fee_sol: None,
                         })
                         .await
                     {
@@ -633,6 +639,7 @@ impl SignalProcessor {
                             status: "PENDING".to_string(),
                             tx_signature: None,
                             error_message: Some(reason.to_string()),
+                            network_fee_sol: None,
                         })
                         .await
                     {
@@ -652,6 +659,7 @@ impl SignalProcessor {
                             status: "FAILED".to_string(),
                             tx_signature: None,
                             error_message: Some(reason.to_string()),
+                            network_fee_sol: None,
                         })
                         .await
                     {
@@ -703,6 +711,7 @@ impl SignalProcessor {
                         status: "FAILED".to_string(),
                         tx_signature: None,
                         error_message: Some(e.to_string()),
+                        network_fee_sol: None,
                     })
                     .await
                 {

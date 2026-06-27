@@ -69,17 +69,18 @@ async fn test_trade_idempotency() {
     .expect("First insert should succeed");
 
     // Second insert with same UUID should fail
-    let second = db.insert_trade(&InsertTrade {
-        trade_uuid: uuid.to_string(),
-        wallet_address: wallet.to_string(),
-        token_address: token.to_string(),
-        token_symbol: Some("BONK".to_string()),
-        strategy: "SHIELD".to_string(),
-        side: "BUY".to_string(),
-        amount_sol: Decimal::from_str("0.1").unwrap(),
-        status: "PENDING".to_string(),
-    })
-    .await;
+    let second = db
+        .insert_trade(&InsertTrade {
+            trade_uuid: uuid.to_string(),
+            wallet_address: wallet.to_string(),
+            token_address: token.to_string(),
+            token_symbol: Some("BONK".to_string()),
+            strategy: "SHIELD".to_string(),
+            side: "BUY".to_string(),
+            amount_sol: Decimal::from_str("0.1").unwrap(),
+            status: "PENDING".to_string(),
+        })
+        .await;
     assert!(
         second.is_err(),
         "Duplicate trade_uuid should be rejected by DB"
@@ -162,6 +163,7 @@ async fn test_trade_status_update() {
         status: "CLOSED".to_string(),
         tx_signature: Some("tx_signature_abc".to_string()),
         error_message: None,
+        network_fee_sol: None,
     })
     .await
     .unwrap();

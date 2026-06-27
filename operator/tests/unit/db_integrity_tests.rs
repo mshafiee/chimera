@@ -68,6 +68,7 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
             status: "QUEUED".to_string(),
             tx_signature: None,
             error_message: None,
+            network_fee_sol: None,
         })
         .await;
 
@@ -104,6 +105,7 @@ async fn test_update_trade_status_real_trade_affects_exactly_one_row() {
         status: "QUEUED".to_string(),
         tx_signature: None,
         error_message: None,
+        network_fee_sol: None,
     })
     .await
     .unwrap();
@@ -182,7 +184,7 @@ async fn test_close_position_closes_only_specified_position() {
 
     // Both positions are ACTIVE
     let active: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND state = 'ACTIVE'"
+        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND state = 'ACTIVE'",
     )
     .bind("wallet_multi")
     .fetch_one(&pool)
@@ -224,7 +226,10 @@ async fn test_close_position_closes_only_specified_position() {
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(uuid2_state.0, "ACTIVE", "Second position must remain ACTIVE");
+    assert_eq!(
+        uuid2_state.0, "ACTIVE",
+        "Second position must remain ACTIVE"
+    );
 }
 
 // ─── Test 42 (plan) ── close_position with exit_price=0 is rejected (M11 fix) ────
@@ -266,17 +271,18 @@ async fn test_close_position_zero_exit_price_is_rejected() {
     .unwrap();
 
     // Close with exit_price = 0 should return Err
-    let result = db.close_position_full(
-        uuid,
-        "wallet_z",
-        "token_z",
-        Decimal::ZERO,
-        "sig_exit_z",
-        None,
-        Decimal::ONE,
-        true,
-    )
-    .await;
+    let result = db
+        .close_position_full(
+            uuid,
+            "wallet_z",
+            "token_z",
+            Decimal::ZERO,
+            "sig_exit_z",
+            None,
+            Decimal::ONE,
+            true,
+        )
+        .await;
 
     // M11 FIX: Function returns Err when exit_price is zero
     assert!(
@@ -289,8 +295,11 @@ async fn test_close_position_zero_exit_price_is_rejected() {
         .bind(uuid)
         .fetch_one(&pool)
         .await
-    .unwrap();
-    assert_eq!(state.0, "ACTIVE", "Position must remain ACTIVE when close fails");
+        .unwrap();
+    assert_eq!(
+        state.0, "ACTIVE",
+        "Position must remain ACTIVE when close fails"
+    );
 }
 
 // ─── Test 43 (plan) ── open_position with entry_price=0 is rejected (M4 fix) ──
@@ -317,19 +326,20 @@ async fn test_open_position_zero_entry_price_is_rejected() {
     .await
     .unwrap();
 
-    let result = db.activate_trade_and_open_position(
-        uuid,
-        "wallet_ze",
-        "token_ze",
-        None,
-        "SHIELD",
-        Decimal::from_str("1.0").unwrap(),
-        Decimal::ZERO, // zero entry price
-        "sig_ze",
-        None,
-        None,
-    )
-    .await;
+    let result = db
+        .activate_trade_and_open_position(
+            uuid,
+            "wallet_ze",
+            "token_ze",
+            None,
+            "SHIELD",
+            Decimal::from_str("1.0").unwrap(),
+            Decimal::ZERO, // zero entry price
+            "sig_ze",
+            None,
+            None,
+        )
+        .await;
 
     // M4 FIX: Function returns Err when entry_price is zero
     assert!(
@@ -342,8 +352,11 @@ async fn test_open_position_zero_entry_price_is_rejected() {
         .bind(uuid)
         .fetch_one(&pool)
         .await
-    .unwrap();
-    assert_eq!(count.0, 0, "No position should be created when entry_price is zero");
+        .unwrap();
+    assert_eq!(
+        count.0, 0,
+        "No position should be created when entry_price is zero"
+    );
 }
 
 // ─── Test 44 (plan) ── trade costs accumulated on retry (M10 fix) ──────────────
@@ -516,11 +529,12 @@ async fn test_pnl_precision_f64_roundtrip() {
     .await
     .unwrap();
 
-    let stored: (String,) = sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = ?")
-        .bind(uuid)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let stored: (String,) =
+        sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = ?")
+            .bind(uuid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
 
     let recovered = Decimal::from_str(&stored.0).unwrap_or(Decimal::ZERO);
 
@@ -543,17 +557,18 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
 
     let (db, _tmp) = create_test_db().await;
 
-    let result = db.close_position_full(
-        "uuid-missing",
-        "wallet_missing",
-        "token_missing",
-        Decimal::from_str("2.0").unwrap(),
-        "sig_missing",
-        None,
-        Decimal::ONE,
-        true,
-    )
-    .await;
+    let result = db
+        .close_position_full(
+            "uuid-missing",
+            "wallet_missing",
+            "token_missing",
+            Decimal::from_str("2.0").unwrap(),
+            "sig_missing",
+            None,
+            Decimal::ONE,
+            true,
+        )
+        .await;
 
     assert!(
         result.is_ok(),
@@ -597,17 +612,18 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
     .unwrap();
 
     // Close with confirmed = false
-    let result = db.close_position_full(
-        uuid,
-        "wallet_unconf",
-        "token_unconf",
-        Decimal::from_str("120.0").unwrap(),
-        "sig_unconf_sell",
-        None,
-        Decimal::ONE,
-        false, // confirmed = false
-    )
-    .await;
+    let result = db
+        .close_position_full(
+            uuid,
+            "wallet_unconf",
+            "token_unconf",
+            Decimal::from_str("120.0").unwrap(),
+            "sig_unconf_sell",
+            None,
+            Decimal::ONE,
+            false, // confirmed = false
+        )
+        .await;
 
     assert!(result.is_ok());
 
@@ -684,7 +700,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
     // Call close_position with confirmed = false for partial exit (0.5 SOL / 1.5 SOL = 0.333333 fraction)
     // Note: With M3 fix, trade_uuid parameter must match the position's trade_uuid (entry_uuid)
     db.close_position_full(
-        entry_uuid,  // M3 FIX: Use entry_uuid (position's trade_uuid), not exit_uuid
+        entry_uuid, // M3 FIX: Use entry_uuid (position's trade_uuid), not exit_uuid
         "wallet_revert",
         "token_revert",
         Decimal::from_str("120.0").unwrap(),

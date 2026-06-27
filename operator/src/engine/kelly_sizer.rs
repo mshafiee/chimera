@@ -77,7 +77,8 @@ impl KellySizer {
         let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let strategy_str = strategy.to_string();
 
-        let trades = self.db
+        let trades = self
+            .db
             .get_trades_filtered(
                 Some(&from_date_str),
                 None,

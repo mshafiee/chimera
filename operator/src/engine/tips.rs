@@ -66,7 +66,10 @@ impl TipManager {
     /// Initialize from database (load persisted tips)
     pub async fn init(&self) -> AppResult<()> {
         // Load recent tips from database
-        let tips = self.db.get_recent_jito_tips(self.max_history_size as i32).await?;
+        let tips = self
+            .db
+            .get_recent_jito_tips(self.max_history_size as i32)
+            .await?;
 
         {
             let mut history = self.history.write();
@@ -212,7 +215,12 @@ impl TipManager {
         // Persist to database
         let strategy_str = strategy.to_string();
         self.db
-            .insert_jito_tip(&tip_amount_sol, bundle_signature, Some(&strategy_str), success)
+            .insert_jito_tip(
+                &tip_amount_sol,
+                bundle_signature,
+                Some(&strategy_str),
+                success,
+            )
             .await?;
 
         if success {

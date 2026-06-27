@@ -299,6 +299,7 @@ async fn should_return_error_on_status_update_for_missing_uuid() {
             status: "QUEUED".to_string(),
             tx_signature: None,
             error_message: None,
+            network_fee_sol: None,
         })
         .await;
 
@@ -324,6 +325,7 @@ async fn should_succeed_on_status_update_for_existing_trade() {
             status: "QUEUED".to_string(),
             tx_signature: None,
             error_message: None,
+            network_fee_sol: None,
         })
         .await;
 

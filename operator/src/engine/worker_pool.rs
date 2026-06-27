@@ -96,7 +96,7 @@ impl WorkerPool {
             let signal_processor = self.signal_processor.clone();
             let rpc_semaphore = Arc::clone(&self.rpc_semaphore);
             let active_workers = Arc::clone(&self.active_workers);
-                    let cancel_token = self.cancel_token.clone();
+            let cancel_token = self.cancel_token.clone();
 
             self.workers.spawn(async move {
                 Self::worker_loop(
@@ -184,7 +184,9 @@ impl WorkerPool {
     /// Get worker pool statistics
     pub fn stats(&self) -> WorkerPoolStats {
         WorkerPoolStats {
-            active_workers: self.active_workers.load(std::sync::atomic::Ordering::Relaxed),
+            active_workers: self
+                .active_workers
+                .load(std::sync::atomic::Ordering::Relaxed),
             queue_depth: self.queue.len(),
             rpc_semaphore_available: self.rpc_semaphore.available_permits(),
         }

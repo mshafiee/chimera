@@ -23,7 +23,10 @@ pub use rate_limiter::{RateLimitMetrics, RateLimiter, RequestPriority};
 pub use rpc_polling::RpcPollingState;
 pub use signal_aggregator::SignalAggregator;
 pub use wallet_performance::WalletPerformanceTracker;
-pub use webhook_health_task::{reconcile_helius_webhooks_async, start_webhook_health_task, run_startup_webhook_check, StartupWebhookResult, WebhookHealthConfig};
+pub use webhook_health_task::{
+    reconcile_helius_webhooks_async, run_startup_webhook_check, start_webhook_health_task,
+    StartupWebhookResult, WebhookHealthConfig,
+};
 pub use webhook_lifecycle::{WebhookLifecycleConfig, WebhookLifecycleManager};
 
 use crate::circuit_breaker::CircuitBreaker;

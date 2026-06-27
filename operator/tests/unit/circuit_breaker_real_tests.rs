@@ -11,9 +11,7 @@
 
 use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use chimera_operator::config::CircuitBreakerConfig;
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool,
-};
+use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use rust_decimal::Decimal;
 use sqlx::Pool;
 use sqlx::Sqlite;
@@ -49,11 +47,7 @@ fn tight_config() -> CircuitBreakerConfig {
 }
 
 /// Insert a closed trade with a specific USD PnL (used by get_consecutive_losses).
-async fn insert_closed_trade_with_pnl(
-    pool: &Pool<Sqlite>,
-    uuid: &str,
-    pnl_usd: f64,
-) {
+async fn insert_closed_trade_with_pnl(pool: &Pool<Sqlite>, uuid: &str, pnl_usd: f64) {
     sqlx::query(
         "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, \
          amount_sol, status, pnl_usd, created_at, updated_at) \
@@ -67,11 +61,7 @@ async fn insert_closed_trade_with_pnl(
 }
 
 /// Insert a closed position with a specific SOL PnL (used by get_pnl_24h / drawdown).
-async fn insert_closed_position_with_pnl(
-    pool: &Pool<Sqlite>,
-    trade_uuid: &str,
-    pnl_sol: f64,
-) {
+async fn insert_closed_position_with_pnl(pool: &Pool<Sqlite>, trade_uuid: &str, pnl_sol: f64) {
     // Insert backing trade
     sqlx::query(
         "INSERT OR IGNORE INTO trades \

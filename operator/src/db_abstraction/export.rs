@@ -39,13 +39,19 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.status,
             trade.pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade.pnl_usd.map(|p| p.to_string()).unwrap_or_default(),
-            trade.jito_tip_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade
+                .jito_tip_sol
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
             trade.dex_fee_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade
                 .slippage_cost_sol
                 .map(|p| p.to_string())
                 .unwrap_or_default(),
-            trade.total_cost_sol.map(|p| p.to_string()).unwrap_or_default(),
+            trade
+                .total_cost_sol
+                .map(|p| p.to_string())
+                .unwrap_or_default(),
             trade.net_pnl_sol.map(|p| p.to_string()).unwrap_or_default(),
             trade.created_at,
         ));
@@ -56,5 +62,7 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
 
 /// Generate PDF content from trades
 pub fn trades_to_pdf(_trades: &[TradeDetail]) -> AppResult<Vec<u8>> {
-    Err(AppError::Internal("PDF export not available in this printpdf version".to_string()))
+    Err(AppError::Internal(
+        "PDF export not available in this printpdf version".to_string(),
+    ))
 }

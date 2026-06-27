@@ -119,8 +119,10 @@ impl DexComparator {
         if results.is_empty() {
             // Graceful fallback to default Jupiter result as expected by tests and operators
             tracing::warn!("All DEX queries failed, falling back to default Jupiter result");
-            let default_fee = Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000));
-            let default_slippage = Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000));
+            let default_fee =
+                Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000));
+            let default_slippage =
+                Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000));
             let fee_sol = amount_sol * default_fee;
             let slippage_sol = amount_sol * default_slippage;
             let total_cost_sol = fee_sol + slippage_sol;
@@ -215,8 +217,9 @@ impl DexComparator {
         }
 
         // Extract fee and slippage from quote, convert to Decimal
-        let fee_percent =
-            get_json_decimal(&quote, "fee").unwrap_or_else(|| Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))); // Default 0.3% fee
+        let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
+            Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))
+        }); // Default 0.3% fee
 
         let fee_sol = amount_sol * fee_percent;
 
@@ -225,7 +228,9 @@ impl DexComparator {
         // We must divide by 100 to convert to a fraction before multiplying with amount_sol
         let slippage_percent = get_json_decimal(&quote, "priceImpactPct")
             .map(|pct| pct / Decimal::from(100))
-            .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))); // Default 0.5% slippage
+            .unwrap_or_else(|| {
+                Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
+            }); // Default 0.5% slippage
 
         let slippage_sol = amount_sol * slippage_percent;
         let total_cost_sol = fee_sol + slippage_sol;
@@ -286,12 +291,15 @@ impl DexComparator {
                     ));
                 }
 
-                let fee_percent = get_json_decimal(&quote, "fee")
-                    .unwrap_or_else(|| Decimal::from_str("0.0025").unwrap_or(Decimal::from(25) / Decimal::from(10000))); // Raydium default 0.25% fee
+                let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
+                    Decimal::from_str("0.0025").unwrap_or(Decimal::from(25) / Decimal::from(10000))
+                }); // Raydium default 0.25% fee
 
                 let fee_sol = amount_sol * fee_percent;
-                let slippage_percent = get_json_decimal(&quote, "priceImpact")
-                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000)));
+                let slippage_percent =
+                    get_json_decimal(&quote, "priceImpact").unwrap_or_else(|| {
+                        Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
+                    });
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -354,12 +362,15 @@ impl DexComparator {
                     ));
                 }
 
-                let fee_percent = get_json_decimal(&quote, "fee")
-                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))); // Orca default 0.3% fee
+                let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
+                    Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))
+                }); // Orca default 0.3% fee
 
                 let fee_sol = amount_sol * fee_percent;
-                let slippage_percent = get_json_decimal(&quote, "priceImpact")
-                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000)));
+                let slippage_percent =
+                    get_json_decimal(&quote, "priceImpact").unwrap_or_else(|| {
+                        Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
+                    });
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 
@@ -424,12 +435,15 @@ impl DexComparator {
                     ));
                 }
 
-                let fee_percent = get_json_decimal(&quote, "fee")
-                    .unwrap_or_else(|| Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))); // Meteora default 0.3% fee
+                let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
+                    Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))
+                }); // Meteora default 0.3% fee
 
                 let fee_sol = amount_sol * fee_percent;
-                let slippage_percent = get_json_decimal(&quote, "priceImpact")
-                    .unwrap_or_else(|| Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000)));
+                let slippage_percent =
+                    get_json_decimal(&quote, "priceImpact").unwrap_or_else(|| {
+                        Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
+                    });
                 let slippage_sol = amount_sol * slippage_percent;
                 let total_cost_sol = fee_sol + slippage_sol;
 

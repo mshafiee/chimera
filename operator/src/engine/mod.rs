@@ -16,12 +16,12 @@ pub mod position_sizer;
 pub mod profit_targets;
 pub mod recovery;
 pub mod rpc_cache;
+pub mod signal_pipeline;
 pub mod signal_quality;
 pub mod stop_loss;
 pub mod tips;
 pub mod transaction_builder;
 pub mod v0_reconstruction;
-pub mod signal_pipeline;
 pub mod volume_cache;
 pub mod worker_pool;
 
@@ -421,7 +421,8 @@ impl Engine {
         let cancel_token = self.shutdown_token.clone();
 
         // Create worker pool configuration
-        let worker_config = crate::engine::worker_pool::WorkerPoolConfig::from_app_config(&self.config);
+        let worker_config =
+            crate::engine::worker_pool::WorkerPoolConfig::from_app_config(&self.config);
 
         tracing::info!(
             num_workers = worker_config.num_workers,
@@ -554,17 +555,19 @@ impl Engine {
                             // Attempt to trip circuit breaker via config audit log so
                             // the operations team is alerted even if the CB reference
                             // is not directly accessible from Engine.
-                            let _ = self.db.log_config_change(
-                                "circuit_breaker",
-                                Some("OPEN"),
-                                "TRIPPED",
-                                "SYSTEM_PANIC",
-                                Some(&format!(
+                            let _ = self
+                                .db
+                                .log_config_change(
+                                    "circuit_breaker",
+                                    Some("OPEN"),
+                                    "TRIPPED",
+                                    "SYSTEM_PANIC",
+                                    Some(&format!(
                                     "Engine loop panic count {} exceeded threshold in 60s window",
                                     count
                                 )),
-                            )
-                            .await;
+                                )
+                                .await;
                             drop(executor);
                             panic_count.store(0, Ordering::SeqCst);
                         }

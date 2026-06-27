@@ -9,9 +9,7 @@
 //! - No double-exit when position is already being exited
 
 use chimera_operator::config::ProfitManagementConfig;
-use chimera_operator::db_abstraction::{
-    create_database, DatabaseConfig,
-};
+use chimera_operator::db_abstraction::{create_database, DatabaseConfig};
 use chimera_operator::engine::profit_targets::{ProfitTargetAction, ProfitTargetManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;

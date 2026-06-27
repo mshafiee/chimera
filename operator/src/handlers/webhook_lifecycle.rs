@@ -6,10 +6,13 @@
 use crate::db_abstraction::{WebhookAuditLog, WebhookStats};
 use crate::error::{AppError, AppResult};
 use crate::middleware::AuthExtension;
+use crate::monitoring::webhook_health_task::{
+    get_webhook_statistics, manual_health_check as health_check_internal,
+    manual_reconcile_webhooks as reconcile_internal,
+};
 use crate::monitoring::webhook_lifecycle::{
     BulkOperationResult, HealthCheckResult, ReconciliationResult, WebhookLifecycleManager,
 };
-use crate::monitoring::webhook_health_task::{get_webhook_statistics, manual_health_check as health_check_internal, manual_reconcile_webhooks as reconcile_internal};
 use crate::monitoring::MonitoringState;
 use crate::Role;
 use axum::{
@@ -106,9 +109,9 @@ impl<T> ApiResponse<T> {
 pub async fn get_webhook_stats(
     State(state): State<Arc<MonitoringState>>,
 ) -> AppResult<Json<ApiResponse<WebhookStats>>> {
-    let stats = get_webhook_statistics(state.db.as_ref()).await.map_err(|e| {
-        AppError::Internal(format!("Failed to get webhook statistics: {}", e))
-    })?;
+    let stats = get_webhook_statistics(state.db.as_ref())
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get webhook statistics: {}", e)))?;
 
     Ok(Json(ApiResponse::success(stats)))
 }
@@ -148,9 +151,10 @@ pub async fn bulk_register_webhooks(
         lifecycle_config,
     );
 
-    let result = manager.bulk_register_webhooks(request.wallets).await.map_err(|e| {
-        AppError::Internal(format!("Bulk webhook registration failed: {}", e))
-    })?;
+    let result = manager
+        .bulk_register_webhooks(request.wallets)
+        .await
+        .map_err(|e| AppError::Internal(format!("Bulk webhook registration failed: {}", e)))?;
 
     let total = result.total;
     let succeeded = result.succeeded;
@@ -200,9 +204,10 @@ pub async fn bulk_cleanup_webhooks(
         lifecycle_config,
     );
 
-    let result = manager.bulk_cleanup_webhooks(request.wallets).await.map_err(|e| {
-        AppError::Internal(format!("Bulk webhook cleanup failed: {}", e))
-    })?;
+    let result = manager
+        .bulk_cleanup_webhooks(request.wallets)
+        .await
+        .map_err(|e| AppError::Internal(format!("Bulk webhook cleanup failed: {}", e)))?;
 
     let total = result.total;
     let succeeded = result.succeeded;
@@ -329,13 +334,13 @@ pub async fn get_webhook_audit_log(
     let logs = state
         .db
         .get_webhook_audit_log(
-        params.wallet_address.as_deref(),
-        params.action.as_deref(),
-        params.status.as_deref(),
-        params.limit,
-    )
-    .await
-    .map_err(|e| AppError::Internal(format!("Failed to get webhook audit log: {}", e)))?;
+            params.wallet_address.as_deref(),
+            params.action.as_deref(),
+            params.status.as_deref(),
+            params.limit,
+        )
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to get webhook audit log: {}", e)))?;
 
     let log_count = logs.len();
 
@@ -436,7 +441,10 @@ pub async fn toggle_wallet_webhook(
         lifecycle_config,
     );
 
-    match manager.toggle_wallet_webhook(&wallet_address, body.enabled).await {
+    match manager
+        .toggle_wallet_webhook(&wallet_address, body.enabled)
+        .await
+    {
         Ok(()) => {
             info!(
                 wallet = %wallet_address,

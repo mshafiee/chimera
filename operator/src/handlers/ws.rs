@@ -9,15 +9,15 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State, Query,
+        Query, State,
     },
     http::StatusCode,
-    response::{Response, IntoResponse},
+    response::{IntoResponse, Response},
 };
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -35,9 +35,18 @@ pub struct WsState {
 }
 
 impl WsState {
-    pub fn new(api_keys: HashMap<String, crate::middleware::Role>, jwt_secret: String, allow_anonymous_readonly: bool) -> Self {
+    pub fn new(
+        api_keys: HashMap<String, crate::middleware::Role>,
+        jwt_secret: String,
+        allow_anonymous_readonly: bool,
+    ) -> Self {
         let (tx, _) = broadcast::channel(100);
-        Self { tx, api_keys, jwt_secret, allow_anonymous_readonly }
+        Self {
+            tx,
+            api_keys,
+            jwt_secret,
+            allow_anonymous_readonly,
+        }
     }
 
     /// Broadcast an event to all connected clients
@@ -174,7 +183,9 @@ pub async fn ws_handler(
             // No token provided - check if anonymous readonly is allowed
             if state.allow_anonymous_readonly {
                 tracing::info!("WebSocket connection allowed (anonymous readonly)");
-                let response = ws.on_upgrade(|socket| handle_socket(socket, state, Some("anonymous".to_string())));
+                let response = ws.on_upgrade(|socket| {
+                    handle_socket(socket, state, Some("anonymous".to_string()))
+                });
                 tracing::info!("WebSocket upgrade successful (anonymous)");
                 return response;
             }
@@ -192,7 +203,9 @@ pub async fn ws_handler(
             let identifier = user.identifier.clone();
             tracing::info!(identifier = %identifier, role = %user.role, "WebSocket connection authenticated");
             let identifier_for_closure = identifier.clone();
-            let response = ws.on_upgrade(move |socket| handle_socket(socket, state, Some(identifier_for_closure)));
+            let response = ws.on_upgrade(move |socket| {
+                handle_socket(socket, state, Some(identifier_for_closure))
+            });
             tracing::info!("WebSocket upgrade successful for user: {}", identifier);
             response
         }
@@ -237,7 +250,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<WsState>, user_identifier: 
                 Ok(json) => {
                     tracing::debug!(user = %user_id_for_send, event_count, "Sending WebSocket event");
                     Message::Text(json)
-                },
+                }
                 Err(e) => {
                     tracing::error!(error = %e, user = %user_id_for_send, "Failed to serialize WebSocket event");
                     continue;

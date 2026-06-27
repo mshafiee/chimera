@@ -249,7 +249,8 @@ impl MarketRegimeDetector {
     #[allow(clippy::type_complexity)]
     pub fn get_price_history(
         &self,
-    ) -> Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>> {
+    ) -> Arc<parking_lot::RwLock<VecDeque<(chrono::DateTime<chrono::Utc>, rust_decimal::Decimal)>>>
+    {
         self.price_history.clone()
     }
 
@@ -338,7 +339,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_regime_detection_insufficient_span() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
+        let price_cache = Arc::new(
+            PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"),
+        );
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let sol_mint = "So11111111111111111111111111111111111111112";
         let now = Utc::now();
@@ -369,7 +372,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_regime_detection_sufficient_span_bull() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
+        let price_cache = Arc::new(
+            PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"),
+        );
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let sol_mint = "So11111111111111111111111111111111111111112";
         let now = Utc::now();
@@ -400,7 +405,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_regime_detection_insufficient_span() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
+        let price_cache = Arc::new(
+            PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"),
+        );
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let token = "Token111111111111111111111111111111111111111";
         let now = Utc::now();
@@ -426,7 +433,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_token_regime_detection_sufficient_span_bear() {
-        let price_cache = Arc::new(PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"));
+        let price_cache = Arc::new(
+            PriceCache::with_ttl(24 * 3600).expect("Failed to create price cache for test"),
+        );
         let detector = MarketRegimeDetector::new(price_cache.clone());
         let token = "Token111111111111111111111111111111111111111";
         let now = Utc::now();

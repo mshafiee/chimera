@@ -131,7 +131,8 @@ impl PositionSizer {
                 Err(_) => {
                     // < 15 closed trades: scale base size by WQS quality and sample confidence.
                     // Uses the same 15-trade minimum as Kelly Criterion for consistency.
-                    let trade_count = self.db
+                    let trade_count = self
+                        .db
                         .get_closed_trade_count_for_wallet(&factors.wallet_address)
                         .await
                         .unwrap_or(0);
@@ -161,7 +162,8 @@ impl PositionSizer {
         } else {
             // Kelly not enabled: apply WQS + confidence scaling directly
             // Uses 15-trade denominator to match Kelly's minimum threshold
-            let trade_count = self.db
+            let trade_count = self
+                .db
                 .get_closed_trade_count_for_wallet(&factors.wallet_address)
                 .await
                 .unwrap_or(0);
@@ -179,8 +181,10 @@ impl PositionSizer {
         let confidence_mult = if let Some(count) = factors.consensus_wallet_count {
             if count > 0 {
                 let excess = (count - 1).min(3) as i64;
-                (Decimal::ONE + Decimal::from_str("0.15").unwrap_or(Decimal::from(15) / Decimal::from(100)) * Decimal::from(excess))
-                    .min(Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2)))
+                (Decimal::ONE
+                    + Decimal::from_str("0.15").unwrap_or(Decimal::from(15) / Decimal::from(100))
+                        * Decimal::from(excess))
+                .min(Decimal::from_str("1.5").unwrap_or(Decimal::from(3) / Decimal::from(2)))
             } else {
                 Decimal::ONE
             }
@@ -347,15 +351,12 @@ impl PositionSizer {
 
         // Get wallet performance metrics from database
         // Convert success rate percentage to Decimal (0.0-1.0)
-        let success_rate =
-            match self.db.get_wallet_copy_performance(wallet_address).await {
-                Ok(Some(metrics)) => {
-                    metrics.signal_success_rate / rust_decimal::Decimal::from(100)
-                }
-                // Default to 0.4 for unproven/stale wallets — produces a 0.8× performance
-                // penalty rather than neutral 1.0×, reflecting the uncertainty of no data.
-                _ => rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO),
-            };
+        let success_rate = match self.db.get_wallet_copy_performance(wallet_address).await {
+            Ok(Some(metrics)) => metrics.signal_success_rate / rust_decimal::Decimal::from(100),
+            // Default to 0.4 for unproven/stale wallets — produces a 0.8× performance
+            // penalty rather than neutral 1.0×, reflecting the uncertainty of no data.
+            _ => rust_decimal::Decimal::from_str("0.4").unwrap_or(rust_decimal::Decimal::ZERO),
+        };
 
         // Get token age if token address and Helius client are provided
         let token_age_hours =
@@ -399,7 +400,7 @@ impl PositionSizer {
             Ok(positions) => positions.len() as i64,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to query active positions, rejecting trade for safety");
-                return false;  // Fail-safe: reject trade on DB error to prevent unlimited position opening
+                return false; // Fail-safe: reject trade on DB error to prevent unlimited position opening
             }
         };
 

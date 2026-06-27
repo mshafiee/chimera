@@ -193,7 +193,8 @@ impl ProfitTargetManager {
                     entry_time,
                     remaining_fraction: Decimal::ONE,
                 };
-                if let Err(e) = self.db
+                if let Err(e) = self
+                    .db
                     .upsert_exit_target(
                         trade_uuid,
                         entry_price,
@@ -460,18 +461,9 @@ impl ProfitTargetManager {
         // Persist state changes to DB (outside the lock)
         if let Some((ep, ea, pp, ppp, th_json, tsa, tsp, rf)) = db_snapshot {
             let trade_uuid_owned = trade_uuid.to_string();
-            if let Err(e) = self.db
-                .upsert_exit_target(
-                    &trade_uuid_owned,
-                    ep,
-                    ea,
-                    pp,
-                    ppp,
-                    &th_json,
-                    tsa,
-                    tsp,
-                    rf,
-                )
+            if let Err(e) = self
+                .db
+                .upsert_exit_target(&trade_uuid_owned, ep, ea, pp, ppp, &th_json, tsa, tsp, rf)
                 .await
             {
                 tracing::warn!(trade_uuid, error = %e, "Failed to persist profit target state");
@@ -508,7 +500,10 @@ impl ProfitTargetManager {
     /// Called periodically from the position monitoring loop (~every 5 minutes).
     pub async fn sweep_hwm_stale_entries(&self) -> usize {
         let active = match self.db.get_active_positions().await {
-            Ok(positions) => positions.into_iter().map(|p| p.trade_uuid).collect::<Vec<_>>(),
+            Ok(positions) => positions
+                .into_iter()
+                .map(|p| p.trade_uuid)
+                .collect::<Vec<_>>(),
             Err(e) => {
                 tracing::warn!(error = %e, "HWM sweep: DB query failed, skipping");
                 return 0;

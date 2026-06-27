@@ -14,11 +14,11 @@ use crate::error::AppResult;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
-use std::sync::OnceLock;
 use prometheus::{IntCounter, IntGauge};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Persist circuit breaker state to the database
 async fn persist_cb_state(
@@ -38,7 +38,9 @@ async fn persist_cb_state(
 }
 
 /// Load persisted circuit breaker state from the database
-async fn load_cb_state(db: &dyn Database) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
+async fn load_cb_state(
+    db: &dyn Database,
+) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
     match db.get_circuit_breaker_state().await {
         Ok(state) => Ok(Some((state.state, state.tripped_at, state.trip_reason))),
         Err(_) => Ok(None),
@@ -70,10 +72,7 @@ impl std::fmt::Display for CircuitBreakerState {
 #[derive(Debug, Clone)]
 pub enum TripReason {
     /// 24h losses exceeded threshold
-    MaxLoss24h {
-        loss: Decimal,
-        threshold: Decimal,
-    },
+    MaxLoss24h { loss: Decimal, threshold: Decimal },
     /// Consecutive losses exceeded threshold
     ConsecutiveLosses { count: u32, threshold: u32 },
     /// Drawdown from peak exceeded threshold
@@ -170,7 +169,11 @@ pub struct CircuitBreaker {
 
 impl CircuitBreaker {
     /// Create a new circuit breaker
-    pub fn new(config: CircuitBreakerConfig, db: Arc<dyn Database>, initial_capital_sol: Decimal) -> Self {
+    pub fn new(
+        config: CircuitBreakerConfig,
+        db: Arc<dyn Database>,
+        initial_capital_sol: Decimal,
+    ) -> Self {
         Self::new_with_ws(config, db, None, initial_capital_sol)
     }
 
@@ -190,7 +193,7 @@ impl CircuitBreaker {
                 trip_reason: None,
                 last_check: None,
             })),
-            check_interval: Duration::seconds(5),  // Reduced from 30s to 5s for faster loss detection
+            check_interval: Duration::seconds(5), // Reduced from 30s to 5s for faster loss detection
             ws_state,
             total_capital_sol: Arc::new(RwLock::new(initial_capital_sol)),
             price_cache: None,
@@ -464,14 +467,15 @@ impl CircuitBreaker {
         }
 
         // Log to config audit
-        self.db.log_config_change(
-            "circuit_breaker",
-            Some("ACTIVE"),
-            "TRIPPED",
-            "SYSTEM_CIRCUIT_BREAKER",
-            Some(&reason_str),
-        )
-        .await?;
+        self.db
+            .log_config_change(
+                "circuit_breaker",
+                Some("ACTIVE"),
+                "TRIPPED",
+                "SYSTEM_CIRCUIT_BREAKER",
+                Some(&reason_str),
+            )
+            .await?;
 
         // Broadcast alert via WebSocket
         if let Some(ref ws) = self.ws_state {
@@ -495,9 +499,7 @@ impl CircuitBreaker {
         // Send push notification
         if let Some(notifier) = self.notifier.get() {
             notifier
-                .notify(NotificationEvent::CircuitBreakerTriggered {
-                    reason: reason_str,
-                })
+                .notify(NotificationEvent::CircuitBreakerTriggered { reason: reason_str })
                 .await;
         }
 
@@ -525,17 +527,18 @@ impl CircuitBreaker {
             gauge.set(1);
         }
 
-        self.db.log_config_change(
-            "circuit_breaker",
-            Some("TRIPPED"),
-            "COOLDOWN",
-            "SYSTEM",
-            Some(&format!(
-                "Cooldown for {} minutes",
-                self.config.cooldown_minutes
-            )),
-        )
-        .await?;
+        self.db
+            .log_config_change(
+                "circuit_breaker",
+                Some("TRIPPED"),
+                "COOLDOWN",
+                "SYSTEM",
+                Some(&format!(
+                    "Cooldown for {} minutes",
+                    self.config.cooldown_minutes
+                )),
+            )
+            .await?;
 
         Ok(())
     }
@@ -550,7 +553,9 @@ impl CircuitBreaker {
                 "Circuit breaker re-tripped during cooldown exit — clock reset"
             );
             self.trip(reason).await?;
-            tracing::warn!("Circuit breaker cooldown expired but breach condition still present — re-tripped");
+            tracing::warn!(
+                "Circuit breaker cooldown expired but breach condition still present — re-tripped"
+            );
             return Ok(());
         }
 
@@ -569,18 +574,21 @@ impl CircuitBreaker {
         tracing::info!("Circuit breaker exiting cooldown - trading resumed");
 
         // FIX [R-C1]: Persist Active state so restarts see cleared state.
-        if let Err(e) = persist_cb_state(self.db.as_ref(), CircuitBreakerState::Active, None, None).await {
+        if let Err(e) =
+            persist_cb_state(self.db.as_ref(), CircuitBreakerState::Active, None, None).await
+        {
             tracing::error!(error = %e, "Failed to persist circuit breaker ACTIVE state to DB after cooldown exit");
         }
 
-        self.db.log_config_change(
-            "circuit_breaker",
-            Some("COOLDOWN"),
-            "ACTIVE",
-            "SYSTEM",
-            Some("Cooldown period completed — breach conditions cleared"),
-        )
-        .await?;
+        self.db
+            .log_config_change(
+                "circuit_breaker",
+                Some("COOLDOWN"),
+                "ACTIVE",
+                "SYSTEM",
+                Some("Cooldown period completed — breach conditions cleared"),
+            )
+            .await?;
 
         Ok(())
     }
@@ -608,18 +616,21 @@ impl CircuitBreaker {
         );
 
         // FIX [R-C1]: Persist Active state so restarts don't re-trip unnecessarily.
-        if let Err(e) = persist_cb_state(self.db.as_ref(), CircuitBreakerState::Active, None, None).await {
+        if let Err(e) =
+            persist_cb_state(self.db.as_ref(), CircuitBreakerState::Active, None, None).await
+        {
             tracing::error!(error = %e, "Failed to persist circuit breaker ACTIVE state to DB after reset");
         }
 
-        self.db.log_config_change(
-            "circuit_breaker",
-            Some(&previous_state.to_string()),
-            "ACTIVE",
-            admin,
-            Some("Manual reset by admin"),
-        )
-        .await?;
+        self.db
+            .log_config_change(
+                "circuit_breaker",
+                Some(&previous_state.to_string()),
+                "ACTIVE",
+                admin,
+                Some("Manual reset by admin"),
+            )
+            .await?;
 
         Ok(())
     }
@@ -628,14 +639,15 @@ impl CircuitBreaker {
     pub async fn manual_trip(&self, admin: &str, reason: String) -> AppResult<()> {
         self.trip(TripReason::Manual { reason }).await?;
 
-        self.db.log_config_change(
-            "circuit_breaker",
-            Some("ACTIVE"),
-            "TRIPPED",
-            admin,
-            Some("Manual trip by admin"),
-        )
-        .await?;
+        self.db
+            .log_config_change(
+                "circuit_breaker",
+                Some("ACTIVE"),
+                "TRIPPED",
+                admin,
+                Some("Manual trip by admin"),
+            )
+            .await?;
 
         Ok(())
     }

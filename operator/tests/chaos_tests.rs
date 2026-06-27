@@ -10,13 +10,11 @@
 mod tests {
 
     use chimera_operator::config::AppConfig;
-    use chimera_operator::db_abstraction::{
-        create_database, Database, DatabaseConfig, DbPool,
-    };
+    use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
     use chimera_operator::engine::executor::{Executor, RpcMode};
     use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
     use rust_decimal::Decimal;
-    
+
     use sqlx::{Pool, Sqlite};
     use std::str::FromStr;
     use std::sync::Arc;

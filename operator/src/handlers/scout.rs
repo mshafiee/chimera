@@ -127,9 +127,9 @@ pub async fn get_scout_status(
     };
 
     let response = ScoutStatusResponse {
-        last_run_at: wallet_stats.last_analysis_time.unwrap_or_else(|| {
-            chrono::Utc::now().to_rfc3339()
-        }),
+        last_run_at: wallet_stats
+            .last_analysis_time
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         next_run_at: None, // Would be calculated from cron schedule
         wallets_analyzed: wallet_stats.total_wallets,
         analysis_duration_seconds: wallet_stats.avg_analysis_time,
@@ -201,7 +201,9 @@ pub async fn trigger_scout_run(
 fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
     match db.pool() {
         DbPool::SQLite(p) => Ok(p),
-        _ => Err(AppError::Internal("Only SQLite backend is supported".to_string())),
+        _ => Err(AppError::Internal(
+            "Only SQLite backend is supported".to_string(),
+        )),
     }
 }
 
@@ -215,19 +217,18 @@ async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistic
     let pool = sqlite_pool(db)?;
 
     let total_wallets: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')"
+        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')",
     )
     .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
     // Get last update time from the most recently updated wallet
-    let last_time: Option<String> = sqlx::query_scalar(
-        "SELECT MAX(updated_at) FROM wallets WHERE updated_at IS NOT NULL"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let last_time: Option<String> =
+        sqlx::query_scalar("SELECT MAX(updated_at) FROM wallets WHERE updated_at IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     Ok(WalletStatistics {
         total_wallets,
@@ -248,16 +249,15 @@ async fn calculate_wqs_distribution(db: &Arc<dyn Database>) -> Result<Vec<WQSBuc
     ];
 
     let mut distribution = Vec::new();
-    let total_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     for (range_name, min, max) in ranges {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM wallets WHERE wqs_score >= ? AND wqs_score < ?"
+            "SELECT COUNT(*) FROM wallets WHERE wqs_score >= ? AND wqs_score < ?",
         )
         .bind(min)
         .bind(max)
@@ -290,12 +290,11 @@ struct WQSStatistics {
 async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistics, AppError> {
     let pool = sqlite_pool(db)?;
 
-    let total_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let total_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     if total_count == 0 {
         return Ok(WQSStatistics {
@@ -306,12 +305,11 @@ async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistic
     }
 
     // Calculate average
-    let avg: Option<f64> = sqlx::query_scalar(
-        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score IS NOT NULL"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let avg: Option<f64> =
+        sqlx::query_scalar("SELECT AVG(wqs_score) FROM wallets WHERE wqs_score IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     // Calculate median using OFFSET
     let median = if total_count % 2 == 0 {
@@ -355,23 +353,22 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
     let pool = sqlite_pool(db)?;
 
     let total_analyzed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')"
+        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')",
     )
     .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
     // Get rejected wallets (rug check equivalent)
-    let rug_check_rejections: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED'"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let rug_check_rejections: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED'")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     // Calculate backtest success rate (from ACTIVE wallets that passed validation)
     let backtest_passed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND notes LIKE '%Backtest: PASSED%'"
+        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND notes LIKE '%Backtest: PASSED%'",
     )
     .fetch_one(&pool)
     .await
@@ -384,12 +381,11 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
     };
 
     // Validation pass rate (wallets that met promotion criteria)
-    let validation_passed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'"
-    )
-    .fetch_one(&pool)
-    .await
-    .map_err(AppError::Database)?;
+    let validation_passed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE'")
+            .fetch_one(&pool)
+            .await
+            .map_err(AppError::Database)?;
 
     let validation_pass_rate = if total_analyzed > 0 {
         (validation_passed as f64 / total_analyzed as f64) * 100.0
@@ -413,23 +409,26 @@ async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem
     let rows = sqlx::query_as::<_, (String, f64, String, String)>(
         "SELECT address, wqs_score, notes, promoted_at FROM wallets
          WHERE status = 'ACTIVE' AND promoted_at IS NOT NULL
-         ORDER BY promoted_at DESC LIMIT 20"
+         ORDER BY promoted_at DESC LIMIT 20",
     )
     .fetch_all(&pool)
     .await
     .map_err(AppError::Database)?;
 
-    let items = rows.into_iter().map(|(address, wqs_score, notes, promoted_at)| {
-        let backtest_success = notes.contains("Backtest: PASSED");
+    let items = rows
+        .into_iter()
+        .map(|(address, wqs_score, notes, promoted_at)| {
+            let backtest_success = notes.contains("Backtest: PASSED");
 
-        PromotionItem {
-            address,
-            wqs_score,
-            reason: notes,
-            backtest_success,
-            validated_at: promoted_at,
-        }
-    }).collect();
+            PromotionItem {
+                address,
+                wqs_score,
+                reason: notes,
+                backtest_success,
+                validated_at: promoted_at,
+            }
+        })
+        .collect();
 
     Ok(items)
 }
@@ -440,20 +439,21 @@ async fn get_rejection_queue(db: &Arc<dyn Database>) -> Result<Vec<RejectionItem
     let rows = sqlx::query_as::<_, (String, f64, String, String)>(
         "SELECT address, wqs_score, notes, updated_at FROM wallets
          WHERE status = 'REJECTED'
-         ORDER BY updated_at DESC LIMIT 20"
+         ORDER BY updated_at DESC LIMIT 20",
     )
     .fetch_all(&pool)
     .await
     .map_err(AppError::Database)?;
 
-    let items = rows.into_iter().map(|(address, wqs_score, notes, updated_at)| {
-        RejectionItem {
+    let items = rows
+        .into_iter()
+        .map(|(address, wqs_score, notes, updated_at)| RejectionItem {
             address,
             wqs_score,
             reason: notes,
             rejected_at: updated_at,
-        }
-    }).collect();
+        })
+        .collect();
 
     Ok(items)
 }

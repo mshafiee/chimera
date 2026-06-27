@@ -237,10 +237,7 @@ async fn process_transaction(
 
     // Gate 3: duplicate UUID check — prevents re-processing on restart/pagination gaps
     let trade_uuid = payload.generate_trade_uuid(tx.timestamp);
-    if db.trade_uuid_exists(&trade_uuid)
-        .await
-        .unwrap_or(false)
-    {
+    if db.trade_uuid_exists(&trade_uuid).await.unwrap_or(false) {
         tracing::debug!(
             trade_uuid = %trade_uuid,
             "Duplicate polling signal skipped"

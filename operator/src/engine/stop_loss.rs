@@ -124,7 +124,10 @@ impl StopLossManager {
         // Get wallet WQS for dynamic stop calculation
         let wallet_opt = self.db.get_wallet(wallet_address).await;
         let wqs: f64 = match wallet_opt {
-            Ok(Some(w)) => w.wqs_score.map(|s| s.to_f64().unwrap_or(50.0)).unwrap_or(50.0),
+            Ok(Some(w)) => w
+                .wqs_score
+                .map(|s| s.to_f64().unwrap_or(50.0))
+                .unwrap_or(50.0),
             _ => 50.0,
         };
 

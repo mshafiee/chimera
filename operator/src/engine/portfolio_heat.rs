@@ -91,7 +91,10 @@ impl PortfolioHeat {
         let heat_cutoff = now - chrono::Duration::seconds(1800);
 
         // Get active positions for heat calculation
-        let positions = self.db.get_active_positions().await
+        let positions = self
+            .db
+            .get_active_positions()
+            .await
             .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
 
         let mut total_exposure = rust_decimal::Decimal::ZERO;
@@ -125,7 +128,10 @@ impl PortfolioHeat {
 
         // Get pending/queued/executing trades for heat calculation
         for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
-            let trades = self.db.get_trades_by_status(status, i32::MAX).await
+            let trades = self
+                .db
+                .get_trades_by_status(status, i32::MAX)
+                .await
                 .map_err(|e| format!("Failed to query portfolio heat: {}", e))?;
             for trade in &trades {
                 if trade.side == "BUY" {
@@ -197,7 +203,10 @@ impl PortfolioHeat {
         let now = chrono::Utc::now();
         let heat_cutoff = now - chrono::Duration::seconds(1800);
 
-        let positions = self.db.get_active_positions().await
+        let positions = self
+            .db
+            .get_active_positions()
+            .await
             .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
 
         let mut shield_heat = Decimal::ZERO;
@@ -216,7 +225,10 @@ impl PortfolioHeat {
         }
 
         for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
-            let trades = self.db.get_trades_by_status(status, i32::MAX).await
+            let trades = self
+                .db
+                .get_trades_by_status(status, i32::MAX)
+                .await
                 .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
             for trade in &trades {
                 if trade.side == "BUY" {

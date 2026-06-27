@@ -6,9 +6,7 @@
 //! - Atomic write behavior
 //! - Database lock handling
 
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool,
-};
+use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use chimera_operator::roster::{merge_roster, validate_roster};
 use sqlx::Pool;
 use sqlx::Sqlite;

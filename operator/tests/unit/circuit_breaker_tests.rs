@@ -8,9 +8,7 @@
 
 use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState, TripReason};
 use chimera_operator::config::CircuitBreakerConfig;
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool,
-};
+use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;

@@ -1,18 +1,17 @@
 //! SQLite backend implementation for Database trait
 
+use super::types::DatabaseConfig;
 use super::types::SqlitePool;
 use super::{
-    dec_to_text, opt_text_to_dec, text_to_dec,
-    ActivePositionEntry, ActivePositionSummary, CircuitBreakerState, ConfigAuditItem,
-    Database, DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData,
-    RetryableDlqItem, UpdateDlqItemParams,
-    InsertPosition, InsertTrade, KillSwitchState, LatencyBucket, Position, PositionDetail,
-    PositionRecord, ReconciliationRun, ReconciliationStats, ReconciliationStatus,
-    Trade, TradeDetail, TradeLatencyStats, TradeStatistics, UpdatePosition,
-    UpdateTradeStatus, Wallet, WalletCopyPerformance, WalletDetail, WalletMonitoring,
-    WalletPerformance, WebhookAuditLog,
+    dec_to_text, opt_text_to_dec, text_to_dec, ActivePositionEntry, ActivePositionSummary,
+    CircuitBreakerState, ConfigAuditItem, Database, DbPool, DeadLetterItem, DiscrepancyRow,
+    DiscrepancyTypeStats, ExitTargetData, InsertPosition, InsertTrade, KillSwitchState,
+    LatencyBucket, Position, PositionDetail, PositionRecord, ReconciliationRun,
+    ReconciliationStats, ReconciliationStatus, RetryableDlqItem, Trade, TradeDetail,
+    TradeLatencyStats, TradeStatistics, UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus,
+    Wallet, WalletCopyPerformance, WalletDetail, WalletMonitoring, WalletPerformance,
+    WebhookAuditLog,
 };
-use super::types::DatabaseConfig;
 use crate::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -196,13 +195,15 @@ impl Database for SqliteBackend {
             sqlx::query(
                 r#"
                 UPDATE trades
-                SET status = ?, tx_signature = ?, error_message = ?
+                SET status = ?, tx_signature = ?, error_message = ?,
+                    network_fee_sol = COALESCE(?, network_fee_sol)
                 WHERE trade_uuid = ?
                 "#,
             )
             .bind(&update.status)
             .bind(sig)
             .bind(&update.error_message)
+            .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
             .bind(&update.trade_uuid)
             .execute(&self.pool)
             .await?
@@ -210,12 +211,14 @@ impl Database for SqliteBackend {
             sqlx::query(
                 r#"
                 UPDATE trades
-                SET status = ?, error_message = COALESCE(?, error_message)
+                SET status = ?, error_message = COALESCE(?, error_message),
+                    network_fee_sol = COALESCE(?, network_fee_sol)
                 WHERE trade_uuid = ?
                 "#,
             )
             .bind(&update.status)
             .bind(&update.error_message)
+            .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
             .bind(&update.trade_uuid)
             .execute(&self.pool)
             .await?
@@ -275,9 +278,7 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        rows.into_iter()
-            .map(|r| self.row_to_trade(r))
-            .collect()
+        rows.into_iter().map(|r| self.row_to_trade(r)).collect()
     }
 
     async fn get_trades_by_status(&self, status: &str, limit: i32) -> AppResult<Vec<Trade>> {
@@ -301,9 +302,7 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        rows.into_iter()
-            .map(|r| self.row_to_trade(r))
-            .collect()
+        rows.into_iter().map(|r| self.row_to_trade(r)).collect()
     }
 
     async fn update_trade_execution(
@@ -342,12 +341,11 @@ impl Database for SqliteBackend {
         pnl_sol: Decimal,
         pnl_usd: Decimal,
     ) -> AppResult<()> {
-        let total_cost_str: Option<String> = sqlx::query_scalar(
-            "SELECT total_cost_sol FROM trades WHERE trade_uuid = ?",
-        )
-        .bind(trade_uuid)
-        .fetch_optional(&self.pool)
-        .await?;
+        let total_cost_str: Option<String> =
+            sqlx::query_scalar("SELECT total_cost_sol FROM trades WHERE trade_uuid = ?")
+                .bind(trade_uuid)
+                .fetch_optional(&self.pool)
+                .await?;
 
         let total_cost_sol = total_cost_str
             .as_deref()
@@ -473,7 +471,8 @@ impl Database for SqliteBackend {
                 strategy, entry_amount_sol, entry_price, entry_tx_signature,
                 current_price, unrealized_pnl_sol, unrealized_pnl_percent,
                 state, exit_price, exit_tx_signature, realized_pnl_sol,
-                realized_pnl_usd, entry_sol_price_usd, opened_at, last_updated, closed_at
+                realized_pnl_usd, entry_sol_price_usd, opened_at, last_updated, closed_at,
+                token_amount
             FROM positions
             WHERE state = 'ACTIVE'
             ORDER BY opened_at DESC
@@ -483,9 +482,7 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        rows.into_iter()
-            .map(|r| self.row_to_position(r))
-            .collect()
+        rows.into_iter().map(|r| self.row_to_position(r)).collect()
     }
 
     async fn get_position_by_trade_uuid(&self, trade_uuid: &str) -> AppResult<Option<Position>> {
@@ -496,7 +493,8 @@ impl Database for SqliteBackend {
                 strategy, entry_amount_sol, entry_price, entry_tx_signature,
                 current_price, unrealized_pnl_sol, unrealized_pnl_percent,
                 state, exit_price, exit_tx_signature, realized_pnl_sol,
-                realized_pnl_usd, entry_sol_price_usd, opened_at, last_updated, closed_at
+                realized_pnl_usd, entry_sol_price_usd, opened_at, last_updated, closed_at,
+                token_amount
             FROM positions
             WHERE trade_uuid = ?
             "#,
@@ -585,9 +583,7 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        rows.into_iter()
-            .map(|r| self.row_to_wallet(r))
-            .collect()
+        rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
     }
 
     async fn update_wallet_status(&self, address: &str, status: &str) -> AppResult<()> {
@@ -654,9 +650,7 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        rows.into_iter()
-            .map(|r| self.row_to_wallet(r))
-            .collect()
+        rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
     }
 
     // ========================================================================
@@ -723,9 +717,7 @@ impl Database for SqliteBackend {
             changed_at: row
                 .try_get::<String, _>("changed_at")
                 .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339()),
-            changed_by: row
-                .try_get("changed_by")
-                .unwrap_or("SYSTEM".to_string()),
+            changed_by: row.try_get("changed_by").unwrap_or("SYSTEM".to_string()),
             reason: row.try_get("reason").ok(),
         })
     }
@@ -776,11 +768,12 @@ impl Database for SqliteBackend {
     }
 
     async fn get_admin_wallet_role(&self, wallet_address: &str) -> AppResult<Option<String>> {
-        let role: Option<String> = sqlx::query_scalar("SELECT role FROM admin_wallets WHERE wallet_address = ?")
-            .bind(wallet_address)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(AppError::Database)?;
+        let role: Option<String> =
+            sqlx::query_scalar("SELECT role FROM admin_wallets WHERE wallet_address = ?")
+                .bind(wallet_address)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(AppError::Database)?;
 
         Ok(role)
     }
@@ -804,21 +797,21 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        let pnl_values: Vec<String> = sqlx::query_scalar(
-            "SELECT net_pnl_sol FROM trades WHERE net_pnl_sol IS NOT NULL"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let total_pnl_sol: Decimal = pnl_values.iter()
+        let pnl_values: Vec<String> =
+            sqlx::query_scalar("SELECT net_pnl_sol FROM trades WHERE net_pnl_sol IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await?;
+        let total_pnl_sol: Decimal = pnl_values
+            .iter()
             .filter_map(|s| Decimal::from_str(s).ok())
             .sum();
 
-        let volume_values: Vec<String> = sqlx::query_scalar(
-            "SELECT amount_sol FROM trades WHERE amount_sol IS NOT NULL"
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        let total_volume_sol: Decimal = volume_values.iter()
+        let volume_values: Vec<String> =
+            sqlx::query_scalar("SELECT amount_sol FROM trades WHERE amount_sol IS NOT NULL")
+                .fetch_all(&self.pool)
+                .await?;
+        let total_volume_sol: Decimal = volume_values
+            .iter()
             .filter_map(|s| Decimal::from_str(s).ok())
             .sum();
 
@@ -851,12 +844,13 @@ impl Database for SqliteBackend {
         .await
         .map_err(AppError::Database)?;
 
-        rows.into_iter()
-            .map(|r| self.row_to_trade(r))
-            .collect()
+        rows.into_iter().map(|r| self.row_to_trade(r)).collect()
     }
 
-    async fn get_wallet_performance(&self, wallet_address: &str) -> AppResult<Option<WalletPerformance>> {
+    async fn get_wallet_performance(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<Option<WalletPerformance>> {
         let row = sqlx::query(
             r#"
             SELECT
@@ -873,11 +867,19 @@ impl Database for SqliteBackend {
 
         match row {
             Some(r) => Ok(Some(WalletPerformance {
-                wallet_address: r.try_get("wallet_address").unwrap_or(wallet_address.to_string()),
-                copy_pnl_7d: text_to_dec(&r.try_get::<String, _>("copy_pnl_7d").unwrap_or_default()),
-                copy_pnl_30d: text_to_dec(&r.try_get::<String, _>("copy_pnl_30d").unwrap_or_default()),
-                signal_success_rate: Decimal::from_f64(r.try_get("signal_success_rate").unwrap_or(0.0))
-                    .unwrap_or(Decimal::ZERO),
+                wallet_address: r
+                    .try_get("wallet_address")
+                    .unwrap_or(wallet_address.to_string()),
+                copy_pnl_7d: text_to_dec(
+                    &r.try_get::<String, _>("copy_pnl_7d").unwrap_or_default(),
+                ),
+                copy_pnl_30d: text_to_dec(
+                    &r.try_get::<String, _>("copy_pnl_30d").unwrap_or_default(),
+                ),
+                signal_success_rate: Decimal::from_f64(
+                    r.try_get("signal_success_rate").unwrap_or(0.0),
+                )
+                .unwrap_or(Decimal::ZERO),
                 total_trades: r.try_get("total_trades").unwrap_or(0),
                 winning_trades: r.try_get("winning_trades").unwrap_or(0),
             })),
@@ -940,10 +942,11 @@ impl Database for SqliteBackend {
     }
 
     async fn prune_old_jito_tips(&self) -> AppResult<u64> {
-        let result =
-            sqlx::query("DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days')")
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query(
+            "DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days')",
+        )
+        .execute(&self.pool)
+        .await?;
 
         Ok(result.rows_affected())
     }
@@ -976,7 +979,8 @@ impl Database for SqliteBackend {
             .await?
         };
 
-        let total = rows.into_iter()
+        let total = rows
+            .into_iter()
             .map(|(s,)| text_to_dec(&s))
             .fold(Decimal::ZERO, |acc, v| acc + v);
         Ok(total)
@@ -990,7 +994,8 @@ impl Database for SqliteBackend {
         .fetch_all(&self.pool)
         .await?;
 
-        let total = rows.into_iter()
+        let total = rows
+            .into_iter()
             .map(|(s,)| text_to_dec(&s))
             .fold(Decimal::ZERO, |acc, v| acc + v);
         Ok(total)
@@ -1004,7 +1009,8 @@ impl Database for SqliteBackend {
         .fetch_all(&self.pool)
         .await?;
 
-        let total = rows.into_iter()
+        let total = rows
+            .into_iter()
             .map(|(s,)| text_to_dec(&s))
             .fold(Decimal::ZERO, |acc, v| acc + v);
         Ok(total)
@@ -1018,7 +1024,8 @@ impl Database for SqliteBackend {
         .fetch_all(&self.pool)
         .await?;
 
-        let total = rows.into_iter()
+        let total = rows
+            .into_iter()
             .map(|(s,)| text_to_dec(&s))
             .fold(Decimal::ZERO, |acc, v| acc + v);
         Ok(total)
@@ -1133,7 +1140,8 @@ impl Database for SqliteBackend {
         )
         .fetch_all(&self.pool)
         .await?;
-        let unrealized_pnl: Decimal = unrealized_rows.into_iter()
+        let unrealized_pnl: Decimal = unrealized_rows
+            .into_iter()
             .map(|(s,)| text_to_dec(&s))
             .fold(Decimal::ZERO, |acc, v| acc + v);
 
@@ -1187,7 +1195,8 @@ impl Database for SqliteBackend {
             )
             .fetch_all(&mut *tx)
             .await?;
-            let current: Decimal = exposure_values.iter()
+            let current: Decimal = exposure_values
+                .iter()
                 .filter_map(|s| Decimal::from_str(s).ok())
                 .sum();
             if current + amount_sol > limit {
@@ -1238,8 +1247,8 @@ impl Database for SqliteBackend {
             INSERT INTO positions (
                 trade_uuid, wallet_address, token_address, token_symbol, strategy,
                 entry_amount_sol, entry_price, entry_tx_signature, entry_sol_price_usd,
-                state, unrealized_pnl_sol, unrealized_pnl_percent
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', '0', '0')
+                state, unrealized_pnl_sol, unrealized_pnl_percent, token_amount
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', '0', '0', NULL)
             "#,
         )
         .bind(trade_uuid)
@@ -1255,6 +1264,20 @@ impl Database for SqliteBackend {
         .await?;
 
         tx.commit().await?;
+        Ok(())
+    }
+
+    async fn update_position_token_amount(
+        &self,
+        trade_uuid: &str,
+        token_amount: u64,
+    ) -> AppResult<()> {
+        sqlx::query("UPDATE positions SET token_amount = ? WHERE trade_uuid = ?")
+            .bind(token_amount.to_string())
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await
+            .map_err(AppError::Database)?;
         Ok(())
     }
 
@@ -1295,7 +1318,8 @@ impl Database for SqliteBackend {
             {
                 Ok(_) => return Ok(()),
                 Err(AppError::Database(sqlx::Error::Database(db_err)))
-                    if db_err.to_string().contains("database is locked") && attempt < MAX_RETRIES =>
+                    if db_err.to_string().contains("database is locked")
+                        && attempt < MAX_RETRIES =>
                 {
                     let backoff = std::time::Duration::from_millis(50 * (1 << (attempt - 1)));
                     tracing::debug!(
@@ -1359,15 +1383,20 @@ impl Database for SqliteBackend {
             return Ok(());
         }
 
-        let exit_costs: Option<(String, String, String)> = sqlx::query_as(
-            "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = ?",
+        let exit_costs: Option<(String, String, String, Option<String>)> = sqlx::query_as(
+            "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol, network_fee_sol FROM trades WHERE trade_uuid = ?",
         )
         .bind(trade_uuid)
         .fetch_optional(&mut *tx)
         .await?;
 
         let exit_total_costs = exit_costs
-            .map(|(t, d, s)| text_to_dec(&t) + text_to_dec(&d) + text_to_dec(&s))
+            .as_ref()
+            .map(|(t, d, s, _)| text_to_dec(t) + text_to_dec(d) + text_to_dec(s))
+            .unwrap_or(Decimal::ZERO);
+        let exit_network_fee = exit_costs
+            .and_then(|(_, _, _, nf)| nf)
+            .map(|nf| text_to_dec(&nf))
             .unwrap_or(Decimal::ZERO);
 
         if sol_price_usd.is_none() {
@@ -1382,7 +1411,8 @@ impl Database for SqliteBackend {
             .map(|(_, _, _, uuid, _)| uuid.clone())
             .collect();
 
-        let mut entry_costs_map: HashMap<String, (String, String, String, String)> = HashMap::new();
+        let mut entry_costs_map: HashMap<String, (String, String, String, String, Option<String>)> =
+            HashMap::new();
         if !entry_uuids.is_empty() {
             let placeholders = entry_uuids
                 .iter()
@@ -1390,18 +1420,20 @@ impl Database for SqliteBackend {
                 .collect::<Vec<_>>()
                 .join(", ");
             let bulk_sql = format!(
-                "SELECT trade_uuid, jito_tip_sol, dex_fee_sol, slippage_cost_sol, amount_sol FROM trades WHERE trade_uuid IN ({})",
+                "SELECT trade_uuid, jito_tip_sol, dex_fee_sol, slippage_cost_sol, amount_sol, network_fee_sol FROM trades WHERE trade_uuid IN ({})",
                 placeholders
             );
-            let mut bulk_q =
-                sqlx::query_as::<_, (String, String, String, String, String)>(&bulk_sql);
+            let mut bulk_q = sqlx::query_as::<
+                _,
+                (String, String, String, String, String, Option<String>),
+            >(&bulk_sql);
             for uuid in &entry_uuids {
                 bulk_q = bulk_q.bind(uuid);
             }
-            let cost_rows: Vec<(String, String, String, String, String)> =
+            let cost_rows: Vec<(String, String, String, String, String, Option<String>)> =
                 bulk_q.fetch_all(&mut *tx).await?;
-            for (uuid, tip, dex, slip, amount) in cost_rows {
-                entry_costs_map.insert(uuid, (tip, dex, slip, amount));
+            for (uuid, tip, dex, slip, amount, nf) in cost_rows {
+                entry_costs_map.insert(uuid, (tip, dex, slip, amount, nf));
             }
         }
 
@@ -1415,6 +1447,7 @@ impl Database for SqliteBackend {
         {
             let entry_price_dec = text_to_dec(entry_price_str);
             let entry_amount_dec = text_to_dec(entry_amount_str);
+            let mut net_pnl_sol_str: Option<String> = None;
             let entry_sol_price_dec = entry_sol_price_str.as_deref().map(text_to_dec);
 
             let exited_amount = entry_amount_dec * exit_fraction;
@@ -1485,12 +1518,15 @@ impl Database for SqliteBackend {
                 Decimal::ZERO
             };
 
-            if let Some((et, ed, es, orig_amount_str)) =
+            if let Some((et, ed, es, orig_amount_str, entry_nf)) =
                 entry_costs_map.get(entry_trade_uuid.as_str())
             {
                 let orig_amount = text_to_dec(orig_amount_str);
-                let total_entry_cost =
-                    text_to_dec(et) + text_to_dec(ed) + text_to_dec(es);
+                let total_entry_cost = text_to_dec(et) + text_to_dec(ed) + text_to_dec(es);
+                let entry_network_fee = entry_nf
+                    .as_deref()
+                    .map(text_to_dec)
+                    .unwrap_or(Decimal::ZERO);
                 let exited_fraction_of_original = if !orig_amount.is_zero() {
                     exited_amount
                         .checked_div(orig_amount)
@@ -1499,7 +1535,16 @@ impl Database for SqliteBackend {
                     exit_fraction
                 };
                 let proportional_entry_cost = total_entry_cost * exited_fraction_of_original;
-                entry_total_costs += proportional_entry_cost;
+                let proportional_entry_network_fee =
+                    entry_network_fee * exited_fraction_of_original;
+                entry_total_costs += proportional_entry_cost + proportional_entry_network_fee;
+                let proportional_exit_network_fee = exit_network_fee * exit_fraction;
+                let net_pnl_sol = pnl_sol
+                    - proportional_entry_cost
+                    - proportional_entry_network_fee
+                    - exit_total_costs
+                    - proportional_exit_network_fee;
+                net_pnl_sol_str = Some(dec_to_text(&net_pnl_sol));
             }
 
             let pnl_usd_opt: Option<String> =
@@ -1517,6 +1562,7 @@ impl Database for SqliteBackend {
                         exit_tx_signature = ?,
                         realized_pnl_sol = ?,
                         realized_pnl_usd = ?,
+                        realized_net_pnl_sol = ?,
                         closed_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
                         state = ?
                     WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
@@ -1526,6 +1572,7 @@ impl Database for SqliteBackend {
                 .bind(signature)
                 .bind(&pnl_sol_str)
                 .bind(&pnl_usd_opt)
+                .bind(&net_pnl_sol_str)
                 .bind(if confirmed { 1 } else { 0 })
                 .bind(if confirmed { "CLOSED" } else { "EXITING" })
                 .bind(id)
@@ -1543,13 +1590,13 @@ impl Database for SqliteBackend {
                 let remaining_amount = entry_amount_dec - exited_amount;
                 let remaining_str = dec_to_text(&remaining_amount);
 
-                let current_realized: Option<String> = sqlx::query_scalar(
-                    "SELECT realized_pnl_sol FROM positions WHERE id = ?"
-                )
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                let current_sol = current_realized.as_deref()
+                let current_realized: Option<String> =
+                    sqlx::query_scalar("SELECT realized_pnl_sol FROM positions WHERE id = ?")
+                        .bind(id)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                let current_sol = current_realized
+                    .as_deref()
                     .and_then(|s| Decimal::from_str(s).ok())
                     .unwrap_or(Decimal::ZERO);
                 let new_realized_sol = current_sol + pnl_sol;
@@ -1557,13 +1604,13 @@ impl Database for SqliteBackend {
 
                 let new_realized_usd_str = if let Some(ref pnl_usd_str) = pnl_usd_opt {
                     let pnl_usd = Decimal::from_str(pnl_usd_str).unwrap_or(Decimal::ZERO);
-                    let current_realized_usd: Option<String> = sqlx::query_scalar(
-                        "SELECT realized_pnl_usd FROM positions WHERE id = ?"
-                    )
-                    .bind(id)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-                    let current_usd = current_realized_usd.as_deref()
+                    let current_realized_usd: Option<String> =
+                        sqlx::query_scalar("SELECT realized_pnl_usd FROM positions WHERE id = ?")
+                            .bind(id)
+                            .fetch_optional(&mut *tx)
+                            .await?;
+                    let current_usd = current_realized_usd
+                        .as_deref()
                         .and_then(|s| Decimal::from_str(s).ok())
                         .unwrap_or(Decimal::ZERO);
                     Some(dec_to_text(&(current_usd + pnl_usd)))
@@ -1580,6 +1627,11 @@ impl Database for SqliteBackend {
                         exit_tx_signature = ?,
                         realized_pnl_sol = ?,
                         realized_pnl_usd = ?,
+                        realized_net_pnl_sol = COALESCE(
+                            CAST(COALESCE(realized_net_pnl_sol, '0') AS REAL) + CAST(? AS REAL),
+                            ?
+                        ),
+                        token_amount = CAST(CAST(token_amount AS REAL) * (1 - ?) AS INTEGER),
                         state = ?,
                         last_updated = CURRENT_TIMESTAMP
                     WHERE id = ? AND state IN ('ACTIVE', 'EXITING')
@@ -1590,6 +1642,9 @@ impl Database for SqliteBackend {
                 .bind(signature)
                 .bind(&new_realized_sol_str)
                 .bind(&new_realized_usd_str)
+                .bind(net_pnl_sol_str.clone().unwrap_or_else(|| "0".to_string()))
+                .bind(&net_pnl_sol_str)
+                .bind(exit_fraction.to_f64().unwrap_or(1.0))
                 .bind(if confirmed { "ACTIVE" } else { "EXITING" })
                 .bind(id)
                 .execute(&mut *tx)
@@ -1608,23 +1663,21 @@ impl Database for SqliteBackend {
         }
 
         let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
-        let current_net_str: Option<String> = sqlx::query_scalar(
-            "SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?"
-        )
-        .bind(trade_uuid)
-        .fetch_optional(&mut *tx)
-        .await?;
-        let current_net = current_net_str.as_deref()
+        let current_net_str: Option<String> =
+            sqlx::query_scalar("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
+                .bind(trade_uuid)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let current_net = current_net_str
+            .as_deref()
             .and_then(|s| Decimal::from_str(s).ok())
             .unwrap_or(Decimal::ZERO);
         let new_net_str = dec_to_text(&(current_net + net_pnl));
-        sqlx::query(
-            "UPDATE trades SET net_pnl_sol = ? WHERE trade_uuid = ?",
-        )
-        .bind(&new_net_str)
-        .bind(trade_uuid)
-        .execute(&mut *tx)
-        .await?;
+        sqlx::query("UPDATE trades SET net_pnl_sol = ? WHERE trade_uuid = ?")
+            .bind(&new_net_str)
+            .bind(trade_uuid)
+            .execute(&mut *tx)
+            .await?;
 
         tx.commit().await?;
         Ok(())
@@ -1679,7 +1732,8 @@ impl Database for SqliteBackend {
                     .bind(exit_sig)
                     .fetch_all(&mut *tx)
                     .await?;
-                    let confirmed_exit_amount: Decimal = confirmed_exit_values.iter()
+                    let confirmed_exit_amount: Decimal = confirmed_exit_values
+                        .iter()
                         .filter_map(|s| Decimal::from_str(s).ok())
                         .sum();
 
@@ -2462,16 +2516,13 @@ impl Database for SqliteBackend {
         Ok(())
     }
 
-    async fn get_orphaned_webhooks(
-        &self,
-        helius_webhook_ids: &[String],
-    ) -> AppResult<Vec<String>> {
+    async fn get_orphaned_webhooks(&self, helius_webhook_ids: &[String]) -> AppResult<Vec<String>> {
         if helius_webhook_ids.is_empty() {
             return Ok(Vec::new());
         }
 
-        let placeholders: Vec<String> = std::iter::repeat_n("?".to_string(), helius_webhook_ids.len())
-            .collect();
+        let placeholders: Vec<String> =
+            std::iter::repeat_n("?".to_string(), helius_webhook_ids.len()).collect();
 
         let query = format!(
             "SELECT DISTINCT helius_webhook_id FROM wallet_monitoring WHERE helius_webhook_id IN ({})",
@@ -2555,8 +2606,8 @@ impl Database for SqliteBackend {
             .fetch_optional(&self.pool)
             .await?;
 
-        Ok(row.map(
-            |(ep, ea, pp, ppp, th, tsa, tsp, rf)| ExitTargetData {
+        Ok(
+            row.map(|(ep, ea, pp, ppp, th, tsa, tsp, rf)| ExitTargetData {
                 entry_price: text_to_dec(&ep),
                 entry_amount_sol: text_to_dec(&ea),
                 peak_price: text_to_dec(&pp),
@@ -2565,8 +2616,8 @@ impl Database for SqliteBackend {
                 trailing_stop_active: tsa != 0,
                 trailing_stop_price: text_to_dec(&tsp),
                 remaining_fraction: text_to_dec(&rf),
-            },
-        ))
+            }),
+        )
     }
 
     async fn delete_exit_target(&self, trade_uuid: &str) -> AppResult<()> {
@@ -2704,10 +2755,7 @@ impl Database for SqliteBackend {
         })
     }
 
-    async fn get_reconciliation_history(
-        &self,
-        limit: i32,
-    ) -> AppResult<Vec<ReconciliationRun>> {
+    async fn get_reconciliation_history(&self, limit: i32) -> AppResult<Vec<ReconciliationRun>> {
         let limit_val = limit.clamp(1, 100) as i64;
 
         let rows = sqlx::query(
@@ -3040,11 +3088,7 @@ impl Database for SqliteBackend {
         Ok(())
     }
 
-    async fn update_trade_net_pnl(
-        &self,
-        trade_uuid: &str,
-        net_pnl_sol: Decimal,
-    ) -> AppResult<()> {
+    async fn update_trade_net_pnl(&self, trade_uuid: &str, net_pnl_sol: Decimal) -> AppResult<()> {
         let result = sqlx::query(
             r#"
             UPDATE trades
@@ -3142,7 +3186,11 @@ impl Database for SqliteBackend {
     // INCIDENTS API (Dead Letter Queue & Config Audit)
     // ========================================================================
 
-    async fn get_dead_letter_entries(&self, limit: i32, offset: i32) -> AppResult<Vec<DeadLetterItem>> {
+    async fn get_dead_letter_entries(
+        &self,
+        limit: i32,
+        offset: i32,
+    ) -> AppResult<Vec<DeadLetterItem>> {
         #[allow(clippy::type_complexity)]
         let rows: Vec<(
             i64,
@@ -3287,7 +3335,11 @@ impl Database for SqliteBackend {
         Ok(processed_count)
     }
 
-    async fn get_config_audit_entries(&self, limit: i32, offset: i32) -> AppResult<Vec<ConfigAuditItem>> {
+    async fn get_config_audit_entries(
+        &self,
+        limit: i32,
+        offset: i32,
+    ) -> AppResult<Vec<ConfigAuditItem>> {
         let rows = sqlx::query(
             "SELECT id, key, old_value, new_value, changed_by, change_reason, changed_at FROM config_audit ORDER BY changed_at DESC LIMIT ? OFFSET ?",
         )
@@ -3367,11 +3419,23 @@ impl Database for SqliteBackend {
 
         match row {
             Some(r) => Ok(Some(WalletCopyPerformance {
-                wallet_address: r.try_get("wallet_address").unwrap_or(wallet_address.to_string()),
-                copy_pnl_7d: text_to_dec(&r.try_get::<String, _>("copy_pnl_7d").unwrap_or_default()),
-                copy_pnl_30d: text_to_dec(&r.try_get::<String, _>("copy_pnl_30d").unwrap_or_default()),
-                signal_success_rate: text_to_dec(&r.try_get::<String, _>("signal_success_rate").unwrap_or_default()),
-                avg_return_per_trade: text_to_dec(&r.try_get::<String, _>("avg_return_per_trade").unwrap_or_default()),
+                wallet_address: r
+                    .try_get("wallet_address")
+                    .unwrap_or(wallet_address.to_string()),
+                copy_pnl_7d: text_to_dec(
+                    &r.try_get::<String, _>("copy_pnl_7d").unwrap_or_default(),
+                ),
+                copy_pnl_30d: text_to_dec(
+                    &r.try_get::<String, _>("copy_pnl_30d").unwrap_or_default(),
+                ),
+                signal_success_rate: text_to_dec(
+                    &r.try_get::<String, _>("signal_success_rate")
+                        .unwrap_or_default(),
+                ),
+                avg_return_per_trade: text_to_dec(
+                    &r.try_get::<String, _>("avg_return_per_trade")
+                        .unwrap_or_default(),
+                ),
                 total_trades: r.try_get("total_trades").unwrap_or(0),
                 winning_trades: r.try_get("winning_trades").unwrap_or(0),
                 last_updated: r.try_get("last_updated").unwrap_or_default(),
@@ -3499,9 +3563,9 @@ impl Database for SqliteBackend {
     }
 
     async fn get_positions(&self, state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>> {
-        let rows = match state_filter {
-            Some(state) => {
-                sqlx::query(
+        let rows =
+            match state_filter {
+                Some(state) => sqlx::query(
                     r#"SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
                            entry_amount_sol, entry_price, entry_tx_signature, current_price,
                            unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
@@ -3510,10 +3574,9 @@ impl Database for SqliteBackend {
                     FROM positions WHERE state = ? ORDER BY last_updated DESC"#,
                 )
                 .bind(state)
-                .fetch_all(&self.pool).await?
-            }
-            None => {
-                sqlx::query(
+                .fetch_all(&self.pool)
+                .await?,
+                None => sqlx::query(
                     r#"SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
                            entry_amount_sol, entry_price, entry_tx_signature, current_price,
                            unrealized_pnl_sol, unrealized_pnl_percent, state, exit_price,
@@ -3521,34 +3584,54 @@ impl Database for SqliteBackend {
                            opened_at, last_updated, closed_at
                     FROM positions ORDER BY last_updated DESC"#,
                 )
-                .fetch_all(&self.pool).await?
-            }
-        };
+                .fetch_all(&self.pool)
+                .await?,
+            };
 
-        let positions = rows.into_iter().map(|row| {
-            PositionDetail {
+        let positions = rows
+            .into_iter()
+            .map(|row| PositionDetail {
                 id: row.try_get("id").unwrap_or(0),
                 trade_uuid: row.try_get("trade_uuid").unwrap_or_default(),
                 wallet_address: row.try_get("wallet_address").unwrap_or_default(),
                 token_address: row.try_get("token_address").unwrap_or_default(),
                 token_symbol: row.try_get("token_symbol").ok(),
                 strategy: row.try_get("strategy").unwrap_or_default(),
-                entry_amount_sol: text_to_dec(&row.try_get::<String, _>("entry_amount_sol").unwrap_or_default()),
-                entry_price: text_to_dec(&row.try_get::<String, _>("entry_price").unwrap_or_default()),
+                entry_amount_sol: text_to_dec(
+                    &row.try_get::<String, _>("entry_amount_sol")
+                        .unwrap_or_default(),
+                ),
+                entry_price: text_to_dec(
+                    &row.try_get::<String, _>("entry_price").unwrap_or_default(),
+                ),
                 entry_tx_signature: row.try_get("entry_tx_signature").unwrap_or_default(),
-                current_price: opt_text_to_dec(row.try_get::<String, _>("current_price").ok().as_deref()),
-                unrealized_pnl_sol: opt_text_to_dec(row.try_get::<String, _>("unrealized_pnl_sol").ok().as_deref()),
-                unrealized_pnl_percent: opt_text_to_dec(row.try_get::<String, _>("unrealized_pnl_percent").ok().as_deref()),
+                current_price: opt_text_to_dec(
+                    row.try_get::<String, _>("current_price").ok().as_deref(),
+                ),
+                unrealized_pnl_sol: opt_text_to_dec(
+                    row.try_get::<String, _>("unrealized_pnl_sol")
+                        .ok()
+                        .as_deref(),
+                ),
+                unrealized_pnl_percent: opt_text_to_dec(
+                    row.try_get::<String, _>("unrealized_pnl_percent")
+                        .ok()
+                        .as_deref(),
+                ),
                 state: row.try_get("state").unwrap_or_default(),
                 exit_price: opt_text_to_dec(row.try_get::<String, _>("exit_price").ok().as_deref()),
                 exit_tx_signature: row.try_get("exit_tx_signature").ok(),
-                realized_pnl_sol: opt_text_to_dec(row.try_get::<String, _>("realized_pnl_sol").ok().as_deref()),
-                realized_pnl_usd: opt_text_to_dec(row.try_get::<String, _>("realized_pnl_usd").ok().as_deref()),
+                realized_pnl_sol: opt_text_to_dec(
+                    row.try_get::<String, _>("realized_pnl_sol").ok().as_deref(),
+                ),
+                realized_pnl_usd: opt_text_to_dec(
+                    row.try_get::<String, _>("realized_pnl_usd").ok().as_deref(),
+                ),
                 opened_at: row.try_get("opened_at").unwrap_or_default(),
                 last_updated: row.try_get("last_updated").unwrap_or_default(),
                 closed_at: row.try_get("closed_at").ok(),
-            }
-        }).collect();
+            })
+            .collect();
         Ok(positions)
     }
 
@@ -3587,32 +3670,58 @@ impl Database for SqliteBackend {
                 .await?
             }
         };
-        let wallets = rows.into_iter().map(|row| {
-            WalletDetail {
+        let wallets = rows
+            .into_iter()
+            .map(|row| WalletDetail {
                 id: row.try_get("id").unwrap_or(0),
                 address: row.try_get("address").unwrap_or_default(),
                 status: row.try_get("status").unwrap_or_default(),
-                wqs_score: row.try_get::<f64, _>("wqs_score").ok().and_then(Decimal::from_f64),
+                wqs_score: row
+                    .try_get::<f64, _>("wqs_score")
+                    .ok()
+                    .and_then(Decimal::from_f64),
                 roi_7d: opt_text_to_dec(row.try_get::<String, _>("roi_7d").ok().as_deref()),
                 roi_30d: opt_text_to_dec(row.try_get::<String, _>("roi_30d").ok().as_deref()),
                 trade_count_30d: row.try_get("trade_count_30d").ok(),
-                win_rate: row.try_get::<f64, _>("win_rate").ok().and_then(Decimal::from_f64),
-                max_drawdown_30d: opt_text_to_dec(row.try_get::<String, _>("max_drawdown_30d").ok().as_deref()),
-                avg_trade_size_sol: opt_text_to_dec(row.try_get::<String, _>("avg_trade_size_sol").ok().as_deref()),
-                avg_win_sol: opt_text_to_dec(row.try_get::<String, _>("avg_win_sol").ok().as_deref()),
-                avg_loss_sol: opt_text_to_dec(row.try_get::<String, _>("avg_loss_sol").ok().as_deref()),
-                profit_factor: opt_text_to_dec(row.try_get::<String, _>("profit_factor").ok().as_deref()),
-                realized_pnl_30d_sol: opt_text_to_dec(row.try_get::<String, _>("realized_pnl_30d_sol").ok().as_deref()),
+                win_rate: row
+                    .try_get::<f64, _>("win_rate")
+                    .ok()
+                    .and_then(Decimal::from_f64),
+                max_drawdown_30d: opt_text_to_dec(
+                    row.try_get::<String, _>("max_drawdown_30d").ok().as_deref(),
+                ),
+                avg_trade_size_sol: opt_text_to_dec(
+                    row.try_get::<String, _>("avg_trade_size_sol")
+                        .ok()
+                        .as_deref(),
+                ),
+                avg_win_sol: opt_text_to_dec(
+                    row.try_get::<String, _>("avg_win_sol").ok().as_deref(),
+                ),
+                avg_loss_sol: opt_text_to_dec(
+                    row.try_get::<String, _>("avg_loss_sol").ok().as_deref(),
+                ),
+                profit_factor: opt_text_to_dec(
+                    row.try_get::<String, _>("profit_factor").ok().as_deref(),
+                ),
+                realized_pnl_30d_sol: opt_text_to_dec(
+                    row.try_get::<String, _>("realized_pnl_30d_sol")
+                        .ok()
+                        .as_deref(),
+                ),
                 last_trade_at: row.try_get("last_trade_at").ok(),
                 promoted_at: row.try_get("promoted_at").ok(),
                 ttl_expires_at: row.try_get("ttl_expires_at").ok(),
                 notes: row.try_get("notes").ok(),
                 archetype: row.try_get("archetype").ok(),
-                avg_entry_delay_seconds: row.try_get::<f64, _>("avg_entry_delay_seconds").ok().and_then(Decimal::from_f64),
+                avg_entry_delay_seconds: row
+                    .try_get::<f64, _>("avg_entry_delay_seconds")
+                    .ok()
+                    .and_then(Decimal::from_f64),
                 created_at: row.try_get("created_at").unwrap_or_default(),
                 updated_at: row.try_get("updated_at").unwrap_or_default(),
-            }
-        }).collect();
+            })
+            .collect();
         Ok(wallets)
     }
 
@@ -3656,7 +3765,12 @@ impl Database for SqliteBackend {
             null_price_pnl_sol += text_to_dec(np);
         }
 
-        Ok((unrealized_sol, realized_pnl_sol, realized_usd, null_price_pnl_sol))
+        Ok((
+            unrealized_sol,
+            realized_pnl_sol,
+            realized_usd,
+            null_price_pnl_sol,
+        ))
     }
 }
 
@@ -3676,20 +3790,32 @@ impl SqliteBackend {
             strategy: row.try_get("strategy").unwrap_or_default(),
             side: row.try_get("side").unwrap_or_default(),
             amount_sol: text_to_dec(&row.try_get::<String, _>("amount_sol").unwrap_or_default()),
-            price_at_signal: opt_text_to_dec(row.try_get::<String, _>("price_at_signal").ok().as_deref()),
+            price_at_signal: opt_text_to_dec(
+                row.try_get::<String, _>("price_at_signal").ok().as_deref(),
+            ),
             tx_signature: row.try_get("tx_signature").ok(),
             status: row.try_get("status").unwrap_or_default(),
             retry_count: row.try_get("retry_count").unwrap_or(0),
             error_message: row.try_get("error_message").ok(),
             pnl_sol: opt_text_to_dec(row.try_get::<String, _>("pnl_sol").ok().as_deref()),
             pnl_usd: opt_text_to_dec(row.try_get::<String, _>("pnl_usd").ok().as_deref()),
-            jito_tip_sol: text_to_dec(&row.try_get::<String, _>("jito_tip_sol").unwrap_or_default()),
+            jito_tip_sol: text_to_dec(
+                &row.try_get::<String, _>("jito_tip_sol").unwrap_or_default(),
+            ),
             dex_fee_sol: text_to_dec(&row.try_get::<String, _>("dex_fee_sol").unwrap_or_default()),
-            slippage_cost_sol: text_to_dec(&row.try_get::<String, _>("slippage_cost_sol").unwrap_or_default()),
-            total_cost_sol: text_to_dec(&row.try_get::<String, _>("total_cost_sol").unwrap_or_default()),
+            slippage_cost_sol: text_to_dec(
+                &row.try_get::<String, _>("slippage_cost_sol")
+                    .unwrap_or_default(),
+            ),
+            total_cost_sol: text_to_dec(
+                &row.try_get::<String, _>("total_cost_sol")
+                    .unwrap_or_default(),
+            ),
             net_pnl_sol: opt_text_to_dec(row.try_get::<String, _>("net_pnl_sol").ok().as_deref()),
-            created_at: self.parse_datetime(row.try_get::<String, _>("created_at").ok().as_deref())?,
-            updated_at: self.parse_datetime(row.try_get::<String, _>("updated_at").ok().as_deref())?,
+            created_at: self
+                .parse_datetime(row.try_get::<String, _>("created_at").ok().as_deref())?,
+            updated_at: self
+                .parse_datetime(row.try_get::<String, _>("updated_at").ok().as_deref())?,
         })
     }
 
@@ -3702,21 +3828,48 @@ impl SqliteBackend {
             token_address: row.try_get("token_address").unwrap_or_default(),
             token_symbol: row.try_get("token_symbol").ok(),
             strategy: row.try_get("strategy").unwrap_or_default(),
-            entry_amount_sol: text_to_dec(&row.try_get::<String, _>("entry_amount_sol").unwrap_or_default()),
+            entry_amount_sol: text_to_dec(
+                &row.try_get::<String, _>("entry_amount_sol")
+                    .unwrap_or_default(),
+            ),
             entry_price: text_to_dec(&row.try_get::<String, _>("entry_price").unwrap_or_default()),
             entry_tx_signature: row.try_get("entry_tx_signature").unwrap_or_default(),
-            current_price: opt_text_to_dec(row.try_get::<String, _>("current_price").ok().as_deref()),
-            unrealized_pnl_sol: opt_text_to_dec(row.try_get::<String, _>("unrealized_pnl_sol").ok().as_deref()),
-            unrealized_pnl_percent: opt_text_to_dec(row.try_get::<String, _>("unrealized_pnl_percent").ok().as_deref()),
+            current_price: opt_text_to_dec(
+                row.try_get::<String, _>("current_price").ok().as_deref(),
+            ),
+            unrealized_pnl_sol: opt_text_to_dec(
+                row.try_get::<String, _>("unrealized_pnl_sol")
+                    .ok()
+                    .as_deref(),
+            ),
+            unrealized_pnl_percent: opt_text_to_dec(
+                row.try_get::<String, _>("unrealized_pnl_percent")
+                    .ok()
+                    .as_deref(),
+            ),
             state: row.try_get("state").unwrap_or_default(),
             exit_price: opt_text_to_dec(row.try_get::<String, _>("exit_price").ok().as_deref()),
             exit_tx_signature: row.try_get("exit_tx_signature").ok(),
-            realized_pnl_sol: opt_text_to_dec(row.try_get::<String, _>("realized_pnl_sol").ok().as_deref()),
-            realized_pnl_usd: opt_text_to_dec(row.try_get::<String, _>("realized_pnl_usd").ok().as_deref()),
-            entry_sol_price_usd: opt_text_to_dec(row.try_get::<String, _>("entry_sol_price_usd").ok().as_deref()),
-            opened_at: self.parse_datetime(row.try_get::<String, _>("opened_at").ok().as_deref())?,
-            last_updated: self.parse_datetime(row.try_get::<String, _>("last_updated").ok().as_deref())?,
-            closed_at: row.try_get::<String, _>("closed_at").ok().and_then(|s| self.parse_datetime(Some(&s)).ok()),
+            realized_pnl_sol: opt_text_to_dec(
+                row.try_get::<String, _>("realized_pnl_sol").ok().as_deref(),
+            ),
+            realized_pnl_usd: opt_text_to_dec(
+                row.try_get::<String, _>("realized_pnl_usd").ok().as_deref(),
+            ),
+            entry_sol_price_usd: opt_text_to_dec(
+                row.try_get::<String, _>("entry_sol_price_usd")
+                    .ok()
+                    .as_deref(),
+            ),
+            opened_at: self
+                .parse_datetime(row.try_get::<String, _>("opened_at").ok().as_deref())?,
+            last_updated: self
+                .parse_datetime(row.try_get::<String, _>("last_updated").ok().as_deref())?,
+            closed_at: row
+                .try_get::<String, _>("closed_at")
+                .ok()
+                .and_then(|s| self.parse_datetime(Some(&s)).ok()),
+            token_amount: opt_text_to_dec(row.try_get::<String, _>("token_amount").ok().as_deref()),
         })
     }
 
@@ -3727,25 +3880,54 @@ impl SqliteBackend {
             address: row.try_get("address").unwrap_or_default(),
             status: row.try_get("status").unwrap_or_default(),
             wqs_score: row.try_get("wqs_score").ok().and_then(Decimal::from_f64),
-            wqs_confidence: row.try_get("wqs_confidence").ok().and_then(Decimal::from_f64),
+            wqs_confidence: row
+                .try_get("wqs_confidence")
+                .ok()
+                .and_then(Decimal::from_f64),
             roi_7d: opt_text_to_dec(row.try_get::<String, _>("roi_7d").ok().as_deref()),
             roi_30d: opt_text_to_dec(row.try_get::<String, _>("roi_30d").ok().as_deref()),
             trade_count_30d: row.try_get("trade_count_30d").ok(),
             win_rate: row.try_get("win_rate").ok().and_then(Decimal::from_f64),
-            max_drawdown_30d: opt_text_to_dec(row.try_get::<String, _>("max_drawdown_30d").ok().as_deref()),
-            avg_trade_size_sol: opt_text_to_dec(row.try_get::<String, _>("avg_trade_size_sol").ok().as_deref()),
+            max_drawdown_30d: opt_text_to_dec(
+                row.try_get::<String, _>("max_drawdown_30d").ok().as_deref(),
+            ),
+            avg_trade_size_sol: opt_text_to_dec(
+                row.try_get::<String, _>("avg_trade_size_sol")
+                    .ok()
+                    .as_deref(),
+            ),
             avg_win_sol: opt_text_to_dec(row.try_get::<String, _>("avg_win_sol").ok().as_deref()),
             avg_loss_sol: opt_text_to_dec(row.try_get::<String, _>("avg_loss_sol").ok().as_deref()),
-            profit_factor: opt_text_to_dec(row.try_get::<String, _>("profit_factor").ok().as_deref()),
-            realized_pnl_30d_sol: opt_text_to_dec(row.try_get::<String, _>("realized_pnl_30d_sol").ok().as_deref()),
-            last_trade_at: row.try_get::<String, _>("last_trade_at").ok().and_then(|s| self.parse_datetime(Some(&s)).ok()),
-            promoted_at: row.try_get::<String, _>("promoted_at").ok().and_then(|s| self.parse_datetime(Some(&s)).ok()),
-            ttl_expires_at: row.try_get::<String, _>("ttl_expires_at").ok().and_then(|s| self.parse_datetime(Some(&s)).ok()),
+            profit_factor: opt_text_to_dec(
+                row.try_get::<String, _>("profit_factor").ok().as_deref(),
+            ),
+            realized_pnl_30d_sol: opt_text_to_dec(
+                row.try_get::<String, _>("realized_pnl_30d_sol")
+                    .ok()
+                    .as_deref(),
+            ),
+            last_trade_at: row
+                .try_get::<String, _>("last_trade_at")
+                .ok()
+                .and_then(|s| self.parse_datetime(Some(&s)).ok()),
+            promoted_at: row
+                .try_get::<String, _>("promoted_at")
+                .ok()
+                .and_then(|s| self.parse_datetime(Some(&s)).ok()),
+            ttl_expires_at: row
+                .try_get::<String, _>("ttl_expires_at")
+                .ok()
+                .and_then(|s| self.parse_datetime(Some(&s)).ok()),
             notes: row.try_get("notes").ok(),
             archetype: row.try_get("archetype").ok(),
-            avg_entry_delay_seconds: row.try_get("avg_entry_delay_seconds").ok().and_then(Decimal::from_f64),
-            created_at: self.parse_datetime(row.try_get::<String, _>("created_at").ok().as_deref())?,
-            updated_at: self.parse_datetime(row.try_get::<String, _>("updated_at").ok().as_deref())?,
+            avg_entry_delay_seconds: row
+                .try_get("avg_entry_delay_seconds")
+                .ok()
+                .and_then(Decimal::from_f64),
+            created_at: self
+                .parse_datetime(row.try_get::<String, _>("created_at").ok().as_deref())?,
+            updated_at: self
+                .parse_datetime(row.try_get::<String, _>("updated_at").ok().as_deref())?,
         })
     }
 

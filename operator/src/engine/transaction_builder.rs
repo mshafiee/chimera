@@ -78,6 +78,13 @@ impl BuiltTransaction {
     }
 }
 
+pub struct QuoteResult {
+    pub price_impact_pct: Option<Decimal>,
+    pub fill_price_lamports_per_base: Option<Decimal>,
+    pub in_amount: u64,
+    pub out_amount: u64,
+}
+
 impl TransactionBuilder {
     /// Create a new transaction builder
     pub fn new(rpc_client: Arc<RpcClient>, config: Arc<AppConfig>) -> AppResult<Self> {
@@ -120,25 +127,11 @@ impl TransactionBuilder {
     ///
     /// This uses Jupiter Swap API which returns a pre-built transaction
     /// that just needs to be signed.
-    /// In devnet simulation mode, returns a simulated transaction without calling Jupiter.
     pub async fn build_swap_transaction(
         &self,
         signal: &Signal,
         wallet_keypair: &Keypair,
     ) -> AppResult<BuiltTransaction> {
-        // Check if devnet simulation mode is enabled
-        if self.config.jupiter.devnet_simulation_mode {
-            tracing::info!(
-                token = %signal.token_address(),
-                action = ?signal.payload.action,
-                amount_sol = signal.payload.amount_sol.to_f64().unwrap_or(0.0),
-                "Devnet simulation mode: skipping Jupiter API, creating simulated transaction"
-            );
-            return self
-                .build_simulated_transaction(signal, wallet_keypair)
-                .await;
-        }
-
         // Determine input and output mints
         let (input_mint, output_mint, amount) = match signal.payload.action {
             Action::Buy => {
@@ -347,6 +340,7 @@ impl TransactionBuilder {
         }
     }
 
+    #[allow(dead_code)]
     /// Build a simulated transaction for devnet testing
     async fn build_simulated_transaction(
         &self,
@@ -549,6 +543,58 @@ impl TransactionBuilder {
         })?;
 
         Ok(quote)
+    }
+
+    pub async fn get_quote_prices(
+        &self,
+        input_mint: &str,
+        output_mint: &str,
+        amount: u64,
+    ) -> AppResult<QuoteResult> {
+        let input_mint = Pubkey::from_str(input_mint).map_err(|e| {
+            crate::error::AppError::Validation(format!("Invalid input mint: {}", e))
+        })?;
+        let output_mint = Pubkey::from_str(output_mint).map_err(|e| {
+            crate::error::AppError::Validation(format!("Invalid output mint: {}", e))
+        })?;
+        let quote = self
+            .get_jupiter_quote(input_mint, output_mint, amount)
+            .await?;
+
+        let price_impact_pct = quote
+            .get("priceImpactPct")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok());
+
+        let in_amount = quote
+            .get("inAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| quote.get("inAmount").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+
+        let out_amount = quote
+            .get("outAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()))
+            .unwrap_or(0);
+
+        let fill_price_lamports_per_base = match (in_amount, out_amount) {
+            (inn, out) if out > 0 && inn > 0 => {
+                if output_mint.to_string() == crate::constants::mints::SOL {
+                    Some(Decimal::from(out) / Decimal::from(inn))
+                } else {
+                    Some(Decimal::from(inn) / Decimal::from(out))
+                }
+            }
+            _ => None,
+        };
+
+        Ok(QuoteResult {
+            price_impact_pct,
+            fill_price_lamports_per_base,
+            in_amount,
+            out_amount,
+        })
     }
 }
 

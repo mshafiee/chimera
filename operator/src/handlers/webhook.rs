@@ -199,14 +199,16 @@ pub async fn webhook_handler(
                         );
 
                         // Log to dead letter queue
-                        let _ = state.db.insert_dlq(
-                            Some(&trade_uuid),
-                            &serde_json::to_string(&payload).unwrap_or_default(),
-                            "TOKEN_SAFETY_FAILED",
-                            Some(&reason),
-                            None,
-                        )
-                        .await;
+                        let _ = state
+                            .db
+                            .insert_dlq(
+                                Some(&trade_uuid),
+                                &serde_json::to_string(&payload).unwrap_or_default(),
+                                "TOKEN_SAFETY_FAILED",
+                                Some(&reason),
+                                None,
+                            )
+                            .await;
 
                         return Ok((
                             StatusCode::BAD_REQUEST,
@@ -280,7 +282,11 @@ pub async fn webhook_handler(
                 let win_rate = wallet
                     .win_rate
                     .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
-                Some((wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(50.0), wallet.wqs_score, win_rate))
+                Some((
+                    wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(50.0),
+                    wallet.wqs_score,
+                    win_rate,
+                ))
             }
             Ok(None) => {
                 tracing::warn!(
@@ -414,7 +420,11 @@ pub async fn webhook_handler(
             let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
             let pool = match state.db.pool() {
                 DbPool::SQLite(p) => p,
-                _ => return Err(AppError::Internal("Only SQLite backend supported".to_string())),
+                _ => {
+                    return Err(AppError::Internal(
+                        "Only SQLite backend supported".to_string(),
+                    ))
+                }
             };
             if let Err(e) = sqlx::query(
                 r#"
@@ -486,17 +496,19 @@ pub async fn webhook_handler(
                 min_required = %min_liquidity,
                 "Signal rejected: liquidity below strategy minimum"
             );
-            let _ = state.db.insert_dlq(
-                Some(&signal.trade_uuid),
-                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                "LIQUIDITY_BELOW_MINIMUM",
-                Some(&format!(
-                    "Liquidity ${} < required ${}",
-                    liquidity_usd, min_liquidity
-                )),
-                None,
-            )
-            .await;
+            let _ = state
+                .db
+                .insert_dlq(
+                    Some(&signal.trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "LIQUIDITY_BELOW_MINIMUM",
+                    Some(&format!(
+                        "Liquidity ${} < required ${}",
+                        liquidity_usd, min_liquidity
+                    )),
+                    None,
+                )
+                .await;
             return Ok((
                 StatusCode::BAD_REQUEST,
                 Json(WebhookResponse {
@@ -535,17 +547,19 @@ pub async fn webhook_handler(
             );
 
             // Log to dead letter queue
-            let _ = state.db.insert_dlq(
-                Some(&signal.trade_uuid),
-                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                "SIGNAL_QUALITY_TOO_LOW",
-                Some(&format!(
-                    "Quality score: {:.2} < {:.2}",
-                    quality.score, quality_threshold
-                )),
-                None,
-            )
-            .await;
+            let _ = state
+                .db
+                .insert_dlq(
+                    Some(&signal.trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "SIGNAL_QUALITY_TOO_LOW",
+                    Some(&format!(
+                        "Quality score: {:.2} < {:.2}",
+                        quality.score, quality_threshold
+                    )),
+                    None,
+                )
+                .await;
 
             return Ok((
                 StatusCode::BAD_REQUEST,
@@ -643,14 +657,16 @@ pub async fn webhook_handler(
                 );
 
                 // Log to dead letter queue
-                let _ = state.db.insert_dlq(
-                    Some(&signal.trade_uuid),
-                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                    "PORTFOLIO_HEAT_LIMIT",
-                    Some("Portfolio heat limit (20%) reached"),
-                    None,
-                )
-                .await;
+                let _ = state
+                    .db
+                    .insert_dlq(
+                        Some(&signal.trade_uuid),
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        "PORTFOLIO_HEAT_LIMIT",
+                        Some("Portfolio heat limit (20%) reached"),
+                        None,
+                    )
+                    .await;
 
                 return Ok((
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -681,14 +697,16 @@ pub async fn webhook_handler(
                             "Signal rejected: strategy allocation limit reached"
                         );
 
-                        let _ = state.db.insert_dlq(
-                            Some(&signal.trade_uuid),
-                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                            "STRATEGY_HEAT_LIMIT",
-                            Some("Strategy allocation limit reached"),
-                            None,
-                        )
-                        .await;
+                        let _ = state
+                            .db
+                            .insert_dlq(
+                                Some(&signal.trade_uuid),
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                "STRATEGY_HEAT_LIMIT",
+                                Some("Strategy allocation limit reached"),
+                                None,
+                            )
+                            .await;
 
                         return Ok((
                             StatusCode::SERVICE_UNAVAILABLE,
@@ -723,17 +741,19 @@ pub async fn webhook_handler(
     }
 
     // Insert into database as PENDING
-    state.db.insert_trade(&InsertTrade {
-        trade_uuid: signal.trade_uuid.clone(),
-        wallet_address: signal.payload.wallet_address.clone(),
-        token_address: signal.token_address().to_string(),
-        token_symbol: Some(signal.payload.token.clone()),
-        strategy: signal.payload.strategy.to_string(),
-        side: signal.payload.action.to_string(),
-        amount_sol: trade_amount_sol,
-        status: "PENDING".to_string(),
-    })
-    .await?;
+    state
+        .db
+        .insert_trade(&InsertTrade {
+            trade_uuid: signal.trade_uuid.clone(),
+            wallet_address: signal.payload.wallet_address.clone(),
+            token_address: signal.token_address().to_string(),
+            token_symbol: Some(signal.payload.token.clone()),
+            strategy: signal.payload.strategy.to_string(),
+            side: signal.payload.action.to_string(),
+            amount_sol: trade_amount_sol,
+            status: "PENDING".to_string(),
+        })
+        .await?;
 
     tracing::info!(
         trade_uuid = %signal.trade_uuid,
@@ -745,18 +765,24 @@ pub async fn webhook_handler(
     );
 
     // Use cached wallet data for queue routing
-    let wallet_wqs: Option<f64> = wallet_data.as_ref().and_then(|(_, wqs, _)| wqs.map(|d| d.to_f64().unwrap_or(0.0)));
+    let wallet_wqs: Option<f64> = wallet_data
+        .as_ref()
+        .and_then(|(_, wqs, _)| wqs.map(|d| d.to_f64().unwrap_or(0.0)));
 
     // Queue for execution
     match state.engine.queue_signal(signal.clone(), wallet_wqs).await {
         Ok(()) => {
             // Update status to QUEUED
-            state.db.update_trade_status(&UpdateTradeStatus {
-                trade_uuid: signal.trade_uuid.clone(),
-                status: "QUEUED".to_string(),
-                tx_signature: None,
-                error_message: None,
-            }).await?;
+            state
+                .db
+                .update_trade_status(&UpdateTradeStatus {
+                    trade_uuid: signal.trade_uuid.clone(),
+                    status: "QUEUED".to_string(),
+                    tx_signature: None,
+                    error_message: None,
+                    network_fee_sol: None,
+                })
+                .await?;
 
             tracing::info!(trade_uuid = %signal.trade_uuid, "Signal queued for execution");
 
@@ -779,22 +805,28 @@ pub async fn webhook_handler(
 
             // Update trade status to DEAD_LETTER first, then insert the DLQ entry.
             // The status update is authoritative; the DLQ entry is supplementary audit data.
-            state.db.update_trade_status(&UpdateTradeStatus {
-                trade_uuid: signal.trade_uuid.clone(),
-                status: "DEAD_LETTER".to_string(),
-                tx_signature: None,
-                error_message: Some(e.to_string()),
-            }).await?;
+            state
+                .db
+                .update_trade_status(&UpdateTradeStatus {
+                    trade_uuid: signal.trade_uuid.clone(),
+                    status: "DEAD_LETTER".to_string(),
+                    tx_signature: None,
+                    error_message: Some(e.to_string()),
+                    network_fee_sol: None,
+                })
+                .await?;
 
             // Log to dead letter queue (best-effort — status is already DEAD_LETTER above).
-            if let Err(dlq_err) = state.db.insert_dlq(
-                Some(&signal.trade_uuid),
-                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                "QUEUE_FULL",
-                Some(&e.to_string()),
-                None,
-            )
-            .await
+            if let Err(dlq_err) = state
+                .db
+                .insert_dlq(
+                    Some(&signal.trade_uuid),
+                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                    "QUEUE_FULL",
+                    Some(&e.to_string()),
+                    None,
+                )
+                .await
             {
                 tracing::error!(
                     error = %dlq_err,

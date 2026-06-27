@@ -6,7 +6,10 @@
 //! - Profit target hit metrics
 //! - Position size analysis
 
-use axum::{extract::{Query, State}, Json};
+use axum::{
+    extract::{Query, State},
+    Json,
+};
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,7 +31,9 @@ pub struct TimeRangeQuery {
     days: u32,
 }
 
-fn default_days() -> u32 { 30 }
+fn default_days() -> u32 {
+    30
+}
 
 // =============================================================================
 // PORTFOLIO RISK RESPONSE TYPES
@@ -39,11 +44,11 @@ fn default_days() -> u32 { 30 }
 pub struct PortfolioRiskResponse {
     pub portfolio_heat_percent: f64,
     pub heat_threshold: f64,
-    pub heat_status: String,  // 'normal' | 'elevated' | 'high' | 'critical'
+    pub heat_status: String, // 'normal' | 'elevated' | 'high' | 'critical'
     pub concentration: ConcentrationData,
     pub exposure: ExposureData,
     pub drawdown: DrawdownData,
-    pub total_capital_sol: f64,  // Current wallet balance
+    pub total_capital_sol: f64, // Current wallet balance
 }
 
 /// Concentration data (by token and sector)
@@ -52,7 +57,7 @@ pub struct ConcentrationData {
     pub by_token: Vec<TokenConcentration>,
     pub by_sector: Vec<SectorConcentration>,
     pub max_concentration_percent: f64,
-    pub hhi: f64,  // Herfindahl-Hirschman Index
+    pub hhi: f64, // Herfindahl-Hirschman Index
 }
 
 /// Token concentration breakdown
@@ -113,7 +118,7 @@ pub struct StopLossMetricsResponse {
 #[derive(Debug, Serialize)]
 pub struct StrategyStopLossData {
     #[serde(rename = "strategy")]
-    pub strategy_name: String,  // 'SHIELD' | 'SPEAR'
+    pub strategy_name: String, // 'SHIELD' | 'SPEAR'
     pub activations: i64,
     pub loss_prevented_sol: f64,
 }
@@ -128,7 +133,7 @@ pub struct StopLossActivation {
     pub stop_price: f64,
     pub loss_prevented_sol: f64,
     #[serde(rename = "strategy")]
-    pub strategy_name: String,  // 'SHIELD' | 'SPEAR'
+    pub strategy_name: String, // 'SHIELD' | 'SPEAR'
 }
 
 // =============================================================================
@@ -151,7 +156,7 @@ pub struct ProfitTargetMetricsResponse {
 #[derive(Debug, Serialize)]
 pub struct StrategyProfitTargetData {
     #[serde(rename = "strategy")]
-    pub strategy_name: String,  // 'SHIELD' | 'SPEAR'
+    pub strategy_name: String, // 'SHIELD' | 'SPEAR'
     pub hit_rate: f64,
     pub total_hits: i64,
     pub average_gain_sol: f64,
@@ -166,7 +171,7 @@ pub struct ProfitTargetHit {
     pub target_level: i32,
     pub realized_gain_sol: f64,
     #[serde(rename = "strategy")]
-    pub strategy_name: String,  // 'SHIELD' | 'SPEAR'
+    pub strategy_name: String, // 'SHIELD' | 'SPEAR'
 }
 
 // =============================================================================
@@ -227,7 +232,8 @@ fn calculate_hhi(concentrations: &[TokenConcentration]) -> f64 {
             let share = c.percentage / 100.0;
             share * share
         })
-        .sum::<f64>() * 10000.0
+        .sum::<f64>()
+        * 10000.0
 }
 
 /// Determine heat status based on exposure vs threshold
@@ -248,7 +254,9 @@ fn determine_heat_status(exposure: f64, threshold: f64) -> &'static str {
 fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
     match db.pool() {
         DbPool::SQLite(p) => Ok(p),
-        _ => Err(AppError::Internal("Only SQLite backend supported".to_string())),
+        _ => Err(AppError::Internal(
+            "Only SQLite backend supported".to_string(),
+        )),
     }
 }
 
@@ -279,7 +287,11 @@ async fn get_position_concentrations(
             token_symbol: symbol.clone(),
             position_count: *count,
             total_value_sol: *value,
-            percentage: if total_exposure > 0.0 { (*value / total_exposure) * 100.0 } else { 0.0 },
+            percentage: if total_exposure > 0.0 {
+                (*value / total_exposure) * 100.0
+            } else {
+                0.0
+            },
         })
         .collect();
 
@@ -299,11 +311,18 @@ async fn get_position_concentrations(
             sector: sector.to_string(),
             position_count: sector_counts.get(sector).copied().unwrap_or(0),
             total_value_sol: value,
-            percentage: if total_exposure > 0.0 { (value / total_exposure) * 100.0 } else { 0.0 },
+            percentage: if total_exposure > 0.0 {
+                (value / total_exposure) * 100.0
+            } else {
+                0.0
+            },
         })
         .collect();
 
-    let max_concentration = by_token.iter().map(|c| c.percentage).fold(0.0_f64, f64::max);
+    let max_concentration = by_token
+        .iter()
+        .map(|c| c.percentage)
+        .fold(0.0_f64, f64::max);
 
     Ok((by_token, by_sector, max_concentration))
 }
@@ -333,8 +352,8 @@ async fn get_portfolio_exposure(db: &Arc<dyn Database>) -> AppResult<ExposureDat
         long_exposure_sol,
         short_exposure_sol,
         net_exposure_sol,
-        max_drawdown_percent: 0.0,  // Will be filled in handler
-        current_drawdown_percent: 0.0,  // Will be filled in handler
+        max_drawdown_percent: 0.0,     // Will be filled in handler
+        current_drawdown_percent: 0.0, // Will be filled in handler
     })
 }
 
@@ -404,7 +423,18 @@ async fn get_stop_loss_metrics_db(
         .collect();
 
     // Get recent activations (last 10)
-    let recent_rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, f64, f64, f64, String)>(
+    let recent_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            f64,
+            f64,
+            f64,
+            String,
+        ),
+    >(
         r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
                p.entry_price, et.stop_loss_price, p.exit_price, p.strategy
@@ -427,7 +457,7 @@ async fn get_stop_loss_metrics_db(
     let recent_activations: Vec<StopLossActivation> = recent_rows
         .iter()
         .map(|(uuid, symbol, closed_at, entry, stop, exit, strategy)| {
-            let loss_prevented = (stop - exit) * 0.01;  // Approximate
+            let loss_prevented = (stop - exit) * 0.01; // Approximate
             StopLossActivation {
                 timestamp: closed_at.clone().unwrap_or_default(),
                 trade_uuid: uuid.clone(),
@@ -544,14 +574,24 @@ async fn get_profit_target_metrics_db(
         .iter()
         .map(|(strategy, hits, avg_gain, _)| StrategyProfitTargetData {
             strategy_name: strategy.clone(),
-            hit_rate: 100.0,  // All rows are hits by definition
+            hit_rate: 100.0, // All rows are hits by definition
             total_hits: *hits,
             average_gain_sol: avg_gain.unwrap_or(0.0),
         })
         .collect();
 
     // Get recent hits
-    let recent_rows = sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<i64>, f64, String)>(
+    let recent_rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+            f64,
+            String,
+        ),
+    >(
         r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
                json_array_length(et.targets_hit) as targets_count,
@@ -573,14 +613,16 @@ async fn get_profit_target_metrics_db(
 
     let recent_hits: Vec<ProfitTargetHit> = recent_rows
         .iter()
-        .map(|(uuid, symbol, closed_at, targets_count, gain, strategy)| ProfitTargetHit {
-            timestamp: closed_at.clone().unwrap_or_default(),
-            trade_uuid: uuid.clone(),
-            token_symbol: symbol.clone(),
-            target_level: targets_count.unwrap_or(1) as i32,
-            realized_gain_sol: *gain,
-            strategy_name: strategy.clone(),
-        })
+        .map(
+            |(uuid, symbol, closed_at, targets_count, gain, strategy)| ProfitTargetHit {
+                timestamp: closed_at.clone().unwrap_or_default(),
+                trade_uuid: uuid.clone(),
+                token_symbol: symbol.clone(),
+                target_level: targets_count.unwrap_or(1) as i32,
+                realized_gain_sol: *gain,
+                strategy_name: strategy.clone(),
+            },
+        )
         .collect();
 
     // Calculate hit rate (hits with targets / total closed)
@@ -682,7 +724,11 @@ async fn get_position_size_analysis_db(
         .map(|(range, count)| SizeBucket {
             size_range: range.clone(),
             count: *count,
-            percentage: if total_count > 0 { (*count as f64 / total_count as f64) * 100.0 } else { 0.0 },
+            percentage: if total_count > 0 {
+                (*count as f64 / total_count as f64) * 100.0
+            } else {
+                0.0
+            },
         })
         .collect();
 
@@ -692,7 +738,7 @@ async fn get_position_size_analysis_db(
         max_position_sol,
         min_position_sol,
         position_size_distribution,
-        kelly_criterion_usage: 0.0,  // Placeholder - not calculated yet
+        kelly_criterion_usage: 0.0, // Placeholder - not calculated yet
     })
 }
 
@@ -710,7 +756,11 @@ pub async fn get_portfolio_risk(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<PortfolioRiskResponse>, AppError> {
     let config = state.config.read().await;
-    let heat_threshold = config.position_sizing.total_capital_sol.to_f64().unwrap_or(100.0);
+    let heat_threshold = config
+        .position_sizing
+        .total_capital_sol
+        .to_f64()
+        .unwrap_or(100.0);
     let total_capital = config.position_sizing.total_capital_sol;
     drop(config);
 
@@ -737,9 +787,11 @@ pub async fn get_portfolio_risk(
     let drawdown = DrawdownData {
         current_drawdown_percent: current_drawdown_f64,
         max_drawdown_percent: exposure.max_drawdown_percent,
-        drawdown_duration_days: 0.0,  // Would need timestamp tracking
+        drawdown_duration_days: 0.0, // Would need timestamp tracking
         recovery_percent: if current_drawdown_f64 > 0.0 {
-            ((exposure.max_drawdown_percent - current_drawdown_f64) / exposure.max_drawdown_percent.max(0.01)) * 100.0
+            ((exposure.max_drawdown_percent - current_drawdown_f64)
+                / exposure.max_drawdown_percent.max(0.01))
+                * 100.0
         } else {
             100.0
         },

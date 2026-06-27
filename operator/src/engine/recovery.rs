@@ -52,12 +52,20 @@ impl RecoveryManager {
     }
 
     /// Create with custom threshold
-    pub fn with_threshold(db: Arc<dyn Database>, rpc_url: String, stuck_threshold_secs: i64) -> Self {
+    pub fn with_threshold(
+        db: Arc<dyn Database>,
+        rpc_url: String,
+        stuck_threshold_secs: i64,
+    ) -> Self {
         Self::new_with_ws_and_threshold(db, rpc_url, stuck_threshold_secs, None)
     }
 
     /// Create with WebSocket support
-    pub fn new_with_ws(db: Arc<dyn Database>, rpc_url: String, ws_state: Option<Arc<WsState>>) -> Self {
+    pub fn new_with_ws(
+        db: Arc<dyn Database>,
+        rpc_url: String,
+        ws_state: Option<Arc<WsState>>,
+    ) -> Self {
         let rpc_client = Arc::new(RpcClient::new(rpc_url));
         Self {
             db,
@@ -148,7 +156,10 @@ impl RecoveryManager {
 
     /// Recover stuck positions
     pub async fn recover_stuck_positions(&self) -> AppResult<u32> {
-        let stuck_positions = self.db.get_stuck_positions(self.stuck_threshold_secs).await?;
+        let stuck_positions = self
+            .db
+            .get_stuck_positions(self.stuck_threshold_secs)
+            .await?;
 
         if stuck_positions.is_empty() {
             return Ok(0);
@@ -222,22 +233,25 @@ impl RecoveryManager {
         match on_chain_state {
             OnChainState::TransactionConfirmed => {
                 // Exit transaction confirmed on-chain, mark CLOSED.
-                self.db.update_position_state(&position.trade_uuid, "CLOSED").await?;
+                self.db
+                    .update_position_state(&position.trade_uuid, "CLOSED")
+                    .await?;
 
                 let tx_sig = position
                     .exit_tx_signature
                     .as_deref()
                     .unwrap_or(tx_signature);
 
-                self.db.insert_reconciliation_log(
-                    &position.trade_uuid,
-                    "EXITING",
-                    Some("FOUND"),
-                    "NONE",
-                    Some(tx_sig),
-                    Some("Auto-recovery: transaction confirmed on-chain"),
-                )
-                .await?;
+                self.db
+                    .insert_reconciliation_log(
+                        &position.trade_uuid,
+                        "EXITING",
+                        Some("FOUND"),
+                        "NONE",
+                        Some(tx_sig),
+                        Some("Auto-recovery: transaction confirmed on-chain"),
+                    )
+                    .await?;
 
                 // Broadcast position update via WebSocket
                 if let Some(ref ws) = self.ws_state {
@@ -270,27 +284,29 @@ impl RecoveryManager {
                         rpc_error = %rpc_err,
                         "Persistent RPC errors checking EXITING position — escalating to dead letter and reverting to ACTIVE"
                     );
-                    self.db.insert_dlq(
-                        Some(&position.trade_uuid),
-                        &position.trade_uuid,
-                        "RPC_CHECK_FAILED",
-                        Some(rpc_err.as_str()),
-                        None,
-                    )
-                    .await?;
-                    self.db.insert_reconciliation_log(
-                        &position.trade_uuid,
-                        "EXITING",
-                        None,
-                        "STATE_MISMATCH",
-                        None,
-                        Some(&format!(
-                            "Escalated to dead letter after {}s: RPC error: {}",
-                            stuck_duration.num_seconds(),
-                            rpc_err
-                        )),
-                    )
-                    .await?;
+                    self.db
+                        .insert_dlq(
+                            Some(&position.trade_uuid),
+                            &position.trade_uuid,
+                            "RPC_CHECK_FAILED",
+                            Some(rpc_err.as_str()),
+                            None,
+                        )
+                        .await?;
+                    self.db
+                        .insert_reconciliation_log(
+                            &position.trade_uuid,
+                            "EXITING",
+                            None,
+                            "STATE_MISMATCH",
+                            None,
+                            Some(&format!(
+                                "Escalated to dead letter after {}s: RPC error: {}",
+                                stuck_duration.num_seconds(),
+                                rpc_err
+                            )),
+                        )
+                        .await?;
                     // Revert to ACTIVE so portfolio heat is freed and the exit can be
                     // retried by the normal exit path. Leaving the position in EXITING
                     // would permanently lock capital in the heat calculation.
@@ -388,7 +404,9 @@ impl RecoveryManager {
                 trade_uuid = %position.trade_uuid,
                 "Position is stuck in EXITING but on-chain token balance is 0 — marking CLOSED directly to avoid zombie loop"
             );
-            self.db.update_position_state(&position.trade_uuid, "CLOSED").await?;
+            self.db
+                .update_position_state(&position.trade_uuid, "CLOSED")
+                .await?;
             self.db.insert_reconciliation_log(
                 &position.trade_uuid,
                 "EXITING",
@@ -412,24 +430,26 @@ impl RecoveryManager {
                 "On-chain balance is non-zero — reverting position to ACTIVE so stop-loss can manage exit"
             );
             self.db.revert_position_exit(&position.trade_uuid).await?;
-            self.db.insert_reconciliation_log(
-                &position.trade_uuid,
-                "EXITING",
-                actual_on_chain,
-                discrepancy,
-                None,
-                Some(notes),
-            )
-            .await?;
+            self.db
+                .insert_reconciliation_log(
+                    &position.trade_uuid,
+                    "EXITING",
+                    actual_on_chain,
+                    discrepancy,
+                    None,
+                    Some(notes),
+                )
+                .await?;
 
-            self.db.log_config_change(
-                &format!("position:{}", position.trade_uuid),
-                Some("EXITING"),
-                "ACTIVE",
-                "SYSTEM_RECOVERY",
-                Some(notes),
-            )
-            .await?;
+            self.db
+                .log_config_change(
+                    &format!("position:{}", position.trade_uuid),
+                    Some("EXITING"),
+                    "ACTIVE",
+                    "SYSTEM_RECOVERY",
+                    Some(notes),
+                )
+                .await?;
 
             if let Some(ref ws) = self.ws_state {
                 ws.broadcast(WsEvent::PositionUpdate(PositionUpdateData {

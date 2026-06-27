@@ -66,7 +66,9 @@ pub struct OperationsState {
 /// Get system resource usage
 ///
 /// GET /api/v1/operations/resources
-pub async fn get_resources(State(_state): State<Arc<OperationsState>>) -> Result<Json<ResourceUsageResponse>, AppError> {
+pub async fn get_resources(
+    State(_state): State<Arc<OperationsState>>,
+) -> Result<Json<ResourceUsageResponse>, AppError> {
     let mut sys = System::new_all();
     sys.refresh_all();
 
@@ -178,7 +180,7 @@ pub struct SecretRotationResponse {
     pub next_rotation_at: Option<String>,
     pub days_until_due: Option<i64>,
     pub status: RotationStatus,
-    pub is_initialized: bool,  // true if rotation tracking is configured
+    pub is_initialized: bool, // true if rotation tracking is configured
     pub rotation_history: Vec<RotationEvent>,
 }
 
@@ -189,8 +191,8 @@ pub enum RotationStatus {
     Active,
     DueSoon,
     Overdue,
-    NeverRotated,  // Fresh deployment with no rotation history
-    Unknown,       // Error state (data issue)
+    NeverRotated, // Fresh deployment with no rotation history
+    Unknown,      // Error state (data issue)
 }
 
 /// Rotation event
@@ -215,7 +217,9 @@ pub enum EventStatus {
 /// Get secret rotation status
 ///
 /// GET /api/v1/operations/secrets
-pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Json<SecretRotationResponse>, AppError> {
+pub async fn get_secrets(
+    State(state): State<Arc<OperationsState>>,
+) -> Result<Json<SecretRotationResponse>, AppError> {
     // Query config audit table for rotation events
     let rotation_events = get_rotation_history(&state.db).await?;
 
@@ -225,7 +229,8 @@ pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Js
 
     // Calculate next rotation (90 days from last rotation)
     let next_rotation_at = last_rotation_at.as_ref().map(|timestamp| {
-        let last_dt = timestamp.parse::<chrono::DateTime<Utc>>()
+        let last_dt = timestamp
+            .parse::<chrono::DateTime<Utc>>()
             .unwrap_or_else(|_| Utc::now());
         let next_dt = last_dt + Duration::days(90);
         next_dt.to_rfc3339()
@@ -233,7 +238,8 @@ pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Js
 
     // Calculate days until due
     let days_until_due = next_rotation_at.as_ref().map(|next| {
-        let next_dt = next.parse::<chrono::DateTime<Utc>>()
+        let next_dt = next
+            .parse::<chrono::DateTime<Utc>>()
             .unwrap_or_else(|_| Utc::now() + Duration::days(90));
         let now = Utc::now();
         let duration = next_dt.signed_duration_since(now);
@@ -246,9 +252,9 @@ pub async fn get_secrets(State(state): State<Arc<OperationsState>>) -> Result<Js
         (Some(days), true) if days < 0 => RotationStatus::Overdue,
         (Some(days), true) if days <= 7 => RotationStatus::DueSoon,
         (Some(_days), true) => RotationStatus::Active,
-        (None, false) => RotationStatus::NeverRotated,  // No rotation history (fresh deployment)
-        (None, true) => RotationStatus::Unknown,        // Error: history exists but no days_until_due
-        (Some(_), false) => RotationStatus::Unknown,   // Error: inconsistent state
+        (None, false) => RotationStatus::NeverRotated, // No rotation history (fresh deployment)
+        (None, true) => RotationStatus::Unknown, // Error: history exists but no days_until_due
+        (Some(_), false) => RotationStatus::Unknown, // Error: inconsistent state
     };
 
     let response = SecretRotationResponse {
@@ -288,8 +294,8 @@ async fn get_rotation_history(db: &Arc<dyn Database>) -> Result<Vec<RotationEven
                 timestamp: item.changed_at,
                 status,
                 duration_seconds: None, // Parse from item.new_value if needed
-                keys_rotated: 1, // Default value - should be parsed from audit data
-                failed_keys: 0,  // Default value - should be parsed from audit data
+                keys_rotated: 1,        // Default value - should be parsed from audit data
+                failed_keys: 0,         // Default value - should be parsed from audit data
             }
         })
         .collect();
@@ -342,10 +348,12 @@ pub enum EndpointStatus {
 /// Get rate limit status
 ///
 /// GET /api/v1/operations/rate-limit
-pub async fn get_rate_limit_status(State(_state): State<Arc<OperationsState>>) -> Result<Json<RateLimitStatusResponse>, AppError> {
+pub async fn get_rate_limit_status(
+    State(_state): State<Arc<OperationsState>>,
+) -> Result<Json<RateLimitStatusResponse>, AppError> {
     // Define endpoints with their rate limits (from configuration)
     let endpoints_config = vec![
-        ("/api/v1/webhook", 100),  // 100 req/s
+        ("/api/v1/webhook", 100), // 100 req/s
         ("/api/v1/trades", 50),   // 50 req/s
         ("/api/v1/positions", 50),
         ("/api/v1/wallets", 30),
@@ -392,9 +400,15 @@ pub async fn get_rate_limit_status(State(_state): State<Arc<OperationsState>>) -
         .collect();
 
     // Determine overall status
-    let overall_status = if endpoints.iter().any(|e| matches!(e.status, EndpointStatus::Throttled)) {
+    let overall_status = if endpoints
+        .iter()
+        .any(|e| matches!(e.status, EndpointStatus::Throttled))
+    {
         OverallStatus::Throttled
-    } else if endpoints.iter().any(|e| matches!(e.status, EndpointStatus::Warning)) {
+    } else if endpoints
+        .iter()
+        .any(|e| matches!(e.status, EndpointStatus::Warning))
+    {
         OverallStatus::Degraded
     } else {
         OverallStatus::Healthy
@@ -450,7 +464,9 @@ pub enum CheckStatus {
 /// Get detailed health checks
 ///
 /// GET /api/v1/operations/health-checks
-pub async fn get_health_check_details(State(state): State<Arc<OperationsState>>) -> Result<Json<HealthCheckDetailsResponse>, AppError> {
+pub async fn get_health_check_details(
+    State(state): State<Arc<OperationsState>>,
+) -> Result<Json<HealthCheckDetailsResponse>, AppError> {
     let mut checks = Vec::new();
 
     // Database health check
@@ -470,9 +486,15 @@ pub async fn get_health_check_details(State(state): State<Arc<OperationsState>>)
     checks.push(pc_check);
 
     // Determine overall status
-    let overall_status = if checks.iter().any(|c| matches!(c.status, CheckStatus::Failing)) {
+    let overall_status = if checks
+        .iter()
+        .any(|c| matches!(c.status, CheckStatus::Failing))
+    {
         OverallHealthStatus::Unhealthy
-    } else if checks.iter().any(|c| matches!(c.status, CheckStatus::Warning)) {
+    } else if checks
+        .iter()
+        .any(|c| matches!(c.status, CheckStatus::Warning))
+    {
         OverallHealthStatus::Degraded
     } else {
         OverallHealthStatus::Healthy
@@ -524,7 +546,10 @@ async fn check_rpc_health(engine: &Option<Arc<EngineHandle>>) -> HealthCheck {
         Some(_health) if _health.healthy => HealthCheck {
             name: "rpc".to_string(),
             status: CheckStatus::Passing,
-            message: Some(format!("RPC latency: {}ms", _health.latency_ms.unwrap_or(0))),
+            message: Some(format!(
+                "RPC latency: {}ms",
+                _health.latency_ms.unwrap_or(0)
+            )),
             last_check: Utc::now().to_rfc3339(),
             response_time_ms,
         },
@@ -558,7 +583,11 @@ fn check_circuit_breaker_health(circuit_breaker: &Arc<CircuitBreaker>) -> Health
         ),
         CircuitBreakerState::Tripped => (
             CheckStatus::Failing,
-            Some(status.trip_reason.unwrap_or_else(|| "Circuit breaker tripped".to_string())),
+            Some(
+                status
+                    .trip_reason
+                    .unwrap_or_else(|| "Circuit breaker tripped".to_string()),
+            ),
         ),
         CircuitBreakerState::Cooldown => (
             CheckStatus::Warning,

@@ -204,13 +204,22 @@ pub async fn manual_health_check(
 }
 
 /// Get webhook statistics for monitoring
-pub async fn get_webhook_statistics(db: &dyn Database) -> Result<crate::db_abstraction::WebhookStats> {
+pub async fn get_webhook_statistics(
+    db: &dyn Database,
+) -> Result<crate::db_abstraction::WebhookStats> {
     let all_monitoring = db.get_all_wallet_monitoring().await?;
     let total = all_monitoring.len();
-    let active = all_monitoring.iter().filter(|m| m.webhook_status.as_deref() == Some("active")).count();
-    let failed = all_monitoring.iter().filter(|m| {
-        m.webhook_health_status.as_deref() == Some("error") || m.webhook_health_status.as_deref() == Some("unhealthy")
-    }).count();
+    let active = all_monitoring
+        .iter()
+        .filter(|m| m.webhook_status.as_deref() == Some("active"))
+        .count();
+    let failed = all_monitoring
+        .iter()
+        .filter(|m| {
+            m.webhook_health_status.as_deref() == Some("error")
+                || m.webhook_health_status.as_deref() == Some("unhealthy")
+        })
+        .count();
     Ok(crate::db_abstraction::WebhookStats {
         total_webhooks: total,
         active_webhooks: active,
@@ -256,12 +265,8 @@ pub async fn run_startup_webhook_check(
         webhook_url: config.webhook_url.clone(),
     };
 
-    let manager = WebhookLifecycleManager::new(
-        db.clone(),
-        helius_client,
-        rate_limiter,
-        lifecycle_config,
-    );
+    let manager =
+        WebhookLifecycleManager::new(db.clone(), helius_client, rate_limiter, lifecycle_config);
 
     let mut registered = 0;
     let mut orphaned = 0;
@@ -334,12 +339,7 @@ pub async fn run_startup_webhook_check(
 
     info!(
         wallets_checked,
-        registered,
-        orphaned,
-        cleaned_up,
-        failed,
-        duration_ms,
-        "Startup webhook check completed"
+        registered, orphaned, cleaned_up, failed, duration_ms, "Startup webhook check completed"
     );
 
     Ok(StartupWebhookResult {
@@ -368,7 +368,7 @@ pub async fn reconcile_helius_webhooks_async(
     info!("Starting Helius webhook reconciliation (async background task)");
 
     let lifecycle_config = WebhookLifecycleConfig {
-        auto_register_enabled: false,  // Don't register, only assess profitability
+        auto_register_enabled: false, // Don't register, only assess profitability
         auto_cleanup_enabled: true,
         health_check_interval_secs: config.check_interval_secs,
         stale_threshold_days: config.stale_threshold_days,
@@ -376,12 +376,7 @@ pub async fn reconcile_helius_webhooks_async(
         webhook_url: config.webhook_url.clone(),
     };
 
-    let manager = WebhookLifecycleManager::new(
-        db,
-        helius_client,
-        rate_limiter,
-        lifecycle_config,
-    );
+    let manager = WebhookLifecycleManager::new(db, helius_client, rate_limiter, lifecycle_config);
 
     // Run reconciliation with profitability assessment
     let result = manager.reconcile_with_helius_dashboard().await?;

@@ -11,9 +11,7 @@
 //! - Fail-open when price cache is unavailable
 
 use chimera_operator::config::ProfitManagementConfig;
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool,
-};
+use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;

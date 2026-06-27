@@ -28,8 +28,8 @@ use crate::error::AppResult;
 use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tracing::{error, info, warn};
 
 /// Set to true while a roster merge transaction is in progress.
@@ -195,7 +195,11 @@ pub struct MergeResult {
 pub async fn merge_roster(db: &Arc<dyn Database>, roster_path: &Path) -> AppResult<MergeResult> {
     let pool = match db.pool() {
         DbPool::SQLite(p) => p.clone(),
-        _ => return Err(crate::error::AppError::Internal("Only SQLite backend supported for roster merge".to_string())),
+        _ => {
+            return Err(crate::error::AppError::Internal(
+                "Only SQLite backend supported for roster merge".to_string(),
+            ))
+        }
     };
     let mut warnings = Vec::new();
 
@@ -324,30 +328,30 @@ pub async fn merge_roster(db: &Arc<dyn Database>, roster_path: &Path) -> AppResu
 
     // Define a struct to hold the row data (sqlx only supports tuples up to 9-16 elements)
     #[derive(sqlx::FromRow)]
-struct RosterTransferRow {
-    address: String,
-    status: String,
-    wqs_score: Option<f64>,
-    wqs_confidence: Option<f64>,
-    roi_7d: Option<f64>,
-    roi_30d: Option<f64>,
-    trade_count_30d: Option<i64>,
-    win_rate: Option<f64>,
-    max_drawdown_30d: Option<f64>,
-    avg_trade_size_sol: Option<f64>,
-    avg_win_sol: Option<f64>,
-    avg_loss_sol: Option<f64>,
-    profit_factor: Option<f64>,
-    realized_pnl_30d_sol: Option<f64>,
-    last_trade_at: Option<String>,
-    promoted_at: Option<String>,
-    ttl_expires_at: Option<String>,
-    notes: Option<String>,
-    archetype: Option<String>,
-    avg_entry_delay_seconds: Option<f64>,
-    created_at: Option<String>,
-    updated_at: Option<String>,
-}
+    struct RosterTransferRow {
+        address: String,
+        status: String,
+        wqs_score: Option<f64>,
+        wqs_confidence: Option<f64>,
+        roi_7d: Option<f64>,
+        roi_30d: Option<f64>,
+        trade_count_30d: Option<i64>,
+        win_rate: Option<f64>,
+        max_drawdown_30d: Option<f64>,
+        avg_trade_size_sol: Option<f64>,
+        avg_win_sol: Option<f64>,
+        avg_loss_sol: Option<f64>,
+        profit_factor: Option<f64>,
+        realized_pnl_30d_sol: Option<f64>,
+        last_trade_at: Option<String>,
+        promoted_at: Option<String>,
+        ttl_expires_at: Option<String>,
+        notes: Option<String>,
+        archetype: Option<String>,
+        avg_entry_delay_seconds: Option<f64>,
+        created_at: Option<String>,
+        updated_at: Option<String>,
+    }
 
     // Collect all rows first (attached DB is on conn; we need conn for reads throughout)
     let mut all_rows: Vec<RosterTransferRow> = Vec::with_capacity(new_count as usize);
@@ -514,7 +518,11 @@ struct RosterTransferRow {
 pub async fn validate_roster(db: &Arc<dyn Database>, roster_path: &Path) -> AppResult<bool> {
     let pool = match db.pool() {
         DbPool::SQLite(p) => p,
-        _ => return Err(crate::error::AppError::Internal("Only SQLite backend supported for roster validation".to_string())),
+        _ => {
+            return Err(crate::error::AppError::Internal(
+                "Only SQLite backend supported for roster validation".to_string(),
+            ))
+        }
     };
     if !roster_path.exists() {
         return Ok(false);
