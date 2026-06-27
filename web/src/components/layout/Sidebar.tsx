@@ -36,6 +36,10 @@ const navigation = [
   { name: 'Performance', href: '/performance', icon: Zap },
   { name: 'Operations', href: '/operations', icon: Activity },
   { name: 'Consensus', href: '/consensus', icon: Network },
+  // Analysis Dashboards
+  { name: 'Risk Analysis', href: '/risk-dashboard', icon: Shield },
+  { name: 'Signal Analysis', href: '/signals-dashboard', icon: TrendingUp },
+  { name: 'Scout Integration', href: '/scout-dashboard', icon: Search },
 ]
 
 // Mobile bottom navigation - only show key items
@@ -44,6 +48,10 @@ const mobileNavigation = [
   { name: 'Wallets', href: '/wallets', icon: Wallet },
   { name: 'Trades', href: '/trades', icon: ArrowLeftRight },
   { name: 'Config', href: '/config', icon: Settings },
+  // Analysis dashboards for mobile
+  { name: 'Risk Analysis', href: '/risk-dashboard', icon: Shield },
+  { name: 'Signal Analysis', href: '/signals-dashboard', icon: TrendingUp },
+  { name: 'Scout Integration', href: '/scout-dashboard', icon: Search },
 ]
 
 interface SidebarProps {

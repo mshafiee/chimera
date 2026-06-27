@@ -20,6 +20,9 @@ const Operations = lazy(() => import('./pages/Operations').then(m => ({ default:
 const Consensus = lazy(() => import('./pages/Consensus').then(m => ({ default: m.Consensus })))
 const WalletMonitoring = lazy(() => import('./pages/WalletMonitoring').then(m => ({ default: m.WalletMonitoring })))
 const Webhooks = lazy(() => import('./pages/Webhooks').then(m => ({ default: m.Webhooks })))
+const RiskDashboard = lazy(() => import('./pages/RiskDashboard').then(m => ({ default: m.RiskDashboard })))
+const SignalsDashboard = lazy(() => import('./pages/SignalsDashboard').then(m => ({ default: m.SignalsDashboard })))
+const ScoutDashboard = lazy(() => import('./pages/ScoutDashboard').then(m => ({ default: m.ScoutDashboard })))
 
 const SuspenseWrapper = ({ children }: { children: React.ReactNode }) => (
   <Suspense fallback={<LoadingSpinner />}>{children}</Suspense>
@@ -54,6 +57,11 @@ function App() {
         <Route path="performance" element={<Performance />} />
         <Route path="operations" element={<Operations />} />
         <Route path="consensus" element={<Consensus />} />
+
+        {/* Analysis Dashboards */}
+        <Route path="risk-dashboard" element={<RiskDashboard />} />
+        <Route path="signals-dashboard" element={<SignalsDashboard />} />
+        <Route path="scout-dashboard" element={<ScoutDashboard />} />
 
         {/* Admin-only routes */}
         <Route path="config" element={

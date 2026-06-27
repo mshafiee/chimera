@@ -46,6 +46,9 @@ use chimera_operator::handlers::{
     get_resources,
     get_scout_metrics,
     get_scout_status,
+    get_budget_status,
+    get_cache_stats,
+    get_conviction_allocation,
     get_secrets,
     get_strategy_performance,
     get_wallet,
@@ -1538,6 +1541,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/scout/wqs-distribution", get(get_wqs_distribution))
         .route("/scout/metrics", get(get_scout_metrics))
         .route("/scout/run", post(trigger_scout_run))
+        // Scout integration features
+        .route("/scout/budget", get(get_budget_status))
+        .route("/scout/cache", get(get_cache_stats))
+        .route("/scout/conviction", get(get_conviction_allocation))
         .with_state(api_state.clone())
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             2 * 1024 * 1024,

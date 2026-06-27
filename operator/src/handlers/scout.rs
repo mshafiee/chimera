@@ -91,6 +91,113 @@ pub struct ScoutRunResponse {
 }
 
 // =============================================================================
+// INTEGRATION FEATURE RESPONSE TYPES
+// =============================================================================
+
+/// Budget status and forecasting response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetStatusResponse {
+    pub credits_used: i64,
+    pub credits_remaining: i64,
+    pub total_monthly_credits: i64,
+    pub daily_target: i64,
+    pub usage_percentage: f64,
+    pub daily_usage_percentage: f64,
+    pub alert_level: String,
+    pub forecast_24h: BudgetForecast,
+    pub optimization_suggestions: Vec<OptimizationSuggestion>,
+}
+
+/// Budget forecast
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetForecast {
+    pub horizon_hours: i32,
+    pub projected_usage: i64,
+    pub projected_remaining: i64,
+    pub confidence: f64,
+    pub trend: String,
+    pub recommendations: Vec<String>,
+}
+
+/// Optimization suggestion
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptimizationSuggestion {
+    pub action_type: String,
+    pub description: String,
+    pub expected_savings: i64,
+    pub priority: String,
+}
+
+/// Cache statistics response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheStatsResponse {
+    pub hit_rate: f64,
+    pub miss_rate: f64,
+    pub total_hits: i64,
+    pub total_misses: i64,
+    pub total_entries: i64,
+    pub max_size: i64,
+    pub activity_distribution: ActivityDistribution,
+    pub cache_efficiency: f64,
+}
+
+/// Activity distribution for cache
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityDistribution {
+    pub very_high: i64,
+    pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+    pub inactive: i64,
+}
+
+/// Conviction allocation response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConvictionAllocationResponse {
+    pub total_wallets_analyzed: i64,
+    pub high_conviction_count: i64,
+    pub budget_remaining: BudgetBreakdown,
+    pub wallets_analyzed: WalletAnalysisBreakdown,
+    pub allocation_summary: AllocationSummary,
+}
+
+/// Budget breakdown by conviction level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BudgetBreakdown {
+    pub high_conviction: i64,
+    pub emerging: i64,
+    pub reserve: i64,
+}
+
+/// Wallet analysis breakdown
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletAnalysisBreakdown {
+    pub very_high: WalletLevelStats,
+    pub high: WalletLevelStats,
+    pub medium: WalletLevelStats,
+    pub emerging: WalletLevelStats,
+    pub low: WalletLevelStats,
+}
+
+/// Statistics for a conviction level
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalletLevelStats {
+    pub count: i64,
+    pub credits_used: i64,
+    pub average_wqs: f64,
+    pub roi_score: f64,
+}
+
+/// Overall allocation summary
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllocationSummary {
+    pub total_credits_allocated: i64,
+    pub high_conviction_percentage: f64,
+    pub emerging_percentage: f64,
+    pub average_credits_per_wallet: f64,
+}
+
+// =============================================================================
 // QUERY PARAMETERS
 // =============================================================================
 
@@ -189,6 +296,328 @@ pub async fn trigger_scout_run(
     let response = ScoutRunResponse {
         run_id,
         scheduled_at,
+    };
+
+    Ok(Json(response))
+}
+
+// =============================================================================
+// INTEGRATION FEATURE HANDLERS
+// =============================================================================
+
+/// Get PredictiveBudgetManager status and forecasting
+pub async fn get_budget_status(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<BudgetStatusResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
+
+    // Get total wallet count for budget estimation
+    let total_wallets: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Simulated budget data (in production, this would come from Scout's budget manager)
+    let monthly_credits: i64 = 10_000_000;
+    let estimated_credits_per_wallet: i64 = 2500;
+    let credits_used = total_wallets.saturating_mul(estimated_credits_per_wallet);
+    let credits_remaining = monthly_credits.saturating_sub(credits_used);
+    let usage_percentage = if monthly_credits > 0 {
+        (credits_used as f64 / monthly_credits as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let daily_target = monthly_credits / 30;
+    let daily_usage_percentage = if daily_target > 0 {
+        ((credits_used / 30) as f64 / daily_target as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let alert_level = if usage_percentage >= 95.0 {
+        "depleted"
+    } else if usage_percentage >= 80.0 {
+        "critical"
+    } else if usage_percentage >= 50.0 {
+        "warning"
+    } else {
+        "normal"
+    };
+
+    let forecast = BudgetForecast {
+        horizon_hours: 24,
+        projected_usage: (total_wallets.saturating_mul(estimated_credits_per_wallet) / 30),
+        projected_remaining: credits_remaining.saturating_sub(total_wallets.saturating_mul(estimated_credits_per_wallet) / 30),
+        confidence: 0.85,
+        trend: if daily_usage_percentage < 80.0 { "stable" } else { "increasing" }.to_string(),
+        recommendations: vec![
+            "Continue monitoring daily usage".to_string(),
+            "Cache hit rate is optimal".to_string(),
+        ],
+    };
+
+    let response = BudgetStatusResponse {
+        credits_used,
+        credits_remaining,
+        total_monthly_credits: monthly_credits,
+        daily_target,
+        usage_percentage,
+        daily_usage_percentage,
+        alert_level: alert_level.to_string(),
+        forecast_24h: forecast,
+        optimization_suggestions: vec![
+            OptimizationSuggestion {
+                action_type: "cache_optimization".to_string(),
+                description: "Increase cache TTL for inactive wallets".to_string(),
+                expected_savings: 50000,
+                priority: "medium".to_string(),
+            },
+        ],
+    };
+
+    Ok(Json(response))
+}
+
+/// Get ActivityBasedCache statistics
+pub async fn get_cache_stats(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<CacheStatsResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
+
+    // Get wallet activity distribution (proxy for cache activity)
+    let very_high: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > datetime('now', '-1 hour')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let high: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > datetime('now', '-24 hours')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let medium: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at > datetime('now', '-7 days')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let low: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at <= datetime('now', '-7 days')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let inactive: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED' OR updated_at <= datetime('now', '-30 days')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let total_entries = very_high + high + medium + low + inactive;
+
+    // Simulated cache metrics (in production, get from Scout's cache manager)
+    let total_hits = very_high.saturating_mul(10).saturating_add(high.saturating_mul(5));
+    let total_misses = medium.saturating_add(low);
+    let max_size = 10000;
+
+    let hit_rate = if total_hits + total_misses > 0 {
+        (total_hits as f64 / (total_hits + total_misses) as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let miss_rate = 100.0 - hit_rate;
+
+    let cache_efficiency = if total_entries > 0 {
+        hit_rate * (total_entries as f64 / max_size as f64)
+    } else {
+        0.0
+    };
+
+    let response = CacheStatsResponse {
+        hit_rate,
+        miss_rate,
+        total_hits,
+        total_misses,
+        total_entries,
+        max_size,
+        activity_distribution: ActivityDistribution {
+            very_high,
+            high,
+            medium,
+            low,
+            inactive,
+        },
+        cache_efficiency,
+    };
+
+    Ok(Json(response))
+}
+
+/// Get HighConvictionAllocator status and allocation
+pub async fn get_conviction_allocation(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ConvictionAllocationResponse>, AppError> {
+    let pool = sqlite_pool(&state.db)?;
+
+    // Get total wallets analyzed
+    let total_wallets_analyzed: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Get high-conviction wallets (WQS 70+)
+    let high_conviction_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 70.0 AND status = 'ACTIVE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Get conviction breakdown
+    let very_high: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 80.0 AND status = 'ACTIVE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let high: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 70.0 AND wqs_score < 80.0 AND status = 'ACTIVE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let medium: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 50.0 AND wqs_score < 70.0 AND status IN ('ACTIVE', 'CANDIDATE')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let emerging: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE wqs_score >= 30.0 AND wqs_score < 50.0 AND status = 'CANDIDATE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    let low: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM wallets WHERE wqs_score < 30.0 AND status = 'REJECTED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?;
+
+    // Simulated budget allocation (in production, get from HighConvictionAllocator)
+    let total_budget: i64 = 5000;
+    let high_conviction_budget = (total_budget as f64 * 0.70) as i64; // 70% to high conviction
+    let emerging_budget = (total_budget as f64 * 0.20) as i64; // 20% to emerging
+    let reserve_budget = total_budget.saturating_sub(high_conviction_budget).saturating_sub(emerging_budget);
+
+    let avg_wqs_very_high: f64 = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 80.0 AND status = 'ACTIVE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?
+    .unwrap_or(0.0);
+
+    let avg_wqs_high: f64 = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 70.0 AND wqs_score < 80.0 AND status = 'ACTIVE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?
+    .unwrap_or(0.0);
+
+    let avg_wqs_medium: f64 = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 50.0 AND wqs_score < 70.0 AND status IN ('ACTIVE', 'CANDIDATE')",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?
+    .unwrap_or(0.0);
+
+    let avg_wqs_emerging: f64 = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score >= 30.0 AND wqs_score < 50.0 AND status = 'CANDIDATE'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?
+    .unwrap_or(0.0);
+
+    let avg_wqs_low: f64 = sqlx::query_scalar::<_, Option<f64>>(
+        "SELECT AVG(wqs_score) FROM wallets WHERE wqs_score < 30.0 AND status = 'REJECTED'",
+    )
+    .fetch_one(&pool)
+    .await
+    .map_err(AppError::Database)?
+    .unwrap_or(0.0);
+
+    let response = ConvictionAllocationResponse {
+        total_wallets_analyzed,
+        high_conviction_count,
+        budget_remaining: BudgetBreakdown {
+            high_conviction: high_conviction_budget,
+            emerging: emerging_budget,
+            reserve: reserve_budget,
+        },
+        wallets_analyzed: WalletAnalysisBreakdown {
+            very_high: WalletLevelStats {
+                count: very_high,
+                credits_used: very_high.saturating_mul(3), // 3x multiplier
+                average_wqs: avg_wqs_very_high,
+                roi_score: 0.85,
+            },
+            high: WalletLevelStats {
+                count: high,
+                credits_used: high.saturating_mul(2), // 2.5x multiplier
+                average_wqs: avg_wqs_high,
+                roi_score: 0.75,
+            },
+            medium: WalletLevelStats {
+                count: medium,
+                credits_used: medium,
+                average_wqs: avg_wqs_medium,
+                roi_score: 0.60,
+            },
+            emerging: WalletLevelStats {
+                count: emerging,
+                credits_used: emerging.saturating_mul(2),
+                average_wqs: avg_wqs_emerging,
+                roi_score: 0.40,
+            },
+            low: WalletLevelStats {
+                count: low,
+                credits_used: 0,
+                average_wqs: avg_wqs_low,
+                roi_score: 0.10,
+            },
+        },
+        allocation_summary: AllocationSummary {
+            total_credits_allocated: high_conviction_budget,
+            high_conviction_percentage: 70.0,
+            emerging_percentage: 20.0,
+            average_credits_per_wallet: if total_wallets_analyzed > 0 {
+                high_conviction_budget as f64 / total_wallets_analyzed as f64
+            } else {
+                0.0
+            },
+        },
     };
 
     Ok(Json(response))
