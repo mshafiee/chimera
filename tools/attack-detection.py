@@ -13,7 +13,7 @@ This service:
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from prometheus_fastapi.instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import redis

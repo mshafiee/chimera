@@ -143,6 +143,24 @@ except ImportError:
     create_high_conviction_integration = None
     print("[Scout] Warning: High-conviction integration not available")
 
+# Import network features for graph-based wallet intelligence
+try:
+    from core.network_features import NetworkFeatures
+    NETWORK_FEATURES_AVAILABLE = True
+except ImportError:
+    NETWORK_FEATURES_AVAILABLE = False
+    NetworkFeatures = None
+    print("[Scout] Warning: Network features not available (requires networkx)")
+
+# Import time-series features for temporal pattern analysis
+try:
+    from core.time_series_features import TimeSeriesFeatures
+    TIME_SERIES_FEATURES_AVAILABLE = True
+except ImportError:
+    TIME_SERIES_FEATURES_AVAILABLE = False
+    TimeSeriesFeatures = None
+    print("[Scout] Warning: Time-series features not available")
+
 # Import config module if available
 try:
     from config import ScoutConfig
@@ -744,7 +762,57 @@ async def analyze_wallets(
                 import traceback
                 traceback.print_exc()
                 return None
-            
+
+            # Extract network features if available
+            network_features = None
+            if NETWORK_FEATURES_AVAILABLE and NetworkFeatures:
+                try:
+                    print(f"[Scout] Computing network features for {wallet_address[:8]}...")
+                    network_extractor = NetworkFeatures()
+                    # For network features, we need the broader context, but we can extract
+                    # wallet-level features like token co-holding patterns
+                    # Note: Full network analysis requires all wallets, done in post-processing
+                    network_features = {
+                        "wallet_address": wallet_address,
+                        "token_co_holding_score": None,  # Placeholder for individual wallet analysis
+                        "centrality_score": None,        # Requires full network graph
+                        "sybil_score": None,            # Requires full network graph
+                        "cluster_membership": None      # Requires full network graph
+                    }
+                    print("[Scout] Network features computed")
+                except Exception as e:
+                    print(f"[Scout] Warning: Network feature extraction failed for {wallet_address[:8]}...: {e}")
+                    network_features = None
+
+            # Extract time-series features if available
+            time_series_features = None
+            if TIME_SERIES_FEATURES_AVAILABLE and TimeSeriesFeatures and trades:
+                try:
+                    print(f"[Scout] Computing time-series features for {wallet_address[:8]}...")
+                    ts_extractor = TimeSeriesFeatures(min_samples=3, max_samples=100)
+
+                    # Build performance history from trades
+                    performance_history = []
+                    for trade in trades:
+                        if trade.get('timestamp') and (trade.get('pnl_sol') or trade.get('pnl')):
+                            performance_history.append({
+                                'timestamp': trade.get('timestamp'),
+                                'pnl_sol': trade.get('pnl_sol', trade.get('pnl', 0.0)),
+                                'roi': trade.get('roi', 0.0)
+                            })
+
+                    if performance_history:
+                        time_series_features = ts_extractor.extract_features(
+                            performance_history, feature_set="all"
+                        )
+                        print("[Scout] Time-series features computed")
+                    else:
+                        print("[Scout] Insufficient trade history for time-series features")
+
+                except Exception as e:
+                    print(f"[Scout] Warning: Time-series feature extraction failed for {wallet_address[:8]}...: {e}")
+                    time_series_features = None
+
             result = {
                 "address": wallet_address,
                 "metrics": metrics,
@@ -759,6 +827,8 @@ async def analyze_wallets(
                 "wmi": wmi,
                 "strategy": _strategy,
                 "archetype": _archetype,
+                "network_features": network_features,
+                "time_series_features": time_series_features,
             }
             
             print(f"[Scout] ✓ Completed {wallet_address[:8]}... (WQS={wqs_score:.1f}, Status={final_status})")
@@ -809,7 +879,46 @@ async def analyze_wallets(
     # Clear analyzer caches to free memory before proceeding
     if analyzer:
         await analyzer.clear_all_caches()
-    
+
+    # Post-processing: Network features analysis across all wallets
+    network_analysis = None
+    if NETWORK_FEATURES_AVAILABLE and NetworkFeatures:
+        try:
+            print("[Scout] Computing network-wide features...")
+            network_extractor = NetworkFeatures()
+
+            # Collect wallet addresses and their trades for network analysis
+            wallet_addresses = []
+            wallet_trades_map = {}
+            for res in results:
+                if res and res.get('address'):
+                    wallet_addresses.append(res['address'])
+                    wallet_trades_map[res['address']] = res.get('trades', [])
+
+            if wallet_addresses:
+                # Build network graph from all wallets using batch method
+                network_analysis = network_extractor.extract_network_features_batch(
+                    wallet_addresses, wallet_trades_map
+                )
+
+                # Enhance individual results with network-wide features
+                if network_analysis:
+                    for res in results:
+                        if res and res.get('address'):
+                            addr = res['address']
+                            if addr in network_analysis:
+                                # Update network features with computed values
+                                if res.get('network_features'):
+                                    res['network_features'].update(network_analysis[addr])
+                                else:
+                                    res['network_features'] = network_analysis[addr]
+
+                    print(f"[Scout] Network features computed for {len(network_analysis)} wallets")
+        except Exception as e:
+            print(f"[Scout] Warning: Network-wide analysis failed: {e}")
+            import traceback
+            traceback.print_exc()
+
     for res in results:
         if isinstance(res, Exception):
             if verbose:
@@ -846,6 +955,53 @@ async def analyze_wallets(
         notes_parts = [f"WQS: {wqs:.1f}"]
         if res['backtest']['notes']:
             notes_parts.append(f"Backtest: {res['backtest']['notes']}")
+
+        # Add network feature highlights if available
+        network_features = res.get('network_features')
+        if network_features:
+            if network_features.get('sybil_risk') == 'HIGH':
+                notes_parts.append(f"⚠️ SYBIL RISK: {network_features.get('sybil_cluster', 'unknown')}")
+            elif network_features.get('pagerank_centrality'):
+                centrality = network_features.get('pagerank_centrality', 0)
+                if centrality > 0.5:
+                    notes_parts.append(f"Network: High centrality ({centrality:.2f})")
+            elif network_features.get('avg_coholding_with_successful'):
+                coholding = network_features.get('avg_coholding_with_successful', 0)
+                if coholding > 0.3:
+                    notes_parts.append(f"Network: Strong successful co-holding ({coholding:.2f})")
+
+        # Add time-series feature highlights if available
+        time_series_features = res.get('time_series_features')
+        if time_series_features and time_series_features.get('extraction_success'):
+            # RSI indicators
+            rsi = time_series_features.get('rsi')
+            if rsi:
+                if rsi > 70:
+                    notes_parts.append(f"Time-series: Overbought (RSI={rsi:.1f})")
+                elif rsi < 30:
+                    notes_parts.append(f"Time-series: Oversold (RSI={rsi:.1f})")
+
+            # Trend indicators
+            if time_series_features.get('trend_up'):
+                trend_strength = time_series_features.get('trend_strength', 0)
+                notes_parts.append(f"Time-series: Uptrend (strength={trend_strength:.2f})")
+            elif time_series_features.get('trend_up') == 0:
+                trend_strength = time_series_features.get('trend_strength', 0)
+                notes_parts.append(f"Time-series: Downtrend (strength={trend_strength:.2f})")
+
+            # Momentum
+            momentum = time_series_features.get('momentum_score')
+            if momentum is not None and momentum > 0.7:
+                notes_parts.append(f"Time-series: Strong momentum ({momentum:.2f})")
+            elif momentum is not None and momentum < 0.3:
+                notes_parts.append(f"Time-series: Weak momentum ({momentum:.2f})")
+
+            # Persistence
+            if time_series_features.get('persistence'):
+                notes_parts.append("Time-series: Performance persistence detected")
+            elif time_series_features.get('mean_reverting'):
+                notes_parts.append("Time-series: Mean-reverting pattern")
+
         notes_parts.append(f"Analyzed at {utcnow().isoformat()}")
 
         # Determine archetype

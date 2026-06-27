@@ -386,6 +386,213 @@ class NetworkFeatures:
 
         return features
 
+    def extract_network_features_batch(
+        self,
+        wallet_addresses: List[str],
+        wallet_trades_map: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Extract network features for multiple wallets and analyze network-wide relationships.
+
+        Args:
+            wallet_addresses: List of wallet addresses to analyze
+            wallet_trades_map: Dictionary mapping wallet addresses to their trade history
+
+        Returns:
+            Dictionary mapping wallet addresses to their network features
+        """
+        network_features = {}
+        if not wallet_addresses or not NETWORKX_AVAILABLE:
+            return network_features
+
+        try:
+            # Build transaction graph from all wallet trades
+            G = self._build_multi_wallet_graph(wallet_addresses, wallet_trades_map)
+
+            # Identify successful wallets (high WQS or ACTIVE status)
+            successful_wallets = self._identify_successful_wallets(
+                wallet_addresses, wallet_trades_map
+            )
+
+            # Extract features for each wallet
+            for wallet_address in wallet_addresses:
+                features = {}
+
+                # Centrality features
+                if wallet_address in G.nodes:
+                    try:
+                        # PageRank centrality
+                        pagerank = nx.pagerank(G, max_iter=100)
+                        features['pagerank_centrality'] = float(pagerank.get(wallet_address, 0.0))
+
+                        # Degree centrality
+                        degree = nx.degree_centrality(G)
+                        features['degree_centrality'] = float(degree.get(wallet_address, 0.0))
+
+                        # Betweenness centrality (for smaller graphs)
+                        if G.number_of_nodes() < 100:
+                            betweenness = nx.betweenness_centrality(G)
+                            features['betweenness_centrality'] = float(betweenness.get(wallet_address, 0.0))
+
+                        # Clustering coefficient
+                        clustering = nx.clustering(G)
+                        features['local_clustering'] = float(clustering.get(wallet_address, 0.0))
+
+                    except Exception as e:
+                        logger.debug(f"Centrality calculation failed for {wallet_address[:8]}: {e}")
+
+                # Token co-holding with successful wallets
+                if wallet_address in successful_wallets or successful_wallets:
+                    trades = wallet_trades_map.get(wallet_address, [])
+                    token_holdings = self._extract_token_holdings(trades)
+                    coholding_score = self._calculate_coholding_with_successful(
+                        wallet_address, token_holdings, successful_wallets, wallet_trades_map
+                    )
+                    features.update(coholding_score)
+
+                # Community detection
+                if G.number_of_nodes() < 500 and wallet_address in G.nodes:
+                    try:
+                        communities = nx.algorithms.community.greedy_modularity_communities(G)
+                        for i, community in enumerate(communities):
+                            if wallet_address in community:
+                                features['community_id'] = int(i)
+                                features['community_size'] = len(community)
+                                break
+                    except Exception as e:
+                        logger.debug(f"Community detection failed: {e}")
+
+                network_features[wallet_address] = features
+
+            # Network-wide sybil detection
+            sybil_clusters = self.detect_sybil_wallets(
+                wallet_addresses,
+                {'edges': list(G.edges(data=True))}
+            )
+            if sybil_clusters:
+                # Add sybil cluster information to affected wallets
+                for cluster_id, cluster_wallets in sybil_clusters.items():
+                    for wallet in cluster_wallets:
+                        if wallet in network_features:
+                            network_features[wallet]['sybil_cluster'] = cluster_id
+                            network_features[wallet]['sybil_risk'] = 'HIGH'
+                        else:
+                            network_features[wallet] = {
+                                'sybil_cluster': cluster_id,
+                                'sybil_risk': 'HIGH'
+                            }
+
+            logger.info(f"Computed network features for {len(network_features)} wallets")
+
+        except Exception as e:
+            logger.error(f"Batch network feature extraction failed: {e}")
+
+        return network_features
+
+    def _build_multi_wallet_graph(
+        self,
+        wallet_addresses: List[str],
+        wallet_trades_map: Dict[str, List[Dict[str, Any]]]
+    ) -> nx.Graph:
+        """Build a graph from multiple wallet trades."""
+        G = nx.Graph()
+
+        # Add wallet nodes
+        for wallet in wallet_addresses:
+            G.add_node(wallet)
+
+        # Add edges based on shared tokens and transaction patterns
+        for i, wallet1 in enumerate(wallet_addresses):
+            for wallet2 in wallet_addresses[i+1:]:
+                # Calculate similarity between wallets
+                trades1 = wallet_trades_map.get(wallet1, [])
+                trades2 = wallet_trades_map.get(wallet2, [])
+
+                if not trades1 or not trades2:
+                    continue
+
+                # Extract tokens traded by each wallet
+                tokens1 = {tx.get('token') for tx in trades1 if tx.get('token')}
+                tokens2 = {tx.get('token') for tx in trades2 if tx.get('token')}
+
+                # Jaccard similarity of token sets
+                if tokens1 and tokens2:
+                    intersection = len(tokens1 & tokens2)
+                    union = len(tokens1 | tokens2)
+                    similarity = intersection / union if union > 0 else 0
+
+                    # Add edge if similarity is above threshold
+                    if similarity > 0.1:  # At least 10% token overlap
+                        G.add_edge(wallet1, wallet2, weight=similarity)
+
+        return G
+
+    def _identify_successful_wallets(
+        self,
+        wallet_addresses: List[str],
+        wallet_trades_map: Dict[str, List[Dict[str, Any]]]
+    ) -> List[str]:
+        """Identify successful wallets based on trade performance."""
+        successful = []
+
+        for wallet in wallet_addresses:
+            trades = wallet_trades_map.get(wallet, [])
+            if not trades:
+                continue
+
+            # Simple success metric: positive PnL trades
+            profitable_trades = [tx for tx in trades if tx.get('pnl', 0) > 0]
+            success_rate = len(profitable_trades) / len(trades) if trades else 0
+
+            if success_rate > 0.6 and len(trades) >= 5:
+                successful.append(wallet)
+
+        return successful
+
+    def _extract_token_holdings(self, trades: List[Dict[str, Any]]) -> Dict[str, float]:
+        """Extract token holdings from trades."""
+        token_amounts = {}
+        for trade in trades:
+            token = trade.get('token')
+            amount = trade.get('amount', 0)
+            if token and amount > 0:
+                token_amounts[token] = token_amounts.get(token, 0) + amount
+        return token_amounts
+
+    def _calculate_coholding_with_successful(
+        self,
+        wallet_address: str,
+        token_holdings: Dict[str, float],
+        successful_wallets: List[str],
+        wallet_trades_map: Dict[str, List[Dict[str, Any]]]
+    ) -> Dict[str, float]:
+        """Calculate token co-holding metrics with successful wallets."""
+        features = {}
+
+        if not token_holdings or not successful_wallets:
+            return features
+
+        overlaps = []
+        for success_wallet in successful_wallets:
+            if success_wallet == wallet_address:
+                continue
+
+            success_trades = wallet_trades_map.get(success_wallet, [])
+            success_holdings = self._extract_token_holdings(success_trades)
+
+            if success_holdings:
+                shared_tokens = set(token_holdings.keys()) & set(success_holdings.keys())
+                if token_holdings:
+                    overlap_score = len(shared_tokens) / len(token_holdings)
+                    overlaps.append(overlap_score)
+
+        if overlaps:
+            features['avg_coholding_with_successful'] = float(np.mean(overlaps))
+            features['max_coholding_with_successful'] = float(np.max(overlaps))
+            features['successful_wallets_analyzed'] = len(overlaps)
+
+        return features
+
 
 # Convenience function
 def extract_network_features(

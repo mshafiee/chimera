@@ -13,7 +13,7 @@ This service:
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
-from prometheus_fastapi.instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
 import yaml
@@ -52,26 +52,26 @@ instrumentator = Instrumentator(app)
 # Prometheus Metrics
 policy_changes_total = Counter(
     "chimera_policy_changes_total",
-    ["action", "policy_type"],
-    "Total policy changes made"
+    "Total policy changes made",
+    labelnames=["action", "policy_type"]
 )
 
 policy_validations_total = Counter(
     "chimera_policy_validations_total",
-    ["result"],
-    "Total policy validations performed"
+    "Total policy validations performed",
+    labelnames=["result"]
 )
 
 haproxy_reloads_total = Counter(
     "chimera_haproxy_reloads_total",
-    ["result"],
-    "Total HAProxy configuration reloads"
+    "Total HAProxy configuration reloads",
+    labelnames=["result"]
 )
 
 active_policies = Gauge(
     "chimera_active_policies",
-    ["policy_type"],
-    "Number of currently active policies"
+    "Number of currently active policies",
+    labelnames=["policy_type"]
 )
 
 policy_reload_duration = Histogram(
