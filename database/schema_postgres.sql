@@ -538,6 +538,138 @@ CREATE TRIGGER exit_targets_updated_at
     EXECUTE FUNCTION update_last_updated_column();
 
 -- =============================================================================
+-- QUERY OPTIMIZATION INDEXES (Functional indexes for performance)
+-- =============================================================================
+
+-- PnL percentage calculations (net_pnl_sol / amount_sol * 100)
+CREATE INDEX IF NOT EXISTS idx_trades_pnl_percent
+    ON trades (CASE
+        WHEN amount_sol > 0 THEN ((net_pnl_sol - COALESCE(total_cost_sol, 0)) / amount_sol * 100.0)
+        ELSE NULL
+    END)
+    WHERE net_pnl_sol IS NOT NULL AND amount_sol > 0;
+
+-- Net PnL after all costs (net_pnl_sol - total_cost_sol - network_fee_sol)
+CREATE INDEX IF NOT EXISTS idx_trades_total_pnl
+    ON trades ((net_pnl_sol - COALESCE(total_cost_sol, 0) - COALESCE(network_fee_sol, 0)))
+    WHERE net_pnl_sol IS NOT NULL;
+
+-- Total costs breakdown (total_cost_sol + network_fee_sol)
+CREATE INDEX IF NOT EXISTS idx_trades_total_costs
+    ON trades ((COALESCE(total_cost_sol, 0) + COALESCE(network_fee_sol, 0)))
+    WHERE total_cost_sol > 0 OR network_fee_sol > 0;
+
+-- Strategy-specific PnL aggregations
+CREATE INDEX IF NOT EXISTS idx_trades_strategy_pnl
+    ON trades (strategy, status, created_at DESC)
+    WHERE net_pnl_sol IS NOT NULL;
+
+-- Strategy volume calculations
+CREATE INDEX IF NOT EXISTS idx_trades_strategy_volume
+    ON trades (strategy, (amount_sol))
+    WHERE amount_sol > 0;
+
+-- Strategy success rate calculations
+CREATE INDEX IF NOT EXISTS idx_trades_strategy_success
+    ON trades (strategy, status, created_at)
+    WHERE status IN ('ACTIVE', 'CLOSED', 'FAILED');
+
+-- Unrealized PnL percentage for positions
+CREATE INDEX IF NOT EXISTS idx_positions_unrealized_pnl_percent
+    ON positions ((CASE
+        WHEN entry_amount_sol > 0 THEN (unrealized_pnl_sol / entry_amount_sol * 100.0)
+        ELSE NULL
+    END))
+    WHERE state IN ('ACTIVE', 'EXITING') AND unrealized_pnl_sol IS NOT NULL;
+
+-- Current position value calculations
+CREATE INDEX IF NOT EXISTS idx_positions_current_value
+    ON positions ((entry_amount_sol + COALESCE(unrealized_pnl_sol, 0)))
+    WHERE state IN ('ACTIVE', 'EXITING');
+
+-- Risk-adjusted return calculations by wallet
+CREATE INDEX IF NOT EXISTS idx_positions_risk_return
+    ON positions (wallet_address, (CASE
+        WHEN entry_amount_sol > 0 THEN (unrealized_pnl_sol / entry_amount_sol)
+        ELSE NULL
+    END))
+    WHERE state IN ('ACTIVE', 'EXITING') AND entry_amount_sol > 0;
+
+-- Wallet total PnL calculations
+CREATE INDEX IF NOT EXISTS idx_wallets_total_pnl
+    ON wallets ((COALESCE(realized_pnl_30d_sol, 0) + COALESCE(avg_trade_size_sol, 0)))
+    WHERE status = 'ACTIVE';
+
+-- Wallet ROI calculations (realized_pnl_30d_sol / avg_trade_size_sol)
+CREATE INDEX IF NOT EXISTS idx_wallets_roi_percent
+    ON wallets ((CASE
+        WHEN avg_trade_size_sol > 0 THEN (realized_pnl_30d_sol / avg_trade_size_sol * 100.0)
+        ELSE NULL
+    END))
+    WHERE status = 'ACTIVE' AND avg_trade_size_sol > 0;
+
+-- WQS-based wallet sorting
+CREATE INDEX IF NOT EXISTS idx_wallets_wqs_status
+    ON wallets (status, wqs_score DESC, roi_30d DESC)
+    WHERE status IN ('ACTIVE', 'CANDIDATE');
+
+-- Daily PnL aggregations
+CREATE INDEX IF NOT EXISTS idx_trades_daily_pnl
+    ON trades (DATE(created_at), ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
+    WHERE net_pnl_sol IS NOT NULL;
+
+-- Hourly volume aggregations
+CREATE INDEX IF NOT EXISTS idx_trades_hourly_volume
+    ON trades (DATE_TRUNC('hour', created_at), amount_sol)
+    WHERE amount_sol > 0;
+
+-- Weekly strategy performance
+CREATE INDEX IF NOT EXISTS idx_trades_weekly_strategy
+    ON trades (strategy, DATE_TRUNC('week', created_at), ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
+    WHERE net_pnl_sol IS NOT NULL;
+
+-- Consecutive loss calculations
+CREATE INDEX IF NOT EXISTS idx_trades_consecutive_losses
+    ON trades (wallet_address, created_at DESC, net_pnl_sol)
+    WHERE net_pnl_sol < 0 AND status IN ('CLOSED', 'ACTIVE');
+
+-- Maximum drawdown calculations
+CREATE INDEX IF NOT EXISTS idx_positions_drawdown
+    ON positions (wallet_address, closed_at DESC, realized_pnl_sol)
+    WHERE state = 'CLOSED' AND realized_pnl_sol IS NOT NULL;
+
+-- Position age and PnL correlation
+CREATE INDEX IF NOT EXISTS idx_positions_age_pnl
+    ON positions (wallet_address, (EXTRACT(EPOCH FROM (COALESCE(closed_at, CURRENT_TIMESTAMP) - opened_at))), realized_pnl_sol)
+    WHERE state IN ('ACTIVE', 'CLOSED');
+
+-- Active profitable trades only
+CREATE INDEX IF NOT EXISTS idx_trades_active_profitable
+    ON trades (created_at DESC, ((net_pnl_sol / amount_sol * 100.0)))
+    WHERE status = 'ACTIVE' AND net_pnl_sol > 0 AND amount_sol > 0;
+
+-- High-value trades (amount >= 1 SOL)
+CREATE INDEX IF NOT EXISTS idx_trades_high_value
+    ON trades (amount_sol DESC, created_at DESC, net_pnl_sol)
+    WHERE amount_sol >= 1.0;
+
+-- Failed trades analysis
+CREATE INDEX IF NOT EXISTS idx_trades_failed_analysis
+    ON trades (status, created_at DESC, error_message, ((COALESCE(total_cost_sol, 0) + COALESCE(network_fee_sol, 0))))
+    WHERE status IN ('FAILED', 'DEAD_LETTER');
+
+-- Recent trades requiring attention
+CREATE INDEX IF NOT EXISTS idx_trades_recent_attention
+    ON trades (status, created_at DESC, ((net_pnl_sol - COALESCE(total_cost_sol, 0))))
+    WHERE created_at >= CURRENT_TIMESTAMP - INTERVAL '24 hours'
+    AND status IN ('ACTIVE', 'EXITING', 'FAILED');
+
+-- Stuck position detection
+CREATE INDEX IF NOT EXISTS idx_positions_stuck_detection
+    ON positions (state, last_updated, (EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - last_updated))))
+    WHERE state IN ('EXITING', 'EXECUTING') AND last_updated < CURRENT_TIMESTAMP - INTERVAL '5 minutes';
+
+-- =============================================================================
 -- VIEWS FOR COMMON QUERIES (Optional performance optimization)
 -- =============================================================================
 
