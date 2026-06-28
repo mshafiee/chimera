@@ -65,6 +65,7 @@ services:
     profiles:
       - mainnet-paper
       - mainnet-prod
+      - evaluation
 
   # Redis - Unified cache for security services and application caching
   redis:
@@ -96,6 +97,7 @@ services:
     profiles:
       - mainnet-paper
       - mainnet-prod
+      - evaluation
 
   # Chimera Operator - Core trading engine
   operator:
@@ -138,6 +140,7 @@ services:
       - devnet
       - mainnet-paper
       - mainnet-prod
+      - evaluation
 
   # Chimera Scout - Wallet intelligence layer
   scout:
@@ -209,6 +212,7 @@ services:
       - devnet
       - mainnet-paper
       - mainnet-prod
+      - evaluation
 
   # Web Dashboard
   web:
@@ -261,6 +265,7 @@ services:
       - devnet
       - mainnet-paper
       - mainnet-prod
+      - evaluation
 
   # Grafana - Metrics visualization
   grafana:
@@ -289,6 +294,7 @@ services:
       - devnet
       - mainnet-paper
       - mainnet-prod
+      - evaluation
 
   # Alertmanager - Alert routing
   alertmanager:
