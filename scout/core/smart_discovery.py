@@ -534,9 +534,10 @@ class StrategyCoordinator:
     - Multi-objective optimization (quality, cost, speed)
     """
 
-    def __init__(self, prioritizer: Optional[SmartDiscoveryPrioritizer] = None):
+    def __init__(self, prioritizer: Optional[SmartDiscoveryPrioritizer] = None, helius_client=None):
         """Initialize the strategy coordinator."""
         self._prioritizer = prioritizer or SmartDiscoveryPrioritizer()
+        self._helius_client = helius_client  # For actual wallet discovery
         self._lock = threading.Lock()
 
         # Real-time performance tracking
@@ -651,21 +652,90 @@ class StrategyCoordinator:
             with self._lock:
                 self._active_strategies.add(strategy)
 
-            # Execute strategy (placeholder - would integrate with actual discovery methods)
-            # For now, simulate execution
-            await asyncio.sleep(0.1)  # Simulate work
+            # Execute strategy with actual wallet discovery
+            wallets_found = []
+            wqs_scores = {}
+
+            if self._helius_client:
+                # Execute actual discovery based on strategy type
+                if strategy == DiscoveryStrategy.DEX_AGGREGATOR_TRADES:
+                    # Discover wallets from DEX aggregator trades (24h window)
+                    wallet_counts = await self._execute_with_fallback(
+                        self._helius_client.discover_wallets,
+                        hours_back=24,
+                        max_wallets=200,
+                        limit_per_token=50
+                    )
+                    wallets_found = list(wallet_counts.keys())
+                    wqs_scores = {wallet: min(100.0, count * 5) for wallet, count in wallet_counts.items()}
+
+                elif strategy == DiscoveryStrategy.LARGE_DEX_TRADES:
+                    # Discover wallets from large DEX trades (high value)
+                    wallet_counts = await self._execute_with_fallback(
+                        self._helius_client.discover_wallets,
+                        hours_back=48,
+                        max_wallets=100,
+                        limit_per_token=20,
+                        min_value_usd=10000  # Filter for larger trades
+                    )
+                    wallets_found = list(wallet_counts.keys())
+                    wqs_scores = {wallet: min(100.0, count * 8) for wallet, count in wallet_counts.items()}
+
+                elif strategy == DiscoveryStrategy.TOKEN_HOLDERS:
+                    # Discover token holders (lower cost, broader coverage)
+                    wallet_counts = await self._execute_with_fallback(
+                        self._helius_client.discover_wallets,
+                        hours_back=72,
+                        max_wallets=500,
+                        limit_per_token=100
+                    )
+                    wallets_found = list(wallet_counts.keys())
+                    wqs_scores = {wallet: min(100.0, count * 3) for wallet, count in wallet_counts.items()}
+
+                elif strategy == DiscoveryStrategy.RECENT_SWAPS:
+                    # Discover from recent swaps (real-time)
+                    wallet_counts = await self._execute_with_fallback(
+                        self._helius_client.discover_wallets_from_recent_swaps,
+                        hours_back=6,
+                        max_wallets=150
+                    )
+                    wallets_found = list(wallet_counts.keys())
+                    wqs_scores = {wallet: min(100.0, count * 10) for wallet, count in wallet_counts.items()}
+
+                elif strategy == DiscoveryStrategy.TOP_TOKENS:
+                    # Discover from top performing tokens
+                    wallets_found = await self._execute_with_fallback(
+                        self._helius_client.discover_from_top_performing_tokens,
+                        min_wallets=50,
+                        max_wallets=150
+                    )
+                    wqs_scores = {wallet: 70.0 for wallet in wallets_found}  # Baseline quality
+
+                else:
+                    # Fallback for unknown strategies
+                    logger.warning(f"[StrategyCoordinator] Unknown strategy: {strategy.value}")
+                    wallets_found = []
+                    wqs_scores = {}
+            else:
+                # No Helius client - simulate for testing
+                await asyncio.sleep(0.1)
+                logger.warning("[StrategyCoordinator] No Helius client - simulating discovery")
 
             # Update performance tracking
             execution_time_ms = (time.time() - start_time) * 1000
 
-            # Create result (placeholder - would be actual discovery result)
+            # Calculate efficiency
+            credits_consumed = self._prioritizer._config.CREDIT_COSTS[strategy]
+            efficiency = (len(wallets_found) * 10) / max(1, credits_consumed)  # Normalized efficiency
+
+            # Create result with actual discovery data
             result = DiscoveryResult(
                 strategy=strategy,
-                wallets_found=[],  # Would be actual discovered wallets
-                wqs_scores={},  # Would be actual WQS scores
-                credits_consumed=self._prioritizer._config.CREDIT_COSTS[strategy],
+                wallets_found=wallets_found,
+                wqs_scores=wqs_scores,
+                credits_consumed=credits_consumed,
                 time_taken_seconds=execution_time_ms / 1000,
-                efficiency=0.0,  # Would be calculated from actual results
+                efficiency=efficiency,
             )
 
             # Update performance metrics
@@ -710,6 +780,31 @@ class StrategyCoordinator:
         finally:
             with self._lock:
                 self._active_strategies.discard(strategy)
+
+    async def _execute_with_fallback(self, discovery_func, **kwargs):
+        """
+        Execute discovery function with graceful fallback on errors.
+
+        Args:
+            discovery_func: The discovery function to execute
+            **kwargs: Arguments to pass to the discovery function
+
+        Returns:
+            Discovery results or empty dict on failure
+        """
+        try:
+            result = await discovery_func(**kwargs)
+            if isinstance(result, dict):
+                return result
+            elif isinstance(result, list):
+                # Convert list to dict with default counts
+                return {wallet: 1 for wallet in result}
+            else:
+                logger.warning(f"Unexpected result type from discovery: {type(result)}")
+                return {}
+        except Exception as e:
+            logger.error(f"Discovery function failed: {e}")
+            return {}  # Return empty dict on failure
 
     def _calculate_health_status(self, performance: StrategyPerformance) -> str:
         """Calculate health status based on performance metrics."""

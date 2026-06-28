@@ -312,12 +312,19 @@ pub async fn get_consensus(
         Vec::new()
     };
 
+    // Calculate divergence alerts
+    let divergence_alerts = if let Some(ref agg) = state.signal_aggregator {
+        calculate_divergence_alerts(agg, &recent_signals).await
+    } else {
+        Vec::new()
+    };
+
     Ok(Json(ConsensusResponse {
         consensus_rate,
         avg_clustering_coefficient,
         active_clusters,
         recent_signals,
-        divergence_alerts: Vec::new(), // TODO: Implement divergence detection
+        divergence_alerts,
     }))
 }
 
@@ -869,4 +876,91 @@ async fn build_quality_trend(
     }
 
     trend
+}
+
+/// Calculate divergence alerts from recent signals and aggregator state
+///
+/// This function analyzes wallet trading patterns to detect divergences where
+/// some wallets are exiting positions while others are holding or accumulating.
+async fn calculate_divergence_alerts(
+    aggregator: &crate::monitoring::signal_aggregator::SignalAggregator,
+    _consensus_signals: &[crate::handlers::signals::ConsensusSignal],
+) -> Vec<crate::handlers::signals::DivergenceAlert> {
+    let mut divergence_alerts = Vec::new();
+
+    // Get recent signals from aggregator for analysis
+    let recent_signals = aggregator.get_all_recent_signals().await;
+
+    // Group signals by token to identify divergences
+    let mut token_signals: std::collections::HashMap<String, Vec<&crate::monitoring::signal_aggregator::TokenSignal>> =
+        std::collections::HashMap::new();
+
+    for signal in &recent_signals {
+        token_signals
+            .entry(signal.token_address.clone())
+            .or_default()
+            .push(signal);
+    }
+
+    // Analyze each token for divergence patterns
+    for (token_address, signals) in token_signals.iter() {
+        // Separate buyers and sellers
+        let buyers: Vec<&crate::monitoring::signal_aggregator::TokenSignal> = signals
+            .iter()
+            .filter(|s| s.direction == "BUY")
+            .cloned()
+            .collect();
+
+        let sellers: Vec<&crate::monitoring::signal_aggregator::TokenSignal> = signals
+            .iter()
+            .filter(|s| s.direction == "SELL")
+            .cloned()
+            .collect();
+
+        // Check for divergence: some wallets selling while others buying/holding
+        if !sellers.is_empty() && !buyers.is_empty() {
+            // This is a divergence pattern - wallets disagree on direction
+            let divergence_type = if buyers.len() > sellers.len() {
+                "directional_bullish".to_string() // More buyers than sellers
+            } else if sellers.len() > buyers.len() {
+                "directional_bearish".to_string() // More sellers than buyers
+            } else {
+                "timing".to_string() // Equal split - timing divergence
+            };
+
+            // Create wallet clusters for divergent wallets
+            let wallets_clustered = vec![WalletCluster {
+                cluster_id: format!("holders_{}", token_address[..8].to_string()),
+                wallet_addresses: buyers.iter().map(|b| b.wallet_address.clone()).collect(),
+                signal: "BUY".to_string(),
+            }];
+
+            let wallets_divergent = vec![WalletCluster {
+                cluster_id: format!("sellers_{}", token_address[..8].to_string()),
+                wallet_addresses: sellers.iter().map(|s| s.wallet_address.clone()).collect(),
+                signal: "SELL".to_string(),
+            }];
+
+            let alert = DivergenceAlert {
+                alert_id: format!("div_{}", uuid::Uuid::new_v4()),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                token_address: token_address.clone(),
+                token_symbol: None, // Could be enhanced with token metadata lookup
+                divergence_type,
+                severity: if sellers.len() > buyers.len() {
+                    "high".to_string() // Selling pressure is concerning
+                } else {
+                    "medium".to_string()
+                },
+                wallets_clustered,
+                wallets_divergent,
+            };
+
+            divergence_alerts.push(alert);
+        }
+    }
+
+    // Limit to most recent/divergent alerts to avoid noise
+    divergence_alerts.truncate(10);
+    divergence_alerts
 }

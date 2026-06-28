@@ -604,14 +604,20 @@ async def analyze_wallets(
             if ml_boost_applied > 0 and optimizer and OPTIMIZATION_AVAILABLE:
                 try:
                     from core.prediction_logger import PredictionLogger
+
+                    # Convert expected_return_pct (percentage) to absolute SOL amount
+                    # The downstream matcher compares against actual_copy_pnl_30d_sol (in SOL)
+                    # Use avg_trade_size_sol as proxy for investment size
+                    investment_size_sol = wqs_metrics.avg_trade_size_sol if wqs_metrics.avg_trade_size_sol and wqs_metrics.avg_trade_size_sol > 0 else 1.0
+                    expected_return_sol = (prediction.expected_return_pct / 100.0) * investment_size_sol
+
                     plogger = PredictionLogger()
                     plogger.log_prediction(
                         wallet_address=wallet_address,
                         model_type="simple_ensemble",
-                        # expected_return_pct is a percentage (e.g. 15.0 = 15%), but
-                        # downstream matcher compares to actual_copy_pnl_30d_sol in SOL.
-                        # TODO: normalize units before matching.
-                        predicted_pnl=prediction.expected_return_pct,
+                        # Normalize expected_return_pct to SOL units for proper matching
+                        # against actual_copy_pnl_30d_sol (downstream comparison is now SOL to SOL)
+                        predicted_pnl=expected_return_sol,
                         confidence=prediction.confidence,
                         features={
                             'roi_7d': wqs_metrics.roi_7d,

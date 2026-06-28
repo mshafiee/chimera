@@ -25,14 +25,14 @@ pub struct SignalAggregator {
 
 /// Token signal from a wallet
 #[derive(Debug, Clone)]
-struct TokenSignal {
+pub struct TokenSignal {
     #[allow(dead_code)]
-    wallet_address: String,
+    pub wallet_address: String,
     #[allow(dead_code)]
-    token_address: String,
-    direction: String, // BUY or SELL
-    amount_sol: Decimal,
-    timestamp: Instant,
+    pub token_address: String,
+    pub direction: String, // BUY or SELL
+    pub amount_sol: Decimal,
+    pub timestamp: Instant,
 }
 
 /// Consensus signal (multiple wallets buying same token)
@@ -219,5 +219,26 @@ impl SignalAggregator {
         }
 
         related_wallets
+    }
+
+    /// Get all recent signals for divergence analysis
+    ///
+    /// Returns a snapshot of all recent signals across all tokens.
+    /// This is used for divergence detection in the consensus API.
+    pub async fn get_all_recent_signals(&self) -> Vec<TokenSignal> {
+        let signals = self.recent_signals.read().await;
+        let mut all_signals = Vec::new();
+
+        // Collect all signals from all tokens
+        for token_signals in signals.values() {
+            for signal in token_signals {
+                all_signals.push(signal.clone());
+            }
+        }
+
+        // Sort by timestamp (most recent first)
+        all_signals.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        all_signals
     }
 }

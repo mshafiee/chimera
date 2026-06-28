@@ -301,6 +301,8 @@ impl MetricsState {
         let metric_families = self.registry.gather();
         let mut sample_count = 0u32;
         let mut sum_ms = 0.0;
+        let mut slow_queries_count = 0u32;
+        const SLOW_QUERY_THRESHOLD_MS: f64 = 100.0; // Queries > 100ms considered slow
 
         for metric_family in metric_families {
             if metric_family.name() == "chimera_db_query_latency_ms" {
@@ -309,6 +311,14 @@ impl MetricsState {
                     if !histogram.bucket.is_empty() {
                         sample_count = histogram.get_sample_count() as u32;
                         sum_ms = histogram.get_sample_sum();
+
+                        // Count slow queries (> 100ms) from histogram buckets
+                        for bucket in histogram.bucket.iter() {
+                            if bucket.get_upper_bound() >= SLOW_QUERY_THRESHOLD_MS {
+                                slow_queries_count += bucket.get_cumulative_count() as u32;
+                                break; // This gives us count of queries >= threshold
+                            }
+                        }
                     }
                 }
             }
@@ -325,7 +335,7 @@ impl MetricsState {
             avg_ms,
             p95_ms,
             p99_ms,
-            slow_queries_count: 0, // Could track queries > threshold
+            slow_queries_count,
             total_queries_count: sample_count,
         }
     }

@@ -669,8 +669,12 @@ class DiscoveryPipeline:
     - Comprehensive performance monitoring
     """
 
-    def __init__(self):
-        """Initialize the optimized discovery pipeline."""
+    def __init__(self, helius_client=None):
+        """Initialize the optimized discovery pipeline.
+
+        Args:
+            helius_client: Optional HeliusClient for wallet discovery
+        """
         # Optimization components
         self._cache = AggressiveCacheManager()
         self._incremental = IncrementalProcessor()
@@ -682,6 +686,9 @@ class DiscoveryPipeline:
 
         # Configuration
         self._strategy = OptimizationStrategy.BALANCED
+
+        # Helius client for actual wallet discovery
+        self._helius_client = helius_client
 
         logger.info("[DiscoveryPipeline] Initialized with comprehensive optimization")
 
@@ -749,9 +756,87 @@ class DiscoveryPipeline:
 
     async def _get_wallets_to_process(self, params: Dict[str, Any]) -> List[str]:
         """Get list of wallets to process based on parameters."""
-        # This would integrate with the actual discovery methods
-        # For now, return empty list (placeholder)
-        return []
+        if self._helius_client is None:
+            logger.warning("[DiscoveryPipeline] No Helius client available, returning empty wallet list")
+            return []
+
+        try:
+            # Extract discovery parameters
+            min_balance = params.get('min_balance', 1000)
+            min_transactions = params.get('min_transactions', 10)
+            hours_back = params.get('hours_back', 24)
+            max_wallets = params.get('max_wallets', 100)
+
+            logger.info(
+                f"[DiscoveryPipeline] Fetching wallets with parameters: "
+                f"min_balance={min_balance}, min_transactions={min_transactions}, "
+                f"hours_back={hours_back}, max_wallets={max_wallets}"
+            )
+
+            # Discover wallets using Helius client
+            # Based on pattern from smart_discovery.py StrategyCoordinator
+            discovered_wallets = []
+
+            # Method 1: Large wallets discovery
+            try:
+                large_wallets = await self._helius_client.get_large_wallets(
+                    min_balance=min_balance,
+                    min_transactions=min_transactions,
+                    limit=max_wallets
+                )
+                discovered_wallets.extend(large_wallets)
+                logger.info(f"[DiscoveryPipeline] Found {len(large_wallets)} large wallets")
+            except Exception as e:
+                logger.error(f"[DiscoveryPipeline] Large wallet discovery failed: {e}")
+
+            # Method 2: Recent traders
+            if hours_back > 0:
+                try:
+                    recent_traders = await self._helius_client.get_recent_traders(
+                        hours_back=hours_back,
+                        min_balance=min_balance,
+                        limit=max_wallets // 2
+                    )
+                    # Add new wallets (avoid duplicates)
+                    for wallet in recent_traders:
+                        if wallet not in discovered_wallets:
+                            discovered_wallets.append(wallet)
+                    logger.info(f"[DiscoveryPipeline] Found {len(recent_traders)} recent traders")
+                except Exception as e:
+                    logger.error(f"[DiscoveryPipeline] Recent trader discovery failed: {e}")
+
+            # Apply additional filters if specified
+            if params.get('filter_active', True):
+                # Filter to wallets with recent activity
+                try:
+                    active_wallets = await self._helius_client.get_active_wallets(
+                        hours_back=hours_back,
+                        limit=max_wallets * 2
+                    )
+                    # Keep only wallets that appear in active set
+                    filtered_wallets = [
+                        w for w in discovered_wallets
+                        if w in set(active_wallets)
+                    ]
+                    logger.info(
+                        f"[DiscoveryPipeline] Filtered to {len(filtered_wallets)} "
+                        f"active wallets from {len(discovered_wallets)}"
+                    )
+                    discovered_wallets = filtered_wallets
+                except Exception as e:
+                    logger.warning(f"[DiscoveryPipeline] Active wallet filter failed: {e}")
+
+            # Limit to max_wallets
+            final_wallets = discovered_wallets[:max_wallets]
+
+            logger.info(
+                f"[DiscoveryPipeline] Returning {len(final_wallets)} wallets for processing"
+            )
+            return final_wallets
+
+        except Exception as e:
+            logger.error(f"[DiscoveryPipeline] Failed to get wallets to process: {e}")
+            return []
 
     async def _process_wallet_batch(
         self,
@@ -812,9 +897,21 @@ class DiscoveryPipeline:
 _pipeline_instance: Optional[DiscoveryPipeline] = None
 
 
-def get_discovery_pipeline() -> DiscoveryPipeline:
-    """Get the singleton discovery pipeline instance."""
+def get_discovery_pipeline(helius_client=None) -> DiscoveryPipeline:
+    """Get the singleton discovery pipeline instance.
+
+    Args:
+        helius_client: Optional HeliusClient for wallet discovery
+
+    Returns:
+        DiscoveryPipeline instance
+    """
     global _pipeline_instance
     if _pipeline_instance is None:
-        _pipeline_instance = DiscoveryPipeline()
+        _pipeline_instance = DiscoveryPipeline(helius_client=helius_client)
+    elif helius_client is not None and _pipeline_instance._helius_client is None:
+        # Update existing instance with client if available
+        _pipeline_instance._helius_client = helius_client
+        logger.info("[DiscoveryPipeline] Updated existing instance with Helius client")
+    return _pipeline_instance
     return _pipeline_instance
