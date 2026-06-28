@@ -93,6 +93,9 @@ rust_decimal = { version = "1.33", features = ["serde"] }
 rust_decimal_macros = "1"
 sysinfo = "0.38.4"
 
+[features]
+postgres = []
+
 [dev-dependencies]
 # Testing utilities
 axum-test = "18.4.1"

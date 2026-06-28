@@ -2210,39 +2210,128 @@ pub async fn get_database_performance(
 /// GET /api/v1/metrics/rpc-latency
 /// Requires: readonly+ role
 pub async fn get_rpc_latency(
-    State(state): State<Arc<ApiState>>,
+    State(_state): State<Arc<ApiState>>,
 ) -> Result<Json<RPCLatencyResponse>, AppError> {
-    // Get RPC health from engine
-    let avg_latency_f64 = if let Some(engine) = state.engine.as_ref() {
-        // Try to get RPC health from engine
-        match engine.get_rpc_health().await {
-            Some(health) => health.latency_ms.map(|ms| ms as f64).unwrap_or(50.0),
-            None => 50.0,
-        }
-    } else {
-        50.0
-    };
+    use crate::metrics::{histogram_quantile, quantile_from_buckets};
 
-    // Placeholder endpoint breakdown
-    // TODO: Integrate with Prometheus metrics for per-endpoint breakdown
-    let endpoints = vec![RPCEndpointLatency {
-        endpoint: "getLatestBlockhash".to_string(),
-        method: "GET".to_string(),
-        avg_latency_ms: avg_latency_f64,
-        p95_latency_ms: avg_latency_f64 * 1.5,
-        p99_latency_ms: avg_latency_f64 * 2.0,
-        error_rate_percent: 0.0,
-        request_count: 1250,
-        success_rate_percent: 100.0,
-    }];
+    // Extract a label value from a Prometheus metric.
+    fn label_value(m: &prometheus::proto::Metric, name: &str) -> String {
+        m.get_label()
+            .iter()
+            .find(|l| l.name() == name)
+            .map(|l| l.value().to_string())
+            .unwrap_or_default()
+    }
+
+    // Read ONLY the two RPC series. Registering the process-global clones (which share
+    // collectors with the main registry) on a throwaway registry lets us gather just
+    // these two families instead of `state.metrics.registry().gather()`, which
+    // serializes every metric family in the process on every request.
+    let rpc_registry = prometheus::Registry::new();
+    rpc_registry
+        .register(Box::new(crate::metrics::rpc_latency_metric()))
+        .ok();
+    rpc_registry
+        .register(Box::new(crate::metrics::rpc_errors_metric()))
+        .ok();
+    let families = rpc_registry.gather();
+
+    // Index error counts by (endpoint, method).
+    let mut error_counts: std::collections::HashMap<(String, String), f64> =
+        std::collections::HashMap::new();
+    for fam in &families {
+        if fam.name() == "chimera_rpc_errors_total" {
+            for m in fam.get_metric() {
+                error_counts.insert(
+                    (label_value(m, "endpoint"), label_value(m, "method")),
+                    m.get_counter().value(),
+                );
+            }
+        }
+    }
+
+    let mut endpoints: Vec<RPCEndpointLatency> = Vec::new();
+    // Overall accumulators.
+    let mut total_count: u64 = 0;
+    let mut total_sum: f64 = 0.0;
+    let mut total_errors: f64 = 0.0;
+    // Merged buckets across all children (same bounds per HistogramVec) for overall
+    // quantile estimation.
+    let mut merged_bounds: Vec<f64> = Vec::new();
+    let mut merged_cum: Vec<u64> = Vec::new();
+
+    for fam in &families {
+        if fam.name() != "chimera_rpc_latency_ms" {
+            continue;
+        }
+        for m in fam.get_metric() {
+            let hist = m.get_histogram();
+            let count = hist.get_sample_count();
+            let sum = hist.get_sample_sum();
+            // Accumulate merged buckets regardless of count (so zero-sample children
+            // don't reset bounds), but only emit rows for children with samples.
+            if merged_bounds.is_empty() {
+                merged_bounds = hist.get_bucket().iter().map(|b| b.upper_bound()).collect();
+                merged_cum = hist.get_bucket().iter().map(|b| b.cumulative_count()).collect();
+            } else {
+                for (mc, b) in merged_cum.iter_mut().zip(hist.get_bucket().iter()) {
+                    *mc += b.cumulative_count();
+                }
+            }
+            if count == 0 {
+                continue;
+            }
+
+            let endpoint = label_value(m, "endpoint");
+            let method = label_value(m, "method");
+            let avg = sum / count as f64;
+            let p95 = histogram_quantile(hist, 0.95);
+            let p99 = histogram_quantile(hist, 0.99);
+            let errors = error_counts
+                .get(&(endpoint.clone(), method.clone()))
+                .copied()
+                .unwrap_or(0.0);
+            let error_rate = errors / count as f64 * 100.0;
+
+            total_count += count;
+            total_sum += sum;
+            total_errors += errors;
+
+            endpoints.push(RPCEndpointLatency {
+                endpoint,
+                method,
+                avg_latency_ms: avg,
+                p95_latency_ms: p95,
+                p99_latency_ms: p99,
+                error_rate_percent: error_rate,
+                request_count: count as u32,
+                success_rate_percent: 100.0 - error_rate,
+            });
+        }
+    }
+
+    let overall_avg = if total_count > 0 {
+        total_sum / total_count as f64
+    } else {
+        0.0
+    };
+    let overall_error_rate = if total_count > 0 {
+        total_errors / total_count as f64 * 100.0
+    } else {
+        0.0
+    };
+    let (overall_p95, overall_p99) = (
+        quantile_from_buckets(&merged_bounds, &merged_cum, total_count, 0.95),
+        quantile_from_buckets(&merged_bounds, &merged_cum, total_count, 0.99),
+    );
 
     Ok(Json(RPCLatencyResponse {
         endpoints,
-        overall_avg_ms: avg_latency_f64,
-        overall_p95_ms: avg_latency_f64 * 1.5,
-        overall_p99_ms: avg_latency_f64 * 2.0,
-        error_rate_percent: 0.0,
-        sample_size: 1250,
+        overall_avg_ms: overall_avg,
+        overall_p95_ms: overall_p95,
+        overall_p99_ms: overall_p99,
+        error_rate_percent: overall_error_rate,
+        sample_size: total_count as u32,
     }))
 }
 
@@ -2959,11 +3048,53 @@ pub async fn trigger_reconciliation(
         ));
     }
 
-    // For now, return success - reconciliation runs via cron
-    // TODO: Implement async task spawning for on-demand reconciliation
     tracing::info!("Manual reconciliation triggered by {}", auth.0.identifier);
 
-    // Log the trigger event
+    // Resolve an RPC client: prefer the engine's active client, else build one from
+    // the configured primary URL so reconciliation works even pre-engine.
+    let rpc_client = match state.engine.as_ref() {
+        Some(engine) => engine.active_rpc_client().await,
+        None => None,
+    };
+    let rpc_client = match rpc_client {
+        Some(client) => Some(client),
+        None => {
+            let config = state.config.read().await;
+            Some(std::sync::Arc::new(
+                solana_client::nonblocking::rpc_client::RpcClient::new(
+                    config.rpc.primary_url.clone(),
+                ),
+            ))
+        }
+    };
+
+    let db = state.db.clone();
+    let metrics = state.metrics.clone();
+    let started_at = chrono::Utc::now().to_rfc3339();
+
+    if let Some(client) = rpc_client {
+        // Guard against overlapping runs: a sweep iterates up to hundreds of positions
+        // with one RPC call each, so stacking triggers would hammer the RPC provider.
+        use std::sync::atomic::Ordering;
+        if crate::engine::reconciliation::RECONCILIATION_RUNNING.swap(true, Ordering::SeqCst) {
+            return Err(AppError::Duplicate(
+                "A reconciliation run is already in progress".to_string(),
+            ));
+        }
+        let checker =
+            crate::engine::reconciliation::RpcOnChainChecker::new(client);
+        tokio::spawn(async move {
+            let result =
+                crate::engine::reconciliation::run_reconciliation(db.as_ref(), &checker, &metrics)
+                    .await;
+            crate::engine::reconciliation::RECONCILIATION_RUNNING.store(false, Ordering::SeqCst);
+            tracing::info!(?result, "Reconciliation run finished");
+        });
+    } else {
+        tracing::warn!("Reconciliation triggered without an RPC client; skipping run");
+    }
+
+    // Log the trigger event.
     state
         .db
         .log_config_change(
@@ -2977,7 +3108,7 @@ pub async fn trigger_reconciliation(
 
     Ok(Json(TriggerReconciliationResponse {
         run_id: uuid::Uuid::new_v4().to_string(),
-        scheduled_at: chrono::Utc::now().to_rfc3339(),
+        scheduled_at: started_at,
     }))
 }
 

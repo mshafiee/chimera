@@ -1,5 +1,17 @@
 #!/bin/bash
 # Chimera Daily Reconciliation Script
+#
+# ============================================================================
+# DEPRECATED — superseded by the in-process Rust runner.
+# ----------------------------------------------------------------------------
+# Reconciliation now runs inside the operator via
+#   operator/src/engine/reconciliation.rs (run_reconciliation), triggered by:
+#     POST /api/v1/reconciliation/trigger   (operator+ role)
+# Point cron at that API endpoint (or the operator's built-in schedule) instead of
+# this script so there is a single reconciliation path and no divergence between
+# shell and Rust logic. This script is retained only for fallback reference.
+# ============================================================================
+#
 # Runs daily via cron at 4 AM
 #
 # Purpose:

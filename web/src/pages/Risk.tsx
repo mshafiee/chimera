@@ -63,11 +63,12 @@ export function Risk() {
               <Info className="w-5 h-5 text-spear" />
               <div className="flex-1">
                 <div className="font-semibold text-spear">
-                  Risk API Endpoint Not Implemented
+                  No Portfolio Risk Data Available Yet
                 </div>
                 <div className="text-sm text-text-muted">
-                  The comprehensive portfolio risk API endpoint is not yet available.
-                  Risk metrics will be displayed once the backend implementation is complete.
+                  The portfolio risk API is available, but no risk metrics have been
+                  collected yet. Metrics populate automatically once positions are open
+                  and traded.
                 </div>
               </div>
             </div>
@@ -109,7 +110,7 @@ export function Risk() {
             <PortfolioHeatGauge data={portfolioRisk} />
           ) : (
             <div className="text-center text-text-muted py-8">
-              Risk metrics not available - API endpoint not implemented
+              No risk metrics available yet
             </div>
           )}
         </CardContent>
@@ -165,7 +166,7 @@ export function Risk() {
             <StopLossAnalytics data={stopLossMetrics} />
           ) : (
             <div className="text-center text-text-muted py-8">
-              Stop loss metrics not available - API endpoint not implemented
+              No stop loss metrics available yet
             </div>
           )}
         </CardContent>
@@ -186,7 +187,7 @@ export function Risk() {
             <ProfitTargetAnalytics data={profitTargetMetrics} />
           ) : (
             <div className="text-center text-text-muted py-8">
-              Profit target metrics not available - API endpoint not implemented
+              No profit target metrics available yet
             </div>
           )}
         </CardContent>

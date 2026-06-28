@@ -130,10 +130,15 @@ impl JitoSearcherClient {
             })?;
 
         // Get recent blockhash from RPC
-        let recent_blockhash =
-            self.rpc_client.get_latest_blockhash().await.map_err(|e| {
-                ExecutorError::Rpc(format!("Failed to get recent blockhash: {}", e))
-            })?;
+        let recent_blockhash = crate::metrics::timed_rpc(
+            "jito",
+            "getLatestBlockhash",
+            self.rpc_client.get_latest_blockhash(),
+        )
+        .await
+        .map_err(|e| {
+            ExecutorError::Rpc(format!("Failed to get recent blockhash: {}", e))
+        })?;
 
         // Create tip instruction
         let tip_instruction =

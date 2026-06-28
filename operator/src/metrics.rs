@@ -9,7 +9,8 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{
-    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntGauge, Opts, Registry, TextEncoder,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
+    TextEncoder,
 };
 use std::sync::Arc;
 
@@ -136,15 +137,19 @@ impl MetricsState {
             .register(Box::new(total_trades.clone()))
             .map_err(|e| format!("Failed to register total_trades: {}", e))?;
 
-        // RPC latency histogram by endpoint
-        let rpc_latency = HistogramVec::new(
-            HistogramOpts::new("chimera_rpc_latency_ms", "RPC call latency in milliseconds"),
-            &["endpoint", "method"],
-        )
-        .map_err(|e| format!("Failed to create rpc_latency histogram: {}", e))?;
+        // RPC latency histogram by endpoint/method. Backed by a process-global so that
+        // `timed_rpc` can observe at call sites that do not hold a MetricsState handle;
+        // registering the (shared) clone here exposes it for /metrics scraping.
+        let rpc_latency = rpc_latency_metric();
         registry
             .register(Box::new(rpc_latency.clone()))
             .map_err(|e| format!("Failed to register rpc_latency: {}", e))?;
+
+        // RPC error counter by endpoint/method (companion to rpc_latency for error rate).
+        let rpc_errors = rpc_errors_metric();
+        registry
+            .register(Box::new(rpc_errors.clone()))
+            .map_err(|e| format!("Failed to register rpc_errors: {}", e))?;
 
         // Reconciliation checked counter
         let reconciliation_checked = prometheus::IntCounter::with_opts(Opts::new(
@@ -391,6 +396,129 @@ pub fn metrics_router() -> Router<Arc<MetricsState>> {
     Router::new().route("/metrics", get(metrics_handler))
 }
 
+// =============================================================================
+// RPC latency instrumentation
+// =============================================================================
+
+/// Bucket bounds (ms) for the RPC latency histogram. RPC calls range from a few
+/// milliseconds (blockhash) to seconds (getTransaction), so bounds span 1ms..10s.
+const RPC_LATENCY_BUCKETS_MS: &[f64] =
+    &[1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0];
+
+// Process-global metrics so RPC call sites can observe latency without holding a
+// MetricsState handle. MetricsState registers clones of these for /metrics scraping.
+static RPC_LATENCY: std::sync::OnceLock<HistogramVec> = std::sync::OnceLock::new();
+static RPC_ERRORS: std::sync::OnceLock<IntCounterVec> = std::sync::OnceLock::new();
+
+/// The process-global RPC latency histogram (labels: `endpoint`, `method`).
+/// Clones share the same underlying collectors, so observing here is visible to any
+/// registry that registered a clone.
+pub fn rpc_latency_metric() -> HistogramVec {
+    RPC_LATENCY
+        .get_or_init(|| {
+            HistogramVec::new(
+                HistogramOpts::new("chimera_rpc_latency_ms", "RPC call latency in milliseconds")
+                    .buckets(RPC_LATENCY_BUCKETS_MS.to_vec()),
+                &["endpoint", "method"],
+            )
+            .expect("chimera_rpc_latency_ms is a valid HistogramVec")
+        })
+        .clone()
+}
+
+/// The process-global RPC error counter (labels: `endpoint`, `method`).
+pub fn rpc_errors_metric() -> IntCounterVec {
+    RPC_ERRORS
+        .get_or_init(|| {
+            IntCounterVec::new(
+                Opts::new(
+                    "chimera_rpc_errors_total",
+                    "Total RPC call errors by endpoint and method",
+                ),
+                &["endpoint", "method"],
+            )
+            .expect("chimera_rpc_errors_total is a valid IntCounterVec")
+        })
+        .clone()
+}
+
+/// Time an RPC call future, recording its latency to `chimera_rpc_latency_ms` (and an
+/// error to `chimera_rpc_errors_total` on `Err`). Records on BOTH success and error
+/// paths. `endpoint` is a coarse endpoint category (e.g. "primary", "polling", "jito");
+/// `method` is the Solana RPC method name (e.g. "getLatestBlockhash").
+///
+/// Wrap a call site like:
+/// ```ignore
+/// let blockhash = timed_rpc("primary", "getLatestBlockhash", async {
+///     self.rpc_client.get_latest_blockhash().await
+/// }).await.map_err(|e| ...)?;
+/// ```
+pub async fn timed_rpc<F, T, E>(endpoint: &str, method: &str, fut: F) -> Result<T, E>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+{
+    let start = std::time::Instant::now();
+    let result = fut.await;
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    rpc_latency_metric()
+        .with_label_values(&[endpoint, method])
+        .observe(elapsed_ms);
+    if result.is_err() {
+        rpc_errors_metric().with_label_values(&[endpoint, method]).inc();
+    }
+    result
+}
+
+/// Prometheus-style histogram quantile estimation via linear interpolation between
+/// cumulative bucket boundaries (the `histogram_quantile()` algorithm). `q` is in
+/// `[0, 1]`. Returns `0.0` when there are no samples, and the highest finite bucket
+/// bound when the quantile falls in the `+Inf` overflow bucket.
+pub fn histogram_quantile(hist: &prometheus::proto::Histogram, q: f64) -> f64 {
+    let total = hist.get_sample_count();
+    let bounds: Vec<f64> = hist.get_bucket().iter().map(|b| b.upper_bound()).collect();
+    let cum: Vec<u64> = hist
+        .get_bucket()
+        .iter()
+        .map(|b| b.cumulative_count())
+        .collect();
+    quantile_from_buckets(&bounds, &cum, total, q)
+}
+
+/// Core quantile estimator operating on raw bucket data (upper bounds + cumulative
+/// counts), shared by the single-histogram and merged-histogram paths. Exposed so
+/// `get_rpc_latency` can compute overall quantiles across multiple (endpoint, method)
+/// children without reconstructing a proto `Histogram`.
+pub fn quantile_from_buckets(bounds: &[f64], cum: &[u64], total_count: u64, q: f64) -> f64 {
+    if total_count == 0 {
+        return 0.0;
+    }
+    let target = q * total_count as f64;
+
+    let mut prev_count: u64 = 0;
+    let mut prev_bound: f64 = 0.0;
+    for (upper, &cum_i) in bounds.iter().zip(cum.iter()) {
+        if (cum_i as f64) >= target {
+            // Quantile falls in this bucket. If the bucket is +Inf (overflow) we cannot
+            // interpolate beyond the last finite bound, so report it.
+            if !upper.is_finite() {
+                return prev_bound;
+            }
+            let bucket_count = cum_i.saturating_sub(prev_count);
+            if bucket_count == 0 {
+                return *upper;
+            }
+            return prev_bound + (*upper - prev_bound) * (target - prev_count as f64)
+                / bucket_count as f64;
+        }
+        prev_count = cum_i;
+        if upper.is_finite() {
+            prev_bound = *upper;
+        }
+    }
+    // Target beyond all buckets (shouldn't happen since +Inf bucket holds everything).
+    prev_bound
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,5 +540,80 @@ mod tests {
 
         state.rpc_health.set(1);
         assert_eq!(state.rpc_health.get(), 1);
+    }
+
+    #[test]
+    fn test_quantile_from_buckets() {
+        // bounds [10, 50, 100, +Inf], cumulative [10, 60, 100, 100], total 100.
+        let bounds = vec![10.0, 50.0, 100.0, f64::INFINITY];
+        let cum = vec![10u64, 60, 100, 100];
+        let total = 100u64;
+
+        // median: target 50 → bucket [10,50), interpolate: 10 + 40*(50-10)/50 = 42
+        assert!((quantile_from_buckets(&bounds, &cum, total, 0.5) - 42.0).abs() < 1e-9);
+        // q=0.1: target 10 → bucket [0,10), interpolate: 0 + 10*(10-0)/10 = 10
+        assert!((quantile_from_buckets(&bounds, &cum, total, 0.1) - 10.0).abs() < 1e-9);
+        // q=0.95: target 95 → bucket [50,100), interpolate: 50 + 50*(95-60)/40 = 93.75
+        assert!((quantile_from_buckets(&bounds, &cum, total, 0.95) - 93.75).abs() < 1e-9);
+        // q=1.0: target 100 → top of [50,100) bucket = 100
+        assert!((quantile_from_buckets(&bounds, &cum, total, 1.0) - 100.0).abs() < 1e-9);
+
+        // Overflow into +Inf bucket reports the highest finite bound (10).
+        let bounds_inf = vec![10.0, f64::INFINITY];
+        let cum_inf = vec![5u64, 100];
+        assert!((quantile_from_buckets(&bounds_inf, &cum_inf, 100, 0.5) - 10.0).abs() < 1e-9);
+
+        // No samples.
+        assert_eq!(quantile_from_buckets(&[], &[], 0, 0.5), 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_timed_rpc_records_latency_and_errors() {
+        let registry = Registry::new();
+        registry
+            .register(Box::new(rpc_latency_metric()))
+            .expect("register rpc_latency");
+        registry
+            .register(Box::new(rpc_errors_metric()))
+            .expect("register rpc_errors");
+
+        // Unique (endpoint, method) so this test's observations are isolated from other
+        // tests that share the process-global metrics.
+        let endpoint = "test_ep";
+        let method = "test_timed_rpc_records_latency_and_errors";
+
+        let ok: Result<u32, String> = timed_rpc(endpoint, method, async { Ok(42) }).await;
+        assert_eq!(ok.unwrap(), 42);
+        let err: Result<u32, String> = timed_rpc(endpoint, method, async { Err("boom".into()) }).await;
+        assert!(err.is_err());
+
+        let mut latency_count = 0u64;
+        let mut error_value = 0.0f64;
+        for fam in registry.gather() {
+            if fam.name() == "chimera_rpc_latency_ms" {
+                for m in fam.get_metric() {
+                    if label_eq(m, "endpoint", endpoint) && label_eq(m, "method", method) {
+                        latency_count = m.get_histogram().get_sample_count();
+                    }
+                }
+            } else if fam.name() == "chimera_rpc_errors_total" {
+                for m in fam.get_metric() {
+                    if label_eq(m, "endpoint", endpoint) && label_eq(m, "method", method) {
+                        error_value = m.get_counter().value();
+                    }
+                }
+            }
+        }
+        assert_eq!(latency_count, 2, "both calls recorded");
+        assert!(
+            (error_value - 1.0).abs() < 1e-9,
+            "exactly one error recorded"
+        );
+    }
+
+    fn label_eq(m: &prometheus::proto::Metric, name: &str, value: &str) -> bool {
+        m.get_label()
+            .iter()
+            .any(|l| l.name() == name && l.value() == value)
     }
 }

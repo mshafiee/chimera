@@ -218,10 +218,15 @@ impl TransactionBuilder {
         );
 
         // Get recent blockhash first (needed for both transaction types)
-        let blockhash =
-            self.rpc_client.get_latest_blockhash().await.map_err(|e| {
-                crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
-            })?;
+        let blockhash = crate::metrics::timed_rpc(
+            "primary",
+            "getLatestBlockhash",
+            self.rpc_client.get_latest_blockhash(),
+        )
+        .await
+        .map_err(|e| {
+            crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
+        })?;
 
         // Jupiter v1 API returns VersionedTransaction (starts with version byte 0x01)
         // Check the first byte to determine transaction type
@@ -347,10 +352,15 @@ impl TransactionBuilder {
         _signal: &Signal,
         wallet_keypair: &Keypair,
     ) -> AppResult<BuiltTransaction> {
-        let blockhash =
-            self.rpc_client.get_latest_blockhash().await.map_err(|e| {
-                crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
-            })?;
+        let blockhash = crate::metrics::timed_rpc(
+            "primary",
+            "getLatestBlockhash",
+            self.rpc_client.get_latest_blockhash(),
+        )
+        .await
+        .map_err(|e| {
+            crate::error::AppError::Rpc(format!("Failed to get blockhash: {}", e))
+        })?;
 
         let empty_tx = Transaction::new_with_payer(&[], Some(&wallet_keypair.pubkey()));
 
@@ -374,11 +384,16 @@ impl TransactionBuilder {
         use solana_account_decoder::UiAccountData;
         use solana_client::rpc_request::TokenAccountsFilter;
 
-        let accounts = self
-            .rpc_client
-            .get_token_accounts_by_owner(wallet_pubkey, TokenAccountsFilter::Mint(*token_mint))
-            .await
-            .ok()?;
+        let accounts = crate::metrics::timed_rpc(
+            "primary",
+            "getTokenAccountsByOwner",
+            self.rpc_client.get_token_accounts_by_owner(
+                wallet_pubkey,
+                TokenAccountsFilter::Mint(*token_mint),
+            ),
+        )
+        .await
+        .ok()?;
 
         accounts
             .iter()

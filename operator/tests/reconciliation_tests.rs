@@ -5,6 +5,239 @@
 //! - Auto-resolution of discrepancies
 //! - Epsilon tolerance for dust amounts
 //! - Reconciliation log entries
+//!
+//! The `runner_*` tests exercise the real [`run_reconciliation`] runner against a
+//! full-schema SQLite database using a stub on-chain checker.
+
+mod common;
+
+use async_trait::async_trait;
+use chimera_operator::db_abstraction::{
+    types::{InsertPosition, InsertTrade, UpdatePosition},
+    Database,
+};
+use chimera_operator::engine::reconciliation::{
+    run_reconciliation, OnChainTxChecker, OnChainTxStatus,
+};
+use chimera_operator::metrics::MetricsState;
+use rust_decimal::Decimal;
+use std::sync::Arc;
+
+/// Stub on-chain checker: signatures in `found` → Found, in `not_found` → NotFound,
+/// everything else → Error.
+struct StubChecker {
+    found: Vec<String>,
+    not_found: Vec<String>,
+}
+
+#[async_trait]
+impl OnChainTxChecker for StubChecker {
+    async fn check_signature(&self, signature: &str) -> OnChainTxStatus {
+        if self.found.iter().any(|s| s == signature) {
+            OnChainTxStatus::Found
+        } else if self.not_found.iter().any(|s| s == signature) {
+            OnChainTxStatus::NotFound
+        } else {
+            OnChainTxStatus::Error
+        }
+    }
+}
+
+fn metrics() -> Arc<MetricsState> {
+    Arc::new(MetricsState::new().expect("metrics"))
+}
+
+async fn seed_position(db: &Arc<dyn Database>, uuid: &str, entry_sig: &str) {
+    db.insert_trade(&InsertTrade {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "Wallet1".to_string(),
+        token_address: "Token1".to_string(),
+        token_symbol: Some("TST".to_string()),
+        strategy: "SHIELD".to_string(),
+        side: "BUY".to_string(),
+        amount_sol: Decimal::ONE,
+        status: "ACTIVE".to_string(),
+    })
+    .await
+    .unwrap();
+
+    db.insert_position(&InsertPosition {
+        trade_uuid: uuid.to_string(),
+        wallet_address: "Wallet1".to_string(),
+        token_address: "Token1".to_string(),
+        token_symbol: Some("TST".to_string()),
+        strategy: "SHIELD".to_string(),
+        entry_amount_sol: Decimal::ONE,
+        entry_price: Decimal::from(10),
+        entry_tx_signature: entry_sig.to_string(),
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn runner_logs_confirmed_entry_for_active_position() {
+    let (db, _temp) = common::create_test_db().await;
+    seed_position(&db, "uuid-active", "entry-sig-active").await;
+
+    let checker = StubChecker {
+        found: vec!["entry-sig-active".to_string()],
+        not_found: vec![],
+    };
+    let metrics = metrics();
+
+    let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
+
+    // One ACTIVE position checked, no discrepancies, none auto-resolved.
+    assert_eq!(result.checked_count, 1);
+    assert_eq!(result.discrepancies, 0);
+    assert_eq!(result.auto_resolved, 0);
+
+    // A log row was inserted recording the confirmed entry.
+    let status = db.get_reconciliation_status(100).await.unwrap();
+    assert!(status.checked_count >= 1, "checked_count should reflect the run");
+
+    // The checked counter advanced.
+    assert!(metrics.reconciliation_checked.get() >= 1);
+}
+
+#[tokio::test]
+async fn runner_flags_missing_entry_transaction() {
+    let (db, _temp) = common::create_test_db().await;
+    seed_position(&db, "uuid-missing", "entry-sig-missing").await;
+
+    // Age past the entry-finalization grace window so a missing entry is actionable.
+    let pool = common::sqlite_pool(&db);
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    sqlx::query("UPDATE positions SET opened_at = ? WHERE trade_uuid = ?")
+        .bind(old)
+        .bind("uuid-missing")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let checker = StubChecker {
+        found: vec![],
+        not_found: vec!["entry-sig-missing".to_string()],
+    };
+    let metrics = metrics();
+
+    let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
+
+    assert_eq!(result.checked_count, 1);
+    assert_eq!(result.discrepancies, 1, "missing entry should be a discrepancy");
+    assert!(metrics.reconciliation_discrepancies.get() >= 1);
+}
+
+#[tokio::test]
+async fn runner_suppresses_fresh_entry_missing_within_grace() {
+    let (db, _temp) = common::create_test_db().await;
+    // Fresh position (opened_at = now) — within the entry-finalization grace window.
+    seed_position(&db, "uuid-fresh-missing", "entry-sig-fresh-missing").await;
+
+    let checker = StubChecker {
+        found: vec![],
+        not_found: vec!["entry-sig-fresh-missing".to_string()],
+    };
+    let metrics = metrics();
+
+    let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
+
+    assert_eq!(result.checked_count, 1);
+    assert_eq!(
+        result.discrepancies, 0,
+        "fresh position's missing entry is pending, not a discrepancy"
+    );
+}
+
+#[tokio::test]
+async fn runner_auto_resolves_confirmed_exit() {
+    let (db, _temp) = common::create_test_db().await;
+    let uuid = "uuid-exiting";
+    seed_position(&db, uuid, "entry-sig-exit").await;
+
+    // Move the position to EXITING with an exit price + signature.
+    db.update_position(&UpdatePosition {
+        trade_uuid: uuid.to_string(),
+        current_price: Some(Decimal::from(20)),
+        unrealized_pnl_sol: None,
+        unrealized_pnl_percent: None,
+        state: Some("EXITING".to_string()),
+        exit_price: Some(Decimal::from(20)),
+        exit_tx_signature: Some("exit-sig-confirmed".to_string()),
+        realized_pnl_sol: None,
+        realized_pnl_usd: None,
+    })
+    .await
+    .unwrap();
+
+    // Age the position past the confirmation grace window so the exit is checked.
+    let pool = common::sqlite_pool(&db);
+    let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    sqlx::query("UPDATE positions SET opened_at = ? WHERE trade_uuid = ?")
+        .bind(old)
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let checker = StubChecker {
+        found: vec![
+            "entry-sig-exit".to_string(),
+            "exit-sig-confirmed".to_string(),
+        ],
+        not_found: vec![],
+    };
+    let metrics = metrics();
+
+    let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
+
+    assert_eq!(result.auto_resolved, 1, "confirmed exit should auto-resolve");
+
+    // The position should now be CLOSED.
+    let positions = db.get_positions(Some("CLOSED")).await.unwrap();
+    assert!(
+        positions.iter().any(|p| p.trade_uuid == uuid),
+        "position should be CLOSED after auto-resolve"
+    );
+}
+
+#[tokio::test]
+async fn runner_treats_missing_exit_as_pending() {
+    // An EXITING position whose exit tx is NotFound is treated as PENDING (the exit
+    // may be in-flight), not as a discrepancy, and is not auto-resolved.
+    let (db, _temp) = common::create_test_db().await;
+    let uuid = "uuid-pending-exit";
+    seed_position(&db, uuid, "entry-sig-pending").await;
+
+    db.update_position(&UpdatePosition {
+        trade_uuid: uuid.to_string(),
+        current_price: Some(Decimal::from(20)),
+        unrealized_pnl_sol: None,
+        unrealized_pnl_percent: None,
+        state: Some("EXITING".to_string()),
+        exit_price: Some(Decimal::from(20)),
+        exit_tx_signature: Some("exit-sig-pending".to_string()),
+        realized_pnl_sol: None,
+        realized_pnl_usd: None,
+    })
+    .await
+    .unwrap();
+
+    let checker = StubChecker {
+        found: vec!["entry-sig-pending".to_string()],
+        not_found: vec!["exit-sig-pending".to_string()],
+    };
+    let metrics = metrics();
+
+    let result = run_reconciliation(db.as_ref(), &checker, &metrics).await;
+
+    assert_eq!(result.auto_resolved, 0, "pending exit is not auto-resolved");
+    assert_eq!(result.discrepancies, 0, "pending exit is not a discrepancy");
+    // Position remains EXITING.
+    let exiting = db.get_positions(Some("EXITING")).await.unwrap();
+    assert!(exiting.iter().any(|p| p.trade_uuid == uuid));
+}
 
 #[cfg(test)]
 mod tests {

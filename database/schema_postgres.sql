@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS trades (
     dex_fee_sol             NUMERIC(30,18) DEFAULT 0,
     slippage_cost_sol       NUMERIC(30,18) DEFAULT 0,
     total_cost_sol          NUMERIC(30,18) DEFAULT 0,
+    network_fee_sol         NUMERIC(30,18) DEFAULT 0,
     net_pnl_sol             NUMERIC(30,18),
     created_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at              TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
@@ -82,7 +83,9 @@ CREATE TABLE IF NOT EXISTS positions (
     exit_tx_signature       TEXT,
     realized_pnl_sol         NUMERIC(30,18),
     realized_pnl_usd       NUMERIC(30,18),
+    realized_net_pnl_sol   NUMERIC(30,18),
     entry_sol_price_usd     NUMERIC(30,18),
+    token_amount            NUMERIC(30,18),
     opened_at               TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     last_updated            TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     closed_at               TIMESTAMPTZ,
@@ -94,6 +97,25 @@ CREATE INDEX IF NOT EXISTS idx_positions_state ON positions(state);
 CREATE INDEX IF NOT EXISTS idx_positions_state_updated ON positions(state, last_updated);
 CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_positions_wallet_token ON positions(wallet_address, token_address);
+-- Partial index for time-windowed PnL SUM queries over CLOSED positions. `positions` is
+-- append-only, so the CLOSED set grows without bound; without this, get_pnl_window/_24h/
+-- _7d/_30d/get_max_drawdown_percent scan all CLOSED rows past the time cutoff.
+CREATE INDEX IF NOT EXISTS idx_positions_closed_at ON positions(closed_at) WHERE state = 'CLOSED';
+
+-- =============================================================================
+-- SCHEMA EVOLUTION: idempotent ALTERs for existing databases
+-- =============================================================================
+-- The operator's Postgres `run_migrations()` executes this file on every startup via
+-- `CREATE TABLE IF NOT EXISTS` (a no-op on existing tables). The ALTERs below ensure
+-- columns added after the initial deployment are created on already-populated databases.
+-- They mirror the SQLite migration `20260627000000_add_net_pnl_and_network_fee.sql`.
+
+-- network_fee_sol on trades (on-chain network fee per trade)
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS network_fee_sol NUMERIC(30,18) DEFAULT 0;
+-- realized_net_pnl_sol on positions (accumulated net PnL after cost deduction)
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS realized_net_pnl_sol NUMERIC(30,18);
+-- token_amount on positions (on-chain token balance at entry)
+ALTER TABLE positions ADD COLUMN IF NOT EXISTS token_amount NUMERIC(30,18);
 
 -- =============================================================================
 -- WALLET MANAGEMENT TABLES

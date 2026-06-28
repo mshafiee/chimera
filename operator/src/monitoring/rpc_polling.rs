@@ -201,10 +201,16 @@ pub async fn poll_wallet_transactions(
 
         // Parse signature string to Signature type
         if let Ok(sig) = sig_str.parse::<solana_sdk::signature::Signature>() {
-            if let Ok(tx) = rpc_client
-                .get_transaction(&sig, solana_transaction_status::UiTransactionEncoding::Json)
-                .await
-            {
+            let tx_result = crate::metrics::timed_rpc(
+                "polling",
+                "getTransaction",
+                rpc_client.get_transaction(
+                    &sig,
+                    solana_transaction_status::UiTransactionEncoding::Json,
+                ),
+            )
+            .await;
+            if let Ok(tx) = tx_result {
                 // Convert UiTransaction to JSON Value for parser
                 let tx_json: Value =
                     serde_json::to_value(&tx).context("Failed to serialize transaction to JSON")?;

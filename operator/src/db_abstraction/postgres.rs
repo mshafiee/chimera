@@ -4,31 +4,19 @@ use super::types::DatabaseConfig;
 use super::types::PostgresPool;
 use super::{
     ActivePositionEntry, ActivePositionSummary, CircuitBreakerState, ConfigAuditItem, Database,
-    DbPool, DeadLetterItem, ExitTargetData, InsertPosition, InsertTrade, KillSwitchState,
-    LatencyBucket, Position, PositionDetail, PositionRecord, ReconciliationRun,
-    ReconciliationStats, ReconciliationStatus, RetryableDlqItem, Trade, TradeDetail,
-    TradeLatencyStats, TradeStatistics, UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus,
-    Wallet, WalletCopyPerformance, WalletDetail, WalletMonitoring, WalletPerformance,
-    WebhookAuditLog,
+    DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData, InsertPosition,
+    InsertTrade, KillSwitchState, LatencyBucket, Position, PositionDetail, PositionRecord,
+    ReconciliationRun, ReconciliationStats, ReconciliationStatus, RetryableDlqItem, Trade,
+    TradeDetail, TradeLatencyStats, TradeStatistics, UpdateDlqItemParams, UpdatePosition,
+    UpdateTradeStatus, Wallet, WalletCopyPerformance, WalletDetail, WalletMonitoring,
+    WalletPerformance, WebhookAuditLog,
 };
-use crate::dec_to_text;
 use crate::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::Row;
 use std::str::FromStr;
 use tracing::info;
-
-// Legacy f64 helpers — PostgreSQL still uses REAL columns (not yet migrated to TEXT)
-fn f64_to_decimal(val: f64) -> Decimal {
-    Decimal::from_f64_retain(val).unwrap_or(Decimal::ZERO)
-}
-fn decimal_to_f64(val: Decimal) -> f64 {
-    val.to_f64().unwrap_or(0.0)
-}
-fn opt_f64_to_decimal(val: Option<f64>) -> Option<Decimal> {
-    val.and_then(Decimal::from_f64_retain)
-}
 
 /// PostgreSQL backend implementation
 pub struct PostgresBackend {
@@ -74,6 +62,44 @@ impl PostgresBackend {
     }
 }
 
+/// Append the shared `trades` WHERE-filter fragment (created_at range, status, strategy,
+/// wallet_address) to `sql`, numbering bind placeholders `$1..` and returning the next
+/// available placeholder index. Used by BOTH `get_trades_filtered` and
+/// `count_trades_filtered` so their predicates cannot drift (a drift would make the
+/// pagination total mismatch the returned rows). Callers must bind the `Some` filters in
+/// the same canonical order: from, to, status, strategy, wallet.
+fn append_trade_filter_clauses(
+    sql: &mut String,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+    status_filter: Option<&str>,
+    strategy_filter: Option<&str>,
+    wallet_address_filter: Option<&str>,
+) -> usize {
+    let mut n = 1usize;
+    if from_date.is_some() {
+        sql.push_str(&format!(" AND created_at >= ${n}"));
+        n += 1;
+    }
+    if to_date.is_some() {
+        sql.push_str(&format!(" AND created_at <= ${n}"));
+        n += 1;
+    }
+    if status_filter.is_some() {
+        sql.push_str(&format!(" AND status = ${n}"));
+        n += 1;
+    }
+    if strategy_filter.is_some() {
+        sql.push_str(&format!(" AND strategy = ${n}"));
+        n += 1;
+    }
+    if wallet_address_filter.is_some() {
+        sql.push_str(&format!(" AND wallet_address = ${n}"));
+        n += 1;
+    }
+    n
+}
+
 #[async_trait::async_trait]
 impl Database for PostgresBackend {
     // ========================================================================
@@ -116,11 +142,20 @@ impl Database for PostgresBackend {
         let schema = std::fs::read_to_string("database/schema_postgres.sql")
             .map_err(|e| AppError::Internal(format!("Failed to read schema: {}", e)))?;
 
+        // Strip whole-line SQL comments BEFORE splitting on `;`, otherwise a statement
+        // preceded by a `--` comment would collapse into a chunk that starts with `--`
+        // and be silently skipped (which previously swallowed the idempotent ALTERs and
+        // the partial index added below the schema header comments).
+        let schema: String = schema
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         // Split by semicolon and execute each statement
-        // Note: This is a simplified approach - production should use proper migrations
         for statement in schema.split(';') {
             let statement = statement.trim();
-            if !statement.is_empty() && !statement.starts_with("--") {
+            if !statement.is_empty() {
                 sqlx::query(statement)
                     .execute(&self.pool)
                     .await
@@ -204,7 +239,7 @@ impl Database for PostgresBackend {
         .bind(&trade.token_symbol)
         .bind(&trade.strategy)
         .bind(&trade.side)
-        .bind(decimal_to_f64(trade.amount_sol))
+        .bind(trade.amount_sol)
         .bind(&trade.status)
         .fetch_one(&self.pool)
         .await?;
@@ -226,7 +261,7 @@ impl Database for PostgresBackend {
             .bind(sig)
             .bind(&update.error_message)
             .bind(&update.trade_uuid)
-            .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
+            .bind(update.network_fee_sol)
             .execute(&self.pool)
             .await?
         } else {
@@ -241,7 +276,7 @@ impl Database for PostgresBackend {
             .bind(&update.status)
             .bind(&update.error_message)
             .bind(&update.trade_uuid)
-            .bind(update.network_fee_sol.map(|v| dec_to_text(&v)))
+            .bind(update.network_fee_sol)
             .execute(&self.pool)
             .await?
         };
@@ -344,9 +379,9 @@ impl Database for PostgresBackend {
             "#,
         )
         .bind(tx_signature)
-        .bind(decimal_to_f64(jito_tip_sol))
-        .bind(decimal_to_f64(dex_fee_sol))
-        .bind(decimal_to_f64(slippage_cost_sol))
+        .bind(jito_tip_sol)
+        .bind(dex_fee_sol)
+        .bind(slippage_cost_sol)
         .bind(trade_uuid)
         .execute(&self.pool)
         .await?;
@@ -367,8 +402,8 @@ impl Database for PostgresBackend {
             WHERE trade_uuid = $3
             "#,
         )
-        .bind(decimal_to_f64(pnl_sol))
-        .bind(decimal_to_f64(pnl_usd))
+        .bind(pnl_sol)
+        .bind(pnl_usd)
         .bind(trade_uuid)
         .execute(&self.pool)
         .await?;
@@ -395,8 +430,8 @@ impl Database for PostgresBackend {
         .bind(&position.token_address)
         .bind(&position.token_symbol)
         .bind(&position.strategy)
-        .bind(decimal_to_f64(position.entry_amount_sol))
-        .bind(decimal_to_f64(position.entry_price))
+        .bind(position.entry_amount_sol)
+        .bind(position.entry_price)
         .bind(&position.entry_tx_signature)
         .fetch_one(&self.pool)
         .await?;
@@ -405,49 +440,58 @@ impl Database for PostgresBackend {
     }
 
     async fn update_position(&self, update: &UpdatePosition) -> AppResult<()> {
+        // Bind values are accumulated in a SINGLE ordered container so that the
+        // `$N` placeholder numbering always matches the bind order. Splitting
+        // decimals and strings into separate vectors desyncs from `$N` (see the
+        // SQLite reference, which uses one ordered `binds` vec). Each field is
+        // pushed in the same order its `SET` clause is emitted.
+        enum SetBind {
+            Dec(Decimal),
+            Str(String),
+        }
+
         let mut set_clauses: Vec<String> = Vec::new();
-        let mut f64_binds: Vec<f64> = Vec::new();
-        let mut str_binds: Vec<String> = Vec::new();
+        let mut binds: Vec<SetBind> = Vec::new();
         let mut param_idx = 1;
 
         if let Some(price) = update.current_price {
             set_clauses.push(format!("current_price = ${}", param_idx));
-            f64_binds.push(decimal_to_f64(price));
+            binds.push(SetBind::Dec(price));
             param_idx += 1;
         }
         if let Some(pnl) = update.unrealized_pnl_sol {
             set_clauses.push(format!("unrealized_pnl_sol = ${}", param_idx));
-            f64_binds.push(decimal_to_f64(pnl));
+            binds.push(SetBind::Dec(pnl));
             param_idx += 1;
         }
         if let Some(pnl_pct) = update.unrealized_pnl_percent {
             set_clauses.push(format!("unrealized_pnl_percent = ${}", param_idx));
-            f64_binds.push(decimal_to_f64(pnl_pct));
+            binds.push(SetBind::Dec(pnl_pct));
             param_idx += 1;
         }
         if let Some(state) = &update.state {
             set_clauses.push(format!("state = ${}", param_idx));
-            str_binds.push(state.clone());
+            binds.push(SetBind::Str(state.clone()));
             param_idx += 1;
         }
         if let Some(exit_price) = update.exit_price {
             set_clauses.push(format!("exit_price = ${}", param_idx));
-            f64_binds.push(decimal_to_f64(exit_price));
+            binds.push(SetBind::Dec(exit_price));
             param_idx += 1;
         }
         if let Some(exit_sig) = &update.exit_tx_signature {
             set_clauses.push(format!("exit_tx_signature = ${}", param_idx));
-            str_binds.push(exit_sig.clone());
+            binds.push(SetBind::Str(exit_sig.clone()));
             param_idx += 1;
         }
         if let Some(pnl) = update.realized_pnl_sol {
             set_clauses.push(format!("realized_pnl_sol = ${}", param_idx));
-            f64_binds.push(decimal_to_f64(pnl));
+            binds.push(SetBind::Dec(pnl));
             param_idx += 1;
         }
         if let Some(pnl_usd) = update.realized_pnl_usd {
             set_clauses.push(format!("realized_pnl_usd = ${}", param_idx));
-            f64_binds.push(decimal_to_f64(pnl_usd));
+            binds.push(SetBind::Dec(pnl_usd));
             param_idx += 1;
         }
 
@@ -462,11 +506,11 @@ impl Database for PostgresBackend {
         );
 
         let mut query = sqlx::query(&sql);
-        for bind in f64_binds {
-            query = query.bind(bind);
-        }
-        for bind in str_binds {
-            query = query.bind(bind);
+        for bind in binds {
+            query = match bind {
+                SetBind::Dec(d) => query.bind(d),
+                SetBind::Str(s) => query.bind(s),
+            };
         }
         query = query.bind(&update.trade_uuid);
 
@@ -545,10 +589,10 @@ impl Database for PostgresBackend {
             WHERE trade_uuid = $5
             "#,
         )
-        .bind(decimal_to_f64(exit_price))
+        .bind(exit_price)
         .bind(exit_tx_signature)
-        .bind(decimal_to_f64(realized_pnl_sol))
-        .bind(decimal_to_f64(realized_pnl_usd))
+        .bind(realized_pnl_sol)
+        .bind(realized_pnl_usd)
         .bind(trade_uuid)
         .execute(&self.pool)
         .await?;
@@ -616,11 +660,22 @@ impl Database for PostgresBackend {
     }
 
     async fn merge_roster(&self, _roster_db_path: &str) -> AppResult<u32> {
-        // PostgreSQL roster merge: not yet implemented.
-        // Use the SQLite backend for roster operations.
-        // TODO: implement via pg_bulkload or COPY
+        // Intentionally SQLite-only by design.
+        //
+        // Roster merging is a scout -> operator ETL step that relies on SQLite's
+        // `ATTACH DATABASE` primitive to read scout's wallet roster file directly
+        // (see sqlite.rs `merge_roster`). PostgreSQL has no equivalent of
+        // ATTACH DATABASE, so the SQLite path cannot be ported. Postgres
+        // deployments ingest scout data through the standalone migration tool
+        // (`migrate_sqlite_to_postgres.py`) instead of an in-process ATTACH.
+        //
+        // If this is reached on a Postgres backend, the caller is using the wrong
+        // ingestion path — route roster data through the migration tool.
         Err(AppError::Internal(
-            "Roster merge not yet supported on PostgreSQL backend".to_string(),
+            "merge_roster is not supported on the PostgreSQL backend: it is a \
+             SQLite-only scout ETL operation that depends on ATTACH DATABASE. \
+             Ingest scout roster data via tools/migrate_sqlite_to_postgres.py instead."
+                .to_string(),
         ))
     }
 
@@ -800,8 +855,10 @@ impl Database for PostgresBackend {
             total_trades: row.try_get("total_trades").unwrap_or(0),
             successful_trades: row.try_get("successful_trades").unwrap_or(0),
             failed_trades: row.try_get("failed_trades").unwrap_or(0),
-            total_pnl_sol: f64_to_decimal(row.try_get("total_pnl_sol").unwrap_or(0.0)),
-            total_volume_sol: f64_to_decimal(row.try_get("total_volume_sol").unwrap_or(0.0)),
+            total_pnl_sol: row.try_get::<Decimal, _>("total_pnl_sol").unwrap_or(Decimal::ZERO),
+            total_volume_sol: row
+                .try_get::<Decimal, _>("total_volume_sol")
+                .unwrap_or(Decimal::ZERO),
         })
     }
 
@@ -851,11 +908,11 @@ impl Database for PostgresBackend {
                 wallet_address: r
                     .try_get("wallet_address")
                     .unwrap_or(wallet_address.to_string()),
-                copy_pnl_7d: f64_to_decimal(r.try_get("copy_pnl_7d").unwrap_or(0.0)),
-                copy_pnl_30d: f64_to_decimal(r.try_get("copy_pnl_30d").unwrap_or(0.0)),
-                signal_success_rate: f64_to_decimal(
-                    r.try_get("signal_success_rate").unwrap_or(0.0),
-                ),
+                copy_pnl_7d: r.try_get::<Decimal, _>("copy_pnl_7d").unwrap_or(Decimal::ZERO),
+                copy_pnl_30d: r.try_get::<Decimal, _>("copy_pnl_30d").unwrap_or(Decimal::ZERO),
+                signal_success_rate: r
+                    .try_get::<Decimal, _>("signal_success_rate")
+                    .unwrap_or(Decimal::ZERO),
                 total_trades: r.try_get("total_trades").unwrap_or(0),
                 winning_trades: r.try_get("winning_trades").unwrap_or(0),
             })),
@@ -864,126 +921,760 @@ impl Database for PostgresBackend {
     }
 
     // ========================================================================
-    // NEW METHODS — STUBS (PostgreSQL migration pending)
+    // JITO TIPS
     // ========================================================================
 
     async fn insert_jito_tip(
         &self,
-        _tip: &Decimal,
-        _bsig: Option<&str>,
-        _strat: Option<&str>,
-        _success: bool,
+        tip: &Decimal,
+        bsig: Option<&str>,
+        strat: Option<&str>,
+        success: bool,
     ) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "insert_jito_tip not implemented for PostgreSQL".into(),
-        ))
+        let row = sqlx::query(
+            r#"
+            INSERT INTO jito_tip_history (tip_amount_sol, bundle_signature, strategy, success)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            "#,
+        )
+        .bind(tip)
+        .bind(bsig)
+        .bind(strat)
+        .bind(success)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.try_get("id").unwrap_or(0))
     }
-    async fn get_recent_jito_tips(&self, _limit: i32) -> AppResult<Vec<Decimal>> {
-        Err(AppError::Internal(
-            "get_recent_jito_tips not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_recent_jito_tips(&self, limit: i32) -> AppResult<Vec<Decimal>> {
+        let rows = sqlx::query_scalar::<_, Decimal>(
+            r#"
+            SELECT tip_amount_sol
+            FROM jito_tip_history
+            WHERE success = TRUE
+            ORDER BY created_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(rows)
     }
+
     async fn get_jito_tip_count(&self) -> AppResult<u32> {
-        Err(AppError::Internal(
-            "get_jito_tip_count not implemented for PostgreSQL".into(),
-        ))
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM jito_tip_history WHERE success = TRUE")
+                .fetch_one(&self.pool)
+                .await
+                .map_err(AppError::Database)?;
+
+        Ok(count as u32)
     }
+
     async fn prune_old_jito_tips(&self) -> AppResult<u64> {
-        Err(AppError::Internal(
-            "prune_old_jito_tips not implemented for PostgreSQL".into(),
-        ))
+        let result = sqlx::query(
+            "DELETE FROM jito_tip_history WHERE created_at < NOW() - INTERVAL '7 days'",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected())
     }
-    async fn get_pnl_window(&self, _from: &str, _to: Option<&str>) -> AppResult<Decimal> {
-        Err(AppError::Internal(
-            "get_pnl_window not implemented for PostgreSQL".into(),
-        ))
+
+    // ========================================================================
+    // PnL / PERFORMANCE
+    // ========================================================================
+
+    async fn get_pnl_window(&self, from: &str, to: Option<&str>) -> AppResult<Decimal> {
+        let total: Decimal = if let Some(t) = to {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
+                   WHERE state = 'CLOSED' AND closed_at >= NOW() - ($1 || ' hours')::interval
+                   AND closed_at < NOW() - ($2 || ' hours')::interval"#,
+            )
+            .bind(from)
+            .bind(t)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AppError::Database)?
+        } else {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
+                   WHERE state = 'CLOSED' AND closed_at >= NOW() - ($1 || ' hours')::interval"#,
+            )
+            .bind(from)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AppError::Database)?
+        };
+
+        Ok(total)
     }
+
     async fn get_pnl_24h(&self) -> AppResult<Decimal> {
-        Err(AppError::Internal(
-            "get_pnl_24h not implemented for PostgreSQL".into(),
-        ))
+        let total: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
+               WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours'"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(total)
     }
+
     async fn get_pnl_7d(&self) -> AppResult<Decimal> {
-        Err(AppError::Internal(
-            "get_pnl_7d not implemented for PostgreSQL".into(),
-        ))
+        let total: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
+               WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '7 days'"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(total)
     }
+
     async fn get_pnl_30d(&self) -> AppResult<Decimal> {
-        Err(AppError::Internal(
-            "get_pnl_30d not implemented for PostgreSQL".into(),
-        ))
+        let total: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
+               WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '30 days'"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(total)
     }
+
     async fn get_strategy_performance(
         &self,
-        _strat: &str,
-        _days: i32,
+        strat: &str,
+        days: i32,
     ) -> AppResult<(f64, Decimal, u32)> {
-        Err(AppError::Internal(
-            "get_strategy_performance not implemented for PostgreSQL".into(),
-        ))
+        let days_clamped = days.clamp(1, 365);
+
+        let rows: Vec<Decimal> = sqlx::query_scalar::<_, Decimal>(
+            r#"
+            SELECT COALESCE(net_pnl_sol, 0.0)
+            FROM trades
+            WHERE status = 'CLOSED'
+            AND strategy = $1
+            AND created_at >= NOW() - ($2 || ' days')::interval
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(strat)
+        .bind(days_clamped.to_string())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        if rows.is_empty() {
+            return Ok((0.0, Decimal::ZERO, 0));
+        }
+
+        let mut total_pnl = Decimal::ZERO;
+        let mut winning_trades = 0u32;
+        let total_trades = rows.len() as u32;
+
+        for pnl in rows {
+            total_pnl += pnl;
+            if pnl > Decimal::ZERO {
+                winning_trades += 1;
+            }
+        }
+
+        let win_rate = if total_trades > 0 {
+            (winning_trades as f64 / total_trades as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let avg_return = if total_trades > 0 {
+            total_pnl / Decimal::from(total_trades)
+        } else {
+            Decimal::ZERO
+        };
+
+        Ok((win_rate, avg_return, total_trades))
     }
+
     async fn get_consecutive_losses(&self) -> AppResult<u32> {
-        Err(AppError::Internal(
-            "get_consecutive_losses not implemented for PostgreSQL".into(),
-        ))
+        let rows: Vec<Decimal> = sqlx::query_scalar::<_, Decimal>(
+            r#"
+            SELECT COALESCE(p.realized_pnl_sol, 0.0)
+            FROM trades t
+            LEFT JOIN positions p ON p.trade_uuid = t.trade_uuid
+            WHERE t.status = 'CLOSED'
+            ORDER BY t.created_at DESC
+            LIMIT 20
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let mut consecutive = 0u32;
+        for pnl in rows {
+            if pnl < Decimal::ZERO {
+                consecutive += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(consecutive)
     }
-    async fn get_max_drawdown_percent(&self, _cap: Decimal) -> AppResult<Decimal> {
-        Err(AppError::Internal(
-            "get_max_drawdown_percent not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_max_drawdown_percent(&self, cap: Decimal) -> AppResult<Decimal> {
+        let closed_rows: Vec<Decimal> = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(realized_pnl_sol, 0.0) FROM positions WHERE state = 'CLOSED' ORDER BY closed_at ASC"#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let mut peak_pnl = Decimal::ZERO;
+        let mut running_pnl = Decimal::ZERO;
+        for pnl in &closed_rows {
+            running_pnl += pnl;
+            if running_pnl > peak_pnl {
+                peak_pnl = running_pnl;
+            }
+        }
+
+        let unrealized_pnl: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(unrealized_pnl_sol), 0.0) FROM positions WHERE state IN ('ACTIVE', 'EXITING')"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let current_pnl = running_pnl + unrealized_pnl;
+
+        let denominator = cap + peak_pnl;
+        if denominator > Decimal::ZERO {
+            let drawdown = ((peak_pnl - current_pnl) / denominator) * Decimal::from(100);
+            Ok(drawdown.max(Decimal::ZERO))
+        } else {
+            Ok(Decimal::ZERO)
+        }
     }
+
+    // ========================================================================
+    // POSITION LIFECYCLE
+    // ========================================================================
+
     #[allow(clippy::too_many_arguments)]
     async fn activate_trade_and_open_position(
         &self,
-        _uuid: &str,
-        _wallet: &str,
-        _token: &str,
-        _sym: Option<&str>,
-        _strat: &str,
-        _amt: Decimal,
-        _price: Decimal,
-        _sig: &str,
-        _heat: Option<Decimal>,
-        _sol_price: Option<Decimal>,
+        trade_uuid: &str,
+        wallet_address: &str,
+        token_address: &str,
+        token_symbol: Option<&str>,
+        strategy: &str,
+        amount_sol: Decimal,
+        entry_price: Decimal,
+        tx_signature: &str,
+        max_heat_sol: Option<Decimal>,
+        entry_sol_price_usd: Option<Decimal>,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "activate_trade_and_open_position not implemented for PostgreSQL".into(),
-        ))
+        let mut tx = self.pool.begin().await?;
+
+        if entry_price <= Decimal::ZERO {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                entry_price = %entry_price,
+                "Entry price must be positive — rejecting position open"
+            );
+            return Err(AppError::Validation(
+                "Entry price must be positive".to_string(),
+            ));
+        }
+
+        if let Some(limit) = max_heat_sol {
+            let exposure_values: Vec<Decimal> = sqlx::query_scalar(
+                "SELECT COALESCE(entry_amount_sol, 0) FROM positions WHERE state IN ('ACTIVE', 'EXITING')",
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+            let current: Decimal = exposure_values.into_iter().sum();
+            if current + amount_sol > limit {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    current_exposure_sol = %current,
+                    new_size_sol = %amount_sol,
+                    max_heat_sol = %limit,
+                    "Portfolio heat limit reached at write time — rolling back position open"
+                );
+                return Err(AppError::Internal(
+                    "Portfolio heat limit reached at write time".to_string(),
+                ));
+            }
+        }
+
+        let dupe_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM positions WHERE token_address = $1 AND state IN ('ACTIVE','EXITING')",
+        )
+        .bind(token_address)
+        .fetch_one(&mut *tx)
+        .await?;
+        if dupe_count > 0 {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                token_address = %token_address,
+                "Duplicate position detected at write time — rolling back"
+            );
+            return Err(AppError::Internal(
+                "Duplicate position detected at write time".to_string(),
+            ));
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE trades
+            SET status = 'ACTIVE', tx_signature = $1
+            WHERE trade_uuid = $2
+            "#,
+        )
+        .bind(tx_signature)
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO positions (
+                trade_uuid, wallet_address, token_address, token_symbol, strategy,
+                entry_amount_sol, entry_price, entry_tx_signature, entry_sol_price_usd,
+                state, unrealized_pnl_sol, unrealized_pnl_percent
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', 0, 0)
+            "#,
+        )
+        .bind(trade_uuid)
+        .bind(wallet_address)
+        .bind(token_address)
+        .bind(token_symbol)
+        .bind(strategy)
+        .bind(amount_sol)
+        .bind(entry_price)
+        .bind(tx_signature)
+        .bind(entry_sol_price_usd)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
+
     #[allow(clippy::too_many_arguments)]
     async fn atomic_portfolio_heat_check_and_open_position(
         &self,
-        _uuid: &str,
-        _wallet: &str,
-        _token: &str,
-        _sym: Option<&str>,
-        _strat: &str,
-        _amt: Decimal,
-        _price: Decimal,
-        _sig: &str,
-        _heat: Option<Decimal>,
-        _sol_price: Option<Decimal>,
+        trade_uuid: &str,
+        wallet_address: &str,
+        token_address: &str,
+        token_symbol: Option<&str>,
+        strategy: &str,
+        amount_sol: Decimal,
+        entry_price: Decimal,
+        tx_signature: &str,
+        max_heat_sol: Option<Decimal>,
+        entry_sol_price_usd: Option<Decimal>,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "atomic_portfolio_heat_check_and_open_position not implemented for PostgreSQL".into(),
-        ))
+        const MAX_RETRIES: u32 = 3;
+        let mut attempt = 0;
+
+        loop {
+            attempt += 1;
+
+            match self
+                .activate_trade_and_open_position(
+                    trade_uuid,
+                    wallet_address,
+                    token_address,
+                    token_symbol,
+                    strategy,
+                    amount_sol,
+                    entry_price,
+                    tx_signature,
+                    max_heat_sol,
+                    entry_sol_price_usd,
+                )
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(AppError::Database(sqlx::Error::Database(db_err)))
+                    if (db_err.code().as_deref() == Some("40001")
+                        || db_err.code().as_deref() == Some("40P01"))
+                        && attempt < MAX_RETRIES =>
+                {
+                    let backoff =
+                        std::time::Duration::from_millis(50 * (1 << (attempt - 1)));
+                    tracing::debug!(
+                        attempt = attempt,
+                        backoff_ms = backoff.as_millis(),
+                        trade_uuid = %trade_uuid,
+                        "Serialization conflict, retrying portfolio heat check"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
+
     #[allow(clippy::too_many_arguments)]
     async fn close_position_full(
         &self,
-        _uuid: &str,
-        _wallet: &str,
-        _token: &str,
-        _price: Decimal,
-        _sig: &str,
-        _sol_price: Option<Decimal>,
-        _frac: Decimal,
-        _confirmed: bool,
+        trade_uuid: &str,
+        wallet_address: &str,
+        token_address: &str,
+        exit_price: Decimal,
+        signature: &str,
+        sol_price_usd: Option<Decimal>,
+        exit_fraction: Decimal,
+        confirmed: bool,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "close_position_full not implemented for PostgreSQL".into(),
-        ))
+        if exit_price.is_zero() {
+            return Err(AppError::Validation(
+                "exit_price cannot be zero — PnL calculations would produce -100% loss".to_string(),
+            ));
+        }
+
+        let exit_fraction = exit_fraction.max(Decimal::ZERO).min(Decimal::ONE);
+
+        let mut tx = self.pool.begin().await?;
+
+        #[allow(clippy::type_complexity)]
+        let active_positions: Vec<(i64, Decimal, Decimal, String, Option<Decimal>)> =
+            sqlx::query_as(
+                r#"
+                SELECT id, entry_price, entry_amount_sol, trade_uuid, entry_sol_price_usd
+                FROM positions
+                WHERE wallet_address = $1 AND token_address = $2 AND trade_uuid = $3 AND state IN ('ACTIVE', 'EXITING')
+                "#,
+            )
+            .bind(wallet_address)
+            .bind(token_address)
+            .bind(trade_uuid)
+            .fetch_all(&mut *tx)
+            .await?;
+
+        if active_positions.is_empty() {
+            tracing::warn!(
+                wallet = %wallet_address,
+                token = %token_address,
+                "No active positions found to close"
+            );
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        #[allow(clippy::type_complexity)]
+        let exit_costs: Option<(Option<Decimal>, Option<Decimal>, Option<Decimal>, Option<Decimal>)> =
+            sqlx::query_as(
+                "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol, network_fee_sol FROM trades WHERE trade_uuid = $1",
+            )
+            .bind(trade_uuid)
+            .fetch_optional(&mut *tx)
+            .await?;
+
+        let exit_total_costs = exit_costs
+            .map(|(t, d, s, _)| {
+                t.unwrap_or(Decimal::ZERO) + d.unwrap_or(Decimal::ZERO) + s.unwrap_or(Decimal::ZERO)
+            })
+            .unwrap_or(Decimal::ZERO);
+        let exit_network_fee = exit_costs
+            .and_then(|(_, _, _, nf)| nf)
+            .unwrap_or(Decimal::ZERO);
+
+        if sol_price_usd.is_none() {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                "SOL/USD price unavailable — realized_pnl_usd will be NULL for this close"
+            );
+        }
+
+        let entry_uuids: Vec<String> = active_positions
+            .iter()
+            .map(|(_, _, _, uuid, _)| uuid.clone())
+            .collect();
+
+        #[allow(clippy::type_complexity)]
+        let mut entry_costs_map: std::collections::HashMap<
+            String,
+            (Option<Decimal>, Option<Decimal>, Option<Decimal>, Decimal, Option<Decimal>),
+        > = std::collections::HashMap::new();
+        if !entry_uuids.is_empty() {
+            let placeholders = entry_uuids
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("${}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let bulk_sql = format!(
+                "SELECT trade_uuid, jito_tip_sol, dex_fee_sol, slippage_cost_sol, amount_sol, network_fee_sol FROM trades WHERE trade_uuid IN ({})",
+                placeholders
+            );
+            let mut bulk_q = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    Option<Decimal>,
+                    Decimal,
+                    Option<Decimal>,
+                ),
+            >(&bulk_sql);
+            for uuid in &entry_uuids {
+                bulk_q = bulk_q.bind(uuid);
+            }
+            let cost_rows: Vec<(
+                String,
+                Option<Decimal>,
+                Option<Decimal>,
+                Option<Decimal>,
+                Decimal,
+                Option<Decimal>,
+            )> = bulk_q.fetch_all(&mut *tx).await?;
+            for (uuid, tip, dex, slip, amount, nf) in cost_rows {
+                entry_costs_map.insert(uuid, (tip, dex, slip, amount, nf));
+            }
+        }
+
+        let mut gross_pnl = Decimal::ZERO;
+        let mut entry_total_costs = Decimal::ZERO;
+
+        let is_full_close = exit_fraction >= Decimal::ONE;
+
+        for (id, entry_price_dec, entry_amount_dec, entry_trade_uuid, entry_sol_price_opt) in
+            active_positions.iter()
+        {
+            let id = *id;
+            let entry_price_dec = *entry_price_dec;
+            let entry_amount_dec = *entry_amount_dec;
+            let entry_sol_price_dec = *entry_sol_price_opt;
+            let mut net_pnl_opt: Option<Decimal> = None;
+
+            let exited_amount = entry_amount_dec * exit_fraction;
+
+            let pnl_sol = if !entry_price_dec.is_zero() {
+                if let (Some(entry_sol_price), Some(exit_sol_price)) =
+                    (entry_sol_price_dec, sol_price_usd)
+                {
+                    if !exit_sol_price.is_zero() && !entry_sol_price.is_zero() {
+                        let exit_price_sol = exit_price
+                            .checked_div(exit_sol_price)
+                            .unwrap_or(Decimal::ZERO);
+                        let entry_price_sol = entry_price_dec
+                            .checked_div(entry_sol_price)
+                            .unwrap_or(Decimal::ZERO);
+                        if !entry_price_sol.is_zero() {
+                            let diff = exit_price_sol - entry_price_sol;
+                            let ratio = diff / entry_price_sol;
+                            ratio * exited_amount
+                        } else {
+                            Decimal::ZERO
+                        }
+                    } else if !entry_sol_price.is_zero() {
+                        tracing::warn!(
+                            trade_uuid = %trade_uuid,
+                            "Current SOL price is zero; using entry-time SOL price for PnL conversion"
+                        );
+                        let usd_diff = exit_price - entry_price_dec;
+                        usd_diff / entry_sol_price
+                    } else {
+                        tracing::error!(
+                            trade_uuid = %trade_uuid,
+                            "Cannot compute SOL PnL: entry_sol_price is zero"
+                        );
+                        Decimal::ZERO
+                    }
+                } else if let Some(entry_sol_price) = entry_sol_price_dec {
+                    if !entry_sol_price.is_zero() {
+                        tracing::warn!(
+                            trade_uuid = %trade_uuid,
+                            "Current SOL price unavailable; using entry-time SOL price for PnL conversion"
+                        );
+                        let usd_diff = exit_price - entry_price_dec;
+                        usd_diff / entry_sol_price
+                    } else {
+                        tracing::error!(
+                            trade_uuid = %trade_uuid,
+                            "Cannot compute SOL PnL: entry_sol_price is zero"
+                        );
+                        Decimal::ZERO
+                    }
+                } else {
+                    tracing::error!(
+                        trade_uuid = %trade_uuid,
+                        entry_price = %entry_price_dec,
+                        exit_price = %exit_price,
+                        "No SOL/USD price data available (neither entry nor current)"
+                    );
+                    if !entry_price_dec.is_zero() {
+                        let diff = exit_price - entry_price_dec;
+                        let ratio = diff / entry_price_dec;
+                        ratio * exited_amount
+                    } else {
+                        Decimal::ZERO
+                    }
+                }
+            } else {
+                Decimal::ZERO
+            };
+
+            if let Some((et, ed, es, orig_amount, entry_nf)) =
+                entry_costs_map.get(entry_trade_uuid.as_str())
+            {
+                let total_entry_cost = (*et).unwrap_or(Decimal::ZERO)
+                    + (*ed).unwrap_or(Decimal::ZERO)
+                    + (*es).unwrap_or(Decimal::ZERO);
+                let entry_network_fee = (*entry_nf).unwrap_or(Decimal::ZERO);
+                let exited_fraction_of_original = if !orig_amount.is_zero() {
+                    exited_amount
+                        .checked_div(*orig_amount)
+                        .unwrap_or(exit_fraction)
+                } else {
+                    exit_fraction
+                };
+                let proportional_entry_cost = total_entry_cost * exited_fraction_of_original;
+                let proportional_entry_network_fee =
+                    entry_network_fee * exited_fraction_of_original;
+                entry_total_costs += proportional_entry_cost + proportional_entry_network_fee;
+                let proportional_exit_network_fee = exit_network_fee * exit_fraction;
+                let net_pnl_sol = pnl_sol
+                    - proportional_entry_cost
+                    - proportional_entry_network_fee
+                    - exit_total_costs
+                    - proportional_exit_network_fee;
+                net_pnl_opt = Some(net_pnl_sol);
+            }
+
+            let pnl_usd_opt: Option<Decimal> = sol_price_usd.map(|sol_usd| pnl_sol * sol_usd);
+
+            if is_full_close {
+                let rows = sqlx::query(
+                    r#"
+                    UPDATE positions
+                    SET
+                        exit_price = $1,
+                        exit_tx_signature = $2,
+                        realized_pnl_sol = $3,
+                        realized_pnl_usd = $4,
+                        realized_net_pnl_sol = $5,
+                        closed_at = CASE WHEN $6 THEN NOW() ELSE NULL END,
+                        state = $7
+                    WHERE id = $8 AND state IN ('ACTIVE', 'EXITING')
+                    "#,
+                )
+                .bind(exit_price)
+                .bind(signature)
+                .bind(pnl_sol)
+                .bind(pnl_usd_opt)
+                .bind(net_pnl_opt)
+                .bind(confirmed)
+                .bind(if confirmed { "CLOSED" } else { "EXITING" })
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+
+                if rows.rows_affected() == 0 {
+                    tracing::warn!(
+                        position_id = id,
+                        "Position already closed by concurrent call — skipping"
+                    );
+                    continue;
+                }
+            } else {
+                let remaining_amount = entry_amount_dec - exited_amount;
+
+                let current_realized_sol: Decimal =
+                    sqlx::query_scalar("SELECT COALESCE(realized_pnl_sol, 0) FROM positions WHERE id = $1")
+                        .bind(id)
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .unwrap_or(Decimal::ZERO);
+                let new_realized_sol = current_realized_sol + pnl_sol;
+
+                let new_realized_usd = if let Some(pnl_usd) = pnl_usd_opt {
+                    let current_realized_usd: Decimal =
+                        sqlx::query_scalar("SELECT COALESCE(realized_pnl_usd, 0) FROM positions WHERE id = $1")
+                            .bind(id)
+                            .fetch_optional(&mut *tx)
+                            .await?
+                            .unwrap_or(Decimal::ZERO);
+                    Some(current_realized_usd + pnl_usd)
+                } else {
+                    None
+                };
+
+                let rows = sqlx::query(
+                    r#"
+                    UPDATE positions
+                    SET
+                        entry_amount_sol = $1,
+                        exit_price = $2,
+                        exit_tx_signature = $3,
+                        realized_pnl_sol = $4,
+                        realized_pnl_usd = $5,
+                        realized_net_pnl_sol = COALESCE(realized_net_pnl_sol, 0) + $6,
+                        token_amount = token_amount * (1 - $7),
+                        state = $8,
+                        last_updated = NOW()
+                    WHERE id = $9 AND state IN ('ACTIVE', 'EXITING')
+                    "#,
+                )
+                .bind(remaining_amount)
+                .bind(exit_price)
+                .bind(signature)
+                .bind(new_realized_sol)
+                .bind(new_realized_usd)
+                .bind(net_pnl_opt.unwrap_or(Decimal::ZERO))
+                .bind(exit_fraction)
+                .bind(if confirmed { "ACTIVE" } else { "EXITING" })
+                .bind(id)
+                .execute(&mut *tx)
+                .await?;
+
+                if rows.rows_affected() == 0 {
+                    tracing::warn!(
+                        position_id = id,
+                        "Position already closed by concurrent call — skipping partial close"
+                    );
+                    continue;
+                }
+            }
+
+            gross_pnl += pnl_sol;
+        }
+
+        let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
+        let current_net: Decimal =
+            sqlx::query_scalar("SELECT COALESCE(net_pnl_sol, 0) FROM trades WHERE trade_uuid = $1")
+                .bind(trade_uuid)
+                .fetch_optional(&mut *tx)
+                .await?
+                .unwrap_or(Decimal::ZERO);
+        let new_net = current_net + net_pnl;
+        sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+            .bind(new_net)
+            .bind(trade_uuid)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
+
     async fn update_position_token_amount(&self, uuid: &str, token_amount: u64) -> AppResult<()> {
         sqlx::query("UPDATE positions SET token_amount = $1 WHERE trade_uuid = $2")
             .bind(token_amount.to_string())
@@ -993,399 +1684,1960 @@ impl Database for PostgresBackend {
             .map_err(AppError::Database)?;
         Ok(())
     }
-    async fn revert_position_exit(&self, _uuid: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "revert_position_exit not implemented for PostgreSQL".into(),
-        ))
+
+    async fn revert_position_exit(&self, position_trade_uuid: &str) -> AppResult<()> {
+        let mut tx = self.pool.begin().await?;
+
+        #[allow(clippy::type_complexity)]
+        let pos: Option<(
+            Decimal,
+            Decimal,
+            Option<String>,
+            Option<Decimal>,
+            Option<Decimal>,
+            String,
+            String,
+        )> = sqlx::query_as(
+            r#"
+            SELECT entry_price, entry_amount_sol, exit_tx_signature, realized_pnl_sol, realized_pnl_usd, wallet_address, token_address
+            FROM positions WHERE trade_uuid = $1
+            "#,
+        )
+        .bind(position_trade_uuid)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some((
+            _entry_price,
+            _entry_amount,
+            Some(ref exit_sig),
+            realized_pnl_sol_opt,
+            realized_pnl_usd_opt,
+            ref wallet_address,
+            ref token_address,
+        )) = pos
+        {
+            if !exit_sig.is_empty() {
+                let exit_trade: Option<(String, Decimal)> = sqlx::query_as(
+                    "SELECT trade_uuid, amount_sol FROM trades WHERE tx_signature = $1 AND side = 'SELL'",
+                )
+                .bind(exit_sig)
+                .fetch_optional(&mut *tx)
+                .await?;
+
+                if let Some((ref exit_trade_uuid, _exit_amount)) = exit_trade {
+                    let buy_signal_amount_sol: Decimal =
+                        sqlx::query_scalar("SELECT amount_sol FROM trades WHERE trade_uuid = $1")
+                            .bind(position_trade_uuid)
+                            .fetch_one(&mut *tx)
+                            .await?;
+
+                    let confirmed_exit_values: Vec<Decimal> = sqlx::query_scalar(
+                        "SELECT amount_sol FROM trades WHERE wallet_address = $1 AND token_address = $2 AND side = 'SELL' AND status = 'CLOSED' AND tx_signature <> $3",
+                    )
+                    .bind(wallet_address)
+                    .bind(token_address)
+                    .bind(exit_sig)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                    let confirmed_exit_amount: Decimal = confirmed_exit_values.into_iter().sum();
+
+                    let reverted_amount = buy_signal_amount_sol - confirmed_exit_amount;
+
+                    let mut new_realized_pnl_sol: Option<Decimal> = None;
+                    let mut new_realized_pnl_usd: Option<Decimal> = None;
+
+                    if confirmed_exit_amount > Decimal::ZERO {
+                        #[allow(clippy::type_complexity)]
+                        let (failed_net, failed_tip, failed_dex, failed_slip): (
+                            Option<Decimal>,
+                            Option<Decimal>,
+                            Option<Decimal>,
+                            Option<Decimal>,
+                        ) = sqlx::query_as(
+                            "SELECT net_pnl_sol, jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = $1",
+                        )
+                        .bind(exit_trade_uuid)
+                        .fetch_one(&mut *tx)
+                        .await?;
+
+                        let failed_gross = match (failed_net, failed_tip, failed_dex, failed_slip)
+                        {
+                            (Some(net), Some(tip), Some(dex), Some(slip)) => net + tip + dex + slip,
+                            _ => Decimal::ZERO,
+                        };
+
+                        let current_pnl_sol = realized_pnl_sol_opt.unwrap_or(Decimal::ZERO);
+                        let reverted_pnl = current_pnl_sol - failed_gross;
+                        new_realized_pnl_sol = Some(reverted_pnl);
+
+                        if realized_pnl_usd_opt.is_some() {
+                            tracing::warn!(
+                                exit_trade_uuid = %exit_trade_uuid,
+                                "Reverting position with prior confirmed exits — setting realized_pnl_usd to NULL"
+                            );
+                            new_realized_pnl_usd = None;
+                        }
+                    }
+
+                    sqlx::query(
+                        r#"
+                        UPDATE positions
+                        SET
+                            state = 'ACTIVE',
+                            entry_amount_sol = $1,
+                            exit_price = NULL,
+                            exit_tx_signature = NULL,
+                            realized_pnl_sol = $2,
+                            realized_pnl_usd = $3,
+                            closed_at = NULL,
+                            last_updated = NOW()
+                        WHERE trade_uuid = $4
+                        "#,
+                    )
+                    .bind(reverted_amount)
+                    .bind(new_realized_pnl_sol)
+                    .bind(new_realized_pnl_usd)
+                    .bind(position_trade_uuid)
+                    .execute(&mut *tx)
+                    .await?;
+
+                    sqlx::query(
+                        r#"
+                        UPDATE trades
+                        SET
+                            status = 'FAILED',
+                            net_pnl_sol = NULL,
+                            error_message = 'Exit transaction failed to confirm on-chain (reverted by recovery manager)'
+                        WHERE trade_uuid = $1
+                        "#,
+                    )
+                    .bind(exit_trade_uuid)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        }
+
+        tx.commit().await?;
+        Ok(())
     }
-    async fn get_stuck_positions(&self, _secs: i64) -> AppResult<Vec<PositionRecord>> {
-        Err(AppError::Internal(
-            "get_stuck_positions not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_stuck_positions(&self, stuck_seconds: i64) -> AppResult<Vec<PositionRecord>> {
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT id, trade_uuid, wallet_address, token_address, strategy, state,
+                   entry_tx_signature, exit_tx_signature, last_updated
+            FROM positions
+            WHERE state = 'EXITING'
+            AND last_updated < NOW() - make_interval(secs => $1::double precision)
+            "#,
+        )
+        .bind(stuck_seconds as f64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(
+                |(
+                    id,
+                    trade_uuid,
+                    wallet_address,
+                    token_address,
+                    strategy,
+                    state,
+                    entry_tx_signature,
+                    exit_tx_signature,
+                    last_updated,
+                )| {
+                    Ok(PositionRecord {
+                        id,
+                        trade_uuid,
+                        wallet_address,
+                        token_address,
+                        strategy,
+                        state,
+                        entry_tx_signature,
+                        exit_tx_signature,
+                        last_updated,
+                    })
+                },
+            )
+            .collect()
     }
-    async fn update_position_state(&self, _uuid: &str, _state: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_position_state not implemented for PostgreSQL".into(),
-        ))
+
+    async fn update_position_state(&self, trade_uuid: &str, new_state: &str) -> AppResult<()> {
+        sqlx::query("UPDATE positions SET state = $1 WHERE trade_uuid = $2")
+            .bind(new_state)
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
+
     async fn update_position_unrealized_pnl(
         &self,
-        _uuid: &str,
-        _price: Decimal,
-        _pnl: Decimal,
-        _pct: Decimal,
+        trade_uuid: &str,
+        current_price: Decimal,
+        pnl_sol: Decimal,
+        pnl_pct: Decimal,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_position_unrealized_pnl not implemented for PostgreSQL".into(),
-        ))
+        sqlx::query(
+            r#"
+            UPDATE positions
+            SET current_price = $1,
+                unrealized_pnl_sol = $2,
+                unrealized_pnl_percent = $3,
+                last_updated = NOW()
+            WHERE trade_uuid = $4
+              AND state IN ('ACTIVE', 'EXITING')
+            "#,
+        )
+        .bind(current_price)
+        .bind(pnl_sol)
+        .bind(pnl_pct)
+        .bind(trade_uuid)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
+
     async fn get_active_positions_with_entry(&self) -> AppResult<Vec<ActivePositionEntry>> {
-        Err(AppError::Internal(
-            "get_active_positions_with_entry not implemented for PostgreSQL".into(),
-        ))
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<String>,
+            String,
+            Decimal,
+            Decimal,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            r#"
+            SELECT
+                p.trade_uuid,
+                p.wallet_address,
+                p.token_address,
+                t.token_symbol,
+                p.strategy,
+                COALESCE(p.entry_price, 0),
+                COALESCE(p.entry_amount_sol, 0),
+                COALESCE(p.opened_at, NOW())
+            FROM positions p
+            LEFT JOIN trades t ON t.trade_uuid = p.trade_uuid
+            WHERE p.state = 'ACTIVE'
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let entries = rows
+            .into_iter()
+            .map(
+                |(
+                    trade_uuid,
+                    wallet_address,
+                    token_address,
+                    token_opt,
+                    strategy,
+                    entry_price,
+                    entry_amount_sol,
+                    entry_time,
+                )| ActivePositionEntry {
+                    token_symbol: token_opt.unwrap_or_else(|| token_address.clone()),
+                    trade_uuid,
+                    wallet_address,
+                    token_address,
+                    strategy,
+                    entry_price,
+                    entry_amount_sol,
+                    entry_time,
+                },
+            )
+            .collect();
+
+        Ok(entries)
     }
+
     async fn get_active_position_tokens(&self) -> AppResult<Vec<ActivePositionSummary>> {
-        Err(AppError::Internal(
-            "get_active_position_tokens not implemented for PostgreSQL".into(),
-        ))
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, String, Decimal, Decimal, Option<Decimal>)> = sqlx::query_as(
+            r#"
+            SELECT trade_uuid, token_address, entry_price, entry_amount_sol, entry_sol_price_usd
+            FROM positions
+            WHERE state IN ('ACTIVE', 'EXITING')
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(trade_uuid, token_address, entry_price, entry_amount_sol, entry_sol_price_usd)| {
+                    ActivePositionSummary {
+                        trade_uuid,
+                        token_address,
+                        entry_price,
+                        entry_amount_sol,
+                        entry_sol_price_usd,
+                    }
+                },
+            )
+            .collect())
     }
-    async fn get_position_peak_price(&self, _uuid: &str) -> AppResult<Option<String>> {
-        Err(AppError::Internal(
-            "get_position_peak_price not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_position_peak_price(&self, trade_uuid: &str) -> AppResult<Option<String>> {
+        let row: Option<Option<Decimal>> =
+            sqlx::query_scalar("SELECT peak_price FROM exit_targets WHERE trade_uuid = $1")
+                .bind(trade_uuid)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.flatten().map(|d| d.to_string()))
     }
+
+    // ========================================================================
+    // WALLETS / MONITORING
+    // ========================================================================
+
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_wallet(
         &self,
-        _addr: &str,
-        _wqs: Option<Decimal>,
-        _r7: Option<Decimal>,
-        _r30: Option<Decimal>,
-        _tc: Option<i32>,
-        _wr: Option<Decimal>,
-        _mdd: Option<Decimal>,
-        _ats: Option<Decimal>,
-        _notes: Option<&str>,
+        address: &str,
+        wqs_score: Option<Decimal>,
+        roi_7d: Option<Decimal>,
+        roi_30d: Option<Decimal>,
+        trade_count_30d: Option<i32>,
+        win_rate: Option<Decimal>,
+        max_drawdown_30d: Option<Decimal>,
+        avg_trade_size_sol: Option<Decimal>,
+        notes: Option<&str>,
     ) -> AppResult<bool> {
-        Err(AppError::Internal(
-            "upsert_wallet not implemented for PostgreSQL".into(),
-        ))
+        let result = sqlx::query(
+            r#"
+            INSERT INTO wallets (
+                address, status, wqs_score, roi_7d, roi_30d,
+                trade_count_30d, win_rate, max_drawdown_30d,
+                avg_trade_size_sol, notes,
+                created_at, updated_at
+            )
+            VALUES ($1, 'CANDIDATE', $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT(address) DO UPDATE SET
+                wqs_score          = COALESCE(excluded.wqs_score, wqs_score),
+                roi_7d             = COALESCE(excluded.roi_7d, roi_7d),
+                roi_30d            = COALESCE(excluded.roi_30d, roi_30d),
+                trade_count_30d    = COALESCE(excluded.trade_count_30d, trade_count_30d),
+                win_rate           = COALESCE(excluded.win_rate, win_rate),
+                max_drawdown_30d   = COALESCE(excluded.max_drawdown_30d, max_drawdown_30d),
+                avg_trade_size_sol = COALESCE(excluded.avg_trade_size_sol, avg_trade_size_sol),
+                notes              = COALESCE(excluded.notes, notes),
+                updated_at         = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(address)
+        .bind(wqs_score)
+        .bind(roi_7d)
+        .bind(roi_30d)
+        .bind(trade_count_30d)
+        .bind(win_rate)
+        .bind(max_drawdown_30d)
+        .bind(avg_trade_size_sol)
+        .bind(notes)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() != 1)
     }
+
     async fn update_wallet_status_ext(
         &self,
-        _addr: &str,
-        _status: &str,
-        _ttl: Option<i32>,
-        _reason: Option<&str>,
+        address: &str,
+        status: &str,
+        ttl_hours: Option<i32>,
+        reason: Option<&str>,
     ) -> AppResult<bool> {
-        Err(AppError::Internal(
-            "update_wallet_status_ext not implemented for PostgreSQL".into(),
-        ))
+        let ttl_expires_at =
+            ttl_hours.map(|hours| chrono::Utc::now() + chrono::Duration::hours(hours as i64));
+
+        let promoted_at = if status == "ACTIVE" {
+            Some(chrono::Utc::now())
+        } else {
+            None
+        };
+
+        let result = sqlx::query(
+            r#"
+            UPDATE wallets
+            SET status = $1,
+                promoted_at = COALESCE($2, promoted_at),
+                ttl_expires_at = $3,
+                notes = COALESCE($4, notes)
+            WHERE address = $5
+            "#,
+        )
+        .bind(status)
+        .bind(promoted_at)
+        .bind(ttl_expires_at)
+        .bind(reason)
+        .bind(address)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
     }
+
     async fn get_expired_ttl_wallets(&self) -> AppResult<Vec<String>> {
-        Err(AppError::Internal(
-            "get_expired_ttl_wallets not implemented for PostgreSQL".into(),
-        ))
+        let wallets: Vec<String> = sqlx::query_scalar(
+            r#"
+            SELECT address FROM wallets
+            WHERE status = 'ACTIVE'
+            AND ttl_expires_at IS NOT NULL
+            AND ttl_expires_at < NOW()
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(wallets)
     }
-    async fn demote_wallet(&self, _addr: &str, _reason: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "demote_wallet not implemented for PostgreSQL".into(),
-        ))
+
+    async fn demote_wallet(&self, address: &str, reason: &str) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallets
+            SET status = 'CANDIDATE',
+                ttl_expires_at = NULL,
+                notes = $1
+            WHERE address = $2
+            "#,
+        )
+        .bind(reason)
+        .bind(address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn get_wallet_monitoring(&self, _addr: &str) -> AppResult<Option<WalletMonitoring>> {
-        Err(AppError::Internal(
-            "get_wallet_monitoring not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_wallet_monitoring(
+        &self,
+        wallet_address: &str,
+    ) -> AppResult<Option<WalletMonitoring>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                wallet_address,
+                helius_webhook_id,
+                rpc_polling_active,
+                last_transaction_signature,
+                last_monitored_at,
+                monitoring_enabled,
+                webhook_status,
+                webhook_registered_at,
+                webhook_last_health_check,
+                webhook_health_status,
+                registration_attempts,
+                last_registration_error,
+                last_updated_url,
+                created_at,
+                updated_at
+            FROM wallet_monitoring
+            WHERE wallet_address = $1
+            "#,
+        )
+        .bind(wallet_address)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        match row {
+            Some(r) => Ok(Some(Self::row_to_wallet_monitoring(&r)?)),
+            None => Ok(None),
+        }
     }
+
     async fn upsert_wallet_monitoring(
         &self,
-        _addr: &str,
-        _wid: Option<&str>,
-        _enabled: bool,
+        wallet_address: &str,
+        helius_webhook_id: Option<&str>,
+        monitoring_enabled: bool,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "upsert_wallet_monitoring not implemented for PostgreSQL".into(),
-        ))
+        sqlx::query(
+            r#"
+            INSERT INTO wallet_monitoring (
+                wallet_address, helius_webhook_id, monitoring_enabled, last_monitored_at
+            )
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+            ON CONFLICT(wallet_address) DO UPDATE SET
+                helius_webhook_id = COALESCE($4, helius_webhook_id),
+                monitoring_enabled = $5,
+                last_monitored_at = CURRENT_TIMESTAMP,
+                updated_at = CURRENT_TIMESTAMP
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(helius_webhook_id)
+        .bind(monitoring_enabled)
+        .bind(helius_webhook_id)
+        .bind(monitoring_enabled)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn update_wallet_monitoring_signature(&self, _addr: &str, _sig: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_wallet_monitoring_signature not implemented for PostgreSQL".into(),
-        ))
+
+    async fn update_wallet_monitoring_signature(
+        &self,
+        wallet_address: &str,
+        signature: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET last_transaction_signature = $1,
+                last_monitored_at = CURRENT_TIMESTAMP
+            WHERE wallet_address = $2
+            "#,
+        )
+        .bind(signature)
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
+
     async fn get_wallets_needing_webhook_registration(&self) -> AppResult<Vec<String>> {
-        Err(AppError::Internal(
-            "get_wallets_needing_webhook_registration not implemented for PostgreSQL".into(),
-        ))
+        let wallets = sqlx::query_scalar(
+            r#"
+            SELECT w.address
+            FROM wallets w
+            LEFT JOIN wallet_monitoring wm ON w.address = wm.wallet_address
+            WHERE w.status = 'ACTIVE'
+              AND (wm.helius_webhook_id IS NULL OR wm.helius_webhook_id = '')
+              AND w.address IS NOT NULL
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(wallets)
     }
-    async fn get_stale_webhook_wallets(&self, _days: i32) -> AppResult<Vec<String>> {
-        Err(AppError::Internal(
-            "get_stale_webhook_wallets not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_stale_webhook_wallets(&self, threshold_days: i32) -> AppResult<Vec<String>> {
+        let wallets = sqlx::query_scalar(
+            r#"
+            SELECT wallet_address
+            FROM wallet_monitoring
+            WHERE webhook_status = 'active'
+              AND (webhook_last_health_check IS NULL
+                   OR webhook_last_health_check < NOW() - make_interval(days => $1))
+              AND helius_webhook_id IS NOT NULL
+            "#,
+        )
+        .bind(threshold_days)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(wallets)
     }
+
     async fn get_all_wallet_monitoring(&self) -> AppResult<Vec<WalletMonitoring>> {
-        Err(AppError::Internal(
-            "get_all_wallet_monitoring not implemented for PostgreSQL".into(),
-        ))
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                wallet_address,
+                helius_webhook_id,
+                rpc_polling_active,
+                last_transaction_signature,
+                last_monitored_at,
+                monitoring_enabled,
+                webhook_status,
+                webhook_registered_at,
+                webhook_last_health_check,
+                webhook_health_status,
+                registration_attempts,
+                last_registration_error,
+                last_updated_url,
+                created_at,
+                updated_at
+            FROM wallet_monitoring
+            WHERE wallet_address IS NOT NULL
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let records = rows
+            .iter()
+            .map(Self::row_to_wallet_monitoring)
+            .collect::<AppResult<Vec<_>>>()?;
+
+        Ok(records)
     }
+
     async fn update_webhook_health_status(
         &self,
-        _addr: &str,
-        _status: &str,
-        _wid: Option<&str>,
+        wallet_address: &str,
+        health_status: &str,
+        webhook_id: Option<&str>,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_webhook_health_status not implemented for PostgreSQL".into(),
-        ))
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET webhook_health_status = $1,
+                webhook_last_health_check = CURRENT_TIMESTAMP,
+                webhook_status = CASE
+                    WHEN $1 = 'healthy' THEN 'active'
+                    WHEN $1 = 'unhealthy' THEN 'paused'
+                    ELSE webhook_status
+                END
+            WHERE wallet_address = $2
+            "#,
+        )
+        .bind(health_status)
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+
+        if let Some(webhook_id) = webhook_id {
+            info!(
+                wallet = %wallet_address,
+                webhook_id = %webhook_id,
+                status = %health_status,
+                "Updated webhook health status"
+            );
+        }
+
+        Ok(())
     }
-    async fn update_webhook_status(&self, _addr: &str, _status: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_webhook_status not implemented for PostgreSQL".into(),
-        ))
+
+    async fn update_webhook_status(&self, wallet_address: &str, webhook_status: &str) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET webhook_status = $1
+            WHERE wallet_address = $2
+            "#,
+        )
+        .bind(webhook_status)
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
+
     #[allow(clippy::too_many_arguments)]
     async fn log_webhook_lifecycle_event(
         &self,
-        _addr: &str,
-        _action: &str,
-        _status: &str,
-        _wid: Option<&str>,
-        _details: Option<&str>,
-        _err: Option<&str>,
-        _dur: Option<i32>,
+        wallet_address: &str,
+        action: &str,
+        status: &str,
+        webhook_id: Option<&str>,
+        details: Option<&str>,
+        error_message: Option<&str>,
+        duration_ms: Option<i32>,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "log_webhook_lifecycle_event not implemented for PostgreSQL".into(),
-        ))
+        let _ = sqlx::query(
+            r#"
+            INSERT INTO webhook_lifecycle_audit
+            (wallet_address, action, status, webhook_id, details, error_message, duration_ms)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(action)
+        .bind(status)
+        .bind(webhook_id)
+        .bind(details)
+        .bind(error_message)
+        .bind(duration_ms)
+        .execute(&self.pool)
+        .await;
+
+        Ok(())
     }
+
     async fn get_webhook_audit_log(
         &self,
-        _wallet_address: Option<&str>,
-        _action: Option<&str>,
-        _status: Option<&str>,
-        _limit: Option<i64>,
+        wallet_address: Option<&str>,
+        action: Option<&str>,
+        status: Option<&str>,
+        limit: Option<i64>,
     ) -> AppResult<Vec<WebhookAuditLog>> {
-        Err(AppError::Internal(
-            "get_webhook_audit_log not implemented for PostgreSQL".into(),
-        ))
+        let mut sql = String::from(
+            r#"SELECT id, wallet_address, action, status, webhook_id, details, error_message, duration_ms, created_at
+               FROM webhook_lifecycle_audit WHERE 1=1"#,
+        );
+        let mut binds: Vec<String> = Vec::new();
+        let mut idx = 1usize;
+
+        if let Some(wa) = wallet_address {
+            sql.push_str(&format!(" AND wallet_address = ${idx}"));
+            idx += 1;
+            binds.push(wa.to_string());
+        }
+        if let Some(a) = action {
+            sql.push_str(&format!(" AND action = ${idx}"));
+            idx += 1;
+            binds.push(a.to_string());
+        }
+        if let Some(s) = status {
+            sql.push_str(&format!(" AND status = ${idx}"));
+            idx += 1;
+            binds.push(s.to_string());
+        }
+
+        sql.push_str(" ORDER BY created_at DESC");
+
+        let limit_val = limit.unwrap_or(100).clamp(1, 1000);
+        sql.push_str(&format!(" LIMIT ${idx}"));
+
+        let mut query = sqlx::query(&sql);
+        for b in binds {
+            query = query.bind(b);
+        }
+        query = query.bind(limit_val);
+
+        let rows = query.fetch_all(&self.pool).await?;
+
+        let logs = rows
+            .into_iter()
+            .map(|r| WebhookAuditLog {
+                id: r.try_get("id").unwrap_or_default(),
+                wallet_address: r.try_get("wallet_address").unwrap_or_default(),
+                action: r.try_get("action").unwrap_or_default(),
+                status: r.try_get("status").unwrap_or_default(),
+                webhook_id: r.try_get("webhook_id").ok(),
+                details: r.try_get("details").ok(),
+                error_message: r.try_get("error_message").ok(),
+                duration_ms: r.try_get("duration_ms").ok(),
+                created_at: r
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339()),
+            })
+            .collect();
+
+        Ok(logs)
     }
+
     async fn increment_webhook_registration_attempts(
         &self,
-        _addr: &str,
-        _err: Option<&str>,
+        wallet_address: &str,
+        error: Option<&str>,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "increment_webhook_registration_attempts not implemented for PostgreSQL".into(),
-        ))
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET registration_attempts = registration_attempts + 1,
+                last_registration_error = $1,
+                webhook_status = CASE
+                    WHEN registration_attempts >= 2 THEN 'failed'
+                    ELSE webhook_status
+                END
+            WHERE wallet_address = $2
+            "#,
+        )
+        .bind(error)
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn get_webhook_configuration(&self, _key: &str) -> AppResult<Option<String>> {
-        Err(AppError::Internal(
-            "get_webhook_configuration not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_webhook_configuration(&self, key: &str) -> AppResult<Option<String>> {
+        let result: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT config_value FROM webhook_configuration WHERE config_key = $1
+            "#,
+        )
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(result)
     }
+
     async fn update_webhook_configuration(
         &self,
-        _key: &str,
-        _val: &str,
-        _by: &str,
+        key: &str,
+        value: &str,
+        updated_by: &str,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_webhook_configuration not implemented for PostgreSQL".into(),
-        ))
+        sqlx::query(
+            r#"
+            INSERT INTO webhook_configuration (config_key, config_value, last_updated_at, updated_by)
+            VALUES ($1, $2, NOW(), $3)
+            ON CONFLICT (config_key) DO UPDATE SET
+                config_value = EXCLUDED.config_value,
+                updated_by = EXCLUDED.updated_by,
+                last_updated_at = NOW()
+            "#,
+        )
+        .bind(key)
+        .bind(value)
+        .bind(updated_by)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn get_orphaned_webhooks(&self, _ids: &[String]) -> AppResult<Vec<String>> {
-        Err(AppError::Internal(
-            "get_orphaned_webhooks not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_orphaned_webhooks(&self, helius_webhook_ids: &[String]) -> AppResult<Vec<String>> {
+        if helius_webhook_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: Vec<String> = (1..=helius_webhook_ids.len())
+            .map(|i| format!("${i}"))
+            .collect();
+
+        let query = format!(
+            "SELECT DISTINCT helius_webhook_id FROM wallet_monitoring WHERE helius_webhook_id IN ({})",
+            placeholders.join(", ")
+        );
+
+        let mut q = sqlx::query_scalar::<_, String>(&query);
+        for id in helius_webhook_ids {
+            q = q.bind(id);
+        }
+        let existing: Vec<String> = q.fetch_all(&self.pool).await?;
+
+        Ok(helius_webhook_ids
+            .iter()
+            .filter(|id| !existing.contains(id))
+            .cloned()
+            .collect())
     }
+
+    // ========================================================================
+    // EXIT TARGETS
+    // ========================================================================
+
     #[allow(clippy::too_many_arguments)]
     async fn upsert_exit_target(
         &self,
-        _uuid: &str,
-        _ep: Decimal,
-        _eas: Decimal,
-        _pp: Decimal,
-        _ppp: Decimal,
-        _th: &str,
-        _tsa: bool,
-        _tsp: Decimal,
-        _rf: Decimal,
+        trade_uuid: &str,
+        entry_price: Decimal,
+        entry_amount_sol: Decimal,
+        peak_price: Decimal,
+        peak_profit_percent: Decimal,
+        targets_hit_json: &str,
+        trailing_stop_active: bool,
+        trailing_stop_price: Decimal,
+        remaining_fraction: Decimal,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "upsert_exit_target not implemented for PostgreSQL".into(),
-        ))
+        sqlx::query(
+            r#"
+            INSERT INTO exit_targets (
+                trade_uuid, entry_price, entry_amount_sol, peak_price,
+                peak_profit_percent, targets_hit, trailing_stop_active, trailing_stop_price,
+                remaining_fraction
+            ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+            ON CONFLICT (trade_uuid) DO UPDATE SET
+                peak_price = EXCLUDED.peak_price,
+                peak_profit_percent = EXCLUDED.peak_profit_percent,
+                targets_hit = EXCLUDED.targets_hit,
+                trailing_stop_active = EXCLUDED.trailing_stop_active,
+                trailing_stop_price = EXCLUDED.trailing_stop_price,
+                remaining_fraction = EXCLUDED.remaining_fraction,
+                last_updated = NOW()
+            "#,
+        )
+        .bind(trade_uuid)
+        .bind(entry_price)
+        .bind(entry_amount_sol)
+        .bind(peak_price)
+        .bind(peak_profit_percent)
+        .bind(targets_hit_json)
+        .bind(trailing_stop_active)
+        .bind(trailing_stop_price)
+        .bind(remaining_fraction)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn load_exit_target(&self, _uuid: &str) -> AppResult<Option<ExitTargetData>> {
-        Err(AppError::Internal(
-            "load_exit_target not implemented for PostgreSQL".into(),
-        ))
+
+    async fn load_exit_target(&self, trade_uuid: &str) -> AppResult<Option<ExitTargetData>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                entry_price,
+                entry_amount_sol,
+                peak_price,
+                peak_profit_percent,
+                COALESCE(targets_hit, '[]'::jsonb)::TEXT AS targets_hit,
+                trailing_stop_active,
+                COALESCE(trailing_stop_price, 0) AS trailing_stop_price,
+                COALESCE(remaining_fraction, 1) AS remaining_fraction
+            FROM exit_targets
+            WHERE trade_uuid = $1
+            "#,
+        )
+        .bind(trade_uuid)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|row| ExitTargetData {
+            entry_price: row.try_get::<Decimal, _>("entry_price").unwrap_or(Decimal::ZERO),
+            entry_amount_sol: row
+                .try_get::<Decimal, _>("entry_amount_sol")
+                .unwrap_or(Decimal::ZERO),
+            peak_price: row.try_get::<Decimal, _>("peak_price").unwrap_or(Decimal::ZERO),
+            peak_profit_percent: row
+                .try_get::<Decimal, _>("peak_profit_percent")
+                .unwrap_or(Decimal::ZERO),
+            targets_hit: row
+                .try_get::<String, _>("targets_hit")
+                .unwrap_or_else(|_| "[]".to_string()),
+            trailing_stop_active: row
+                .try_get::<bool, _>("trailing_stop_active")
+                .unwrap_or(false),
+            trailing_stop_price: row
+                .try_get::<Decimal, _>("trailing_stop_price")
+                .unwrap_or(Decimal::ZERO),
+            remaining_fraction: row
+                .try_get::<Decimal, _>("remaining_fraction")
+                .unwrap_or(Decimal::ONE),
+        }))
     }
-    async fn delete_exit_target(&self, _uuid: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "delete_exit_target not implemented for PostgreSQL".into(),
-        ))
+
+    async fn delete_exit_target(&self, trade_uuid: &str) -> AppResult<()> {
+        sqlx::query("DELETE FROM exit_targets WHERE trade_uuid = $1")
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
+
+    // ========================================================================
+    // RECONCILIATION
+    // ========================================================================
+
     async fn insert_reconciliation_log(
         &self,
-        _uuid: &str,
-        _exp: &str,
-        _actual: Option<&str>,
-        _disc: &str,
-        _tx: Option<&str>,
-        _notes: Option<&str>,
+        trade_uuid: &str,
+        expected_state: &str,
+        actual_on_chain: Option<&str>,
+        discrepancy: &str,
+        on_chain_tx_signature: Option<&str>,
+        notes: Option<&str>,
     ) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "insert_reconciliation_log not implemented for PostgreSQL".into(),
-        ))
+        let row = sqlx::query(
+            r#"
+            INSERT INTO reconciliation_log (
+                trade_uuid, expected_state, actual_on_chain, discrepancy,
+                on_chain_tx_signature, notes
+            ) VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            "#,
+        )
+        .bind(trade_uuid)
+        .bind(expected_state)
+        .bind(actual_on_chain)
+        .bind(discrepancy)
+        .bind(on_chain_tx_signature)
+        .bind(notes)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(row.try_get("id").unwrap_or(0))
     }
-    async fn get_reconciliation_status(&self, _limit: i32) -> AppResult<ReconciliationStatus> {
-        Err(AppError::Internal(
-            "get_reconciliation_status not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_reconciliation_status(
+        &self,
+        discrepancies_limit: i32,
+    ) -> AppResult<ReconciliationStatus> {
+        let limit = discrepancies_limit.clamp(1, 100) as i64;
+
+        let latest_row = sqlx::query(
+            r#"
+            SELECT
+                created_at,
+                EXTRACT(EPOCH FROM created_at)::BIGINT AS created_ts
+            FROM reconciliation_log
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (last_at, last_ts) = match latest_row {
+            Some(row) => {
+                let at = row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                    .ok()
+                    .map(|dt| dt.to_rfc3339());
+                let ts = row.try_get::<i64, _>("created_ts").ok();
+                (at, ts)
+            }
+            None => (None, None),
+        };
+
+        let next_at = last_ts.map(|ts| {
+            let next = ts + 86400 - (ts % 86400) + 14400;
+            next.to_string()
+        });
+
+        let (checked_count, discrepancy_count, unresolved_count): (i64, i64, i64) =
+            sqlx::query_as(
+                r#"
+                SELECT
+                    COALESCE(COUNT(*), 0) AS checked,
+                    COALESCE(SUM(CASE WHEN discrepancy != 'NONE' THEN 1 ELSE 0 END), 0) AS discrepancies,
+                    COALESCE(SUM(CASE WHEN discrepancy != 'NONE' AND resolved_at IS NULL THEN 1 ELSE 0 END), 0) AS unresolved
+                FROM reconciliation_log
+                "#,
+            )
+            .fetch_one(&self.pool)
+            .await?;
+
+        let recent_rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                trade_uuid,
+                discrepancy,
+                notes,
+                expected_state,
+                actual_on_chain,
+                created_at AS detected_at,
+                resolved_at IS NOT NULL AS resolved,
+                resolved_at
+            FROM reconciliation_log
+            WHERE discrepancy != 'NONE'
+            ORDER BY created_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let recent_discrepancies = recent_rows
+            .iter()
+            .map(|row| {
+                let discrepancy: String = row.try_get("discrepancy").unwrap_or_default();
+                let notes: Option<String> = row.try_get("notes").ok();
+
+                DiscrepancyRow {
+                    id: row.try_get("id").unwrap_or(0),
+                    trade_uuid: row.try_get("trade_uuid").unwrap_or_default(),
+                    discrepancy_type: match discrepancy.as_str() {
+                        "NONE" => "none".to_string(),
+                        "MISSING_TX" => "missing_position".to_string(),
+                        "AMOUNT_MISMATCH" => "pnl_mismatch".to_string(),
+                        "STATE_MISMATCH" => "state_mismatch".to_string(),
+                        "COST_MISMATCH" => "cost_mismatch".to_string(),
+                        other => other.to_lowercase(),
+                    },
+                    severity: match discrepancy.as_str() {
+                        "NONE" => "low".to_string(),
+                        "MISSING_TX" => "critical".to_string(),
+                        "AMOUNT_MISMATCH" => "high".to_string(),
+                        "STATE_MISMATCH" => "medium".to_string(),
+                        "COST_MISMATCH" => "medium".to_string(),
+                        _ => "low".to_string(),
+                    },
+                    description: notes.unwrap_or_else(|| discrepancy.clone()),
+                    db_value: row.try_get::<String, _>("expected_state").ok(),
+                    on_chain_value: row.try_get::<String, _>("actual_on_chain").ok(),
+                    detected_at: row
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("detected_at")
+                        .ok()
+                        .flatten()
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default(),
+                    resolved: row.try_get::<bool, _>("resolved").unwrap_or(false),
+                    resolved_at: row
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("resolved_at")
+                        .ok()
+                        .flatten()
+                        .map(|dt| dt.to_rfc3339()),
+                }
+            })
+            .collect();
+
+        Ok(ReconciliationStatus {
+            last_reconciliation_at: last_at,
+            next_reconciliation_at: next_at,
+            status: "completed".to_string(),
+            checked_count,
+            discrepancy_count,
+            unresolved_count,
+            duration_seconds: None,
+            recent_discrepancies,
+        })
     }
-    async fn get_reconciliation_history(&self, _limit: i32) -> AppResult<Vec<ReconciliationRun>> {
-        Err(AppError::Internal(
-            "get_reconciliation_history not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_reconciliation_history(&self, limit: i32) -> AppResult<Vec<ReconciliationRun>> {
+        let limit_val = limit.clamp(1, 100) as i64;
+
+        let rows = sqlx::query(
+            r#"
+            WITH daily_runs AS (
+                SELECT
+                    created_at::DATE AS run_date,
+                    MIN(id) AS id,
+                    MIN(created_at) AS started_at,
+                    MAX(created_at) AS completed_at,
+                    'completed' AS status,
+                    COUNT(*) AS checked_count,
+                    SUM(CASE WHEN discrepancy != 'NONE' THEN 1 ELSE 0 END) AS discrepancy_count,
+                    SUM(CASE WHEN discrepancy != 'NONE' AND resolved_at IS NULL THEN 1 ELSE 0 END) AS unresolved_count,
+                    EXTRACT(EPOCH FROM (MAX(created_at) - MIN(created_at)))::FLOAT8 AS duration_seconds
+                FROM reconciliation_log
+                GROUP BY created_at::DATE
+                ORDER BY run_date DESC
+                LIMIT $1
+            )
+            SELECT
+                id,
+                started_at,
+                completed_at,
+                status,
+                checked_count,
+                discrepancy_count,
+                unresolved_count,
+                duration_seconds
+            FROM daily_runs
+            "#,
+        )
+        .bind(limit_val)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let runs = rows
+            .iter()
+            .map(|row| ReconciliationRun {
+                id: row.try_get("id").unwrap_or(0),
+                started_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+                completed_at: row
+                    .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("completed_at")
+                    .ok()
+                    .flatten()
+                    .map(|dt| dt.to_rfc3339()),
+                status: row
+                    .try_get("status")
+                    .unwrap_or_else(|_| "completed".to_string()),
+                checked_count: row.try_get("checked_count").unwrap_or(0),
+                discrepancy_count: row.try_get("discrepancy_count").unwrap_or(0),
+                unresolved_count: row.try_get("unresolved_count").unwrap_or(0),
+                duration_seconds: row
+                    .try_get::<Option<f64>, _>("duration_seconds")
+                    .ok()
+                    .flatten(),
+            })
+            .collect();
+
+        Ok(runs)
     }
+
     async fn count_reconciliation_runs(&self) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "count_reconciliation_runs not implemented for PostgreSQL".into(),
-        ))
+        let result: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(DISTINCT created_at::DATE) AS count
+            FROM reconciliation_log
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(result.0)
     }
-    async fn get_reconciliation_stats(&self, _range: &str) -> AppResult<ReconciliationStats> {
-        Err(AppError::Internal(
-            "get_reconciliation_stats not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_reconciliation_stats(&self, _time_range: &str) -> AppResult<ReconciliationStats> {
+        let (total_reconciliations, total_checked, total_discrepancies, total_unresolved): (
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = sqlx::query_as(
+            r#"
+            WITH stats AS (
+                SELECT
+                    COUNT(DISTINCT created_at::DATE) AS total_runs,
+                    COUNT(*) AS total_checked,
+                    SUM(CASE WHEN discrepancy != 'NONE' THEN 1 ELSE 0 END) AS total_discrepancies,
+                    SUM(CASE WHEN discrepancy != 'NONE' AND resolved_at IS NULL THEN 1 ELSE 0 END) AS total_unresolved
+                FROM reconciliation_log
+            )
+            SELECT
+                total_runs,
+                total_checked,
+                COALESCE(total_discrepancies, 0) AS total_discrepancies,
+                COALESCE(total_unresolved, 0) AS total_unresolved
+            FROM stats
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+
+        let successful_reconciliations = sqlx::query_as::<_, (i64,)>(
+            r#"
+            SELECT COUNT(DISTINCT created_at::DATE)
+            FROM reconciliation_log
+            WHERE discrepancy = 'NONE' OR resolved_at IS NOT NULL
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await?
+        .0;
+
+        let failed_reconciliations = total_reconciliations - successful_reconciliations;
+
+        let avg_discrepancies_per_run = if total_reconciliations > 0 {
+            total_discrepancies as f64 / total_reconciliations as f64
+        } else {
+            0.0
+        };
+
+        let discrepancy_types = sqlx::query(
+            r#"
+            SELECT
+                discrepancy,
+                COUNT(*) AS count
+            FROM reconciliation_log
+            WHERE discrepancy != 'NONE'
+            GROUP BY discrepancy
+            ORDER BY count DESC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let most_common_discrepancy_types = discrepancy_types
+            .iter()
+            .map(|row| {
+                let discrepancy_type: String = row.try_get("discrepancy").unwrap_or_default();
+                let count: i64 = row.try_get("count").unwrap_or(0);
+                let percentage = if total_discrepancies > 0 {
+                    (count as f64 / total_discrepancies as f64) * 100.0
+                } else {
+                    0.0
+                };
+
+                DiscrepancyTypeStats {
+                    discrepancy_type: match discrepancy_type.as_str() {
+                        "NONE" => "none".to_string(),
+                        "MISSING_TX" => "missing_position".to_string(),
+                        "AMOUNT_MISMATCH" => "pnl_mismatch".to_string(),
+                        "STATE_MISMATCH" => "state_mismatch".to_string(),
+                        "COST_MISMATCH" => "cost_mismatch".to_string(),
+                        other => other.to_lowercase(),
+                    },
+                    count,
+                    percentage,
+                }
+            })
+            .collect();
+
+        Ok(ReconciliationStats {
+            total_reconciliations,
+            successful_reconciliations,
+            failed_reconciliations,
+            total_checked,
+            total_discrepancies,
+            total_unresolved,
+            avg_discrepancies_per_run,
+            most_common_discrepancy_types,
+        })
     }
-    async fn resolve_discrepancy(&self, _id: i64, _by: &str, _res: &str) -> AppResult<()> {
-        Err(AppError::Internal(
-            "resolve_discrepancy not implemented for PostgreSQL".into(),
-        ))
+
+    async fn resolve_discrepancy(
+        &self,
+        id: i64,
+        resolved_by: &str,
+        resolution: &str,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE reconciliation_log
+            SET resolved_at = CURRENT_TIMESTAMP,
+                resolved_by = $1,
+                notes = COALESCE(notes || '; ', '') || $2
+            WHERE id = $3 AND resolved_at IS NULL
+            "#,
+        )
+        .bind(resolved_by)
+        .bind(resolution)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
+
+    // ========================================================================
+    // TRADE QUERIES
+    // ========================================================================
+
     #[allow(clippy::too_many_arguments)]
     async fn get_trades_filtered(
         &self,
-        _from: Option<&str>,
-        _to: Option<&str>,
-        _status: Option<&str>,
-        _strat: Option<&str>,
-        _wallet: Option<&str>,
-        _limit: i64,
-        _offset: i64,
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+        status_filter: Option<&str>,
+        strategy_filter: Option<&str>,
+        wallet_address_filter: Option<&str>,
+        limit: i64,
+        offset: i64,
     ) -> AppResult<Vec<TradeDetail>> {
-        Err(AppError::Internal(
-            "get_trades_filtered not implemented for PostgreSQL".into(),
-        ))
+        let mut query = String::from(
+            r#"
+            SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
+                   side, amount_sol, price_at_signal, tx_signature, status, retry_count,
+                   error_message, pnl_sol, pnl_usd, jito_tip_sol, dex_fee_sol, slippage_cost_sol,
+                   total_cost_sol, net_pnl_sol, created_at, updated_at
+            FROM trades
+            WHERE 1=1
+            "#,
+        );
+
+        let next =
+            append_trade_filter_clauses(&mut query, from_date, to_date, status_filter, strategy_filter, wallet_address_filter);
+
+        let limit_n = next;
+        let offset_n = next + 1;
+        query.push_str(&format!(
+            " ORDER BY created_at DESC LIMIT ${limit_n} OFFSET ${offset_n}"
+        ));
+
+        let mut q = sqlx::query(&query);
+        if let Some(from) = from_date {
+            q = q.bind(from);
+        }
+        if let Some(to) = to_date {
+            q = q.bind(to);
+        }
+        if let Some(status) = status_filter {
+            q = q.bind(status);
+        }
+        if let Some(strategy) = strategy_filter {
+            q = q.bind(strategy);
+        }
+        if let Some(wallet) = wallet_address_filter {
+            q = q.bind(wallet);
+        }
+        q = q.bind(limit).bind(offset);
+
+        let rows = q.fetch_all(&self.pool).await?;
+        let trades: Vec<TradeDetail> = rows
+            .into_iter()
+            .map(|row| TradeDetail {
+                id: row.try_get("id").unwrap_or(0),
+                trade_uuid: row.try_get("trade_uuid").unwrap_or_default(),
+                wallet_address: row.try_get("wallet_address").unwrap_or_default(),
+                token_address: row.try_get("token_address").unwrap_or_default(),
+                token_symbol: row.try_get("token_symbol").ok(),
+                strategy: row.try_get("strategy").unwrap_or_default(),
+                side: row.try_get("side").unwrap_or_default(),
+                amount_sol: row.try_get::<Decimal, _>("amount_sol").unwrap_or(Decimal::ZERO),
+                price_at_signal: row
+                    .try_get::<Option<Decimal>, _>("price_at_signal")
+                    .ok()
+                    .flatten(),
+                tx_signature: row.try_get("tx_signature").ok(),
+                status: row.try_get("status").unwrap_or_default(),
+                retry_count: row.try_get("retry_count").unwrap_or(0),
+                error_message: row.try_get("error_message").ok(),
+                pnl_sol: row.try_get::<Option<Decimal>, _>("pnl_sol").ok().flatten(),
+                pnl_usd: row.try_get::<Option<Decimal>, _>("pnl_usd").ok().flatten(),
+                jito_tip_sol: row
+                    .try_get::<Option<Decimal>, _>("jito_tip_sol")
+                    .ok()
+                    .flatten(),
+                dex_fee_sol: row
+                    .try_get::<Option<Decimal>, _>("dex_fee_sol")
+                    .ok()
+                    .flatten(),
+                slippage_cost_sol: row
+                    .try_get::<Option<Decimal>, _>("slippage_cost_sol")
+                    .ok()
+                    .flatten(),
+                total_cost_sol: row
+                    .try_get::<Option<Decimal>, _>("total_cost_sol")
+                    .ok()
+                    .flatten(),
+                net_pnl_sol: row
+                    .try_get::<Option<Decimal>, _>("net_pnl_sol")
+                    .ok()
+                    .flatten(),
+                created_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339()),
+                updated_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339()),
+            })
+            .collect();
+        Ok(trades)
     }
+
     async fn count_trades_filtered(
         &self,
-        _from: Option<&str>,
-        _to: Option<&str>,
-        _status: Option<&str>,
-        _strat: Option<&str>,
-        _wallet: Option<&str>,
+        from_date: Option<&str>,
+        to_date: Option<&str>,
+        status_filter: Option<&str>,
+        strategy_filter: Option<&str>,
+        wallet_address_filter: Option<&str>,
     ) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "count_trades_filtered not implemented for PostgreSQL".into(),
-        ))
+        let mut query = String::from("SELECT COUNT(*) FROM trades WHERE 1=1");
+
+        let _next =
+            append_trade_filter_clauses(&mut query, from_date, to_date, status_filter, strategy_filter, wallet_address_filter);
+
+        let mut q = sqlx::query_as::<_, (i64,)>(&query);
+        if let Some(from) = from_date {
+            q = q.bind(from);
+        }
+        if let Some(to) = to_date {
+            q = q.bind(to);
+        }
+        if let Some(status) = status_filter {
+            q = q.bind(status);
+        }
+        if let Some(strategy) = strategy_filter {
+            q = q.bind(strategy);
+        }
+        if let Some(wallet) = wallet_address_filter {
+            q = q.bind(wallet);
+        }
+
+        let (count,) = q.fetch_one(&self.pool).await?;
+        Ok(count)
     }
+
     async fn update_trade_costs(
         &self,
-        _uuid: &str,
-        _jito: Decimal,
-        _dex: Decimal,
-        _slip: Decimal,
+        trade_uuid: &str,
+        jito_tip_sol: Decimal,
+        dex_fee_sol: Decimal,
+        slippage_cost_sol: Decimal,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_trade_costs not implemented for PostgreSQL".into(),
-        ))
+        let row: Option<(Option<Decimal>, Option<Decimal>, Option<Decimal>)> = sqlx::query_as(
+            "SELECT jito_tip_sol, dex_fee_sol, slippage_cost_sol FROM trades WHERE trade_uuid = $1",
+        )
+        .bind(trade_uuid)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (current_jito, current_dex, current_slip) = row
+            .map(|(j, d, s)| {
+                (
+                    j.unwrap_or(Decimal::ZERO),
+                    d.unwrap_or(Decimal::ZERO),
+                    s.unwrap_or(Decimal::ZERO),
+                )
+            })
+            .unwrap_or((Decimal::ZERO, Decimal::ZERO, Decimal::ZERO));
+
+        let new_jito = current_jito + jito_tip_sol;
+        let new_dex = current_dex + dex_fee_sol;
+        let new_slip = current_slip + slippage_cost_sol;
+        let total = new_jito + new_dex + new_slip;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE trades
+            SET jito_tip_sol = $1,
+                dex_fee_sol = $2,
+                slippage_cost_sol = $3,
+                total_cost_sol = $4
+            WHERE trade_uuid = $5
+            "#,
+        )
+        .bind(new_jito)
+        .bind(new_dex)
+        .bind(new_slip)
+        .bind(total)
+        .bind(trade_uuid)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound(format!(
+                "trade_uuid {} not found",
+                trade_uuid
+            )));
+        }
+
+        Ok(())
     }
-    async fn update_trade_net_pnl(&self, _uuid: &str, _pnl: Decimal) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_trade_net_pnl not implemented for PostgreSQL".into(),
-        ))
+
+    async fn update_trade_net_pnl(&self, trade_uuid: &str, net_pnl_sol: Decimal) -> AppResult<()> {
+        let result = sqlx::query(
+            r#"
+            UPDATE trades
+            SET net_pnl_sol = $1
+            WHERE trade_uuid = $2
+            "#,
+        )
+        .bind(net_pnl_sol)
+        .bind(trade_uuid)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound(format!(
+                "trade_uuid {} not found",
+                trade_uuid
+            )));
+        }
+
+        Ok(())
     }
+
     async fn mark_trade_dead_letter(
         &self,
-        _uuid: &str,
-        _payload: &str,
-        _err: &str,
+        trade_uuid: &str,
+        payload: &str,
+        error: &str,
     ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "mark_trade_dead_letter not implemented for PostgreSQL".into(),
-        ))
+        let mut tx = self.pool.begin().await?;
+
+        let result = sqlx::query(
+            r#"
+            UPDATE trades
+            SET status = 'DEAD_LETTER', error_message = $1
+            WHERE trade_uuid = $2
+            "#,
+        )
+        .bind(error)
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound(format!(
+                "trade_uuid '{}' not found",
+                trade_uuid
+            )));
+        }
+
+        sqlx::query(
+            r#"
+            INSERT INTO dead_letter_queue (trade_uuid, payload, reason, error_details)
+            VALUES ($1, $2, 'DEAD_LETTER', $3)
+            "#,
+        )
+        .bind(trade_uuid)
+        .bind(payload)
+        .bind(error)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
-    async fn log_config_change(
-        &self,
-        _key: &str,
-        _old: Option<&str>,
-        _new: &str,
-        _by: &str,
-        _reason: Option<&str>,
-    ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "log_config_change not implemented for PostgreSQL".into(),
-        ))
+
+    async fn count_trades_by_status(&self, status: &str) -> AppResult<i64> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE status = $1")
+            .bind(status)
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
     }
-    async fn get_dead_letter_entries(
-        &self,
-        _limit: i32,
-        _offset: i32,
-    ) -> AppResult<Vec<DeadLetterItem>> {
-        Err(AppError::Internal(
-            "get_dead_letter_entries not implemented for PostgreSQL".into(),
-        ))
+
+    async fn get_closed_trade_count_for_wallet(&self, wallet_address: &str) -> AppResult<i64> {
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM trades WHERE wallet_address = $1 AND status = 'CLOSED'",
+        )
+        .bind(wallet_address)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count.0)
     }
-    async fn count_dead_letter_entries(&self) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "count_dead_letter_entries not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn get_retryable_dlq_items(&self, _limit: i64) -> AppResult<Vec<RetryableDlqItem>> {
-        Err(AppError::Internal(
-            "get_retryable_dlq_items not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn update_dlq_item(
-        &self,
-        _trade_uuid: &str,
-        _retry_count: i64,
-        _can_retry: bool,
-        _mark_processed: bool,
-    ) -> AppResult<()> {
-        Err(AppError::Internal(
-            "update_dlq_item not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn update_dlq_items_batch(&self, _items: Vec<UpdateDlqItemParams>) -> AppResult<usize> {
-        Err(AppError::Internal(
-            "update_dlq_items_batch not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn get_config_audit_entries(
-        &self,
-        _limit: i32,
-        _offset: i32,
-    ) -> AppResult<Vec<ConfigAuditItem>> {
-        Err(AppError::Internal(
-            "get_config_audit_entries not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn count_config_audit_entries(&self) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "count_config_audit_entries not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn count_trades_by_status(&self, _status: &str) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "count_trades_by_status not implemented for PostgreSQL".into(),
-        ))
-    }
-    async fn get_closed_trade_count_for_wallet(&self, _addr: &str) -> AppResult<i64> {
-        Err(AppError::Internal(
-            "get_closed_trade_count_for_wallet not implemented for PostgreSQL".into(),
-        ))
-    }
+
     async fn get_wallet_copy_performance(
         &self,
-        _addr: &str,
+        wallet_address: &str,
     ) -> AppResult<Option<WalletCopyPerformance>> {
-        Err(AppError::Internal(
-            "get_wallet_copy_performance not implemented for PostgreSQL".into(),
-        ))
+        let row = sqlx::query(
+            r#"
+            SELECT
+                wallet_address,
+                copy_pnl_7d,
+                copy_pnl_30d,
+                signal_success_rate,
+                avg_return_per_trade,
+                total_trades,
+                winning_trades,
+                last_updated
+            FROM wallet_copy_performance
+            WHERE wallet_address = $1
+            "#,
+        )
+        .bind(wallet_address)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        match row {
+            Some(r) => Ok(Some(WalletCopyPerformance {
+                wallet_address: r
+                    .try_get("wallet_address")
+                    .unwrap_or_else(|_| wallet_address.to_string()),
+                copy_pnl_7d: r.try_get::<Decimal, _>("copy_pnl_7d").unwrap_or_default(),
+                copy_pnl_30d: r.try_get::<Decimal, _>("copy_pnl_30d").unwrap_or_default(),
+                signal_success_rate: r
+                    .try_get::<Decimal, _>("signal_success_rate")
+                    .unwrap_or_default(),
+                avg_return_per_trade: r
+                    .try_get::<Decimal, _>("avg_return_per_trade")
+                    .unwrap_or_default(),
+                total_trades: r.try_get("total_trades").unwrap_or(0),
+                winning_trades: r.try_get("winning_trades").unwrap_or(0),
+                last_updated: r
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("last_updated")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+            })),
+            None => Ok(None),
+        }
     }
-    async fn get_trade_latency_stats(&self, _hours: i32) -> AppResult<TradeLatencyStats> {
-        Err(AppError::Internal(
-            "get_trade_latency_stats not implemented for PostgreSQL".into(),
-        ))
+
+    // ========================================================================
+    // DLQ / CONFIG AUDIT
+    // ========================================================================
+
+    async fn log_config_change(
+        &self,
+        key: &str,
+        old_value: Option<&str>,
+        new_value: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO config_audit (key, old_value, new_value, changed_by, change_reason)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(key)
+        .bind(old_value)
+        .bind(new_value)
+        .bind(changed_by)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
+
+    async fn get_dead_letter_entries(
+        &self,
+        limit: i32,
+        offset: i32,
+    ) -> AppResult<Vec<DeadLetterItem>> {
+        let rows = sqlx::query(
+            "SELECT id, trade_uuid, payload, reason, error_details, source_ip, retry_count, can_retry, received_at, processed_at FROM dead_letter_queue ORDER BY received_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let items = rows
+            .into_iter()
+            .map(|row| DeadLetterItem {
+                id: row.try_get("id").unwrap_or(0),
+                trade_uuid: row.try_get("trade_uuid").ok(),
+                payload: row.try_get("payload").unwrap_or_default(),
+                reason: row.try_get("reason").unwrap_or_default(),
+                error_details: row.try_get("error_details").ok(),
+                source_ip: row.try_get("source_ip").ok(),
+                retry_count: row.try_get::<i32, _>("retry_count").unwrap_or(0),
+                can_retry: row.try_get::<bool, _>("can_retry").unwrap_or(true),
+                received_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("received_at")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+                processed_at: row
+                    .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("processed_at")
+                    .ok()
+                    .flatten()
+                    .map(|dt| dt.to_rfc3339()),
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    async fn count_dead_letter_entries(&self) -> AppResult<i64> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM dead_letter_queue")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
+    async fn get_retryable_dlq_items(&self, limit: i64) -> AppResult<Vec<RetryableDlqItem>> {
+        let rows = sqlx::query(
+            "SELECT trade_uuid, payload, retry_count FROM dead_letter_queue WHERE can_retry = TRUE AND processed_at IS NULL LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| RetryableDlqItem {
+                trade_uuid: row.try_get("trade_uuid").unwrap_or_default(),
+                payload: row.try_get("payload").unwrap_or_default(),
+                retry_count: row.try_get::<i32, _>("retry_count").unwrap_or(0) as i64,
+            })
+            .collect())
+    }
+
+    async fn update_dlq_item(
+        &self,
+        trade_uuid: &str,
+        retry_count: i64,
+        can_retry: bool,
+        mark_processed: bool,
+    ) -> AppResult<()> {
+        if mark_processed {
+            sqlx::query(
+                "UPDATE dead_letter_queue SET retry_count = $1, can_retry = $2, processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = $3 AND processed_at IS NULL",
+            )
+            .bind(retry_count)
+            .bind(can_retry)
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            sqlx::query(
+                "UPDATE dead_letter_queue SET retry_count = $1, can_retry = $2 WHERE trade_uuid = $3 AND processed_at IS NULL",
+            )
+            .bind(retry_count)
+            .bind(can_retry)
+            .bind(trade_uuid)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn update_dlq_items_batch(&self, items: Vec<UpdateDlqItemParams>) -> AppResult<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+
+        let mut tx = self.pool.begin().await?;
+
+        let mut processed_count = 0usize;
+        for item in &items {
+            let result = if item.mark_processed {
+                sqlx::query(
+                    "UPDATE dead_letter_queue SET retry_count = $1, can_retry = $2, processed_at = CURRENT_TIMESTAMP WHERE trade_uuid = $3 AND processed_at IS NULL",
+                )
+                .bind(item.retry_count)
+                .bind(item.can_retry)
+                .bind(&item.trade_uuid)
+                .execute(&mut *tx)
+                .await?
+            } else {
+                sqlx::query(
+                    "UPDATE dead_letter_queue SET retry_count = $1, can_retry = $2 WHERE trade_uuid = $3 AND processed_at IS NULL",
+                )
+                .bind(item.retry_count)
+                .bind(item.can_retry)
+                .bind(&item.trade_uuid)
+                .execute(&mut *tx)
+                .await?
+            };
+
+            processed_count += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(processed_count)
+    }
+
+    async fn get_config_audit_entries(
+        &self,
+        limit: i32,
+        offset: i32,
+    ) -> AppResult<Vec<ConfigAuditItem>> {
+        let rows = sqlx::query(
+            "SELECT id, key, old_value, new_value, changed_by, change_reason, changed_at FROM config_audit ORDER BY changed_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let items = rows
+            .into_iter()
+            .map(|row| ConfigAuditItem {
+                id: row.try_get("id").unwrap_or(0),
+                key: row.try_get("key").unwrap_or_default(),
+                old_value: row.try_get("old_value").ok(),
+                new_value: row.try_get("new_value").unwrap_or_default(),
+                changed_by: row.try_get("changed_by").unwrap_or_default(),
+                change_reason: row.try_get("change_reason").ok(),
+                changed_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default(),
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    async fn count_config_audit_entries(&self) -> AppResult<i64> {
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM config_audit")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(count.0)
+    }
+
+    // ========================================================================
+    // TRADE LATENCY
+    // ========================================================================
+
+    async fn get_trade_latency_stats(&self, hours: i32) -> AppResult<TradeLatencyStats> {
+        let latencies: Vec<f64> = sqlx::query_scalar(
+            r#"
+            SELECT EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000.0
+             FROM trades
+             WHERE status = 'CLOSED'
+             AND created_at >= NOW() - make_interval(hours => $1)
+             AND updated_at IS NOT NULL
+             AND updated_at > created_at
+            "#,
+        )
+        .bind(hours)
+        .fetch_all(&self.pool)
+        .await?;
+
+        if latencies.is_empty() {
+            return Ok(TradeLatencyStats {
+                count: 0,
+                avg_ms: 0.0,
+                p50_ms: 0.0,
+                p95_ms: 0.0,
+                p99_ms: 0.0,
+                max_ms: 0.0,
+            });
+        }
+
+        let count = latencies.len() as u32;
+        let avg_ms = latencies.iter().sum::<f64>() / count as f64;
+
+        let mut sorted_latencies = latencies.clone();
+        sorted_latencies.sort_by(|a, b| a.total_cmp(b));
+
+        let p50_ms = *sorted_latencies
+            .get((count as f64 * 0.50) as usize)
+            .unwrap_or(&avg_ms);
+        let p95_ms = *sorted_latencies
+            .get((count as f64 * 0.95) as usize)
+            .unwrap_or(&avg_ms);
+        let p99_ms = *sorted_latencies
+            .get((count as f64 * 0.99) as usize)
+            .unwrap_or(&avg_ms);
+        let max_ms = *sorted_latencies.last().unwrap_or(&avg_ms);
+
+        Ok(TradeLatencyStats {
+            count,
+            avg_ms,
+            p50_ms,
+            p95_ms,
+            p99_ms,
+            max_ms,
+        })
+    }
+
     async fn get_trade_latency_histogram(
         &self,
-        _hours: i32,
-        _buckets: &[f64],
+        hours: i32,
+        bucket_bounds: &[f64],
     ) -> AppResult<Vec<LatencyBucket>> {
-        Err(AppError::Internal(
-            "get_trade_latency_histogram not implemented for PostgreSQL".into(),
-        ))
+        if bucket_bounds.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Single-pass bucketing: scan the filtered trades ONCE, compute the latency
+        // per row in a subquery, then aggregate every bucket with COUNT(*) FILTER in
+        // the same pass. Previously this issued one COUNT query per bucket bound (N+1),
+        // re-scanning and recomputing the latency expression each time.
+        //
+        // Param layout: $1 = hours; $2..$(n+1) = bucket_bounds (upper bounds, in order).
+        // bucket i covers [lower_i, upper_i): lower_0 = 0.0, lower_i = bound_{i-1}.
+        let mut select_parts: Vec<String> = Vec::with_capacity(bucket_bounds.len() + 1);
+        select_parts.push("COUNT(*) AS total".to_string());
+        for (i, _upper) in bucket_bounds.iter().enumerate() {
+            let lower_sql = if i == 0 {
+                "0.0".to_string()
+            } else {
+                format!("${}", i + 1)
+            };
+            let upper_sql = format!("${}", i + 2);
+            select_parts.push(format!(
+                "COUNT(*) FILTER (WHERE lat >= {lower_sql} AND lat < {upper_sql})"
+            ));
+        }
+
+        let sql = format!(
+            r#"
+            SELECT {select}
+            FROM (
+                SELECT EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000.0 AS lat
+                FROM trades
+                WHERE status = 'CLOSED'
+                  AND created_at >= NOW() - make_interval(hours => $1)
+                  AND updated_at IS NOT NULL
+            ) t
+            "#,
+            select = select_parts.join(",\n    ")
+        );
+
+        let mut query = sqlx::query(&sql).bind(hours);
+        for &bound in bucket_bounds {
+            query = query.bind(bound);
+        }
+
+        let row = query.fetch_one(&self.pool).await.map_err(AppError::Database)?;
+        let total: i64 = row.try_get("total").unwrap_or(0);
+        if total == 0 {
+            return Ok(vec![]);
+        }
+
+        let mut buckets = Vec::with_capacity(bucket_bounds.len());
+        let mut lower_bound = 0.0;
+        for (i, &upper_bound) in bucket_bounds.iter().enumerate() {
+            // Column index 0 is `total`; bucket counts start at index 1.
+            let count: i64 = row.try_get(i + 1).unwrap_or(0);
+            let percentage = (count as f64 / total as f64) * 100.0;
+            let range = if i == bucket_bounds.len() - 1 {
+                format!("{}ms+", upper_bound)
+            } else {
+                format!("{}-{}ms", lower_bound, upper_bound)
+            };
+
+            buckets.push(LatencyBucket {
+                range,
+                count: count as u32,
+                percentage,
+            });
+
+            lower_bound = upper_bound;
+        }
+
+        Ok(buckets)
     }
 
     async fn get_positions(&self, state_filter: Option<&str>) -> AppResult<Vec<PositionDetail>> {
@@ -1425,29 +3677,39 @@ impl Database for PostgresBackend {
                     token_address: row.try_get("token_address").unwrap_or_default(),
                     token_symbol: row.try_get("token_symbol").ok(),
                     strategy: row.try_get("strategy").unwrap_or_default(),
-                    entry_amount_sol: f64_to_decimal(
-                        row.try_get::<f64, _>("entry_amount_sol").unwrap_or(0.0),
-                    ),
-                    entry_price: f64_to_decimal(
-                        row.try_get::<f64, _>("entry_price").unwrap_or(0.0),
-                    ),
+                    entry_amount_sol: row
+                        .try_get::<Decimal, _>("entry_amount_sol")
+                        .unwrap_or(Decimal::ZERO),
+                    entry_price: row
+                        .try_get::<Decimal, _>("entry_price")
+                        .unwrap_or(Decimal::ZERO),
                     entry_tx_signature: row.try_get("entry_tx_signature").unwrap_or_default(),
-                    current_price: opt_f64_to_decimal(row.try_get::<f64, _>("current_price").ok()),
-                    unrealized_pnl_sol: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("unrealized_pnl_sol").ok(),
-                    ),
-                    unrealized_pnl_percent: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("unrealized_pnl_percent").ok(),
-                    ),
+                    current_price: row
+                        .try_get::<Option<Decimal>, _>("current_price")
+                        .ok()
+                        .flatten(),
+                    unrealized_pnl_sol: row
+                        .try_get::<Option<Decimal>, _>("unrealized_pnl_sol")
+                        .ok()
+                        .flatten(),
+                    unrealized_pnl_percent: row
+                        .try_get::<Option<Decimal>, _>("unrealized_pnl_percent")
+                        .ok()
+                        .flatten(),
                     state: row.try_get("state").unwrap_or_default(),
-                    exit_price: opt_f64_to_decimal(row.try_get::<f64, _>("exit_price").ok()),
+                    exit_price: row
+                        .try_get::<Option<Decimal>, _>("exit_price")
+                        .ok()
+                        .flatten(),
                     exit_tx_signature: row.try_get("exit_tx_signature").ok(),
-                    realized_pnl_sol: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("realized_pnl_sol").ok(),
-                    ),
-                    realized_pnl_usd: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("realized_pnl_usd").ok(),
-                    ),
+                    realized_pnl_sol: row
+                        .try_get::<Option<Decimal>, _>("realized_pnl_sol")
+                        .ok()
+                        .flatten(),
+                    realized_pnl_usd: row
+                        .try_get::<Option<Decimal>, _>("realized_pnl_usd")
+                        .ok()
+                        .flatten(),
                     opened_at: row
                         .try_get("opened_at")
                         .map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339())
@@ -1510,31 +3772,56 @@ impl Database for PostgresBackend {
                     id: row.try_get("id").unwrap_or(0),
                     address: row.try_get("address").unwrap_or_default(),
                     status: row.try_get("status").unwrap_or_default(),
-                    wqs_score: opt_f64_to_decimal(row.try_get::<f64, _>("wqs_score").ok()),
-                    roi_7d: opt_f64_to_decimal(row.try_get::<f64, _>("roi_7d").ok()),
-                    roi_30d: opt_f64_to_decimal(row.try_get::<f64, _>("roi_30d").ok()),
+                    wqs_score: row
+                        .try_get::<Option<Decimal>, _>("wqs_score")
+                        .ok()
+                        .flatten(),
+                    roi_7d: row
+                        .try_get::<Option<Decimal>, _>("roi_7d")
+                        .ok()
+                        .flatten(),
+                    roi_30d: row
+                        .try_get::<Option<Decimal>, _>("roi_30d")
+                        .ok()
+                        .flatten(),
                     trade_count_30d: row.try_get("trade_count_30d").ok(),
-                    win_rate: opt_f64_to_decimal(row.try_get::<f64, _>("win_rate").ok()),
-                    max_drawdown_30d: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("max_drawdown_30d").ok(),
-                    ),
-                    avg_trade_size_sol: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("avg_trade_size_sol").ok(),
-                    ),
-                    avg_win_sol: opt_f64_to_decimal(row.try_get::<f64, _>("avg_win_sol").ok()),
-                    avg_loss_sol: opt_f64_to_decimal(row.try_get::<f64, _>("avg_loss_sol").ok()),
-                    profit_factor: opt_f64_to_decimal(row.try_get::<f64, _>("profit_factor").ok()),
-                    realized_pnl_30d_sol: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("realized_pnl_30d_sol").ok(),
-                    ),
+                    win_rate: row
+                        .try_get::<Option<Decimal>, _>("win_rate")
+                        .ok()
+                        .flatten(),
+                    max_drawdown_30d: row
+                        .try_get::<Option<Decimal>, _>("max_drawdown_30d")
+                        .ok()
+                        .flatten(),
+                    avg_trade_size_sol: row
+                        .try_get::<Option<Decimal>, _>("avg_trade_size_sol")
+                        .ok()
+                        .flatten(),
+                    avg_win_sol: row
+                        .try_get::<Option<Decimal>, _>("avg_win_sol")
+                        .ok()
+                        .flatten(),
+                    avg_loss_sol: row
+                        .try_get::<Option<Decimal>, _>("avg_loss_sol")
+                        .ok()
+                        .flatten(),
+                    profit_factor: row
+                        .try_get::<Option<Decimal>, _>("profit_factor")
+                        .ok()
+                        .flatten(),
+                    realized_pnl_30d_sol: row
+                        .try_get::<Option<Decimal>, _>("realized_pnl_30d_sol")
+                        .ok()
+                        .flatten(),
                     last_trade_at: row.try_get("last_trade_at").ok(),
                     promoted_at: row.try_get("promoted_at").ok(),
                     ttl_expires_at: row.try_get("ttl_expires_at").ok(),
                     notes: row.try_get("notes").ok(),
                     archetype: row.try_get("archetype").ok(),
-                    avg_entry_delay_seconds: opt_f64_to_decimal(
-                        row.try_get::<f64, _>("avg_entry_delay_seconds").ok(),
-                    ),
+                    avg_entry_delay_seconds: row
+                        .try_get::<Option<Decimal>, _>("avg_entry_delay_seconds")
+                        .ok()
+                        .flatten(),
                     created_at: row
                         .try_get("created_at")
                         .map(|dt: chrono::DateTime<chrono::Utc>| dt.to_rfc3339())
@@ -1606,19 +3893,35 @@ impl PostgresBackend {
             token_symbol: row.try_get("token_symbol").ok(),
             strategy: row.try_get("strategy").unwrap_or_default(),
             side: row.try_get("side").unwrap_or_default(),
-            amount_sol: f64_to_decimal(row.try_get("amount_sol").unwrap_or(0.0)),
-            price_at_signal: opt_f64_to_decimal(row.try_get("price_at_signal").ok()),
+            amount_sol: row
+                .try_get::<Decimal, _>("amount_sol")
+                .unwrap_or(Decimal::ZERO),
+            price_at_signal: row
+                .try_get::<Option<Decimal>, _>("price_at_signal")
+                .ok()
+                .flatten(),
             tx_signature: row.try_get("tx_signature").ok(),
             status: row.try_get("status").unwrap_or_default(),
             retry_count: row.try_get("retry_count").unwrap_or(0),
             error_message: row.try_get("error_message").ok(),
-            pnl_sol: opt_f64_to_decimal(row.try_get("pnl_sol").ok()),
-            pnl_usd: opt_f64_to_decimal(row.try_get("pnl_usd").ok()),
-            jito_tip_sol: f64_to_decimal(row.try_get("jito_tip_sol").unwrap_or(0.0)),
-            dex_fee_sol: f64_to_decimal(row.try_get("dex_fee_sol").unwrap_or(0.0)),
-            slippage_cost_sol: f64_to_decimal(row.try_get("slippage_cost_sol").unwrap_or(0.0)),
-            total_cost_sol: f64_to_decimal(row.try_get("total_cost_sol").unwrap_or(0.0)),
-            net_pnl_sol: opt_f64_to_decimal(row.try_get("net_pnl_sol").ok()),
+            pnl_sol: row.try_get::<Option<Decimal>, _>("pnl_sol").ok().flatten(),
+            pnl_usd: row.try_get::<Option<Decimal>, _>("pnl_usd").ok().flatten(),
+            jito_tip_sol: row
+                .try_get::<Decimal, _>("jito_tip_sol")
+                .unwrap_or(Decimal::ZERO),
+            dex_fee_sol: row
+                .try_get::<Decimal, _>("dex_fee_sol")
+                .unwrap_or(Decimal::ZERO),
+            slippage_cost_sol: row
+                .try_get::<Decimal, _>("slippage_cost_sol")
+                .unwrap_or(Decimal::ZERO),
+            total_cost_sol: row
+                .try_get::<Decimal, _>("total_cost_sol")
+                .unwrap_or(Decimal::ZERO),
+            net_pnl_sol: row
+                .try_get::<Option<Decimal>, _>("net_pnl_sol")
+                .ok()
+                .flatten(),
             created_at: row
                 .try_get("created_at")
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -1636,18 +3939,43 @@ impl PostgresBackend {
             token_address: row.try_get("token_address").unwrap_or_default(),
             token_symbol: row.try_get("token_symbol").ok(),
             strategy: row.try_get("strategy").unwrap_or_default(),
-            entry_amount_sol: f64_to_decimal(row.try_get("entry_amount_sol").unwrap_or(0.0)),
-            entry_price: f64_to_decimal(row.try_get("entry_price").unwrap_or(0.0)),
+            entry_amount_sol: row
+                .try_get::<Decimal, _>("entry_amount_sol")
+                .unwrap_or(Decimal::ZERO),
+            entry_price: row
+                .try_get::<Decimal, _>("entry_price")
+                .unwrap_or(Decimal::ZERO),
             entry_tx_signature: row.try_get("entry_tx_signature").unwrap_or_default(),
-            current_price: opt_f64_to_decimal(row.try_get("current_price").ok()),
-            unrealized_pnl_sol: opt_f64_to_decimal(row.try_get("unrealized_pnl_sol").ok()),
-            unrealized_pnl_percent: opt_f64_to_decimal(row.try_get("unrealized_pnl_percent").ok()),
+            current_price: row
+                .try_get::<Option<Decimal>, _>("current_price")
+                .ok()
+                .flatten(),
+            unrealized_pnl_sol: row
+                .try_get::<Option<Decimal>, _>("unrealized_pnl_sol")
+                .ok()
+                .flatten(),
+            unrealized_pnl_percent: row
+                .try_get::<Option<Decimal>, _>("unrealized_pnl_percent")
+                .ok()
+                .flatten(),
             state: row.try_get("state").unwrap_or_default(),
-            exit_price: opt_f64_to_decimal(row.try_get("exit_price").ok()),
+            exit_price: row
+                .try_get::<Option<Decimal>, _>("exit_price")
+                .ok()
+                .flatten(),
             exit_tx_signature: row.try_get("exit_tx_signature").ok(),
-            realized_pnl_sol: opt_f64_to_decimal(row.try_get("realized_pnl_sol").ok()),
-            realized_pnl_usd: opt_f64_to_decimal(row.try_get("realized_pnl_usd").ok()),
-            entry_sol_price_usd: opt_f64_to_decimal(row.try_get("entry_sol_price_usd").ok()),
+            realized_pnl_sol: row
+                .try_get::<Option<Decimal>, _>("realized_pnl_sol")
+                .ok()
+                .flatten(),
+            realized_pnl_usd: row
+                .try_get::<Option<Decimal>, _>("realized_pnl_usd")
+                .ok()
+                .flatten(),
+            entry_sol_price_usd: row
+                .try_get::<Option<Decimal>, _>("entry_sol_price_usd")
+                .ok()
+                .flatten(),
             opened_at: row
                 .try_get("opened_at")
                 .unwrap_or_else(|_| chrono::Utc::now()),
@@ -1655,7 +3983,10 @@ impl PostgresBackend {
                 .try_get("last_updated")
                 .unwrap_or_else(|_| chrono::Utc::now()),
             closed_at: row.try_get("closed_at").ok(),
-            token_amount: opt_f64_to_decimal(row.try_get("token_amount").ok()),
+            token_amount: row
+                .try_get::<Option<Decimal>, _>("token_amount")
+                .ok()
+                .flatten(),
         })
     }
 
@@ -1664,32 +3995,107 @@ impl PostgresBackend {
             id: row.try_get("id").unwrap_or(0),
             address: row.try_get("address").unwrap_or_default(),
             status: row.try_get("status").unwrap_or_default(),
-            wqs_score: opt_f64_to_decimal(row.try_get("wqs_score").ok()),
-            wqs_confidence: opt_f64_to_decimal(row.try_get("wqs_confidence").ok()),
-            roi_7d: opt_f64_to_decimal(row.try_get("roi_7d").ok()),
-            roi_30d: opt_f64_to_decimal(row.try_get("roi_30d").ok()),
+            wqs_score: row
+                .try_get::<Option<Decimal>, _>("wqs_score")
+                .ok()
+                .flatten(),
+            wqs_confidence: row
+                .try_get::<Option<Decimal>, _>("wqs_confidence")
+                .ok()
+                .flatten(),
+            roi_7d: row.try_get::<Option<Decimal>, _>("roi_7d").ok().flatten(),
+            roi_30d: row
+                .try_get::<Option<Decimal>, _>("roi_30d")
+                .ok()
+                .flatten(),
             trade_count_30d: row.try_get("trade_count_30d").ok(),
-            win_rate: opt_f64_to_decimal(row.try_get("win_rate").ok()),
-            max_drawdown_30d: opt_f64_to_decimal(row.try_get("max_drawdown_30d").ok()),
-            avg_trade_size_sol: opt_f64_to_decimal(row.try_get("avg_trade_size_sol").ok()),
-            avg_win_sol: opt_f64_to_decimal(row.try_get("avg_win_sol").ok()),
-            avg_loss_sol: opt_f64_to_decimal(row.try_get("avg_loss_sol").ok()),
-            profit_factor: opt_f64_to_decimal(row.try_get("profit_factor").ok()),
-            realized_pnl_30d_sol: opt_f64_to_decimal(row.try_get("realized_pnl_30d_sol").ok()),
+            win_rate: row
+                .try_get::<Option<Decimal>, _>("win_rate")
+                .ok()
+                .flatten(),
+            max_drawdown_30d: row
+                .try_get::<Option<Decimal>, _>("max_drawdown_30d")
+                .ok()
+                .flatten(),
+            avg_trade_size_sol: row
+                .try_get::<Option<Decimal>, _>("avg_trade_size_sol")
+                .ok()
+                .flatten(),
+            avg_win_sol: row
+                .try_get::<Option<Decimal>, _>("avg_win_sol")
+                .ok()
+                .flatten(),
+            avg_loss_sol: row
+                .try_get::<Option<Decimal>, _>("avg_loss_sol")
+                .ok()
+                .flatten(),
+            profit_factor: row
+                .try_get::<Option<Decimal>, _>("profit_factor")
+                .ok()
+                .flatten(),
+            realized_pnl_30d_sol: row
+                .try_get::<Option<Decimal>, _>("realized_pnl_30d_sol")
+                .ok()
+                .flatten(),
             last_trade_at: row.try_get("last_trade_at").ok(),
             promoted_at: row.try_get("promoted_at").ok(),
             ttl_expires_at: row.try_get("ttl_expires_at").ok(),
             notes: row.try_get("notes").ok(),
             archetype: row.try_get("archetype").ok(),
-            avg_entry_delay_seconds: opt_f64_to_decimal(
-                row.try_get("avg_entry_delay_seconds").ok(),
-            ),
+            avg_entry_delay_seconds: row
+                .try_get::<Option<Decimal>, _>("avg_entry_delay_seconds")
+                .ok()
+                .flatten(),
             created_at: row
                 .try_get("created_at")
                 .unwrap_or_else(|_| chrono::Utc::now()),
             updated_at: row
                 .try_get("updated_at")
                 .unwrap_or_else(|_| chrono::Utc::now()),
+        })
+    }
+
+    /// Build a `WalletMonitoring` from a query row. Native NUMERIC/BOOLEAN decoding.
+    /// Takes a row reference so it can be used with iterator adapters.
+    fn row_to_wallet_monitoring(row: &sqlx::postgres::PgRow) -> AppResult<WalletMonitoring> {
+        Ok(WalletMonitoring {
+            wallet_address: row.try_get("wallet_address").unwrap_or_default(),
+            helius_webhook_id: row.try_get("helius_webhook_id").ok(),
+            rpc_polling_active: row.try_get::<bool, _>("rpc_polling_active").unwrap_or(false)
+                as i32,
+            last_transaction_signature: row.try_get("last_transaction_signature").ok(),
+            last_monitored_at: row
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_monitored_at")
+                .ok()
+                .flatten()
+                .map(|dt| dt.to_rfc3339()),
+            monitoring_enabled: row.try_get::<bool, _>("monitoring_enabled").unwrap_or(false)
+                as i32,
+            created_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+            updated_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+            webhook_status: row.try_get("webhook_status").ok(),
+            webhook_registered_at: row
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("webhook_registered_at")
+                .ok()
+                .flatten()
+                .map(|dt| dt.to_rfc3339()),
+            webhook_last_health_check: row
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>(
+                    "webhook_last_health_check",
+                )
+                .ok()
+                .flatten()
+                .map(|dt| dt.to_rfc3339()),
+            webhook_health_status: row.try_get("webhook_health_status").ok(),
+            registration_attempts: row.try_get("registration_attempts").unwrap_or(0),
+            last_registration_error: row.try_get("last_registration_error").ok(),
+            last_updated_url: row.try_get("last_updated_url").ok(),
         })
     }
 }

@@ -131,10 +131,13 @@ async fn run_preflight(config: &AppConfig) -> anyhow::Result<()> {
             let rpc_client = solana_client::nonblocking::rpc_client::RpcClient::new(
                 config.rpc.primary_url.clone(),
             );
-            rpc_client
-                .get_latest_blockhash()
-                .await
-                .map_err(|e| anyhow::anyhow!("Pre-flight RPC probe failed: {}", e))?;
+            chimera_operator::metrics::timed_rpc(
+                "primary",
+                "getLatestBlockhash",
+                rpc_client.get_latest_blockhash(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Pre-flight RPC probe failed: {}", e))?;
             tracing::info!(
                 "Pre-flight passed: vault, keypair, and RPC reachable ({})",
                 config.trade_mode
@@ -1275,12 +1278,18 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .map(|m| m.rpc_poll_rate_limit)
             .unwrap_or(40);
+        let exit_detection_delay_secs = config
+            .monitoring
+            .as_ref()
+            .map(|m| m.exit_detection_delay_secs)
+            .unwrap_or(5);
 
         let polling_config = chimera_operator::monitoring::PollingConfig {
             interval_secs,
             batch_size,
             rpc_url: config.rpc.primary_url.clone(),
             rate_limit,
+            exit_detection_delay_secs,
         };
 
         let polling_db = db_pool.clone();
@@ -1715,7 +1724,13 @@ async fn main() -> anyhow::Result<()> {
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                     loop {
                         interval.tick().await;
-                        match rpc.get_balance(&pubkey).await {
+                        let balance_result = chimera_operator::metrics::timed_rpc(
+                            "primary",
+                            "getBalance",
+                            rpc.get_balance(&pubkey),
+                        )
+                        .await;
+                        match balance_result {
                             Ok(lamports) => {
                                 let sol = rust_decimal::Decimal::from(lamports)
                                     / rust_decimal::Decimal::from(1_000_000_000u64);

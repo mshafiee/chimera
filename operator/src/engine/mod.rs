@@ -15,6 +15,7 @@ pub mod portfolio_heat;
 pub mod position_sizer;
 pub mod profit_targets;
 pub mod recovery;
+pub mod reconciliation;
 pub mod rpc_cache;
 pub mod signal_pipeline;
 pub mod signal_quality;

@@ -58,11 +58,11 @@ export function Performance() {
               <Info className="w-5 h-5 text-spear" />
               <div className="flex-1">
                 <div className="font-semibold text-spear">
-                  Performance Metrics API Not Implemented
+                  No Performance Metrics Available Yet
                 </div>
                 <div className="text-sm text-text-muted">
-                  The comprehensive performance metrics API endpoints are not yet available.
-                  Metrics will be displayed once the backend implementation is complete.
+                  The performance metrics API is available, but no metrics have been
+                  collected yet. Metrics populate automatically once trades are executed.
                 </div>
               </div>
             </div>
@@ -113,7 +113,7 @@ export function Performance() {
             </div>
           ) : (
             <div className="text-center text-text-muted py-8">
-              Latency metrics not available - API endpoint not implemented
+              No latency metrics available yet
             </div>
           )}
         </CardContent>

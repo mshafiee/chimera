@@ -2,32 +2,21 @@
 //!
 //! Tests database operations and system behavior using an in-memory test DB.
 
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
-};
+use chimera_operator::db_abstraction::{Database, InsertTrade, UpdateTradeStatus};
 use rust_decimal::prelude::*;
 use sqlx::Pool;
 use sqlx::Sqlite;
 use std::sync::Arc;
-use tempfile::TempDir;
+
+mod common;
 
 fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
-    match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
-    }
+    common::sqlite_pool(db)
 }
 
 /// Setup test database
-async fn setup_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
-    let db = create_database(&config).await.unwrap();
-
-    // Run migrations
-    db.run_migrations().await.unwrap();
-
-    (db, temp_dir)
+async fn setup_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
+    common::create_test_db().await
 }
 
 #[tokio::test]
@@ -213,4 +202,40 @@ async fn test_wallet_insert_and_query() {
         .await
         .unwrap();
     assert_eq!(row.0, "ACTIVE", "Wallet status should be updated to ACTIVE");
+}
+
+// =============================================================================
+// Backend-Agnostic Test (Phase 0 Validation)
+// =============================================================================
+
+#[tokio::test]
+async fn test_backend_agnostic_wallet_insert() {
+    // This test demonstrates the new backend-agnostic test harness.
+    // When TEST_DATABASE_URL is set and the postgres feature is enabled,
+    // it runs against PostgreSQL. Otherwise, it runs against SQLite.
+    
+    let (db, _temp_dir, _backend) = common::create_test_db_from_env().await;
+    
+    // This operation should work on both SQLite and PostgreSQL
+    // because we're using the Database trait abstraction
+    let result = db.upsert_wallet(
+        "test-wallet-backend-agnostic",
+        Some(Decimal::from_str("55.0").unwrap()),
+        Some(Decimal::from_str("12.0").unwrap()),
+        Some(Decimal::from_str("30.0").unwrap()),
+        Some(25),
+        Some(Decimal::from_str("0.65").unwrap()),
+        Some(Decimal::from_str("10.0").unwrap()),
+        Some(Decimal::from_str("0.5").unwrap()),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "upsert_wallet should work on both backends"
+    );
+    
+    // The test passes on both backends, proving the harness works
+    println!("Backend-agnostic wallet insert test passed");
 }

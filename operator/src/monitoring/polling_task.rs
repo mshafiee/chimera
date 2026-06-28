@@ -29,6 +29,8 @@ pub struct PollingConfig {
     pub rpc_url: String,
     /// Rate limit for RPC calls (requests per second)
     pub rate_limit: u32,
+    /// Delay (seconds) before treating a SELL as a position exit
+    pub exit_detection_delay_secs: u64,
 }
 
 /// Start the RPC polling background task
@@ -183,6 +185,7 @@ pub async fn start_polling_task(
                             &token_parser,
                             &exit_detector,
                             &pending_exits,
+                            config.exit_detection_delay_secs,
                         ),
                     )
                     .await;
@@ -208,6 +211,7 @@ async fn get_active_monitored_wallets(db: &dyn Database) -> Result<Vec<String>> 
 }
 
 /// Process a single transaction and generate trading signal
+#[allow(clippy::too_many_arguments)]
 async fn process_transaction(
     db: &dyn Database,
     engine: &EngineHandle,
@@ -216,6 +220,7 @@ async fn process_transaction(
     token_parser: &TokenParser,
     exit_detector: &ExitDetector,
     pending_exits: &Arc<RwLock<Vec<super::ExitSignal>>>,
+    exit_detection_delay_secs: u64,
 ) -> Result<()> {
     // Gate 1: circuit breaker — same check as webhook handler
     if !circuit_breaker.is_trading_allowed() {
@@ -289,8 +294,8 @@ async fn process_transaction(
             slippage: None, // Not available from polling data
         };
 
-        // Detect exit with configurable delay (default 5 seconds)
-        let delay_secs = 5; // TODO: make configurable
+        // Detect exit with configurable delay
+        let delay_secs = exit_detection_delay_secs;
         if let Some(exit_signal) = exit_detector
             .detect_exit(&tx.wallet_address, &parsed_swap, delay_secs)
             .await

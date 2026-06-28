@@ -348,15 +348,18 @@ impl RecoveryManager {
         use solana_client::rpc_request::TokenAccountsFilter;
 
         let rpc = self.get_active_rpc().await?;
-        let accounts = rpc
-            .get_token_accounts_by_owner(&wallet_pubkey, TokenAccountsFilter::Mint(token_mint))
-            .await
-            .map_err(|e| {
-                AppError::Rpc(format!(
-                    "Failed to fetch token accounts for balance check: {}",
-                    e
-                ))
-            })?;
+        let accounts = crate::metrics::timed_rpc(
+            "primary",
+            "getTokenAccountsByOwner",
+            rpc.get_token_accounts_by_owner(&wallet_pubkey, TokenAccountsFilter::Mint(token_mint)),
+        )
+        .await
+        .map_err(|e| {
+            AppError::Rpc(format!(
+                "Failed to fetch token accounts for balance check: {}",
+                e
+            ))
+        })?;
 
         let max_balance = accounts
             .iter()

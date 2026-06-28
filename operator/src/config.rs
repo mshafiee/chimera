@@ -775,6 +775,10 @@ pub struct MonitoringConfig {
     /// RPC poll rate limit (req/sec)
     #[serde(default = "default_rpc_poll_rate_limit")]
     pub rpc_poll_rate_limit: u32,
+    /// Delay (seconds) before detecting a SELL as a position exit, allowing the
+    /// on-chain transaction to settle before reconciliation.
+    #[serde(default = "default_exit_detection_delay")]
+    pub exit_detection_delay_secs: u64,
     /// Maximum active wallets to monitor
     #[serde(default = "default_max_active_wallets")]
     pub max_active_wallets: usize,
@@ -875,6 +879,10 @@ fn default_rpc_poll_rate_limit() -> u32 {
     40
 }
 
+fn default_exit_detection_delay() -> u64 {
+    5
+}
+
 fn default_max_active_wallets() -> usize {
     20
 }
@@ -896,6 +904,7 @@ impl Default for MonitoringConfig {
             rpc_poll_interval_secs: default_rpc_poll_interval(),
             rpc_poll_batch_size: default_rpc_poll_batch(),
             rpc_poll_rate_limit: default_rpc_poll_rate_limit(),
+            exit_detection_delay_secs: default_exit_detection_delay(),
             max_active_wallets: default_max_active_wallets(),
             auto_demote_wallets: default_auto_demote_wallets(),
             webhook_lifecycle: None,

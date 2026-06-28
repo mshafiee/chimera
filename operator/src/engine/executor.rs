@@ -1241,7 +1241,13 @@ impl Executor {
             .map_err(|e| {
                 ExecutorError::TransactionFailed(format!("Invalid Jito tip account: {}", e))
             })?;
-        let recent_blockhash = self.rpc_client.get_latest_blockhash().await.map_err(|e| {
+        let recent_blockhash = crate::metrics::timed_rpc(
+            "primary",
+            "getLatestBlockhash",
+            self.rpc_client.get_latest_blockhash(),
+        )
+        .await
+        .map_err(|e| {
             ExecutorError::Rpc(format!("Failed to get blockhash for tip tx: {}", e))
         })?;
         let tip_instruction =
@@ -1489,7 +1495,13 @@ impl Executor {
 
         // Get recent blockhash (use active RPC client)
         // We need this for both validation and reconstruction
-        let recent_blockhash = active_client.get_latest_blockhash().await.map_err(|e| {
+        let recent_blockhash = crate::metrics::timed_rpc(
+            "primary",
+            "getLatestBlockhash",
+            active_client.get_latest_blockhash(),
+        )
+        .await
+        .map_err(|e| {
             tracing::error!(error = %e, "Failed to get blockhash");
             ExecutorError::Rpc(format!("Failed to get blockhash: {}", e))
         })?;
@@ -2089,11 +2101,14 @@ impl Executor {
             ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e))
         })?;
 
-        let blockhash = self
-            .active_rpc_client()
-            .get_latest_blockhash()
-            .await
-            .map_err(|e| ExecutorError::TransactionFailed(format!("Blockhash: {}", e)))?;
+        let active = self.active_rpc_client();
+        let blockhash = crate::metrics::timed_rpc(
+            "primary",
+            "getLatestBlockhash",
+            active.get_latest_blockhash(),
+        )
+        .await
+        .map_err(|e| ExecutorError::TransactionFailed(format!("Blockhash: {}", e)))?;
 
         let noop_ix = solana_system_interface::instruction::transfer(
             &wallet_keypair.pubkey(),
@@ -2103,15 +2118,17 @@ impl Executor {
         let mut tx = Transaction::new_with_payer(&[noop_ix], Some(&wallet_keypair.pubkey()));
         tx.sign(&[&wallet_keypair], blockhash);
 
-        let signature_str = self
-            .active_rpc_client()
-            .send_transaction(&tx)
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, "Devnet submission failed");
-                ExecutorError::TransactionFailed(format!("Devnet submission: {}", e))
-            })?
-            .to_string();
+        let signature_str = crate::metrics::timed_rpc(
+            "primary",
+            "sendTransaction",
+            active.send_transaction(&tx),
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Devnet submission failed");
+            ExecutorError::TransactionFailed(format!("Devnet submission: {}", e))
+        })?
+        .to_string();
 
         let confirmed = self
             .poll_signature_confirmation(&signature_str, &signal.trade_uuid)
