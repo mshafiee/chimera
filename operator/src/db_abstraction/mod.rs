@@ -12,7 +12,7 @@ pub use export::{trades_to_csv, trades_to_pdf};
 pub use types::{
     ActivePositionEntry, ActivePositionSummary, ConfigAuditItem, DatabaseBackend, DatabaseConfig,
     DbPool, DeadLetterItem, DiscrepancyRow, DiscrepancyTypeStats, ExitTargetData, InsertPosition,
-    InsertTrade, LatencyBucket, PositionDetail, PositionRecord, ReconciliationRun,
+    InsertTrade, LatencyBucket, PoolStats, PositionDetail, PositionRecord, ReconciliationRun,
     ReconciliationStats, ReconciliationStatus, RetryableDlqItem, TradeDetail, TradeLatencyStats,
     UpdateDlqItemParams, UpdatePosition, UpdateTradeStatus, WalletCopyPerformance, WalletDetail,
     WalletMonitoring, WalletMonitoringExtended, WebhookAuditLog, WebhookEligibility, WebhookStats,
@@ -179,6 +179,9 @@ pub trait Database: Send + Sync {
         &self,
         wallet_address: &str,
     ) -> AppResult<Option<WalletPerformance>>;
+
+    /// Get database connection pool statistics
+    async fn get_pool_stats(&self) -> AppResult<PoolStats>;
 
     // ========================================================================
     // JITO TIP HISTORY

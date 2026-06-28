@@ -110,6 +110,15 @@ impl DbPool {
     }
 }
 
+/// Connection pool statistics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolStats {
+    pub active_connections: u32,
+    pub idle_connections: u32,
+    pub max_connections: u32,
+    pub utilization_percent: f64,
+}
+
 /// Trade insertion data
 #[derive(Debug, Clone)]
 pub struct InsertTrade {

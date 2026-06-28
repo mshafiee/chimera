@@ -92,6 +92,27 @@ impl Database for SqliteBackend {
         Ok(())
     }
 
+    async fn get_pool_stats(&self) -> AppResult<super::PoolStats> {
+        use super::PoolStats;
+
+        let max_connections = self.pool.size();
+        let idle_connections = self.pool.num_idle();
+        let active_connections = max_connections.saturating_sub(idle_connections);
+
+        let utilization_percent = if max_connections > 0 {
+            (active_connections as f64 / max_connections as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        Ok(PoolStats {
+            active_connections: active_connections as u32,
+            idle_connections: idle_connections as u32,
+            max_connections: max_connections as u32,
+            utilization_percent,
+        })
+    }
+
     // ========================================================================
     // MIGRATION & STARTUP
     // ========================================================================

@@ -67,6 +67,10 @@ struct PriceCacheInner {
     prices: HashMap<String, PriceEntry>,
     /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
     price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
+    /// Cache hit counter (for performance monitoring)
+    cache_hits: u64,
+    /// Cache miss counter (for performance monitoring)
+    cache_misses: u64,
 }
 
 /// Price cache for token prices
@@ -105,6 +109,8 @@ impl PriceCache {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
+                cache_hits: 0,
+                cache_misses: 0,
             })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -122,6 +128,8 @@ impl PriceCache {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
+                cache_hits: 0,
+                cache_misses: 0,
             })),
             ttl: Duration::seconds(ttl_secs),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -133,15 +141,24 @@ impl PriceCache {
 
     /// Get price for a token
     pub fn get_price(&self, token_address: &str) -> Option<PriceEntry> {
-        let inner = self.inner.read();
-        let entry = inner.prices.get(token_address)?;
+        let mut inner = self.inner.write();
+
+        let entry = match inner.prices.get(token_address) {
+            Some(entry) => entry,
+            None => {
+                inner.cache_misses += 1;
+                return None;
+            }
+        };
 
         // Check if expired
         let age = Utc::now().signed_duration_since(entry.fetched_at);
         if age > self.ttl {
+            inner.cache_misses += 1;
             return None;
         }
 
+        inner.cache_hits += 1;
         Some(entry.clone())
     }
 
@@ -540,11 +557,28 @@ impl PriceCache {
             }
         }
 
+        let total_requests = inner.cache_hits + inner.cache_misses;
+        let hit_rate = if total_requests > 0 {
+            (inner.cache_hits as f64 / total_requests as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let miss_rate = if total_requests > 0 {
+            (inner.cache_misses as f64 / total_requests as f64) * 100.0
+        } else {
+            0.0
+        };
+
         PriceCacheStats {
             total_entries: inner.prices.len(),
             valid_entries: valid_count,
             stale_entries: stale_count,
             tracked_tokens: self.active_tokens.read().len(),
+            total_hits: inner.cache_hits,
+            total_misses: inner.cache_misses,
+            hit_rate,
+            miss_rate,
         }
     }
 
@@ -616,6 +650,14 @@ pub struct PriceCacheStats {
     pub stale_entries: usize,
     /// Number of actively tracked tokens
     pub tracked_tokens: usize,
+    /// Total cache hits (successful lookups)
+    pub total_hits: u64,
+    /// Total cache misses (failed lookups)
+    pub total_misses: u64,
+    /// Cache hit rate percentage
+    pub hit_rate: f64,
+    /// Cache miss rate percentage
+    pub miss_rate: f64,
 }
 
 /// Jupiter Price API V3 response structure

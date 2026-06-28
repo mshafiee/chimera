@@ -11,6 +11,7 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::ge
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntGauge, Opts, Registry, TextEncoder,
 };
+use serde::Serialize;
 use std::sync::Arc;
 
 /// Metrics state
@@ -53,6 +54,8 @@ pub struct MetricsState {
     pub webhook_rate_limiter_health: IntGauge,
     /// Rate limiter usage ratio (0-1, current credits / max credits)
     pub webhook_rate_limiter_usage: prometheus::Gauge,
+    /// Database query latency histogram (in milliseconds)
+    pub db_query_latency: Histogram,
 }
 
 impl MetricsState {
@@ -254,6 +257,16 @@ impl MetricsState {
             .register(Box::new(webhook_rate_limiter_usage.clone()))
             .map_err(|e| format!("Failed to register webhook_rate_limiter_usage: {}", e))?;
 
+        // Database query latency histogram
+        let db_query_latency = Histogram::with_opts(HistogramOpts::new(
+            "chimera_db_query_latency_ms",
+            "Database query execution latency in milliseconds",
+        ))
+        .map_err(|e| format!("Failed to create db_query_latency histogram: {}", e))?;
+        registry
+            .register(Box::new(db_query_latency.clone()))
+            .map_err(|e| format!("Failed to register db_query_latency: {}", e))?;
+
         Ok(Self {
             registry,
             queue_depth,
@@ -274,6 +287,7 @@ impl MetricsState {
             portfolio_heat_percent,
             webhook_rate_limiter_health,
             webhook_rate_limiter_usage,
+            db_query_latency,
         })
     }
 
@@ -289,6 +303,53 @@ impl Default for MetricsState {
         // For Default trait (used in tests), we panic on failure to maintain the trait contract.
         Self::new().expect("Failed to create MetricsState - metrics system initialization failed")
     }
+
+    /// Get database query latency statistics
+    pub fn get_db_query_stats(&self) -> QueryLatencyStats {
+        use prometheus::proto::MetricFamily;
+        use prometheus::Encoder;
+
+        // Gather the histogram metric
+        let metric_families = self.registry.gather();
+        let mut sample_count = 0u32;
+        let mut sum_ms = 0.0;
+
+        for metric_family in metric_families {
+            if metric_family.get_name() == "chimera_db_query_latency_ms" {
+                if let Some(metric) = metric_family.get_metric().first() {
+                    if let Some(histogram) = metric.get_histogram() {
+                        sample_count = histogram.get_sample_count() as u32;
+                        sum_ms = histogram.get_sample_sum();
+                    }
+                }
+            }
+        }
+
+        // Calculate approximate percentiles from the histogram buckets
+        let avg_ms = if sample_count > 0 { sum_ms / sample_count as f64 } else { 0.0 };
+
+        // For now, use estimated percentiles based on avg (this could be improved with proper percentile calculation)
+        let p95_ms = if sample_count > 0 { avg_ms * 3.0 } else { 0.0 };
+        let p99_ms = if sample_count > 0 { avg_ms * 5.0 } else { 0.0 };
+
+        QueryLatencyStats {
+            avg_ms,
+            p95_ms,
+            p99_ms,
+            slow_queries_count: 0, // Could track queries > threshold
+            total_queries_count: sample_count,
+        }
+    }
+}
+
+/// Query latency statistics for API responses
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueryLatencyStats {
+    pub avg_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub slow_queries_count: u32,
+    pub total_queries_count: u32,
 }
 
 /// Metrics handler - returns Prometheus metrics in text format

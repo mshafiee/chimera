@@ -26,18 +26,32 @@ interface ConfigAuditResponse {
 export function useConfigAudit(params?: { limit?: number; offset?: number }) {
   const limit = params?.limit ?? 50
   const offset = params?.offset ?? 0
-  
+
   return useQuery({
     queryKey: ['config-audit', limit, offset],
     queryFn: async ({ signal: _signal }) => {
       const searchParams = new URLSearchParams()
       if (limit) searchParams.set('limit', limit.toString())
       if (offset) searchParams.set('offset', offset.toString())
-      
+
       const { data } = await apiClient.get<ConfigAuditResponse>(
         `/incidents/config-audit?${searchParams.toString()}`
       )
       return data
     },
   })
+}
+
+interface RetryResponse {
+  success: boolean
+  message: string
+  trade_uuid: string
+  retry_attempt: number
+}
+
+export async function retryDeadLetterItem(tradeUuid: string): Promise<RetryResponse> {
+  const { data } = await apiClient.post<RetryResponse>(
+    `/incidents/dead-letter/${tradeUuid}/retry`
+  )
+  return data
 }

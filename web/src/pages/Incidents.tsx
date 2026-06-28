@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { AlertTriangle, AlertCircle, Info, Clock, User, FileText } from 'lucide-react'
+import { toast } from 'sonner'
 import { Card } from '../components/ui/Card'
 import { Button } from '../components/ui/Button'
 import { Badge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
-import { useDeadLetterQueue, useConfigAudit } from '../api'
+import { useDeadLetterQueue, useConfigAudit, retryDeadLetterItem } from '../api'
 import type { Incident, ConfigAudit } from '../types'
 
 type TabType = 'dead-letter' | 'config-audit'
@@ -14,7 +15,7 @@ export function Incidents() {
   const [activeTab, setActiveTab] = useState<TabType>('dead-letter')
   const [severityFilter, setSeverityFilter] = useState<SeverityFilter>('all')
 
-  const { data: dlqData, isLoading: dlqLoading } = useDeadLetterQueue()
+  const { data: dlqData, isLoading: dlqLoading, refetch: refetchDLQ } = useDeadLetterQueue()
   const { data: auditData, isLoading: auditLoading } = useConfigAudit()
 
   return (
@@ -61,6 +62,7 @@ export function Incidents() {
           isLoading={dlqLoading}
           severityFilter={severityFilter}
           onSeverityChange={setSeverityFilter}
+          onRetry={refetchDLQ}
         />
       ) : (
         <ConfigAuditTab data={auditData} isLoading={auditLoading} />
@@ -74,11 +76,13 @@ function DeadLetterTab({
   isLoading,
   severityFilter,
   onSeverityChange,
+  onRetry,
 }: {
   data: { items: Incident[]; total: number } | undefined
   isLoading: boolean
   severityFilter: SeverityFilter
   onSeverityChange: (filter: SeverityFilter) => void
+  onRetry: () => void
 }) {
   const items = data?.items || []
 
@@ -187,7 +191,22 @@ function DeadLetterTab({
                     </TableCell>
                     <TableCell>
                       {item.can_retry && (
-                        <Button variant="ghost" size="sm">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={async () => {
+                            if (!item.trade_uuid) return
+                            try {
+                              await retryDeadLetterItem(item.trade_uuid)
+                              toast.success('Trade queued for retry')
+                              // Refetch the dead letter queue to update the UI
+                              onRetry()
+                            } catch (error) {
+                              console.error('Failed to retry trade:', error)
+                              toast.error(`Failed to retry trade: ${error instanceof Error ? error.message : 'Unknown error'}`)
+                            }
+                          }}
+                        >
                           Retry
                         </Button>
                       )}
