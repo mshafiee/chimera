@@ -106,7 +106,40 @@ groups:
         annotations:
           summary: "RPC endpoint is unhealthy"
           description: "Primary RPC may have failed over to fallback."
-          
+
+      # RPC Latency Critical - Exceeds 50ms budget
+      - alert: RpcLatencyCritical
+        expr: histogram_quantile(0.95, rate(chimera_rpc_latency_ms_bucket[5m])) > 50
+        for: 10m
+        labels:
+          severity: critical
+          component: rpc
+        annotations:
+          summary: "RPC latency p95 exceeds 50ms budget"
+          description: "Sustained high RPC latency (p95={{ $value }}ms) will degrade trade execution quality. Spear strategy may be disabled."
+
+      # RPC Latency Warning - Approaching 50ms budget
+      - alert: RpcLatencyWarning
+        expr: histogram_quantile(0.95, rate(chimera_rpc_latency_ms_bucket[5m])) > 40
+        for: 5m
+        labels:
+          severity: warning
+          component: rpc
+        annotations:
+          summary: "RPC latency p95 approaching 50ms budget"
+          description: "RPC latency p95 is {{ $value }}ms. Monitor closely - approaching threshold."
+
+      # RPC Health Degraded
+      - alert: RpcHealthDegraded
+        expr: chimera_rpc_health < 1
+        for: 2m
+        labels:
+          severity: critical
+          component: rpc
+        annotations:
+          summary: "RPC endpoint health degraded"
+          description: "RPC endpoint is unhealthy (value={{ $value }}). Automatic fallback to secondary RPC may have occurred."
+
       # Reconciliation Discrepancies (PDD Section 8.1)
       - alert: ReconciliationDiscrepancies
         expr: chimera_reconciliation_unresolved_total > 5
