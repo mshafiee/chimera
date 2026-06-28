@@ -1,0 +1,289 @@
+# Chimera Evaluation Services for 10-Day Paper Trading Evaluation
+# Extended services for systematic logging, monitoring, and data collection
+# This extends the base docker-compose.yml with evaluation-specific capabilities
+
+version: '3.8'
+
+services:
+  # Fluentd Log Aggregation - Systematic log collection and organization
+  fluentd:
+    image: fluent/fluentd:v1.16-1
+    container_name: chimera-fluentd
+    restart: unless-stopped
+    volumes:
+      - ./logs:/fluentd/log
+      - ./ops/fluentd/fluentd.conf:/fluentd/etc/fluentd.conf:ro
+      - evaluation-logs:/fluentd/log/evaluation
+      - ./evaluation:/evaluation:rw
+    ports:
+      - "24224:24224" # Fluentd forward protocol
+    networks:
+      - chimera-network
+    depends_on:
+      - operator
+      - scout
+    healthcheck:
+      test: ["CMD", "fluentd", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - evaluation
+
+  # Extended Prometheus for Evaluation Metrics - 10-day retention
+  prometheus-eval:
+    image: prom/prometheus:latest
+    container_name: chimera-prometheus-eval
+    restart: unless-stopped
+    volumes:
+      - ./ops/prometheus/prometheus-eval.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+      - ./evaluation/prometheus:/evaluation/prometheus:rw
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=10d'  # 10-day retention for evaluation
+      - '--storage.tsdb.retention.size=20GB'
+      - '--web.enable-lifecycle'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9091:9090" # Different port to avoid conflict with main Prometheus
+    networks:
+      - chimera-network
+    depends_on:
+      - operator
+      - scout
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - evaluation
+
+  # PostgreSQL for Detailed Evaluation Data - Extended metrics storage
+  postgres-eval:
+    image: postgres:15-alpine
+    container_name: chimera-postgres-eval
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=chimera
+      - POSTGRES_PASSWORD=chimera_eval_password_change_me
+      - POSTGRES_DB=chimera_evaluation
+      # Performance tuning for evaluation workloads
+      - POSTGRES_INITDB_ARGS=-E UTF8 --locale=C
+      - POSTGRES_SHARED_BUFFERS=256MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=2GB
+      - POSTGRES_MAINTENANCE_WORK_MEM=128MB
+      - POSTGRES_WORK_MEM=32MB
+      - POSTGRES_MAX_CONNECTIONS=200
+      # WAL configuration for backup/recovery
+      - POSTGRES_WAL_LEVEL=replica
+      - POSTGRES_MAX_WAL_SENDERS=3
+      - POSTGRES_WAL_KEEP_SIZE=512MB
+      # Logging for evaluation analysis
+      - POSTGRES_LOG_STATEMENT=all
+      - POSTGRES_LOG_DESTINATION=stderr
+      - POSTGRES_LOG_LINE_PREFIX='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+    volumes:
+      - postgres-eval-data:/var/lib/postgresql/data
+      - ./database/evaluation_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/migrations_postgresql:/docker-entrypoint-initdb.d/migrations:ro
+      - ./evaluation/postgres-backup:/backup
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "effective_cache_size=2GB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "work_mem=32MB"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_senders=3"
+      - "-c"
+      - "wal_keep_size=512MB"
+      - "-c"
+      - "log_statement=all"
+      - "-c"
+      - "log_destination=stderr"
+      - "-c"
+      - "log_line_prefix='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '"
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chimera -d chimera_evaluation"]
+      interval: 10s
+      timeout: 5s
+      retries:5
+      start_period: 30s
+    profiles:
+      - evaluation
+
+  # Grafana for Evaluation Monitoring Dashboards
+  grafana-eval:
+    image: grafana/grafana:latest
+    container_name: chimera-grafana-eval
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./ops/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./ops/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ./evaluation/grafana:/evaluation/grafana:rw
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-evaluation_changeme}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=http://localhost:3003/
+      - GF_INSTALL_PLUGINS=
+      - GF_INSTALL_PLUGIN=
+    depends_on:
+      - prometheus-eval
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - evaluation
+
+  # Redis for Extended Caching during Evaluation
+  redis-eval:
+    image: redis:7-alpine
+    container_name: chimera-redis-eval
+    restart: unless-stopped
+    ports:
+      - "6380:6379" # Different port to avoid conflict
+    command:
+      - "redis-server"
+      - "--appendonly yes"                    # AOF persistence
+      - "--appendfsync everysec"              # Flush every second
+      - "--maxmemory 1gb"                   # Extended memory for evaluation
+      - "--maxmemory-policy allkeys-lru"      # Eviction policy
+      - "--save 900 1"                         # RDB snapshot: 1 change in 900s
+      - "--save 300 10"                        # RDB snapshot: 10 changes in 300s
+      - "--save 60 10000"                      # RDB snapshot: 10k changes in 60s
+      - "--dir /data"
+    volumes:
+      - redis-eval-data:/data
+      - ./evaluation/redis:/evaluation/redis:rw
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - chimera-network
+    profiles:
+      - evaluation
+
+  # Evaluation Data Collector - Automated hourly data collection
+  data-collector:
+    build:
+      context: ./ops
+      dockerfile: Dockerfile.evaluator
+    container_name: chimera-data-collector
+    restart: unless-stopped
+    volumes:
+      - ./evaluation:/evaluation:rw
+      - ./data:/app/data:ro
+      - ./config:/app/config:ro
+    environment:
+      - EVALUATION_MODE=true
+      - DATA_COLLECTION_INTERVAL=3600  # Hourly collection
+      - EVAL_DB_PATH=/evaluation/evaluation.db
+      - DAY_NUM=${DAY_NUM:-1}
+      - HOUR_START=${HOUR_START:-0}
+      - PROMETHEUS_URL=http://operator:8080/metrics
+      - SCOUT_PROMETHEUS_URL=http://scout:8081/metrics
+    depends_on:
+      - operator
+      - scout
+      - prometheus-eval
+    networks:
+      - chimera-network
+    profiles:
+      - evaluation
+
+  # Anomaly Detection Service - Real-time monitoring
+  anomaly-detector:
+    build:
+      context: ./ops
+      dockerfile: Dockerfile.anomaly
+    container_name: chimera-anomaly-detector
+    restart: unless-stopped
+    volumes:
+      - ./evaluation:/evaluation:rw
+      - ./evaluation/anomalies:/evaluation/anomalies:rw
+    environment:
+      - PROMETHEUS_URL=http://prometheus-eval:9090
+      - ANOMALY_CHECK_INTERVAL=60  # Check every minute
+      - ALERT_THRESHOLD_WARNING=80
+      - ALERT_THRESHOLD_CRITICAL=95
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
+    depends_on:
+      - prometheus-eval
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - evaluation
+
+  # Report Generator - Daily health and evaluation reports
+  report-generator:
+    build:
+      context: ./ops
+      dockerfile: Dockerfile.report
+    container_name: chimera-report-generator
+    restart: unless-stopped
+    volumes:
+      - ./evaluation:/evaluation:rw
+      - ./evaluation/reports:/evaluation/reports:rw
+      - ./data:/app/data:ro
+    environment:
+      - EVAL_DB_PATH=/evaluation/evaluation.db
+      - EVAL_DIR=/evaluation
+      - REPORT_GENERATION_TIME=02:00  # Daily at 2 AM
+      - INCLUDE_SECTIONS=performance,health,anomalies,costs,risk,database,code_profiling,network
+      - OUTPUT_FORMAT=html
+    depends_on:
+      - postgres-eval
+      - prometheus-eval
+    networks:
+      - chimera-network
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os; os.path.exists('/evaluation/evaluation.db')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    profiles:
+      - evaluation
+
+# Evaluation-specific volumes
+volumes:
+  postgres-eval-data:
+    driver: local
+  redis-eval-data:
+    driver: local
+  evaluation-logs:
+    driver: local
+
+# Use the same network as the base docker-compose
+networks:
+  chimera-network:
+    external: true

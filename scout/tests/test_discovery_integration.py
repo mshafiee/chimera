@@ -429,6 +429,7 @@ class TestProfitabilityPreScreen:
         analyzer.helius_client.get_wallet_sol_balances = AsyncMock(
             return_value={WALLET_A: 5.0, WALLET_B: 0.5, WALLET_C: 10.0}
         )
+        analyzer._budget_manager = None  # Initialize budget manager attribute
 
         result = await analyzer._profitability_pre_screen(
             [WALLET_A, WALLET_B, WALLET_C], max_wallets=2
@@ -448,6 +449,7 @@ class TestProfitabilityPreScreen:
         analyzer.helius_client.get_wallet_sol_balances = AsyncMock(
             side_effect=Exception("API error")
         )
+        analyzer._budget_manager = None  # Initialize budget manager attribute
 
         result = await analyzer._profitability_pre_screen(
             [WALLET_A, WALLET_B], max_wallets=1

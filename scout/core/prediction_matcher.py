@@ -392,8 +392,8 @@ class PredictionMatcher:
             matched_predictions = []
             for row in cursor.fetchall():
                 row_dict = dict(row)
-                actual_pnl = row_dict.get('actual_pnl_sol', 0.0) or 0.0
-                predicted_pnl = row_dict.get('predicted_pnl_sol', 0.0) or 0.0
+                actual_pnl = float(row_dict.get('actual_pnl_sol') or 0.0)
+                predicted_pnl = float(row_dict.get('predicted_pnl_sol') or 0.0)
 
                 matched_predictions.append(MatchedPrediction(
                     prediction_id=row_dict['id'],

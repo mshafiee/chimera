@@ -1127,7 +1127,7 @@ class GrowthTracker:
         """Store growth metrics snapshot in database."""
         conn = None
         try:
-            conn = get_connection(self._db_path, timeout=10.0)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             cursor.execute("""
@@ -1170,7 +1170,7 @@ class GrowthTracker:
         """Record a significant capital event."""
         conn = None
         try:
-            conn = get_connection(self._db_path, timeout=10.0)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             event_id = f"{event_type}_{int(time.time())}_{time.time_ns()}"
@@ -1238,7 +1238,7 @@ class GrowthTracker:
         """Store growth alert."""
         conn = None
         try:
-            conn = get_connection(self._db_path, timeout=10.0)
+            conn = get_connection(self._db_path)
             cursor = conn.cursor()
 
             alert_id = f"{alert_type}_{int(time.time())}_{time.time_ns()}"
