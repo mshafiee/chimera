@@ -79,3 +79,5 @@ test-results/
 # Backup files
 backups/
 *.backup
+evaluation/
+# Evaluation runtime data directory
