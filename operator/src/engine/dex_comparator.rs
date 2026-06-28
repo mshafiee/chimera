@@ -5,6 +5,7 @@
 //! repeated queries for the same token.
 
 use crate::error::AppResult;
+use crate::utils;
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use std::collections::HashMap;
@@ -179,9 +180,7 @@ impl DexComparator {
         amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
         // Convert Decimal to lamports for API call
-        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
-            .to_u64()
-            .unwrap_or(0);
+        let lamports = utils::sol_to_lamports(amount_sol);
 
         // Jupiter API endpoint (using configured URL, migrated from deprecated v6)
         let url = format!(
@@ -252,9 +251,7 @@ impl DexComparator {
         amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
         // Convert Decimal to lamports for API call
-        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
-            .to_u64()
-            .unwrap_or(0);
+        let lamports = utils::sol_to_lamports(amount_sol);
 
         // Raydium API endpoint (v2)
         let url = format!(
@@ -325,9 +322,7 @@ impl DexComparator {
         amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
         // Convert Decimal to lamports for API call
-        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
-            .to_u64()
-            .unwrap_or(0);
+        let lamports = utils::sol_to_lamports(amount_sol);
 
         // Orca API endpoint
         let url = format!(
@@ -396,9 +391,7 @@ impl DexComparator {
         amount_sol: Decimal,
     ) -> AppResult<DexComparisonResult> {
         // Convert Decimal to lamports for API call
-        let lamports = (amount_sol * Decimal::from(1_000_000_000u64))
-            .to_u64()
-            .unwrap_or(0);
+        let lamports = utils::sol_to_lamports(amount_sol);
 
         // Meteora DLMM API endpoint
         let url = format!(

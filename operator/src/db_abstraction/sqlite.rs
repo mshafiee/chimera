@@ -3,7 +3,7 @@
 use super::types::DatabaseConfig;
 use super::types::SqlitePool;
 use super::{
-    dec_to_text, opt_text_to_dec, text_to_dec, ActivePositionEntry, ActivePositionSummary,
+    dec_to_text, opt_text_to_dec, string_to_datetime, text_to_dec, ActivePositionEntry, ActivePositionSummary,
     CircuitBreakerState, ConfigAuditItem, Database, DbPool, DeadLetterItem, DiscrepancyRow,
     DiscrepancyTypeStats, ExitTargetData, InsertPosition, InsertTrade, KillSwitchState,
     LatencyBucket, Position, PositionDetail, PositionRecord, ReconciliationRun,
@@ -1921,9 +1921,9 @@ impl Database for SqliteBackend {
                         state,
                         entry_tx_signature,
                         exit_tx_signature,
-                        last_updated: chrono::DateTime::parse_from_rfc3339(&last_updated)
-                            .map(|dt| dt.with_timezone(&chrono::Utc))
-                            .unwrap_or_else(|_| chrono::Utc::now()),
+                        last_updated: string_to_datetime(&last_updated)
+                            .ok()
+                            .unwrap_or_else(|| chrono::Utc::now()),
                     })
                 },
             )
@@ -2011,9 +2011,9 @@ impl Database for SqliteBackend {
                 )| {
                     let entry_price = text_to_dec(&entry_price_str);
                     let entry_amount_sol = text_to_dec(&entry_amount_str);
-                    let entry_time = chrono::DateTime::parse_from_rfc3339(&created_at_str)
-                        .map(|dt| dt.with_timezone(&chrono::Utc))
-                        .unwrap_or_else(|_| chrono::Utc::now());
+                    let entry_time = string_to_datetime(&created_at_str)
+                        .ok()
+                        .unwrap_or_else(|| chrono::Utc::now());
                     ActivePositionEntry {
                         token_symbol: token_opt.unwrap_or_else(|| token_address.clone()),
                         trade_uuid,

@@ -423,6 +423,15 @@ class RawScoreComponents:
 
 
 def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> RawScoreComponents:
+    """
+    Calculate raw WQS score with bonus and penalty components.
+
+    NOTE: Advanced risk features (CVaR, drawdown duration, risk-adjusted ratios)
+    from advanced_risk_features.py can be integrated here. To enable this:
+    1. Pass raw trade history to this function (or pre-calculate in WalletMetrics)
+    2. Extract advanced features: extract_advanced_risk_features(trade_history)
+    3. Apply penalties: cvar_95 * 0.2, max_drawdown_duration * 0.1
+    """
     _is_spear = strategy.upper() == "SPEAR"
     tracker = ScoreTracker()
 

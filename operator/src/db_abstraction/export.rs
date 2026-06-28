@@ -33,8 +33,8 @@ pub fn trades_to_csv(trades: &[TradeDetail]) -> String {
             trade.amount_sol,
             trade
                 .price_at_signal
-                .map(|p| p.to_string())
-                .unwrap_or_default(),
+                .as_ref()
+                .map_or(String::default(), |p| p.to_string()),
             trade.tx_signature.as_deref().unwrap_or(""),
             trade.status,
             trade.pnl_sol.map(|p| p.to_string()).unwrap_or_default(),

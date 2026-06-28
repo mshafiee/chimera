@@ -6,6 +6,7 @@
 use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::tips::TipManager;
+use crate::utils;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
 use crate::models::{Action, Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
@@ -1062,9 +1063,7 @@ impl Executor {
                     "Jito tip capped at 1 SOL to prevent u64 overflow"
                 );
             }
-            let tip_lamports = (capped_tip * Decimal::from(1_000_000_000u64))
-                .to_u64()
-                .unwrap_or(10_000_000u64); // Convert SOL to lamports
+            let tip_lamports = utils::sol_to_lamports(capped_tip); // Convert SOL to lamports
 
             // Serialize based on transaction type using Legacy config for Solana wire compatibility
             let tx_bytes = match &built_tx {
@@ -1232,9 +1231,7 @@ impl Executor {
                 "Jito tip capped at 1 SOL to prevent u64 overflow (Helius sender)"
             );
         }
-        let tip_lamports = (capped_tip_sol * Decimal::from(1_000_000_000u64))
-            .to_u64()
-            .unwrap_or(10_000_000u64);
+        let tip_lamports = utils::sol_to_lamports(capped_tip_sol);
 
         // Build proper tip transaction (SOL transfer to Jito tip account)
         let jito_tip_account = Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4")

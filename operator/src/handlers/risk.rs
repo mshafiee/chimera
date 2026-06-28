@@ -206,7 +206,7 @@ pub struct SizeBucket {
 ///
 /// This is a simple hash-based classification for the MVP.
 /// Future enhancement: Use token metadata API for accurate classification.
-fn classify_token_sector(token_address: &str) -> &'static str {
+pub fn classify_token_sector(token_address: &str) -> &'static str {
     let first_char = token_address.chars().next().unwrap_or('0');
     match first_char {
         '0'..='3' => "DeFi",
@@ -225,7 +225,7 @@ fn classify_token_sector(token_address: &str) -> &'static str {
 /// - HHI < 1500: Competitive
 /// - HHI 1500-2500: Moderately concentrated
 /// - HHI > 2500: Highly concentrated
-fn calculate_hhi(concentrations: &[TokenConcentration]) -> f64 {
+pub fn calculate_hhi(concentrations: &[TokenConcentration]) -> f64 {
     concentrations
         .iter()
         .map(|c| {
@@ -237,7 +237,7 @@ fn calculate_hhi(concentrations: &[TokenConcentration]) -> f64 {
 }
 
 /// Determine heat status based on exposure vs threshold
-fn determine_heat_status(exposure: f64, threshold: f64) -> &'static str {
+pub fn determine_heat_status(exposure: f64, threshold: f64) -> &'static str {
     let ratio = exposure / threshold.max(0.01);
     match ratio {
         r if r < 0.7 => "normal",
