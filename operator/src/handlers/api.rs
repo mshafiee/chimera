@@ -1872,18 +1872,6 @@ pub struct TradeLatencyResponse {
     pub sample_size: u32,
 }
 
-/// Query latency statistics
-#[derive(Debug, Serialize)]
-pub struct QueryLatencyStats {
-    pub avg_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
-    #[serde(rename = "slow_queries")]
-    pub slow_queries_count: u32,
-    #[serde(rename = "total_queries")]
-    pub total_queries_count: u32,
-}
-
 /// Connection pool statistics
 #[derive(Debug, Serialize)]
 pub struct ConnectionPoolStats {
@@ -2410,8 +2398,8 @@ pub async fn retry_dead_letter_item(
     }
 
     // Check circuit breaker state
-    let cb_state = state.circuit_breaker.get_state();
-    if cb_state != crate::circuit_breaker::State::Active {
+    let cb_state = state.circuit_breaker.current_state();
+    if !matches!(cb_state, crate::circuit_breaker::CircuitBreakerState::Active) {
         return Err(AppError::ServiceUnavailable(
             "Cannot retry while circuit breaker is tripped".to_string(),
         ));

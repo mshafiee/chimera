@@ -144,7 +144,7 @@ impl PriceCache {
         let mut inner = self.inner.write();
 
         let entry = match inner.prices.get(token_address) {
-            Some(entry) => entry,
+            Some(entry) => entry.clone(),
             None => {
                 inner.cache_misses += 1;
                 return None;
@@ -159,7 +159,7 @@ impl PriceCache {
         }
 
         inner.cache_hits += 1;
-        Some(entry.clone())
+        Some(entry)
     }
 
     /// Get price in USD (convenience method).

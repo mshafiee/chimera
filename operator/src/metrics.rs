@@ -11,7 +11,6 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::ge
 use prometheus::{
     Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntGauge, Opts, Registry, TextEncoder,
 };
-use serde::Serialize;
 use std::sync::Arc;
 
 /// Metrics state
@@ -295,29 +294,19 @@ impl MetricsState {
     pub fn registry(&self) -> &Registry {
         &self.registry
     }
-}
-
-impl Default for MetricsState {
-    fn default() -> Self {
-        // In production code, MetricsState::new() should be called and its Result handled.
-        // For Default trait (used in tests), we panic on failure to maintain the trait contract.
-        Self::new().expect("Failed to create MetricsState - metrics system initialization failed")
-    }
 
     /// Get database query latency statistics
     pub fn get_db_query_stats(&self) -> QueryLatencyStats {
-        use prometheus::proto::MetricFamily;
-        use prometheus::Encoder;
-
         // Gather the histogram metric
         let metric_families = self.registry.gather();
         let mut sample_count = 0u32;
         let mut sum_ms = 0.0;
 
         for metric_family in metric_families {
-            if metric_family.get_name() == "chimera_db_query_latency_ms" {
+            if metric_family.name() == "chimera_db_query_latency_ms" {
                 if let Some(metric) = metric_family.get_metric().first() {
-                    if let Some(histogram) = metric.get_histogram() {
+                    let histogram = metric.get_histogram();
+                    if !histogram.bucket.is_empty() {
                         sample_count = histogram.get_sample_count() as u32;
                         sum_ms = histogram.get_sample_sum();
                     }
@@ -339,6 +328,14 @@ impl Default for MetricsState {
             slow_queries_count: 0, // Could track queries > threshold
             total_queries_count: sample_count,
         }
+    }
+}
+
+impl Default for MetricsState {
+    fn default() -> Self {
+        // In production code, MetricsState::new() should be called and its Result handled.
+        // For Default trait (used in tests), we panic on failure to maintain the trait contract.
+        Self::new().expect("Failed to create MetricsState - metrics system initialization failed")
     }
 }
 

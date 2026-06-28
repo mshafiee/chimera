@@ -66,6 +66,14 @@ pub enum AppError {
     /// Parse/deserialization error
     #[error("Parse error: {0}")]
     Parse(String),
+
+    /// Bad request error
+    #[error("Bad request: {0}")]
+    BadRequest(String),
+
+    /// Service unavailable error
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
 }
 
 /// Error response structure for API
@@ -189,6 +197,22 @@ impl IntoResponse for AppError {
                 ErrorResponse {
                     status: "error",
                     reason: "parse_error".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::BadRequest(msg) => (
+                StatusCode::BAD_REQUEST,
+                ErrorResponse {
+                    status: "rejected",
+                    reason: "bad_request".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::ServiceUnavailable(msg) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                ErrorResponse {
+                    status: "error",
+                    reason: "service_unavailable".to_string(),
                     details: Some(msg.clone()),
                 },
             ),

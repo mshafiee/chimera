@@ -95,8 +95,8 @@ impl Database for SqliteBackend {
     async fn get_pool_stats(&self) -> AppResult<super::PoolStats> {
         use super::PoolStats;
 
-        let max_connections = self.pool.size();
-        let idle_connections = self.pool.num_idle();
+        let max_connections = self.pool.size() as usize;
+        let idle_connections = self.pool.num_idle() as usize;
         let active_connections = max_connections.saturating_sub(idle_connections);
 
         let utilization_percent = if max_connections > 0 {

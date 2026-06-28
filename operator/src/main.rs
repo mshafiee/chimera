@@ -69,6 +69,7 @@ use chimera_operator::handlers::{
     manual_reconcile_webhooks,
     reset_circuit_breaker,
     retry_webhook_registration,
+    retry_dead_letter_item,
     roster_merge,
     roster_validate,
     toggle_wallet_webhook,
@@ -1414,6 +1415,7 @@ async fn main() -> anyhow::Result<()> {
         market_regime_detector: Some(market_regime_detector.clone()),
         helius_client: helius_client.clone(),
         webhook_rate_limiter: Some(webhook_api_rate_limiter.clone()),
+        price_cache: price_cache.clone(),
     });
 
     // Run startup webhook management check
@@ -1600,6 +1602,7 @@ async fn main() -> anyhow::Result<()> {
             get(chimera_operator::handlers::get_position_size_analysis),
         )
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
+        .route("/incidents/dead-letter/{trade_uuid}/retry", post(retry_dead_letter_item))
         .route("/incidents/config-audit", get(list_config_audit))
         .route(
             "/signals/consensus",
