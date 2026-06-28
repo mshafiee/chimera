@@ -57,6 +57,13 @@ services:
                # Production Safety Settings
                - SCOUT_STRICT_HISTORICAL_LIQUIDITY=true
                - SCOUT_ENFORCE_CURRENT_LIQUIDITY=true
+      # Advanced Intelligence Features (All Enabled)
+               - SCOUT_CLUSTER_DEDUP=true
+               - SCOUT_CLUSTER_ENSEMBLE=true
+               - SCOUT_CROSS_WALLET_CORRELATION=true
+               - SCOUT_ADVANCED_RISK_FEATURES=true
+               - SCOUT_TIME_SERIES_FEATURES=true
+               - SCOUT_NETWORK_FEATURES=true
     env_file:
       - docker/env.mainnet-prod
       - docker/env.mainnet-prod.local
