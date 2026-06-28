@@ -1,13 +1,19 @@
 # Multi-stage build for Chimera Operator (Rust)
-# Using latest stable to support Cargo.lock v4
-FROM rust:latest as builder
+# Using Ubuntu 22.04 for GLIBC compatibility
+FROM ubuntu:22.04 as builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
+    build-essential \
     pkg-config \
     libssl-dev \
     ca-certificates \
+    curl \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Set working directory
 WORKDIR /build
@@ -17,12 +23,11 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY migrations ./migrations
 
-# Build release binary with offline mode for sqlx
-ENV SQLX_OFFLINE=true
+# Build release binary (online mode for sqlx, as we don't have prepared data)
 RUN cargo build --release
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage - same base image for GLIBC compatibility
+FROM ubuntu:22.04
 
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y \

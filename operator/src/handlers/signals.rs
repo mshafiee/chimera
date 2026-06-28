@@ -688,7 +688,7 @@ async fn get_active_clusters(
     db: &sqlx::Pool<sqlx::Sqlite>,
 ) -> Vec<Cluster> {
     // Query active wallets from database
-    let active_wallets = sqlx::query_scalar!(
+    let active_wallets = sqlx::query_scalar::<_, String>(
         r#"
         SELECT address
         FROM wallets
