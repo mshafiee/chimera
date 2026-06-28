@@ -15,7 +15,7 @@ WQS v2 improvements:
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Optional, Dict, Union, List, Tuple
+from typing import Optional, Dict, Union, List, Tuple, Any
 from datetime import datetime
 
 from .utils import utcnow
@@ -38,6 +38,9 @@ class PenaltyCategory(Enum):
     SCAM = auto()
     INSIDER = auto()
     SMART_MONEY = auto()
+    CVAR = auto()                      # Conditional Value at Risk
+    DRAWDOWN_DURATION = auto()         # Time to recover from drawdown
+    ULCER_INDEX = auto()              # Combined depth + duration metric
 
 
 _STRING_TO_PENALTY: Dict[str, PenaltyCategory] = {
@@ -50,6 +53,9 @@ _STRING_TO_PENALTY: Dict[str, PenaltyCategory] = {
     'scam_penalty': PenaltyCategory.SCAM,
     'insider_penalty': PenaltyCategory.INSIDER,
     'smart_money_removal': PenaltyCategory.SMART_MONEY,
+    'cvar_penalty': PenaltyCategory.CVAR,
+    'drawdown_duration_penalty': PenaltyCategory.DRAWDOWN_DURATION,
+    'ulcer_index_penalty': PenaltyCategory.ULCER_INDEX,
 }
 
 
@@ -366,6 +372,7 @@ class WqsResult:
 
 
 @dataclass
+@dataclass
 class WalletMetrics:
     """Wallet performance metrics for WQS calculation."""
     address: str
@@ -398,6 +405,7 @@ class WalletMetrics:
     volatility_30d: Optional[float] = None
     trade_sizes: Optional[list] = None
     avg_hold_time_hours: Optional[float] = None
+    advanced_risk_features: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -746,6 +754,49 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
             tracker._apply_penalty_precedence()
 
         tracker._apply_penalty_confidence()
+
+        # Advanced Risk Features Integration (CVaR, Drawdown Duration, Ulcer Index)
+        # These provide sophisticated risk detection beyond basic drawdown percentage
+        if hasattr(metrics, 'advanced_risk_features') and metrics.advanced_risk_features:
+            arf = metrics.advanced_risk_features
+
+            # Only apply if extraction was successful
+            if arf.get('extraction_success') and arf.get('sample_count', 0) >= 5:
+
+                # Apply CVaR penalty (95th percentile conditional value at risk)
+                # CVaR measures average loss in the worst 5% of trades
+                # Negative CVaR indicates losses - penalize proportional to severity
+                cvar_95 = arf.get('cvar_95', 0.0)
+                if cvar_95 < 0:  # Only penalize negative CVaR (losses)
+                    cvar_penalty = abs(cvar_95) * 0.2
+                    tracker.add_neg(PenaltyCategory.CVAR, cvar_penalty)
+                    logger.debug(
+                        f"CVaR penalty applied: {cvar_penalty:.2f} "
+                        f"(cvar_95={cvar_95:.4f})"
+                    )
+
+                # Apply Drawdown Duration penalty
+                # Long drawdowns indicate slow recovery from losses
+                # More than 10 trades to recover suggests poor risk management
+                max_dd_duration = arf.get('max_drawdown_duration_trades', 0)
+                if max_dd_duration > 10:  # More than 10 trades to recover
+                    dd_duration_penalty = max_dd_duration * 0.1
+                    tracker.add_neg(PenaltyCategory.DRAWDOWN_DURATION, dd_duration_penalty)
+                    logger.debug(
+                        f"Drawdown duration penalty applied: {dd_duration_penalty:.2f} "
+                        f"(max_drawdown_duration_trades={max_dd_duration})"
+                    )
+
+                # Apply Ulcer Index penalty (depth + duration combined metric)
+                # Ulcer Index > 5.0 indicates severe, prolonged drawdowns
+                ulcer_index = arf.get('ulcer_index', 0.0)
+                if ulcer_index > 5.0:  # Severe, prolonged drawdown
+                    ulcer_penalty = min(20.0, ulcer_index * 0.5)
+                    tracker.add_neg(PenaltyCategory.ULCER_INDEX, ulcer_penalty)
+                    logger.debug(
+                        f"Ulcer Index penalty applied: {ulcer_penalty:.2f} "
+                        f"(ulcer_index={ulcer_index:.2f})"
+                    )
 
     return tracker.to_components()
 
