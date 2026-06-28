@@ -252,7 +252,7 @@ curl http://localhost:8080/api/v1/health
 | Docker Compose Eval | Evaluation services definition | `docker-compose.evaluation.yml` |
 | Environment Base | Base evaluation variables | `docker/env.evaluation` |
 | Environment Local | Local credentials | `docker/env.evaluation.local` |
-| Fluentd Config | Log aggregation configuration | `ops/fluentd/fluentd.conf` |
+| Vector Config | Log aggregation configuration | `ops/vector/vector.toml` |
 | Evaluation Schema | Database schema | `database/evaluation_schema.sql` |
 
 ### Key Script Files

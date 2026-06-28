@@ -121,7 +121,15 @@ check_service_health() {
 
 # Check critical services
 check_service_health "Operator" "http://localhost:8080/api/v1/health"
-check_service_health "Scout" "http://localhost:8081/health"
+
+# Check Scout container health (Scout is a periodic batch job, not a web service)
+echo -e "${YELLOW}⏳ Checking Scout container status...${NC}"
+if docker ps --format "{{.Names}}" | grep -q "chimera-scout"; then
+    echo -e "${GREEN}✓ Scout container is running${NC}"
+else
+    echo -e "${RED}✗ Scout container is not running${NC}"
+fi
+
 check_service_health "Prometheus Eval" "http://localhost:9091/-/healthy"
 
 # ===================================================================
@@ -147,22 +155,27 @@ else
 fi
 
 # ===================================================================
-# FLUENTD LOG AGGREGATION SETUP
+# VECTOR LOG AGGREGATION SETUP
 # ===================================================================
 echo -e "${BLUE}[5/8] Setting up log aggregation...${NC}"
 
-# Check if Fluentd configuration exists
-if [ -f "ops/fluentd/fluentd.conf" ]; then
-    # Create log directories
-    mkdir -p "${EVAL_DIR}/logs"
-    mkdir -p "${EVAL_DIR}/logs/evaluation"
+# Check if Vector service exists in compose files
+if grep -E "^\s*vector:" docker-compose.yml 2>/dev/null || grep -E "^\s*vector:" docker-compose.evaluation.yml 2>/dev/null; then
+    # Check if Vector configuration exists
+    if [ -f "ops/vector/vector.toml" ]; then
+        # Create log directories
+        mkdir -p "${EVAL_DIR}/logs"
+        mkdir -p "${EVAL_DIR}/logs/evaluation"
 
-    # Restart Fluentd to load configuration
-    docker-compose restart fluentd
+        # Restart Vector to load configuration
+        docker-compose -f docker-compose.evaluation.yml restart vector
 
-    echo -e "${GREEN}✓ Fluentd log aggregation started${NC}"
+        echo -e "${GREEN}✓ Vector log aggregation started${NC}"
+    else
+        echo -e "${YELLOW}⚠ Vector configuration not found, skipping log aggregation${NC}"
+    fi
 else
-    echo -e "${YELLOW}⚠ Fluentd configuration not found, skipping log aggregation${NC}"
+    echo -e "${YELLOW}⚠ Vector service not defined, skipping log aggregation${NC}"
 fi
 
 # ===================================================================
@@ -278,7 +291,7 @@ echo "  Logs: ${EVAL_DIR}/logs/evaluation/"
 echo ""
 echo "Monitoring:"
 echo "  Anomaly Detection: Running (PID: ${ANOMALY_PID})"
-echo "  Log Aggregation: Fluentd active"
+echo "  Log Aggregation: Vector active"
 echo ""
 echo "Next Steps:"
 echo "  1. Monitor service health: curl http://localhost:8080/api/v1/health"

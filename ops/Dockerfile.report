@@ -1,0 +1,29 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip install --no-cache-dir \
+    jinja2 \
+    python-dateutil
+
+# Copy report generation scripts
+COPY generate-daily-report.sh /app/
+COPY generate-evaluation-report.py /app/
+
+# Make scripts executable
+RUN chmod +x /app/generate-daily-report.sh
+
+# Create reports directory
+RUN mkdir -p /reports
+
+# Set up environment
+ENV PYTHONUNBUFFERED=1
+
+# Default command
+CMD ["python", "generate-evaluation-report.py"]

@@ -5,45 +5,47 @@
 version: '3.8'
 
 services:
-  # Fluentd Log Aggregation - Systematic log collection and organization
-  fluentd:
-    image: fluent/fluentd:v1.16-1
-    container_name: chimera-fluentd
+  # Vector Log Aggregation - Systematic log collection and organization
+  # ARM64-compatible replacement for Fluentd with improved performance
+  vector:
+    image: timberio/vector:0.36.0-alpine
+    platform: linux/arm64
+    container_name: chimera-vector
     restart: unless-stopped
     volumes:
-      - ./logs:/fluentd/log
-      - ./ops/fluentd/fluentd.conf:/fluentd/etc/fluentd.conf:ro
-      - evaluation-logs:/fluentd/log/evaluation
+      - ./logs:/vector/log
+      - ./ops/vector/vector.toml:/etc/vector/vector.toml:ro
+      - evaluation-logs:/vector/log/evaluation
       - ./evaluation:/evaluation:rw
+      - /var/log/chimera:/var/log/chimera:ro
     ports:
-      - "24224:24224" # Fluentd forward protocol
+      - "8383:8383" # Vector metrics API
     networks:
       - chimera-network
-    depends_on:
-      - operator
-      - scout
     healthcheck:
-      test: ["CMD", "fluentd", "--version"]
+      test: ["CMD", "vector", "validate"]
       interval: 30s
       timeout: 10s
       retries: 3
+    cap_add:
+      - SYS_ADMIN  # Required for file reading
     profiles:
       - evaluation
 
   # Extended Prometheus for Evaluation Metrics - 10-day retention
   prometheus-eval:
     image: prom/prometheus:latest
+    platform: linux/arm64
     container_name: chimera-prometheus-eval
     restart: unless-stopped
     volumes:
       - ./ops/prometheus/prometheus-eval.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus-data:/prometheus
+      - prometheus-eval-data:/prometheus
       - ./evaluation/prometheus:/evaluation/prometheus:rw
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
       - '--storage.tsdb.retention.time=10d'  # 10-day retention for evaluation
-      - '--storage.tsdb.retention.size=20GB'
       - '--web.enable-lifecycle'
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
@@ -51,9 +53,6 @@ services:
       - "9091:9090" # Different port to avoid conflict with main Prometheus
     networks:
       - chimera-network
-    depends_on:
-      - operator
-      - scout
     healthcheck:
       test: ["CMD", "wget", "--spider", "http://localhost:9090/-/healthy"]
       interval: 30s
@@ -65,6 +64,7 @@ services:
   # PostgreSQL for Detailed Evaluation Data - Extended metrics storage
   postgres-eval:
     image: postgres:15-alpine
+    platform: linux/arm64
     container_name: chimera-postgres-eval
     restart: unless-stopped
     environment:
@@ -85,7 +85,7 @@ services:
       # Logging for evaluation analysis
       - POSTGRES_LOG_STATEMENT=all
       - POSTGRES_LOG_DESTINATION=stderr
-      - POSTGRES_LOG_LINE_PREFIX='%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h '
+      # - POSTGRES_LOG_LINE_PREFIX="%t [%p]: [%l-1] user=%u,db=%d,app=%a,client=%h"
     volumes:
       - postgres-eval-data:/var/lib/postgresql/data
       - ./database/evaluation_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
@@ -121,7 +121,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U chimera -d chimera_evaluation"]
       interval: 10s
       timeout: 5s
-      retries:5
+      retries: 5
       start_period: 30s
     profiles:
       - evaluation
@@ -129,6 +129,7 @@ services:
   # Grafana for Evaluation Monitoring Dashboards
   grafana-eval:
     image: grafana/grafana:latest
+    platform: linux/arm64
     container_name: chimera-grafana-eval
     restart: unless-stopped
     volumes:
@@ -159,6 +160,7 @@ services:
   # Redis for Extended Caching during Evaluation
   redis-eval:
     image: redis:7-alpine
+    platform: linux/arm64
     container_name: chimera-redis-eval
     restart: unless-stopped
     ports:
@@ -206,8 +208,6 @@ services:
       - PROMETHEUS_URL=http://operator:8080/metrics
       - SCOUT_PROMETHEUS_URL=http://scout:8081/metrics
     depends_on:
-      - operator
-      - scout
       - prometheus-eval
     networks:
       - chimera-network
@@ -279,6 +279,8 @@ volumes:
   postgres-eval-data:
     driver: local
   redis-eval-data:
+    driver: local
+  prometheus-eval-data:
     driver: local
   evaluation-logs:
     driver: local

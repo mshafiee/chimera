@@ -205,7 +205,7 @@ main() {
         check_service_health "Operator" "http://localhost:8080/api/v1/health"
         check_service_health "Scout" "http://localhost:8081/health"
         check_service_health "Prometheus Eval" "http://localhost:9091/-/healthy"
-        check_service_health "Fluentd" "http://localhost:24224/api/json" 2>/dev/null || echo -e "${YELLOW}?${NC} Fluentd"
+        check_service_health "Vector" "http://localhost:8383/health" 2>/dev/null || echo -e "${YELLOW}?${NC} Vector"
         echo ""
 
         # System Metrics

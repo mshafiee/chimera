@@ -37,7 +37,7 @@
 ### Pre-Evaluation Testing
 - [ ] Docker Compose configuration validated
 - [ ] Individual services tested (operator, scout)
-- [ ] Evaluation services tested (fluentd, prometheus, postgres)
+- [ ] Evaluation services tested (vector, prometheus, postgres)
 - [ ] Data collection script tested
 - [ ] Evaluation database schema created
 - [ ] Monitoring dashboards accessible
@@ -65,7 +65,7 @@
 ### Initial Validation
 - [ ] First data collection completed
 - [ ] Evaluation database contains 1 snapshot
-- [ ] Fluentd log collection working
+- [ ] Vector log collection working
 - [ ] Monitoring dashboard active
 - [ ] No critical errors in logs
 

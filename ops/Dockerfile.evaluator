@@ -1,0 +1,33 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    jq \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python requirements
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy evaluation tools
+COPY collect-evaluation-data.sh /app/
+COPY process-evaluation-metrics.py /app/
+
+# Make scripts executable
+RUN chmod +x /app/collect-evaluation-data.sh
+
+# Create evaluation directory
+RUN mkdir -p /evaluation
+
+# Set up environment
+ENV PYTHONUNBUFFERED=1
+ENV EVALUATION_MODE=true
+
+# Run data collection
+CMD ["python", "process-evaluation-metrics.py"]

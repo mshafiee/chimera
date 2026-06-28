@@ -1,0 +1,30 @@
+# Prometheus Evaluation Configuration
+# Extended retention for 10-day evaluation
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    evaluation: '10-day-paper-trading'
+    environment: 'evaluation'
+
+# Scrape configurations for evaluation
+scrape_configs:
+  # Chimera Operator metrics
+  - job_name: 'chimera-operator'
+    static_configs:
+      - targets: ['operator:8080']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Chimera Scout metrics
+  - job_name: 'chimera-scout'
+    static_configs:
+      - targets: ['scout:8081']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

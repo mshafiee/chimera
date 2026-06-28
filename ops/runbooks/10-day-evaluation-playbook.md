@@ -110,7 +110,7 @@ curl http://localhost:8080/api/v1/health  # Should return 200
 curl http://localhost:8081/health  # Should return 200
 
 # Test evaluation services
-docker-compose --profile evaluation up -d fluentd
+docker-compose --profile evaluation up -d vector
 docker-compose --profile evaluation up -d prometheus-eval
 docker-compose --profile evaluation up -d postgres-eval
 ```
@@ -184,7 +184,7 @@ DAY_NUM=1 HOUR_NUM=0 ./ops/collect-evaluation-data.sh
 sqlite3 evaluation/evaluation.db "SELECT COUNT(*) FROM evaluation_snapshots;"
 # Should return 1
 
-# Check Fluentd log collection
+# Check Vector log collection
 ls -la evaluation/logs/evaluation/
 ```
 
@@ -623,15 +623,15 @@ sqlite3 evaluation/evaluation.db \
 sudo service cron restart
 ```
 
-#### Fluentd Log Collection Issues
+#### Vector Log Collection Issues
 
 **Diagnosis:**
 ```bash
-# Check Fluentd status
-docker-compose ps fluentd
+# Check Vector status
+docker-compose ps vector
 
-# Review Fluentd logs
-docker-compose logs --tail=100 fluentd
+# Review Vector logs
+docker-compose logs --tail=100 vector
 
 # Check log output
 ls -la evaluation/logs/evaluation/
@@ -639,8 +639,8 @@ ls -la evaluation/logs/evaluation/
 
 **Resolution:**
 ```bash
-# Restart Fluentd
-docker-compose restart fluentd
+# Restart Vector
+docker-compose restart vector
 
 # Verify log collection
 tail -f evaluation/logs/evaluation/operator-*.log
@@ -1048,7 +1048,7 @@ docker stats
 | Scout | 8081 | Wallet intelligence API |
 | Prometheus Eval | 9091 | Evaluation metrics |
 | Grafana Eval | 3003 | Evaluation dashboards |
-| Fluentd | 24224 | Log aggregation |
+| Vector | 8383 | Log aggregation |
 | Signal Collector | 8090 | Real-time signal recording |
 
 ### D. Environment Variables
