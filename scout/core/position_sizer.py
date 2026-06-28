@@ -1,6 +1,12 @@
 """
 Kelly Criterion Position Sizer with Growth-Stage Optimization
 
+.. DEPRECATED::
+   This module is a standalone duplicate of position sizing functionality.
+   Active implementation: ``scout/core/strategy_allocator.py`` - which already
+   implements Kelly Criterion position sizing with growth-stage optimization and
+   is integrated into the analysis pipeline.
+
 This module implements position sizing based on the Kelly Criterion with
 growth-stage multipliers for aggressive capital growth.
 

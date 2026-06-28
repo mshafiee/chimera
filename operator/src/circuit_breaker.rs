@@ -9,7 +9,7 @@
 //! manual reset or automatic recovery.
 
 use crate::config::CircuitBreakerConfig;
-use crate::db_abstraction::Database;
+use crate::db_abstraction::{Database, datetime_to_string};
 use crate::error::AppResult;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use chrono::{DateTime, Duration, Utc};
@@ -32,7 +32,7 @@ async fn persist_cb_state(
         CircuitBreakerState::Tripped => "Tripped",
         CircuitBreakerState::Cooldown => "Cooldown",
     };
-    let tripped_at_str = tripped_at.map(|t| t.to_rfc3339());
+    let tripped_at_str = tripped_at.map(datetime_to_string);
     db.update_circuit_breaker_state(state_str, tripped_at_str.as_deref(), trip_reason)
         .await
 }

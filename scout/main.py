@@ -134,6 +134,18 @@ except ImportError:
     CreditAlertLevel = None
     print("[Scout] Warning: PredictiveBudgetManager not available")
 
+# Import advanced caching for RPC optimization (optional)
+try:
+    from core.advanced_cache import (
+        get_wallet_metrics, set_wallet_metrics,
+        get_liquidity_data, set_liquidity_data,
+        get_high_wqs_wallet_data, set_high_wqs_wallet_data,
+    )
+    ADVANCED_CACHE_AVAILABLE = True
+except ImportError:
+    ADVANCED_CACHE_AVAILABLE = False
+    print("[Scout] Warning: Advanced caching not available")
+
 # Import HighConvictionIntegration for WQS-based prioritization
 try:
     from integrations.high_conviction_integration import create_high_conviction_integration

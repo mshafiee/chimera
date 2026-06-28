@@ -10,6 +10,7 @@ use super::{
     TradeDetail, TradeLatencyStats, TradeStatistics, UpdateDlqItemParams, UpdatePosition,
     UpdateTradeStatus, Wallet, WalletCopyPerformance, WalletDetail, WalletMonitoring,
     WalletPerformance, WebhookAuditLog,
+    datetime_to_string,
 };
 use crate::error::{AppError, AppResult};
 use rust_decimal::prelude::*;
@@ -719,8 +720,8 @@ impl Database for PostgresBackend {
             trip_reason: row.try_get("trip_reason").ok(),
             updated_at: row
                 .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339()),
+                .map(datetime_to_string)
+                .unwrap_or_else(|_| datetime_to_string(chrono::Utc::now())),
         })
     }
 
@@ -767,8 +768,8 @@ impl Database for PostgresBackend {
             state: row.try_get("state").unwrap_or("INACTIVE".to_string()),
             changed_at: row
                 .try_get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|_| chrono::Utc::now().to_rfc3339()),
+                .map(datetime_to_string)
+                .unwrap_or_else(|_| datetime_to_string(chrono::Utc::now())),
             changed_by: row.try_get("changed_by").unwrap_or("SYSTEM".to_string()),
             reason: row.try_get("reason").ok(),
         })
