@@ -5,6 +5,7 @@ WORKDIR /app
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     curl \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
@@ -12,12 +13,15 @@ RUN pip install --no-cache-dir \
     jinja2 \
     python-dateutil
 
-# Copy report generation scripts
-COPY generate-daily-report.sh /app/
-COPY generate-evaluation-report.py /app/
+# Copy report generation scripts and database schema
+COPY ops/generate-daily-report.sh /app/
+COPY ops/generate-evaluation-report.py /app/
+COPY ops/report-generator-entrypoint.sh /app/
+COPY database/evaluation_schema.sql /app/evaluation_schema.sql
 
 # Make scripts executable
 RUN chmod +x /app/generate-daily-report.sh
+RUN chmod +x /app/report-generator-entrypoint.sh
 
 # Create reports directory
 RUN mkdir -p /reports
@@ -25,5 +29,5 @@ RUN mkdir -p /reports
 # Set up environment
 ENV PYTHONUNBUFFERED=1
 
-# Default command
-CMD ["python", "generate-evaluation-report.py"]
+# Use entrypoint wrapper for scheduled report generation
+CMD ["/app/report-generator-entrypoint.sh"]

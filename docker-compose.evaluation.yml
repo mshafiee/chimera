@@ -12,18 +12,19 @@ services:
     platform: linux/arm64
     container_name: chimera-vector
     restart: unless-stopped
+    command: ["--config", "/etc/vector/vector.toml"]
     volumes:
       - ./logs:/vector/log
       - ./ops/vector/vector.toml:/etc/vector/vector.toml:ro
       - evaluation-logs:/vector/log/evaluation
       - ./evaluation:/evaluation:rw
-      - /var/log/chimera:/var/log/chimera:ro
+      - ./data:/host/data:ro
     ports:
       - "8383:8383" # Vector metrics API
     networks:
       - chimera-network
     healthcheck:
-      test: ["CMD", "vector", "validate"]
+      test: ["CMD", "vector", "validate", "/etc/vector/vector.toml"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -226,6 +227,8 @@ services:
       - ./evaluation/anomalies:/evaluation/anomalies:rw
     environment:
       - PROMETHEUS_URL=http://prometheus-eval:9090
+      - OPERATOR_METRICS_URL=http://chimera-operator:8080/metrics  # Fixed: use container name
+      - SCOUT_METRICS_URL=  # Disabled: Scout doesn't expose metrics endpoint
       - ANOMALY_CHECK_INTERVAL=60  # Check every minute
       - ALERT_THRESHOLD_WARNING=80
       - ALERT_THRESHOLD_CRITICAL=95
@@ -237,7 +240,7 @@ services:
     networks:
       - chimera-network
     healthcheck:
-      test: ["CMD", "python3", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      test: ["CMD", "python3", "-c", "import requests; requests.get('http://chimera-operator:8080/api/v1/health', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -247,8 +250,8 @@ services:
   # Report Generator - Daily health and evaluation reports
   report-generator:
     build:
-      context: ./ops
-      dockerfile: Dockerfile.report
+      context: .
+      dockerfile: ops/Dockerfile.report
     container_name: chimera-report-generator
     restart: unless-stopped
     volumes:
@@ -284,8 +287,11 @@ volumes:
     driver: local
   evaluation-logs:
     driver: local
+  grafana-data:
+    driver: local
 
 # Use the same network as the base docker-compose
 networks:
   chimera-network:
+    name: chimera_chimera-network
     external: true

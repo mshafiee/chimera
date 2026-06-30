@@ -1,11 +1,5 @@
 # Vector Configuration for Chimera 10-Day Evaluation
-# Modern log aggregation with ARM64 support, VRL transformations, and unified pipeline
-# Replaces Fluentd configuration for ARM64 compatibility and improved performance
-
-# ===================================================================
-# Data Directory - State and checkpointing
-# ===================================================================
-data_dir = "/vector/data"
+# ARM64-compatible log aggregation - Simple working version
 
 # ===================================================================
 # Sources - Log Collection from Chimera Services
@@ -14,348 +8,77 @@ data_dir = "/vector/data"
 # Operator Logs - JSON structured logs from Rust trading engine
 [sources.operator_logs]
 type = "file"
-include = ["/var/log/chimera/operator.log"]
+include = ["/host/data/logs/operator.log"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
 # Scout Logs - Python wallet intelligence layer logs
 [sources.scout_logs]
 type = "file"
-include = ["/var/log/chimera/scout.log"]
+include = ["/host/data/logs/scout.log"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
 # Web Dashboard Logs
 [sources.web_logs]
 type = "file"
-include = ["/var/log/chimera/web.log"]
+include = ["/host/data/logs/web.log"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
 # Database Logs
 [sources.database_logs]
 type = "file"
-include = ["/var/log/chimera/database.log"]
+include = ["/host/data/logs/database.log"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
 # Backup Logs
 [sources.backup_logs]
 type = "file"
-include = ["/var/log/chimera/backup.log"]
+include = ["/host/data/logs/backup.log"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
 # Reconciliation Logs
 [sources.reconcile_logs]
 type = "file"
-include = ["/var/log/chimera/reconcile.log"]
+include = ["/host/data/logs/reconcile.log"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
-# Prometheus Metrics Scraping - Operator
-[sources.prometheus_operator]
-type = "prometheus_scrape"
-endpoints = ["http://operator:8080/metrics"]
-scrape_interval_secs = 60
-
-# Prometheus Metrics Scraping - Scout
-[sources.prometheus_scout]
-type = "prometheus_scrape"
-endpoints = ["http://scout:8081/metrics"]
-scrape_interval_secs = 60
-
 # ===================================================================
-# Transforms - Log Parsing and Standardization with VRL
+# Sinks - Output to Evaluation Storage
 # ===================================================================
 
-# Parse operator JSON logs with enhanced VRL transformations
-[transforms.parse_operator]
-type = "remap"
-inputs = ["operator_logs"]
-source = '''
-  # Parse JSON structured logs
-  . = parse_json!(.message)
-  .timestamp = to_timestamp!(.timestamp)
-  .service = "operator"
-  .level = .level || "INFO"
-
-  # Enhanced field extraction for trading events
-  if exists(.trade_uuid) {
-    .trade_event = true
-    .trade_type = .strategy || "unknown"
-    .risk_level = if exists(.trade_size) && .trade_size > 1000 { "high" } else { "normal" }
-  }
-
-  # Performance metric extraction
-  if includes(to_string(.message), "latency") || includes(to_string(.message), "p95") || includes(to_string(.message), "p99") {
-    .performance_metric = true
-  }
-
-  # Security event detection
-  if includes(to_string(.message), "authentication") || includes(to_string(.message), "auth_failed") || includes(to_string(.message), "rate_limit") {
-    .security_event = true
-  }
-
-  # Error detection
-  if .level == "ERROR" || .level == "CRITICAL" || .level == "WARN" {
-    .error_level = true
-  }
-'''
-
-# Parse Python logs (scout, web, database, backup, reconcile)
-[transforms.parse_scout]
-type = "remap"
-inputs = ["scout_logs"]
-source = '''
-  # Parse Python log format: "timestamp level message"
-  parsed = parse_regex!(.message, r'^(?P<time>[^ ]+) (?P<level>[^ ]+) (?P<message>.*)$')
-  .timestamp = to_timestamp!(parsed.time, "%Y-%m-%d %H:%M:%S")
-  .service = "scout"
-  .level = parsed.level || "INFO"
-  .message = parsed.message
-
-  # Scout-specific field extraction
-  if includes(to_string(.message), "wallet_analyzed") {
-    .wallet_analysis = true
-  }
-
-  # WQS score extraction
-  if includes(to_string(.message), "wqs_score") {
-    .wqs_event = true
-  }
-
-  # Error detection
-  if .level == "ERROR" || .level == "CRITICAL" || .level == "WARN" || includes(to_string(.message), "traceback") {
-    .error_level = true
-  }
-'''
-
-[transforms.parse_web]
-type = "remap"
-inputs = ["web_logs"]
-source = '''
-  parsed = parse_regex!(.message, r'^(?P<time>[^ ]+) (?P<level>[^ ]+) (?P<message>.*)$')
-  .timestamp = to_timestamp!(parsed.time)
-  .service = "web"
-  .level = parsed.level || "INFO"
-  .message = parsed.message
-
-  # Security event detection for web dashboard
-  if includes(to_string(.message), "authentication") || includes(to_string(.message), "unauthorized") || includes(to_string(.message), "access_denied") {
-    .security_event = true
-  }
-
-  if .level == "ERROR" || .level == "CRITICAL" {
-    .error_level = true
-  }
-'''
-
-[transforms.parse_database]
-type = "remap"
-inputs = ["database_logs"]
-source = '''
-  parsed = parse_regex!(.message, r'^(?P<time>[^ ]+) (?P<level>[^ ]+) (?P<message>.*)$')
-  .timestamp = to_timestamp!(parsed.time)
-  .service = "database"
-  .level = parsed.level || "INFO"
-  .message = parsed.message
-
-  # Database error detection
-  if .level == "ERROR" || includes(to_string(.message), "deadlock") || includes(to_string(.message), "lock") {
-    .error_level = true
-  }
-'''
-
-[transforms.parse_backup]
-type = "remap"
-inputs = ["backup_logs"]
-source = '''
-  parsed = parse_regex!(.message, r'^(?P<time>[^ ]+) (?P<level>[^ ]+) (?P<message>.*)$')
-  .timestamp = to_timestamp!(parsed.time)
-  .service = "backup"
-  .level = parsed.level || "INFO"
-  .message = parsed.message
-
-  if .level == "ERROR" || .level == "CRITICAL" {
-    .error_level = true
-  }
-'''
-
-[transforms.parse_reconcile]
-type = "remap"
-inputs = ["reconcile_logs"]
-source = '''
-  parsed = parse_regex!(.message, r'^(?P<time>[^ ]+) (?P<level>[^ ]+) (?P<message>.*)$')
-  .timestamp = to_timestamp!(parsed.time)
-  .service = "reconciliation"
-  .level = parsed.level || "INFO"
-  .message = parsed.message
-
-  # Reconciliation discrepancy detection
-  if includes(to_string(.message), "discrepancy") || includes(to_string(.message), "mismatch") {
-    .error_level = true
-  }
-
-  if .level == "ERROR" || .level == "CRITICAL" {
-    .error_level = true
-  }
-'''
-
-# ===================================================================
-# Advanced Filtering - Intelligent Event Aggregation
-# ===================================================================
-
-# Error Log Aggregation - Collect all errors for investigation
-[transforms.filter_errors]
-type = "filter"
-inputs = ["parse_operator", "parse_scout", "parse_web", "parse_database", "parse_backup", "parse_reconcile"]
-condition = '.error_level == true || .level == "ERROR" || .level == "error" || .level == "Error" || .level == "CRITICAL" || .level == "critical" || .level == "WARN" || .level == "warning" || includes(to_string(.message), "traceback")'
-
-# Trade Event Extraction - Extract key trading events for analysis
-[transforms.filter_trades]
-type = "filter"
-inputs = ["parse_operator"]
-condition = '.trade_event == true || exists(.trade_uuid) || exists(.wallet_address) || exists(.token_address) || exists(.strategy) || includes(to_string(.message), "signal_received") || includes(to_string(.message), "trade_executed") || includes(to_string(.message), "position_closed") || includes(to_string(.message), "circuit_breaker")'
-
-# Performance Metrics Extraction - Collect performance-related logs
-[transforms.filter_performance]
-type = "filter"
-inputs = ["parse_operator"]
-condition = '.performance_metric == true || includes(to_string(.message), "latency") || includes(to_string(.message), "p95") || includes(to_string(.message), "p99") || includes(to_string(.message), "rpc_latency") || includes(to_string(.message), "queue_depth") || includes(to_string(.message), "memory_usage") || includes(to_string(.message), "cpu_usage") || includes(to_string(.message), "execution_time")'
-
-# Security Event Extraction - Collect security-related events
-[transforms.filter_security]
-type = "filter"
-inputs = ["parse_operator", "parse_scout", "parse_web", "parse_database"]
-condition = '.security_event == true || includes(to_string(.message), "authentication") || includes(to_string(.message), "auth_failed") || includes(to_string(.message), "rate_limit") || includes(to_string(.message), "security") || includes(to_string(.message), "attack") || includes(to_string(.message), "unauthorized") || includes(to_string(.message), "forbidden") || includes(to_string(.message), "blocked") || includes(to_string(.message), "geoip") || includes(to_string(.message), "access_denied")'
-
-# ===================================================================
-# Sinks - Output to Evaluation Storage with Enhanced Features
-# ===================================================================
-
-# Main evaluation output - organized by day with enhanced formatting
+# Main evaluation output - all logs combined
 [sinks.evaluation_logs]
 type = "file"
-inputs = ["parse_operator", "parse_scout", "parse_web", "parse_database", "parse_backup", "parse_reconcile"]
+inputs = ["operator_logs", "scout_logs", "web_logs", "database_logs", "backup_logs", "reconcile_logs"]
 path = "/vector/log/evaluation/chimera-%Y-%m-%d.log"
-encoding = "json"
+encoding.codec = "json"
 compression = "gzip"
-[sinks.evaluation_logs.buffer]
-type = "disk"
-max_size = 10737418240  # 10GB
-[sinks.evaluation_logs.batch]
-timeout_secs = 60
-max_bytes = 20971520  # 20MB
 
-# Separate operator logs for detailed trade analysis
+# Separate operator logs for detailed analysis
 [sinks.operator_output]
 type = "file"
-inputs = ["parse_operator"]
+inputs = ["operator_logs"]
 path = "/vector/log/evaluation/operator-%Y-%m-%d.log"
-encoding = "json"
+encoding.codec = "json"
 compression = "gzip"
-[sinks.operator_output.buffer]
-type = "disk"
-max_size = 5368709120  # 5GB
-[sinks.operator_output.batch]
-timeout_secs = 60
-max_bytes = 10485760  # 10MB
 
-# Scout intelligence logs with wallet analysis fields
+# Scout intelligence logs
 [sinks.scout_output]
 type = "file"
-inputs = ["parse_scout"]
+inputs = ["scout_logs"]
 path = "/vector/log/evaluation/scout-%Y-%m-%d.log"
-encoding = "json"
+encoding.codec = "json"
 compression = "gzip"
-[sinks.scout_output.buffer]
-type = "disk"
-max_size = 5368709120  # 5GB
-[sinks.scout_output.batch]
-timeout_secs = 60
-max_bytes = 10485760  # 10MB
 
-# System logs (web, database, backup, reconciliation) combined
+# System logs combined (web, database, backup, reconciliation)
 [sinks.system_output]
 type = "file"
-inputs = ["parse_web", "parse_database", "parse_backup", "parse_reconcile"]
+inputs = ["web_logs", "database_logs", "backup_logs", "reconcile_logs"]
 path = "/vector/log/evaluation/system-%Y-%m-%d.log"
-encoding = "json"
+encoding.codec = "json"
 compression = "gzip"
-[sinks.system_output.buffer]
-type = "disk"
-max_size = 5368709120  # 5GB
-[sinks.system_output.batch]
-timeout_secs = 60
-max_bytes = 10485760  # 10MB
-
-# Error aggregation output - centralized error collection
-[sinks.error_output]
-type = "file"
-inputs = ["filter_errors"]
-path = "/vector/log/evaluation/errors-%Y-%m-%d.log"
-encoding = "json"
-compression = "gzip"
-[sinks.error_output.buffer]
-type = "disk"
-max_size = 2147483648  # 2GB
-[sinks.error_output.batch]
-timeout_secs = 30
-max_bytes = 5242880  # 5MB
-
-# Trade event output (hourly rotation) for detailed analysis
-[sinks.trade_output]
-type = "file"
-inputs = ["filter_trades"]
-path = "/vector/log/evaluation/trades-%Y-%m-%d-%H.log"
-encoding = "json"
-compression = "gzip"
-[sinks.trade_output.buffer]
-type = "disk"
-max_size = 2147483648  # 2GB
-[sinks.trade_output.batch]
-timeout_secs = 30
-max_bytes = 5242880  # 5MB
-
-# Performance metrics output (hourly rotation) for performance analysis
-[sinks.performance_output]
-type = "file"
-inputs = ["filter_performance"]
-path = "/vector/log/evaluation/performance-%Y-%m-%d-%H.log"
-encoding = "json"
-compression = "gzip"
-[sinks.performance_output.buffer]
-type = "disk"
-max_size = 2147483648  # 2GB
-[sinks.performance_output.batch]
-timeout_secs = 60
-max_bytes = 5242880  # 5MB
-
-# Security events output (hourly rotation) for security monitoring
-[sinks.security_output]
-type = "file"
-inputs = ["filter_security"]
-path = "/vector/log/evaluation/security-%Y-%m-%d-%H.log"
-encoding = "json"
-compression = "gzip"
-[sinks.security_output.buffer]
-type = "disk"
-max_size = 2147483648  # 2GB
-[sinks.security_output.batch]
-timeout_secs = 30
-max_bytes = 5242880  # 5MB
-
-# Prometheus metrics output (hourly rotation) - unified pipeline
-[sinks.prometheus_output]
-type = "file"
-inputs = ["prometheus_operator", "prometheus_scout"]
-path = "/vector/log/evaluation/prometheus-metrics-%Y-%m-%d-%H.log"
-encoding = "json"
-compression = "gzip"
-[sinks.prometheus_output.buffer]
-type = "disk"
-max_size = 2147483648  # 2GB
-[sinks.prometheus_output.batch]
-timeout_secs = 60
-max_bytes = 5242880  # 5MB

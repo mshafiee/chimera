@@ -337,11 +337,11 @@ services:
       - mainnet-prod
 
 volumes:
-  prometheus-data:
+  alertmanager-data:
     driver: local
   grafana-data:
     driver: local
-  alertmanager-data:
+  prometheus-data:
     driver: local
   scout-data:
     driver: local

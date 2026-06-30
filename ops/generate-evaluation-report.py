@@ -600,6 +600,34 @@ class EvaluationReportGenerator:
         Returns:
             HTML report content
         """
+        # Build dynamic sections separately to avoid nested f-string issues
+        recommendations_html = "".join([
+            f"""
+        <div class="recommendation">
+            <h4><span class="priority-{rec['priority']}">{rec['priority']}</span> {rec['title']}</h4>
+            <p><strong>Description:</strong> {rec['description']}</p>
+            <p><strong>Impact:</strong> {rec['impact']} | <strong>Effort:</strong> {rec['effort']}</p>
+            <p><strong>Actions:</strong></p>
+            <ul>
+                {"".join(f"<li>{action}</li>" for action in rec['actions'])}
+            </ul>
+        </div>
+        """ for rec in report_data.recommendations
+        ])
+
+        anomalies_html = "".join([
+            f"""
+            <tr>
+                <td>{anomaly['anomaly_time'][:19]}</td>
+                <td class="{'status-critical' if anomaly['severity'] == 'CRITICAL' else 'status-warning'}">{anomaly['severity']}</td>
+                <td>{anomaly['metric_name']}</td>
+                <td>{anomaly['metric_value']:.2f}</td>
+                <td>{anomaly['threshold_value']:.2f}</td>
+                <td>{'Resolved' if anomaly['resolved'] else 'Active'}</td>
+            </tr>
+            """ for anomaly in report_data.anomalies_detected[:20]
+        ])
+
         # Generate comprehensive HTML report
         html_content = f"""
 <!DOCTYPE html>
@@ -809,9 +837,9 @@ class EvaluationReportGenerator:
             </tr>
             <tr>
                 <td>Success Rate</td>
-                <td>{report_data.executive_summary['trading_performance']['success_rate_percent']:.1f}%</td>
-                <td class="{'status-good' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'status-warning'}">
-                    {'Excellent' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'Review'}
+                <td>{{report_data.executive_summary['trading_performance']['success_rate_percent']:.1f}}%</td>
+                <td class="{{'status-good' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'status-warning'}}">
+                    {{'Excellent' if report_data.executive_summary['trading_performance']['success_rate_percent'] >= 95 else 'Review'}}
                 </td>
             </tr>
             <tr>
@@ -927,33 +955,14 @@ class EvaluationReportGenerator:
 
     <div class="section">
         <h2>🎯 Recommendations</h2>
-        {"".join(f"""
-        <div class="recommendation">
-            <h4><span class="priority-{rec['priority']}">{rec['priority']}</span> {rec['title']}</h4>
-            <p><strong>Description:</strong> {rec['description']}</p>
-            <p><strong>Impact:</strong> {rec['impact']} | <strong>Effort:</strong> {rec['effort']}</p>
-            <p><strong>Actions:</strong></p>
-            <ul>
-                {"".join(f"<li>{action}</li>" for action in rec['actions'])}
-            </ul>
-        </div>
-        """ for rec in report_data.recommendations)}
+        {recommendations_html}
     </div>
 
     <div class="section">
         <h2>⚠️ Detected Anomalies (Top 20)</h2>
         <table>
             <tr><th>Time</th><th>Severity</th><th>Metric</th><th>Value</th><th>Threshold</th><th>Status</th></tr>
-            {"".join(f"""
-            <tr>
-                <td>{anomaly['anomaly_time'][:19]}</td>
-                <td class="{'status-critical' if anomaly['severity'] == 'CRITICAL' else 'status-warning'}">{anomaly['severity']}</td>
-                <td>{anomaly['metric_name']}</td>
-                <td>{anomaly['metric_value']:.2f}</td>
-                <td>{anomaly['threshold_value']:.2f}</td>
-                <td>{'Resolved' if anomaly['resolved'] else 'Active'}</td>
-            </tr>
-            """ for anomaly in report_data.anomalies_detected[:20])}
+            {anomalies_html}
         </table>
     </div>
 

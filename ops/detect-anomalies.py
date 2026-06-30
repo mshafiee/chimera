@@ -154,9 +154,9 @@ class AnomalyDetector:
 
     def __init__(self):
         """Initialize the anomaly detector."""
-        self.operator_url = os.getenv('OPERATOR_METRICS_URL', 'http://localhost:8080/metrics')
-        self.scout_url = os.getenv('SCOUT_METRICS_URL', 'http://localhost:8081/metrics')
-        self.eval_db_path = os.getenv('EVAL_DB_PATH', '/opt/chimera/evaluation/evaluation.db')
+        self.operator_url = os.getenv('OPERATOR_METRICS_URL', 'http://chimera-operator:8080/metrics')
+        self.scout_url = os.getenv('SCOUT_METRICS_URL', '').strip()  # Allow empty scout URL
+        self.eval_db_path = os.getenv('EVAL_DB_PATH', '/evaluation/evaluation.db')
 
         # Alert configuration
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -252,7 +252,7 @@ class AnomalyDetector:
                     severity=severity,
                     deviation_percent=deviation_percent,
                     timestamp=timestamp,
-                    description=f"{description}: {value:.2f} exceeds {threshold.value}",
+                    description=f"{description}: {value:.2f} exceeds {threshold}",
                     affected_component=component
                 )
                 anomalies.append(anomaly)
@@ -484,10 +484,14 @@ Time: {anomaly.timestamp}
 
         # Fetch metrics from all sources
         operator_metrics = self.fetch_metrics(self.operator_url)
-        scout_metrics = self.fetch_metrics(self.scout_url)
+        all_metrics = {**operator_metrics}
 
-        # Combine metrics
-        all_metrics = {**operator_metrics, **scout_metrics}
+        # Only fetch scout metrics if URL is configured
+        if self.scout_url:
+            scout_metrics = self.fetch_metrics(self.scout_url)
+            all_metrics.update(scout_metrics)
+        else:
+            print("Scout metrics URL not configured, skipping Scout metrics")
 
         if not all_metrics:
             print("Warning: No metrics retrieved")
