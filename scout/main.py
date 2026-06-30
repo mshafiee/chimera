@@ -24,6 +24,8 @@ from _version import __version__
 
 import argparse
 import json
+import logging
+import logging.handlers
 import math
 import os
 import sqlite3
@@ -201,6 +203,53 @@ DEFAULT_WALLET_TX_LIMIT = 500
 DEFAULT_WALLET_TX_MAX_PAGES = 20
 DEFAULT_PRIORITY_FEE_SOL = 0.00005
 DEFAULT_JITO_TIP_SOL = 0.0001
+
+
+def setup_logging() -> None:
+    """Configure file logging with rotation for Scout."""
+    # Create log directory - use /app/data/logs for container permissions
+    log_dir = "/app/data/logs"
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+    except Exception as e:
+        print(f"Warning: Could not create log directory {log_dir}: {e}")
+        # Fall back to stdout only
+        return
+
+    log_file = os.path.join(log_dir, "scout.log")
+
+    try:
+        # Configure root logger
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+
+        # File handler with daily rotation, 7-day retention
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file,
+            maxBytes=10*1024*1024,  # 10MB per file
+            backupCount=7,
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(file_formatter)
+
+        # Console handler for immediate visibility
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter('[Scout] %(levelname)s: %(message)s')
+        console_handler.setFormatter(console_formatter)
+
+        # Add both handlers
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+
+        logger.info("File logging configured: %s", log_file)
+    except Exception as e:
+        print(f"Warning: Could not setup file logging: {e}")
 
 
 def _percentile(values: List[float], p: float) -> Optional[float]:
@@ -1533,6 +1582,9 @@ def _determine_exit_priority(rec: Dict[str, Any], confidence: float) -> str:
 
 async def main_async():
     """Async main entry point for the Scout."""
+    # Setup file logging
+    setup_logging()
+
     args = parse_args()
     
     print("=" * 70)
