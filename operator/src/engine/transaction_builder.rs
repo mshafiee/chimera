@@ -40,6 +40,9 @@ pub enum BuiltTransaction {
         price_impact_pct: Option<Decimal>,
         /// Fill price from Jupiter quote: inAmount_lamports / outAmount_base_units.
         fill_price_lamports_per_base: Option<Decimal>,
+        /// Real per-route DEX fee in SOL (summed `routePlan[].swapInfo.feeAmount`).
+        /// P2-17: replaces the flat `dex_fee_rate` estimate in cost tracking.
+        route_fee_sol: Option<Decimal>,
     },
     /// Versioned transaction (v0/v1) - stored as raw bytes for RPC submission
     Versioned {
@@ -49,6 +52,8 @@ pub enum BuiltTransaction {
         price_impact_pct: Option<Decimal>,
         /// Fill price from Jupiter quote: inAmount_lamports / outAmount_base_units.
         fill_price_lamports_per_base: Option<Decimal>,
+        /// Real per-route DEX fee in SOL. See [`BuiltTransaction::Legacy::route_fee_sol`].
+        route_fee_sol: Option<Decimal>,
     },
 }
 
@@ -74,6 +79,24 @@ impl BuiltTransaction {
                 fill_price_lamports_per_base,
                 ..
             } => *fill_price_lamports_per_base,
+        }
+    }
+
+    /// The recent blockhash the transaction was built/signed with. Threaded
+    /// through to submission paths so they can reuse it instead of issuing
+    /// extra `getLatestBlockhash` RPCs (P1-11).
+    pub fn blockhash(&self) -> solana_sdk::hash::Hash {
+        match self {
+            BuiltTransaction::Legacy { blockhash, .. } => *blockhash,
+            BuiltTransaction::Versioned { blockhash, .. } => *blockhash,
+        }
+    }
+
+    /// Real per-route DEX fee in SOL, when available (P2-17).
+    pub fn route_fee_sol(&self) -> Option<Decimal> {
+        match self {
+            BuiltTransaction::Legacy { route_fee_sol, .. } => *route_fee_sol,
+            BuiltTransaction::Versioned { route_fee_sol, .. } => *route_fee_sol,
         }
     }
 }
@@ -105,7 +128,7 @@ impl TransactionBuilder {
         };
 
         let jupiter_url = config.jupiter.api_url.clone();
-        let dex_comparator = match DexComparator::with_jupiter_api_url(jupiter_url) {
+        let mut dex_comparator = match DexComparator::with_jupiter_api_url(jupiter_url) {
             Ok(comparator) => comparator,
             Err(e) => {
                 return Err(crate::error::AppError::Signal(format!(
@@ -114,6 +137,9 @@ impl TransactionBuilder {
                 )));
             }
         };
+        // Honor the config: disable the per-DEX fan-out when multi_dex_comparison
+        // is off (single aggregate quote only).
+        dex_comparator.set_multi_dex(config.jupiter.multi_dex_comparison);
 
         Ok(Self {
             rpc_client,
@@ -123,7 +149,11 @@ impl TransactionBuilder {
         })
     }
 
-    /// Build a swap transaction for a signal
+    /// Build a swap transaction for a signal.
+    ///
+    /// `slippage_bps` is the unified on-chain tolerance (see `engine::slippage`),
+    /// threaded in from the executor so the same estimate drives both the
+    /// Jupiter request and cost bookkeeping.
     ///
     /// This uses Jupiter Swap API which returns a pre-built transaction
     /// that just needs to be signed.
@@ -131,6 +161,7 @@ impl TransactionBuilder {
         &self,
         signal: &Signal,
         wallet_keypair: &Keypair,
+        slippage_bps: u16,
     ) -> AppResult<BuiltTransaction> {
         // Determine input and output mints
         let (input_mint, output_mint, amount) = match signal.payload.action {
@@ -167,6 +198,23 @@ impl TransactionBuilder {
                             .round()
                             .to_u64()
                             .unwrap_or(bal);
+                        // F15/P1-12: refuse an empty sell. Rounding a tiny
+                        // balance or a small exit_fraction to 0 lamports would
+                        // submit a no-op swap; abort with a clear error instead.
+                        if scaled_bal == 0 {
+                            tracing::error!(
+                                wallet = %wallet_keypair.pubkey(),
+                                token = %signal.payload.token,
+                                balance_lamports = bal,
+                                exit_fraction = %exit_fraction,
+                                "SELL: scaled token amount rounds to 0 — refusing empty sell"
+                            );
+                            return Err(crate::error::AppError::Validation(format!(
+                                "SELL amount rounds to 0 (balance {} lamports × exit_fraction {}). \
+                                 Increase exit_fraction or skip this sell.",
+                                bal, exit_fraction
+                            )));
+                        }
                         tracing::info!(
                             wallet = %wallet_keypair.pubkey(),
                             token = %signal.payload.token,
@@ -194,14 +242,24 @@ impl TransactionBuilder {
             }
         };
 
-        // Get swap transaction from Jupiter Swap API
+        // Get swap transaction from Jupiter Swap API.
+        // P1-5: the route selection performs the (single) multi-DEX comparison
+        // and returns the winning quote, which is reused directly as the swap
+        // payload — no second quote round-trip.
         let swap_response = self
-            .get_jupiter_swap(input_mint, output_mint, amount, wallet_keypair.pubkey())
+            .get_jupiter_swap(
+                input_mint,
+                output_mint,
+                amount,
+                wallet_keypair.pubkey(),
+                slippage_bps,
+            )
             .await?;
 
         // Extract quote-derived fields before consuming swap_response
         let price_impact_pct = swap_response.price_impact_pct;
         let fill_price_lamports_per_base = swap_response.fill_price_lamports_per_base;
+        let route_fee_sol = swap_response.route_fee_sol;
 
         // Decode the base64 transaction
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -232,12 +290,14 @@ impl TransactionBuilder {
         // Check the first byte to determine transaction type
         if !tx_bytes.is_empty() && tx_bytes[0] == 0x01 {
             // VersionedTransaction (version 1) - may be V0 or Legacy
-            // Parse to sign
-            // Use bincode 1.3 (bincode1) to match Solana wire format
+            // Parse to sign. Unified bincode 2.x serde API, legacy config =
+            // identical wire format to bincode 1.3 (Solana-compatible).
             let mut versioned_tx: VersionedTransaction =
-                bincode1::deserialize(&tx_bytes).map_err(|e| {
-                    crate::error::AppError::Parse(format!("Failed to deserialize V0 tx: {}", e))
-                })?;
+                bincode::serde::decode_from_slice(&tx_bytes, bincode::config::legacy())
+                    .map_err(|e| {
+                        crate::error::AppError::Parse(format!("Failed to deserialize V0 tx: {}", e))
+                    })?
+                    .0;
 
             // Check if Jupiter ignored our asLegacyTransaction request
             let is_v0 = matches!(
@@ -253,32 +313,27 @@ impl TransactionBuilder {
                 }
 
                 if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
-                    tracing::warn!(
+                    tracing::debug!(
                         "Jupiter returned V0 transaction despite asLegacyTransaction=true. \
-                        Attempting to reconstruct with fresh blockhash to reduce expiration risk."
+                         Refreshing the blockhash field directly (no ALT recompile)."
                     );
 
-                    // Attempt to reconstruct V0 message with fresh blockhash
+                    // F10: V0 Message fields are public — refresh is a direct
+                    // field swap on a clone, then re-sign. No per-ALT RPCs.
                     use crate::engine::v0_reconstruction;
-                    match v0_reconstruction::reconstruct_v0_message_with_blockhash(
-                        &versioned_tx,
-                        blockhash,
-                        &self.rpc_client,
-                    )
-                    .await
-                    {
-                        Ok(reconstructed_message) => {
-                            tracing::info!("Successfully reconstructed V0 message with fresh blockhash in transaction builder");
-                            // Update the transaction with reconstructed message
-                            versioned_tx.message = reconstructed_message;
+                    match v0_reconstruction::refresh_v0_blockhash(&versioned_tx, blockhash) {
+                        Ok(refreshed_message) => {
+                            tracing::debug!(
+                                "Refreshed V0 message blockhash in transaction builder"
+                            );
+                            versioned_tx.message = refreshed_message;
                         }
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                "Failed to reconstruct V0 message in transaction builder. \
-                                Using original message - transaction may fail if blockhash expires."
+                                "Failed to refresh V0 blockhash in builder. \
+                                 Using original message — transaction may fail if blockhash expires."
                             );
-                            // Continue with original message - executor will handle reconstruction if needed
                         }
                     }
                 } else {
@@ -304,17 +359,18 @@ impl TransactionBuilder {
                 versioned_tx.signatures[0] = signature;
             }
 
-            // Re-serialize signed transaction
-            // Use bincode 1.3 (bincode1) to ensure correct wire format for RPC
-            let signed_bytes = bincode1::serialize(&versioned_tx).map_err(|e| {
-                crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e))
-            })?;
+            // Re-serialize signed transaction via the unified bincode 2.x API.
+            let signed_bytes =
+                bincode::serde::encode_to_vec(&versioned_tx, bincode::config::legacy()).map_err(
+                    |e| crate::error::AppError::Parse(format!("Failed to re-serialize V0 tx: {}", e)),
+                )?;
 
             Ok(BuiltTransaction::Versioned {
                 transaction_bytes: signed_bytes,
                 blockhash,
                 price_impact_pct,
                 fill_price_lamports_per_base,
+                route_fee_sol,
             })
         } else {
             // Legacy Transaction
@@ -324,13 +380,16 @@ impl TransactionBuilder {
                 ));
             }
 
-            // Use bincode 1.3 (bincode1) for legacy transactions as well
-            let mut tx: Transaction = bincode1::deserialize(&tx_bytes).map_err(|e| {
-                crate::error::AppError::Parse(format!(
-                    "Failed to deserialize legacy transaction: {}",
-                    e
-                ))
-            })?;
+            // Legacy Transaction — unified bincode 2.x API, legacy config.
+            let mut tx: Transaction =
+                bincode::serde::decode_from_slice(&tx_bytes, bincode::config::legacy())
+                    .map_err(|e| {
+                        crate::error::AppError::Parse(format!(
+                            "Failed to deserialize legacy transaction: {}",
+                            e
+                        ))
+                    })?
+                    .0;
 
             // Update blockhash and re-sign
             tx.message.recent_blockhash = blockhash;
@@ -341,6 +400,7 @@ impl TransactionBuilder {
                 blockhash,
                 price_impact_pct,
                 fill_price_lamports_per_base,
+                route_fee_sol,
             })
         }
     }
@@ -369,6 +429,7 @@ impl TransactionBuilder {
             blockhash,
             price_impact_pct: None,
             fill_price_lamports_per_base: None,
+            route_fee_sol: None,
         })
     }
 
@@ -413,59 +474,118 @@ impl TransactionBuilder {
             .max()
     }
 
-    /// Get swap transaction from Jupiter Swap API
+    /// Get swap transaction from Jupiter Swap API.
+    ///
+    /// Performs the multi-DEX route comparison (single round of Jupiter quotes,
+    /// reused for the swap payload) and posts the winning quote to `/swap`
+    /// (v1 Metis) or `/swap/v2/build` (v2 self-sign) depending on config.
     async fn get_jupiter_swap(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,
         amount: u64,
         user_public_key: Pubkey,
+        slippage_bps: u16,
     ) -> AppResult<JupiterSwapResponse> {
-        // First get a quote
-        let quote = self
-            .get_jupiter_quote(input_mint, output_mint, amount)
+        // Single multi-DEX comparison; the winning quote is reused for the swap.
+        let route = self
+            .dex_comparator
+            .select_route(
+                &input_mint.to_string(),
+                &output_mint.to_string(),
+                amount,
+                slippage_bps,
+            )
             .await?;
+        let quote = route.quote;
 
-        // Extract priceImpactPct from the quote for cost tracking in the executor
-        // Jupiter returns this as a percentage string, e.g. "1.234" = 1.234%
+        // Extract priceImpactPct from the quote for cost tracking in the executor.
+        // Jupiter returns this as a percentage string, e.g. "1.234" = 1.234%.
+        // (P1-6: percent interpretation is consistent across builder/comparator.)
         let price_impact_pct: Option<Decimal> = quote
             .get("priceImpactPct")
             .and_then(|v| v.as_str())
             .and_then(|s| Decimal::from_str(s).ok());
 
-        // Then get the swap transaction
-        // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
-        // Note: Jupiter lite API may ignore asLegacyTransaction and still return V0 transactions
-        // V0 transactions use Address Lookup Tables (ALTs) which may not exist on devnet
-        // If ALT errors occur, consider using mainnet RPC or a different Jupiter endpoint
-        let url = format!("{}/swap", self.config.jupiter.api_url);
+        let selected_dex = route.selected_dex.as_str();
+
+        // Then get the swap transaction.
+        // P1-8: Swap v2 (`/swap/v2/build`, self-sign) replaces deprecated v1
+        // Metis (`/swap` + `/quote`). Flag-gated; v1 remains the default until
+        // devnet-validated.
+        let url = if self.config.jupiter.use_swap_v2 {
+            // `api_url` is the v1 base (e.g. "https://api.jup.ag/swap/v1"). The
+            // v2 build endpoint lives at the same host under "/swap/v2/build",
+            // so strip the "/swap/v1" suffix rather than appending to it
+            // (otherwise the path becomes ".../swap/v1/v2/build" and 404s).
+            let base = self
+                .config
+                .jupiter
+                .api_url
+                .trim_end_matches('/')
+                .strip_suffix("/swap/v1")
+                .unwrap_or(&self.config.jupiter.api_url);
+            format!("{}/swap/v2/build", base)
+        } else {
+            format!("{}/swap", self.config.jupiter.api_url)
+        };
+
+        // v2 rename differences: `quoteResponse`→`quoteResponse` (unchanged for
+        // build), response uses `transaction` instead of `swapTransaction`.
         let payload = serde_json::json!({
-            "quoteResponse": quote,  // Pass the full quote response
+            "quoteResponse": quote,
             "userPublicKey": user_public_key.to_string(),
             "wrapAndUnwrapSol": true,
             "dynamicComputeUnitLimit": true,
             "prioritizationFeeLamports": "auto",
-            "asLegacyTransaction": true  // Request legacy format (may be ignored by lite API)
+            "asLegacyTransaction": true,
+            "options": {
+                "slippageBps": slippage_bps,
+            }
         });
 
-        let response = self
-            .http_client
-            .post(url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| {
-                crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e))
-            })?;
+        tracing::debug!(
+            url = %url,
+            use_swap_v2 = self.config.jupiter.use_swap_v2,
+            selected_dex = %selected_dex,
+            "Requesting Jupiter swap"
+        );
 
-        let mut swap_response: JupiterSwapResponse = response.json().await.map_err(|e| {
+        let response = crate::jupiter::with_api_key(
+            self.http_client.post(url).json(&payload),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e))
+        })?;
+
+        let raw: serde_json::Value = response.json().await.map_err(|e| {
             crate::error::AppError::Parse(format!("Failed to parse Jupiter swap: {}", e))
         })?;
 
+        // v2 returns `transaction`, v1 returns `swapTransaction`.
+        let swap_transaction = raw
+            .get("swapTransaction")
+            .or_else(|| raw.get("transaction"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::AppError::Parse(format!(
+                    "Jupiter swap response missing swapTransaction/transaction: {}",
+                    raw
+                ))
+            })?
+            .to_string();
+
+        let mut swap_response = JupiterSwapResponse {
+            swap_transaction,
+            price_impact_pct: None,
+            fill_price_lamports_per_base: None,
+            route_fee_sol: Some(route.fee_sol),
+        };
         swap_response.price_impact_pct = price_impact_pct;
 
         // Compute fill price from quote amounts: lamports_in / base_units_out
-        // For BUY (SOL→TOKEN): in_amount = lamports spent, out_amount = token base units received
         swap_response.fill_price_lamports_per_base = {
             let in_amount = quote
                 .get("inAmount")
@@ -473,17 +593,17 @@ impl TransactionBuilder {
                 .or_else(|| quote.get("inAmount").and_then(|v| v.as_u64()));
             let out_amount = quote
                 .get("outAmount")
-                .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                .and_then(|v| v.as_str().and_then(|s: &str| s.parse::<u64>().ok()))
                 .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()));
             match (in_amount, out_amount) {
                 (Some(inn), Some(out)) if out > 0 && inn > 0 => {
                     let in_dec = Decimal::from(inn);
                     let out_dec = Decimal::from(out);
                     if output_mint.to_string() == crate::constants::mints::SOL {
-                        // For SELL (TOKEN→SOL): out_amount is SOL lamports, in_amount is token base units
+                        // SELL (TOKEN→SOL): out_amount is SOL lamports, in_amount is token base units
                         Some(out_dec / in_dec)
                     } else {
-                        // For BUY (SOL→TOKEN): in_amount is SOL lamports, out_amount is token base units
+                        // BUY (SOL→TOKEN): in_amount is SOL lamports, out_amount is token base units
                         Some(in_dec / out_dec)
                     }
                 }
@@ -494,57 +614,33 @@ impl TransactionBuilder {
         Ok(swap_response)
     }
 
-    /// Get quote from Jupiter Quote API
+    /// Get a single (unrestricted) Jupiter quote. Used for paper/devnet price
+    /// discovery where multi-DEX comparison is unnecessary.
+    ///
+    /// `dexes`, when set, restricts routing (used by route comparison).
     async fn get_jupiter_quote(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,
         amount: u64,
+        slippage_bps: u16,
     ) -> AppResult<JupiterQuote> {
-        // Use DEX comparator to estimate true slippage and set a tighter tolerance.
-        // Clamp to [30, 150] bps: 30 = tight floor, 150 = 1.5% absolute ceiling.
-        let amount_sol = Decimal::from(amount) / Decimal::from(1_000_000_000u64);
-        let slippage_bps: u64 = match self
-            .dex_comparator
-            .compare_and_select(
-                &input_mint.to_string(),
-                &output_mint.to_string(),
-                amount_sol,
-            )
-            .await
-        {
-            Ok(result) if !amount_sol.is_zero() => {
-                let bps = ((result.slippage_sol / amount_sol) * Decimal::from(10_000u64))
-                    .to_u64()
-                    .unwrap_or(50)
-                    .clamp(30, 150);
-                if result.selected_dex != "Jupiter" {
-                    tracing::debug!(
-                        selected_dex = %result.selected_dex,
-                        slippage_bps = bps,
-                        "DexComparator found cheaper route; slippage adjusted"
-                    );
-                }
-                bps
-            }
-            _ => 50, // fallback to original hardcoded value on error
-        };
-
-        // Use the configured Jupiter API URL (defaults to lite-api.jup.ag)
-        // Old quote-api.jup.ag/v6 is deprecated
         let url = format!(
             "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
             self.config.jupiter.api_url, input_mint, output_mint, amount, slippage_bps
         );
 
         tracing::debug!(url = %url, "Requesting Jupiter quote");
-        let response = self.http_client.get(&url).send().await.map_err(|e| {
-            tracing::error!(error = %e, url = %url, "Jupiter quote request failed");
-            crate::error::AppError::Http(format!(
-                "Jupiter quote request failed: {} (URL: {})",
-                e, url
-            ))
-        })?;
+        let response = crate::jupiter::with_api_key(self.http_client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, url = %url, "Jupiter quote request failed");
+                crate::error::AppError::Http(format!(
+                    "Jupiter quote request failed: {} (URL: {})",
+                    e, url
+                ))
+            })?;
 
         if !response.status().is_success() {
             return Err(crate::error::AppError::Http(format!(
@@ -572,8 +668,10 @@ impl TransactionBuilder {
         let output_mint = Pubkey::from_str(output_mint).map_err(|e| {
             crate::error::AppError::Validation(format!("Invalid output mint: {}", e))
         })?;
+        // Paper/devnet price discovery uses a generous tolerance; the quote's
+        // `outAmount` is tolerance-independent so this does not skew the price.
         let quote = self
-            .get_jupiter_quote(input_mint, output_mint, amount)
+            .get_jupiter_quote(input_mint, output_mint, amount, 1000)
             .await?;
 
         let price_impact_pct = quote
@@ -632,6 +730,10 @@ pub struct JupiterSwapResponse {
     /// `None` if inAmount/outAmount are unavailable or unparseable.
     #[serde(skip)]
     pub fill_price_lamports_per_base: Option<Decimal>,
+    /// Real per-route DEX fee in SOL (P2-17), summed from
+    /// `routePlan[].swapInfo.feeAmount`. `None` if the quote lacked route info.
+    #[serde(skip)]
+    pub route_fee_sol: Option<Decimal>,
 }
 
 /// Load wallet keypair from vault

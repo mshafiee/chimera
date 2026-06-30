@@ -40,6 +40,9 @@ mod volatility_tests;
 #[path = "integration/dex_comparison_tests.rs"]
 mod dex_comparison_tests;
 
+#[path = "integration/safety_validation_tests.rs"]
+mod safety_validation_tests;
+
 // ── Financial-loss & missed-profit integration tests ──────────────────────────
 
 #[path = "integration/position_lifecycle_tests.rs"]

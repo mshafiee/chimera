@@ -445,9 +445,12 @@ impl PriceCache {
         );
 
         // Reuse the pre-built HTTP client stored in self.
-        let response = self.http_client.get(&url).send().await.map_err(|e| {
-            PriceCacheError::HttpError(format!("Jupiter price request failed: {}", e))
-        })?;
+        let response = crate::jupiter::with_api_key(self.http_client.get(&url))
+            .send()
+            .await
+            .map_err(|e| {
+                PriceCacheError::HttpError(format!("Jupiter price request failed: {}", e))
+            })?;
 
         // Check for rate limiting
         if response.status() == 429 {

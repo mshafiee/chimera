@@ -19,7 +19,9 @@ pub mod reconciliation;
 pub mod rpc_cache;
 pub mod signal_pipeline;
 pub mod signal_quality;
+pub mod slippage;
 pub mod stop_loss;
+pub mod tip_inlining;
 pub mod tips;
 pub mod transaction_builder;
 pub mod v0_reconstruction;
@@ -28,7 +30,7 @@ pub mod worker_pool;
 
 pub use channel::*;
 pub use degradation::*;
-pub use dex_comparator::{DexComparator, DexComparisonResult};
+pub use dex_comparator::{DexComparator, RouteSelection};
 pub use executor::*;
 pub use kelly_sizer::{KellyResult, KellySizer};
 pub use market_regime::{MarketRegime, MarketRegimeDetector};

@@ -1,126 +1,134 @@
-//! Integration tests for multi-DEX comparison
+//! Integration tests for multi-DEX route selection.
 //!
-//! Tests that multiple DEXs are queried and the one with
-//! lowest total cost is selected.
+//! The CI-safe test (`test_slippage_model_*`) is non-network and asserts the
+//! unified slippage model behaves — this is what actually gates the on-chain
+//! `slippageBps`. The real route-selection tests are gated behind `#[ignore]`
+//! and require a Jupiter API key (set `CHIMERA_JUPITER__API_KEY`), since live
+//! routing depends on real liquidity that cannot be meaningfully mocked here.
 
-use chimera_operator::engine::dex_comparator::DexComparator;
+use chimera_operator::engine::slippage;
+use chimera_operator::Strategy;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
-#[tokio::test]
-#[ignore] // Requires network access - run with: cargo test -- --ignored
-async fn test_dex_comparison_jupiter() {
-    let comparator = DexComparator::new().expect("Failed to create DexComparator");
-
-    let sol_mint = "So11111111111111111111111111111111111111112";
-    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let amount_sol = Decimal::from(1u64);
-
-    // Query Jupiter (should work)
-    let result = comparator
-        .compare_and_select(sol_mint, usdc_mint, amount_sol)
-        .await;
-
-    match result {
-        Ok(dex_result) => {
-            println!("Selected DEX: {}", dex_result.selected_dex);
-            println!("Total cost: {} SOL", dex_result.total_cost_sol);
-            println!("Fee: {} SOL", dex_result.fee_sol);
-            println!("Slippage: {} SOL", dex_result.slippage_sol);
-
-            assert_eq!(dex_result.selected_dex, "Jupiter");
-            assert!(dex_result.total_cost_sol > Decimal::ZERO);
-            assert!(dex_result.fee_sol > Decimal::ZERO);
-        }
-        Err(e) => {
-            println!("DEX comparison error (expected in CI): {}", e);
-            // Don't fail test if network is unavailable
-        }
-    }
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_dex_comparison_caching() {
-    let comparator = DexComparator::new().expect("Failed to create DexComparator");
-
-    let sol_mint = "So11111111111111111111111111111111111111112";
-    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let amount_sol = Decimal::from(1u64);
-
-    // First call should query API
-    let result1 = comparator
-        .compare_and_select(sol_mint, usdc_mint, amount_sol)
-        .await;
-
-    // Second call within 5 seconds should use cache
-    let result2 = comparator
-        .compare_and_select(sol_mint, usdc_mint, amount_sol)
-        .await;
-
-    if let (Ok(r1), Ok(r2)) = (result1, result2) {
-        // Results should be identical (cached)
-        assert_eq!(r1.selected_dex, r2.selected_dex);
-        assert_eq!(r1.total_cost_sol, r2.total_cost_sol);
-    }
-}
-
-#[tokio::test]
-#[ignore]
-async fn test_dex_comparison_multiple_dexs() {
-    let comparator = DexComparator::new().expect("Failed to create DexComparator");
-
-    let sol_mint = "So11111111111111111111111111111111111111112";
-    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    let amount_sol = Decimal::from(1u64);
-
-    // This should query Jupiter, Raydium, Orca, and Meteora in parallel
-    let result = comparator
-        .compare_and_select(sol_mint, usdc_mint, amount_sol)
-        .await;
-
-    match result {
-        Ok(dex_result) => {
-            println!("Selected DEX: {}", dex_result.selected_dex);
-            println!("Total cost: {} SOL", dex_result.total_cost_sol);
-
-            // Should select one of the DEXs
-            assert!(
-                dex_result.selected_dex == "Jupiter"
-                    || dex_result.selected_dex == "Raydium"
-                    || dex_result.selected_dex == "Orca"
-                    || dex_result.selected_dex == "Meteora"
-            );
-        }
-        Err(e) => {
-            println!("Multi-DEX comparison error: {}", e);
-            // Network errors are acceptable in CI
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_dex_comparison_fallback() {
-    let comparator = DexComparator::new().expect("Failed to create DexComparator");
-
-    // Use invalid token addresses to trigger fallback
-    let invalid_token1 = "InvalidToken111111111111111111111111111111";
-    let invalid_token2 = "InvalidToken222222222222222222222222222222";
-    let amount_sol = Decimal::from(1u64);
-
-    // Should fallback to default Jupiter result if all queries fail
-    let result = comparator
-        .compare_and_select(invalid_token1, invalid_token2, amount_sol)
-        .await;
-
-    // Should still return a result — either a real quote or the Jupiter fallback
-    assert!(result.is_ok(), "Should fallback gracefully");
-    let dex_result = result.unwrap();
-    assert!(
-        !dex_result.selected_dex.is_empty(),
-        "Selected DEX should not be empty"
+/// A deep pool: a 1 SOL trade against $500k liquidity should produce a tight,
+/// sub-1% expected impact and a proportionally small (but buffered) tolerance.
+#[test]
+fn test_slippage_model_deep_pool() {
+    let fb = slippage::FallbackTiers {
+        small_fraction: dec!(0.005),
+        large_fraction: dec!(0.01),
+        threshold_sol: dec!(0.5),
+    };
+    // 1 SOL @ $100 = $100 trade vs $500k liquidity → raw 100/(2×500000) = 0.0001
+    // → clamped UP to the impact floor (0.001) — deep pools get a small fixed impact.
+    let est = slippage::estimate(
+        Strategy::Spear,
+        None,
+        dec!(1),
+        Some(dec!(500_000)),
+        Some(dec!(100)),
+        fb,
     );
-    assert!(
-        dex_result.total_cost_sol >= rust_decimal::Decimal::ZERO,
-        "Total cost should be non-negative"
+    assert_eq!(est.expected_fraction, dec!(0.001), "deep pool clamps to the impact floor");
+    // tolerance = (0.001×2 + 0.003) × 1e4 = 50 bps (within Spear [30,300]).
+    assert_eq!(est.tolerance_bps, 50);
+}
+
+/// A thin pool (memecoin-grade): a 0.5 SOL trade against $5k liquidity should
+/// produce a ~0.5% expected impact and a wider tolerance.
+#[test]
+fn test_slippage_model_thin_pool() {
+    let fb = slippage::FallbackTiers {
+        small_fraction: dec!(0.005),
+        large_fraction: dec!(0.01),
+        threshold_sol: dec!(0.5),
+    };
+    // 0.5 SOL @ $100 = $50 vs $5k → 50/(2×5000) = 0.005 (0.5%)
+    let est = slippage::estimate(
+        Strategy::Spear,
+        None,
+        dec!(0.5),
+        Some(dec!(5_000)),
+        Some(dec!(100)),
+        fb,
     );
+    assert_eq!(est.expected_fraction, dec!(0.005));
+    // tolerance = 0.005×2 + 0.003 = 0.013 → 130 bps
+    assert_eq!(est.tolerance_bps, 130);
+}
+
+/// Jupiter's real impact always wins; Shield clamps to its tight ceiling.
+#[test]
+fn test_slippage_model_jupiter_overrides_and_shield_clamps() {
+    let fb = slippage::FallbackTiers {
+        small_fraction: dec!(0.005),
+        large_fraction: dec!(0.01),
+        threshold_sol: dec!(0.5),
+    };
+    let est =
+        slippage::estimate(Strategy::Shield, Some(dec!(5.0)), dec!(1), None, None, fb);
+    // 5% real impact, but Shield tolerance caps at 100 bps.
+    assert_eq!(est.expected_fraction, dec!(0.05));
+    assert_eq!(est.tolerance_bps, 100);
+}
+
+#[tokio::test]
+#[ignore] // Requires network + CHIMERA_JUPITER__API_KEY: cargo test -- --ignored
+async fn test_route_selection_real() {
+    use chimera_operator::engine::dex_comparator::DexComparator;
+
+    if chimera_operator::jupiter::api_key().is_none() {
+        eprintln!("Skipping: no Jupiter API key installed");
+        return;
+    }
+
+    let comparator = DexComparator::new().expect("Failed to create DexComparator");
+    let sol_mint = "So11111111111111111111111111111111111111112";
+    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    let sel = comparator
+        .select_route(sol_mint, usdc_mint, 1_000_000_000, 50)
+        .await
+        .expect("route selection should succeed with a live key");
+
+    // A real quote always carries a non-zero outAmount.
+    let out = sel
+        .quote
+        .get("outAmount")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .expect("real quote has outAmount");
+    assert!(out > 0);
+    assert!(sel.total_cost_sol >= Decimal::ZERO);
+    println!(
+        "selected_dex={} out={} fee_sol={} slippage_sol={}",
+        sel.selected_dex, out, sel.fee_sol, sel.slippage_sol
+    );
+}
+
+#[tokio::test]
+#[ignore] // Requires network + CHIMERA_JUPITER__API_KEY
+async fn test_route_selection_caching() {
+    use chimera_operator::engine::dex_comparator::DexComparator;
+
+    if chimera_operator::jupiter::api_key().is_none() {
+        eprintln!("Skipping: no Jupiter API key installed");
+        return;
+    }
+
+    let comparator = DexComparator::new().expect("Failed to create DexComparator");
+    let sol_mint = "So11111111111111111111111111111111111111112";
+    let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+
+    let r1 = comparator
+        .select_route(sol_mint, usdc_mint, 1_000_000_000, 50)
+        .await
+        .expect("first selection");
+    let r2 = comparator
+        .select_route(sol_mint, usdc_mint, 1_000_000_000, 50)
+        .await
+        .expect("cached selection");
+    // Cached within TTL → identical selection.
+    assert_eq!(r1.selected_dex, r2.selected_dex);
 }

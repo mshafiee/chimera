@@ -6,8 +6,9 @@
 use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::tips::TipManager;
-use crate::utils;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
+use crate::engine::{slippage, slippage::SlippageEstimate};
+use crate::utils;
 use crate::models::{Action, Signal, Strategy};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use crate::price_cache::PriceCache;
@@ -16,9 +17,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use rust_decimal::prelude::*;
-use rust_decimal_macros::dec;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_commitment_config::CommitmentConfig;
 use solana_sdk::signature::Signer;
 use solana_sdk::transaction::{Transaction, VersionedTransaction};
 use std::sync::Arc;
@@ -71,6 +70,10 @@ pub struct ExecutionOutcome {
     pub token_amount: Option<u64>,
     /// Estimated network fee in SOL (paper/devnet only; Live records real on-chain fees)
     pub estimated_fee_sol: Option<Decimal>,
+    /// Real per-route DEX fee in SOL from the Jupiter quote
+    /// (`routePlan[].swapInfo.feeAmount`). `None` for paper/devnet or when the
+    /// quote lacked route info (P2-17).
+    pub route_fee_sol: Option<Decimal>,
 }
 
 impl ExecutionOutcome {
@@ -79,6 +82,7 @@ impl ExecutionOutcome {
         confirmed: bool,
         fill_price_sol_per_token: Option<Decimal>,
         price_impact_pct: Option<Decimal>,
+        route_fee_sol: Option<Decimal>,
     ) -> Self {
         Self {
             signature,
@@ -87,6 +91,7 @@ impl ExecutionOutcome {
             price_impact_pct,
             token_amount: None,
             estimated_fee_sol: None,
+            route_fee_sol,
         }
     }
 }
@@ -105,6 +110,32 @@ pub fn lamports_per_base_to_sol_per_token(
     let d = decimals?;
     let token_units = Decimal::from(10u64.pow(d as u32));
     Some(lamports_per_base * token_units / Decimal::from(1_000_000_000u64))
+}
+
+/// F16/P1-13: convert a fill price to SOL/token without silently zeroing it.
+///
+/// Returns `None` (and logs a warning) when either the raw fill price or the
+/// token decimals are unavailable. Previously callers did
+/// `lamports_per_base_to_sol_per_token(lpb.unwrap_or(ZERO), decimals)`, which
+/// recorded a `0` PnL/cost for unknown decimals or missing quotes — masking bad
+/// data as a free fill.
+pub fn convert_fill_price(
+    lamports_per_base: Option<Decimal>,
+    decimals: Option<u8>,
+    trade_uuid: &str,
+) -> Option<Decimal> {
+    match (lamports_per_base, decimals) {
+        (Some(lpb), Some(d)) => lamports_per_base_to_sol_per_token(lpb, Some(d)),
+        (lpb, d) => {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                has_fill_price = lpb.is_some(),
+                has_decimals = d.is_some(),
+                "Fill price unknown (missing quote amounts or token decimals) — marking as unknown, not zero"
+            );
+            None
+        }
+    }
 }
 
 /// Mutable execution state — wrapped in a Mutex so `execute` can take `&self`,
@@ -488,52 +519,25 @@ impl Executor {
                         Decimal::ZERO
                     };
 
-                    // Track costs: Jito tip, DEX fee, slippage
-                    let dex_fee_rate = self.config.strategy.dex_fee_rate;
-                    let dex_fee_sol = signal.payload.amount_sol * dex_fee_rate;
-                    // Use actual price impact from Jupiter quote when available.
-                    // When unavailable, compute a liquidity-aware estimate:
-                    //   slippage ≈ trade_size_usd / (2 × liquidity_usd)
-                    // This is the square-root market impact approximation. It correctly
-                    // reflects that illiquid tokens ($5k liquidity) with a 0.5 SOL trade
-                    // have ~5% slippage, not the flat 0.5% the old config-based fallback used.
-                    // Falls back to the config value when neither liquidity nor price is available.
-                    let slippage_percent = outcome.price_impact_pct
-                        .map(|pct| pct / Decimal::from(100)) // convert 1.5% → 0.015 fraction
-                        .unwrap_or_else(|| {
-                            // Try liquidity-aware estimate first
-                            if let (Some(liq_usd), Some(ref cache)) = (signal.liquidity_usd, &self.price_cache) {
-                                let sol_price = cache.get_price_usd(crate::constants::mints::SOL)
-                                    .unwrap_or(Decimal::ZERO);
-                                if sol_price > Decimal::ZERO && liq_usd > Decimal::ZERO {
-                                    let trade_usd = signal.payload.amount_sol * sol_price;
-                                    // Clamp between 0.1% and 15% to avoid absurd estimates
-                                    let est = (trade_usd / (Decimal::from(2) * liq_usd))
-                                        .max(dec!(0.001))
-                                        .min(dec!(0.15));
-                                    tracing::debug!(
-                                        trade_uuid = %signal.trade_uuid,
-                                        trade_usd = %trade_usd,
-                                        liquidity_usd = %liq_usd,
-                                        estimated_slippage_pct = %(est * Decimal::from(100)),
-                                        "Using liquidity-aware slippage estimate (no Jupiter price impact)"
-                                    );
-                                    return est;
-                                }
-                            }
-                            // Final fallback: config-based size tier (neither Jupiter impact nor
-                            // liquidity data available — cost estimate may be significantly off).
-                            tracing::warn!(
-                                trade_uuid = %signal.trade_uuid,
-                                "Using config-based slippage tier — no Jupiter impact or liquidity data; actual slippage may differ substantially"
-                            );
-                            if signal.payload.amount_sol < self.config.strategy.slippage_fallback_threshold_sol {
-                                self.config.strategy.slippage_fallback_small_percent
-                            } else {
-                                self.config.strategy.slippage_fallback_large_percent
-                            }
-                        });
-                    let slippage_cost_sol = signal.payload.amount_sol * slippage_percent;
+                    // Track costs: Jito tip, DEX fee, slippage.
+                    // F5/F6: slippage uses the unified estimate (engine::slippage),
+                    // preferring Jupiter's real priceImpactPct (outcome.price_impact_pct),
+                    // then the liquidity-aware sqrt model, then the config tier.
+                    // P2-17/F22: DEX fee is the real per-route fee from the quote
+                    // (routePlan[].swapInfo.feeAmount) when the outcome carries it,
+                    // else the flat config rate.
+                    let dex_fee_sol = outcome.route_fee_sol.unwrap_or_else(|| {
+                        signal.payload.amount_sol * self.config.strategy.dex_fee_rate
+                    });
+                    let slippage = self.slippage_estimate(signal, outcome.price_impact_pct);
+                    if outcome.price_impact_pct.is_none() {
+                        tracing::debug!(
+                            trade_uuid = %signal.trade_uuid,
+                            expected_slippage_pct = %(slippage.expected_fraction * Decimal::from(100)),
+                            "No Jupiter price impact — using estimated slippage for cost tracking"
+                        );
+                    }
+                    let slippage_cost_sol = slippage.expected_cost_sol(signal.payload.amount_sol);
 
                     // Update trade costs in database
                     if let Err(e) = self
@@ -1017,8 +1021,10 @@ impl Executor {
                     e
                 ))
             })?;
+        // F5/F6: unified slippage tolerance drives the on-chain slippageBps.
+        let pre_slippage = self.slippage_estimate(signal, None);
         let built_tx = transaction_builder
-            .build_swap_transaction(signal, &wallet_keypair)
+            .build_swap_transaction(signal, &wallet_keypair, pre_slippage.tolerance_bps)
             .await
             .map_err(|e| {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
@@ -1027,19 +1033,22 @@ impl Executor {
         // Capture actual price impact and fill price from Jupiter quote.
         // [B-M1] Token decimals are now populated at webhook time from on-chain metadata,
         // enabling correct SOL-per-token conversion without hardcoding 9 decimals.
+        // F16/P1-13: unknown decimals now surface as a sentinel rather than ZERO.
         let price_impact = built_tx.price_impact_pct();
-        let fill_price_sol = lamports_per_base_to_sol_per_token(
-            built_tx
-                .fill_price_lamports_per_base()
-                .unwrap_or(Decimal::ZERO),
-            signal.token_decimals,
-        );
+        let fill_price_sol = built_tx
+            .fill_price_lamports_per_base()
+            .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
 
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal);
 
-        // Check total execution cost cap
-        self.check_execution_costs(signal, built_tx.price_impact_pct(), tip)?;
+        // Check total execution cost cap (uses the unified estimate now)
+        self.check_execution_costs(
+            signal,
+            built_tx.price_impact_pct(),
+            tip,
+            built_tx.route_fee_sol(),
+        )?;
 
         tracing::debug!(
             tip_sol = tip.to_f64().unwrap_or(0.0),
@@ -1049,12 +1058,9 @@ impl Executor {
 
         // Submit to Jito via direct Jito Searcher (preferred) or Helius Sender API (fallback)
 
-        // Try direct Jito Searcher first if configured
-        // Note: Jito bundles currently only support legacy transactions
+        // Try direct Jito Searcher first if configured.
         if let Some(ref jito_searcher) = self.jito_searcher {
             // Cap tip at 1 SOL before lamport conversion to avoid u64 overflow.
-            // Without this, a computed tip > 18.4 SOL would silently fall back to
-            // 0.01 SOL, causing the bundle to miss inclusion on a congested network.
             let capped_tip = tip.min(Decimal::ONE);
             if capped_tip < tip {
                 tracing::warn!(
@@ -1063,46 +1069,100 @@ impl Executor {
                     "Jito tip capped at 1 SOL to prevent u64 overflow"
                 );
             }
-            let tip_lamports = utils::sol_to_lamports(capped_tip); // Convert SOL to lamports
+            let tip_lamports = utils::sol_to_lamports(capped_tip);
 
-            // Serialize based on transaction type using Legacy config for Solana wire compatibility
-            let tx_bytes = match &built_tx {
+            // D3: legacy transactions inline the tip as the last instruction and
+            // ship as a single-tx bundle (one signature, atomic at tx level). V0
+            // cannot be safely inlined without ALT reconstruction, so it keeps the
+            // separate-tip two-tx bundle (still atomic at the bundle level).
+            let submit_result = match &built_tx {
                 crate::engine::transaction_builder::BuiltTransaction::Legacy {
                     transaction,
+                    blockhash,
                     ..
-                } => bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
-                    .map_err(|e| {
-                        ExecutorError::TransactionFailed(format!("Serialization error: {}", e))
-                    })?,
+                } => match self.inline_and_serialize_tip(
+                    transaction,
+                    &wallet_keypair,
+                    tip_lamports,
+                    *blockhash,
+                ) {
+                    Ok(bytes) => {
+                        tracing::info!(
+                            trade_uuid = %signal.trade_uuid,
+                            "Jito tip inlined into legacy swap tx (single-tx bundle)"
+                        );
+                        jito_searcher.submit_single_bundle(&bytes).await
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            error = %e,
+                            "Could not inline Jito tip into legacy tx; falling back to separate-tip bundle"
+                        );
+                        let bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+                            .map_err(|e| {
+                                ExecutorError::TransactionFailed(format!(
+                                    "Serialization error: {}",
+                                    e
+                                ))
+                            })?;
+                        jito_searcher.submit_bundle(&bytes, tip_lamports, &wallet_keypair).await
+                    }
+                }
                 crate::engine::transaction_builder::BuiltTransaction::Versioned {
                     transaction_bytes,
                     ..
                 } => {
-                    // Already serialized and signed by transaction_builder
-                    transaction_bytes.clone()
+                    // V0: already serialized+signed by the builder; separate tip.
+                    jito_searcher
+                        .submit_bundle(transaction_bytes, tip_lamports, &wallet_keypair)
+                        .await
                 }
             };
 
-            match jito_searcher
-                .submit_bundle(&tx_bytes, tip_lamports, &wallet_keypair)
-                .await
-            {
-                Ok(signature) => {
+            match submit_result {
+                Ok(bundle_ref) => {
                     tracing::info!(
                         trade_uuid = %signal.trade_uuid,
-                        signature = %signature,
+                        bundle_ref = %bundle_ref,
                         "Bundle submitted via direct Jito Searcher"
                     );
-                    // Poll for confirmation; on definitive on-chain failure propagate error.
-                    // On timeout (still pending) return the signature so recovery handles it.
-                    let confirmed = self
-                        .poll_signature_confirmation(&signature, &signal.trade_uuid)
-                        .await?;
+                    // F12: sendBundle returns a UUID, not a signature. Resolve
+                    // it to the real landed tx signature before polling; if it
+                    // can't be resolved, mark unconfirmed and let recovery
+                    // reconcile — never poll the UUID as a signature.
+                    let (signature, confirmed) = if let Some(bundle_id) =
+                        bundle_ref.strip_prefix("bundle:")
+                    {
+                        match jito_searcher.resolve_bundle_signature(bundle_id).await {
+                            Some(sig) => {
+                                let confirmed = self
+                                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                                    .await?;
+                                (sig, confirmed)
+                            }
+                            None => {
+                                tracing::warn!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    bundle_id,
+                                    "Could not resolve Jito bundle to a signature; marking unconfirmed for recovery"
+                                );
+                                (bundle_ref.clone(), false)
+                            }
+                        }
+                    } else {
+                        // Defensive: not a bundle ref (unexpected); poll as-is.
+                        let confirmed = self
+                            .poll_signature_confirmation(&bundle_ref, &signal.trade_uuid)
+                            .await?;
+                        (bundle_ref, confirmed)
+                    };
                     return Ok(ExecutionOutcome::live(
                         signature,
                         confirmed,
                         fill_price_sol,
                         price_impact,
+                        built_tx.route_fee_sol(),
                     ));
                 }
                 Err(e) => {
@@ -1116,54 +1176,94 @@ impl Executor {
             }
         }
 
-        // Fallback to Helius Sender API if configured and enabled
-        // Note: Helius Sender currently only supports legacy transactions
+        // Fallback to Helius Sender API if configured and enabled.
+        // F11: Helius Sender only supports LEGACY transactions — short-circuit
+        // V0 here (skip straight to TPU) instead of passing V0 bytes that fail
+        // silently in the bundle.
         if self.config.jito.helius_fallback {
             if let Some(helius_api_key) = secrets.rpc_api_key.as_ref() {
-                // Serialize transaction to bytes for Helius Sender
-                let tx_bytes = match &built_tx {
+                let helius_attempt = match &built_tx {
                     crate::engine::transaction_builder::BuiltTransaction::Legacy {
                         transaction,
+                        blockhash,
                         ..
-                    } => bincode1::serialize(transaction).map_err(|e| {
-                        ExecutorError::TransactionFailed(format!(
-                            "Failed to serialize transaction: {}",
-                            e
-                        ))
-                    })?,
-                    crate::engine::transaction_builder::BuiltTransaction::Versioned {
-                        transaction_bytes,
-                        ..
-                    } => transaction_bytes.clone(),
-                };
-
-                match self
-                    .submit_via_helius_sender(&tx_bytes, tip, helius_api_key, &wallet_keypair)
-                    .await
-                {
-                    Ok(signature) => {
+                    } => {
+                        // D3: inline the tip into the legacy swap tx and ship a
+                        // single-tx bundle via Helius (one signature, atomic).
+                        let capped_tip = tip.min(Decimal::ONE);
+                        let tip_lamports = utils::sol_to_lamports(capped_tip);
+                        match self.inline_and_serialize_tip(
+                            transaction,
+                            &wallet_keypair,
+                            tip_lamports,
+                            *blockhash,
+                        ) {
+                            Ok(bytes) => Some(
+                                self.submit_via_helius_single_bundle(&bytes, helius_api_key)
+                                    .await,
+                            ),
+                            Err(e) => {
+                                tracing::warn!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    error = %e,
+                                    "Could not inline tip for Helius; falling through to TPU"
+                                );
+                                None
+                            }
+                        }
+                    }
+                    crate::engine::transaction_builder::BuiltTransaction::Versioned { .. } => {
                         tracing::info!(
                             trade_uuid = %signal.trade_uuid,
-                            signature = %signature,
-                            "Bundle submitted via Helius Sender API"
+                            "Skipping Helius Sender (V0 tx) — Helius is legacy-only; going to TPU"
                         );
+                        None
+                    }
+                };
+
+                if let Some(Ok(bundle_ref)) = helius_attempt {
+                    tracing::info!(
+                        trade_uuid = %signal.trade_uuid,
+                        bundle_ref = %bundle_ref,
+                        "Bundle submitted via Helius Sender API"
+                    );
+                    // F12: resolve the Helius bundle UUID to the real tx
+                    // signature before polling; never poll the UUID itself.
+                    let (signature, confirmed) = if let Some(bundle_id) =
+                        bundle_ref.strip_prefix("bundle:")
+                    {
+                        match self
+                            .resolve_helius_bundle_signature(bundle_id, helius_api_key)
+                            .await
+                        {
+                            Some(sig) => {
+                                let confirmed = self
+                                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                                    .await?;
+                                (sig, confirmed)
+                            }
+                            None => {
+                                tracing::warn!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    bundle_id,
+                                    "Could not resolve Helius bundle to a signature; marking unconfirmed for recovery"
+                                );
+                                (bundle_ref.clone(), false)
+                            }
+                        }
+                    } else {
                         let confirmed = self
-                            .poll_signature_confirmation(&signature, &signal.trade_uuid)
+                            .poll_signature_confirmation(&bundle_ref, &signal.trade_uuid)
                             .await?;
-                        return Ok(ExecutionOutcome::live(
-                            signature,
-                            confirmed,
-                            fill_price_sol,
-                            price_impact,
-                        ));
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            trade_uuid = %signal.trade_uuid,
-                            error = %e,
-                            "Helius Sender API also failed"
-                        );
-                    }
+                        (bundle_ref, confirmed)
+                    };
+                    return Ok(ExecutionOutcome::live(
+                        signature,
+                        confirmed,
+                        fill_price_sol,
+                        price_impact,
+                        built_tx.route_fee_sol(),
+                    ));
                 }
             }
         }
@@ -1175,6 +1275,9 @@ impl Executor {
         );
 
         // Sign and send transaction via standard RPC (handles both legacy and versioned)
+        // F13/P1-10: poll for confirmation on the legacy path instead of
+        // assuming `confirmed = true` (which broke tracking when the tx hadn't
+        // actually landed).
         let (signature, confirmed) = match &built_tx {
             crate::engine::transaction_builder::BuiltTransaction::Legacy {
                 transaction, ..
@@ -1182,14 +1285,21 @@ impl Executor {
                 let sig = self
                     .submit_transaction(transaction, &wallet_keypair)
                     .await?;
-                (sig, true)
+                let confirmed = self
+                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                    .await?;
+                (sig, confirmed)
             }
             crate::engine::transaction_builder::BuiltTransaction::Versioned {
                 transaction_bytes,
                 ..
             } => {
                 let sig = self
-                    .submit_versioned_transaction(transaction_bytes, &wallet_keypair)
+                    .submit_versioned_transaction(
+                        transaction_bytes,
+                        &wallet_keypair,
+                        built_tx.blockhash(),
+                    )
                     .await?;
                 let confirmed = self
                     .poll_signature_confirmation(&sig, &signal.trade_uuid)
@@ -1203,65 +1313,63 @@ impl Executor {
             confirmed,
             fill_price_sol,
             price_impact,
+            built_tx.route_fee_sol(),
         ))
     }
 
-    /// Submit transaction via Helius Sender API (Jito bundles)
-    async fn submit_via_helius_sender(
+    /// Inline a Jito tip into a legacy swap tx, re-sign it, and serialize.
+    /// Shared by the direct-Jito and Helius legacy submission paths so they
+    /// cannot diverge on the inline→sign→serialize sequence. Returns signed
+    /// bytes ready for a single-tx bundle.
+    fn inline_and_serialize_tip(
         &self,
-        tx_bytes: &[u8],
-        tip_sol: Decimal,
-        api_key: &str,
-        tip_keypair: &solana_sdk::signature::Keypair,
-    ) -> Result<String, ExecutorError> {
-        use solana_sdk::pubkey::Pubkey;
+        transaction: &Transaction,
+        wallet_keypair: &solana_sdk::signature::Keypair,
+        tip_lamports: u64,
+        blockhash: solana_sdk::hash::Hash,
+    ) -> Result<Vec<u8>, ExecutorError> {
+        use crate::engine::tip_inlining;
         use solana_sdk::signature::Signer;
-        use solana_system_interface::instruction as system_instruction;
-        use std::str::FromStr;
 
-        let base_url = crate::utils::helius_api_base_url();
-        let url = format!("{}/send-bundle?api-key={}", base_url, api_key);
-
-        // Cap tip at 1 SOL before lamport conversion to avoid u64 overflow (same guard as execute_jito).
-        let capped_tip_sol = tip_sol.min(Decimal::ONE);
-        if capped_tip_sol < tip_sol {
-            tracing::warn!(
-                original_tip = %tip_sol,
-                capped_tip = %capped_tip_sol,
-                "Jito tip capped at 1 SOL to prevent u64 overflow (Helius sender)"
-            );
-        }
-        let tip_lamports = utils::sol_to_lamports(capped_tip_sol);
-
-        // Build proper tip transaction (SOL transfer to Jito tip account)
-        let jito_tip_account = Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU4")
-            .map_err(|e| {
-                ExecutorError::TransactionFailed(format!("Invalid Jito tip account: {}", e))
-            })?;
-        let recent_blockhash = crate::metrics::timed_rpc(
-            "primary",
-            "getLatestBlockhash",
-            self.rpc_client.get_latest_blockhash(),
+        let tipped = tip_inlining::inline_jito_tip(
+            transaction,
+            &wallet_keypair.pubkey(),
+            &crate::engine::jito_searcher::next_tip_account(),
+            tip_lamports,
+            blockhash,
         )
-        .await
         .map_err(|e| {
-            ExecutorError::Rpc(format!("Failed to get blockhash for tip tx: {}", e))
+            ExecutorError::TransactionFailed(format!("Failed to inline Jito tip: {}", e))
         })?;
-        let tip_instruction =
-            system_instruction::transfer(&tip_keypair.pubkey(), &jito_tip_account, tip_lamports);
-        let mut tip_tx =
-            Transaction::new_with_payer(&[tip_instruction], Some(&tip_keypair.pubkey()));
-        tip_tx.sign(&[tip_keypair], recent_blockhash);
-        let tip_tx_bytes = bincode::serde::encode_to_vec(&tip_tx, bincode::config::legacy())
-            .map_err(|e| {
-                ExecutorError::TransactionFailed(format!("Failed to serialize tip tx: {}", e))
-            })?;
-        let tip_tx_base64 = BASE64.encode(&tip_tx_bytes);
+        let mut tipped = tipped;
+        tipped.sign(&[wallet_keypair], blockhash);
+        bincode::serde::encode_to_vec(&tipped, bincode::config::legacy()).map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to serialize tipped tx: {}", e))
+        })
+    }
 
-        // Proper two-transaction bundle: [tip_tx, swap_tx] (tip first per Jito spec)
-        let swap_tx_base64 = BASE64.encode(tx_bytes);
+    /// Submit a **single-transaction** bundle via Helius Sender (D3).
+    ///
+    /// `tipped_tx_bytes` is the swap transaction with the Jito tip already
+    /// inlined as its last instruction (see `engine::tip_inlining`). Ships as a
+    /// one-element bundle — one signature, atomic at the transaction level.
+    /// Returns a `bundle:<uuid>` ref the caller resolves via
+    /// [`Self::resolve_helius_bundle_signature`] before polling (F12).
+    async fn submit_via_helius_single_bundle(
+        &self,
+        tipped_tx_bytes: &[u8],
+        api_key: &str,
+    ) -> Result<String, ExecutorError> {
+        // JSON-RPC `sendBundle` at the Solana RPC host (per Helius docs) so that
+        // submit and getBundleStatuses share one namespace/endpoint. The body is
+        // the same JSON-RPC shape as the direct-Jito sendBundle.
+        let url = crate::utils::helius_rpc_url(api_key);
+        let tx_base64 = BASE64.encode(tipped_tx_bytes);
         let payload = serde_json::json!({
-            "transactions": [tip_tx_base64, swap_tx_base64],
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendBundle",
+            "params": [[tx_base64]]
         });
 
         let response = self
@@ -1291,20 +1399,34 @@ impl Executor {
             )));
         }
 
-        // Parse response to get bundle signature
         let result: serde_json::Value = response
             .json()
             .await
             .map_err(|e| ExecutorError::Rpc(format!("Failed to parse Helius response: {}", e)))?;
 
-        // Extract signature from response
-        let signature = result
-            .get("signature")
-            .or_else(|| result.get("bundleId"))
+        // F12: sendBundle returns a bundle UUID (`result` string), never a
+        // signature. Tag it so the caller resolves it via getBundleStatuses.
+        let bundle_id = result
+            .get("result")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| ExecutorError::Rpc("No signature in Helius response".to_string()))?;
+            .or_else(|| result.get("bundleId").and_then(|v| v.as_str()))
+            .ok_or_else(|| ExecutorError::Rpc("No result/bundleId in Helius response".to_string()))?;
 
-        Ok(signature.to_string())
+        Ok(format!("bundle:{}", bundle_id))
+    }
+
+    /// Resolve a Helius bundle UUID to its real landed SWAP transaction signature
+    /// via the shared `getBundleStatuses` resolver. Returns `None` if unresolved
+    /// (caller marks unconfirmed for recovery — never polls the UUID as a signature).
+    async fn resolve_helius_bundle_signature(
+        &self,
+        bundle_id: &str,
+        api_key: &str,
+    ) -> Option<String> {
+        // getBundleStatuses is served at the Solana RPC host (per Helius docs),
+        // NOT at api.helius.xyz/v0/bundles.
+        let url = crate::utils::helius_rpc_url(api_key);
+        crate::engine::jito_searcher::resolve_bundle_status(&self.http_client, &url, bundle_id).await
     }
 
     /// Execute via standard TPU
@@ -1336,8 +1458,9 @@ impl Executor {
                     e
                 ))
             })?;
+        let pre_slippage = self.slippage_estimate(signal, None);
         let built_tx = transaction_builder
-            .build_swap_transaction(signal, &wallet_keypair)
+            .build_swap_transaction(signal, &wallet_keypair, pre_slippage.tolerance_bps)
             .await
             .map_err(|e| {
                 ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
@@ -1345,16 +1468,19 @@ impl Executor {
 
         // Capture actual price impact and fill price from Jupiter quote.
         // [B-M1] Also capture token decimals for correct SOL-per-token conversion.
+        // F16/P1-13: unknown decimals surface as a sentinel rather than ZERO.
         let price_impact = built_tx.price_impact_pct();
-        let fill_price_sol = lamports_per_base_to_sol_per_token(
-            built_tx
-                .fill_price_lamports_per_base()
-                .unwrap_or(Decimal::ZERO),
-            signal.token_decimals,
-        );
+        let fill_price_sol = built_tx
+            .fill_price_lamports_per_base()
+            .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
 
         // Check total execution cost cap
-        self.check_execution_costs(signal, built_tx.price_impact_pct(), Decimal::ZERO)?;
+        self.check_execution_costs(
+            signal,
+            built_tx.price_impact_pct(),
+            Decimal::ZERO,
+            built_tx.route_fee_sol(),
+        )?;
 
         // Submit transaction via RPC
         let (signature, confirmed) = match &built_tx {
@@ -1371,7 +1497,11 @@ impl Executor {
                 ..
             } => {
                 let sig = self
-                    .submit_versioned_transaction(transaction_bytes, &wallet_keypair)
+                    .submit_versioned_transaction(
+                        transaction_bytes,
+                        &wallet_keypair,
+                        built_tx.blockhash(),
+                    )
                     .await?;
                 let confirmed = self
                     .poll_signature_confirmation(&sig, &signal.trade_uuid)
@@ -1385,6 +1515,7 @@ impl Executor {
             confirmed,
             fill_price_sol,
             price_impact,
+            built_tx.route_fee_sol(),
         ))
     }
 
@@ -1447,11 +1578,18 @@ impl Executor {
     }
 
     /// Submit a versioned transaction to the RPC
-    /// Properly signs the VersionedTransaction with updated blockhash
+    /// Properly signs the VersionedTransaction with an updated blockhash.
+    ///
+    /// `recent_blockhash` is threaded in from the build step (P1-11): the
+    /// builder already refreshed the V0 message's blockhash, so we reuse it
+    /// here instead of issuing extra `getLatestBlockhash` / `is_blockhash_valid`
+    /// RPCs per swap. A hard blockhash expiry is still caught after submission
+    /// (RPC error -32004 → `BlockhashExpired`).
     async fn submit_versioned_transaction(
         &self,
         transaction_bytes: &[u8],
         wallet_keypair: &solana_sdk::signature::Keypair,
+        recent_blockhash: solana_sdk::hash::Hash,
     ) -> Result<String, ExecutorError> {
         tracing::debug!("Starting VersionedTransaction signing and submission");
 
@@ -1472,61 +1610,11 @@ impl Executor {
 
         tracing::debug!("Parsed VersionedTransaction successfully");
 
-        // Validate Jupiter's blockhash
-        let jupiter_blockhash = versioned_tx.message.recent_blockhash();
-        let active_client = self.active_rpc_client();
-        let is_valid = match active_client
-            .is_blockhash_valid(jupiter_blockhash, CommitmentConfig::processed())
-            .await
-        {
-            Ok(valid) => valid,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    blockhash = %jupiter_blockhash,
-                    "Failed to validate blockhash, assuming invalid for safety"
-                );
-                false
-            }
-        };
-
-        // Get recent blockhash (use active RPC client)
-        // We need this for both validation and reconstruction
-        let recent_blockhash = crate::metrics::timed_rpc(
-            "primary",
-            "getLatestBlockhash",
-            active_client.get_latest_blockhash(),
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "Failed to get blockhash");
-            ExecutorError::Rpc(format!("Failed to get blockhash: {}", e))
-        })?;
-
-        tracing::debug!(blockhash = %recent_blockhash, "Got recent blockhash");
-
-        if !is_valid {
-            // Check if this is a V0 transaction (uses ALTs)
-            let is_v0 = matches!(
-                versioned_tx.message,
-                solana_sdk::message::VersionedMessage::V0(_)
-            );
-            if is_v0 {
-                tracing::warn!(
-                    blockhash = %jupiter_blockhash,
-                    "V0 transaction blockhash expired/invalid. Will attempt reconstruction with fresh blockhash."
-                );
-                // Continue processing - reconstruction will happen below
-            } else {
-                tracing::warn!(
-                    blockhash = %jupiter_blockhash,
-                    "Legacy transaction blockhash expired/invalid. Re-requesting fresh quote from Jupiter."
-                );
-                return Err(ExecutorError::BlockhashExpired);
-            }
-        }
-
-        // For VersionedTransaction, we need to manually sign the message hash
+        // P1-11: skip the per-submit `is_blockhash_valid` + `getLatestBlockhash`
+        // RPCs. The blockhash threaded in from the build step is already fresh
+        // (the builder refreshed the V0 message). A hard expiry is still caught
+        // post-submission via RPC error -32004 → `BlockhashExpired` below.
+        //
         // The transaction from Jupiter is unsigned, so we need to:
         // 1. Update the message's recent_blockhash (if needed)
         // 2. Sign the message hash with our keypair
@@ -1548,40 +1636,34 @@ impl Executor {
                     ));
                 }
 
-                // V0 messages use Address Lookup Tables (ALTs) and require reconstruction
-                // to update the blockhash. Attempt to reconstruct with fresh blockhash if enabled.
+                // V0 messages use Address Lookup Tables (ALTs). Refreshing the
+                // blockhash is a direct public-field swap on a clone (F10) — no
+                // per-ALT RPC fetch or message recompilation.
                 if self.config.jupiter.reconstruct_v0_on_blockhash_expiry {
                     tracing::debug!(
-                        "V0 transaction detected: Attempting to reconstruct message with fresh blockhash"
+                        "V0 transaction detected: refreshing message blockhash field"
                     );
 
-                    match v0_reconstruction::reconstruct_v0_message_with_blockhash(
+                    match v0_reconstruction::refresh_v0_blockhash(
                         &versioned_tx,
                         recent_blockhash,
-                        &active_client,
-                    )
-                    .await
-                    {
-                        Ok(reconstructed) => {
-                            tracing::info!(
-                                "Successfully reconstructed V0 message with fresh blockhash"
-                            );
-                            reconstructed
+                    ) {
+                        Ok(refreshed) => {
+                            tracing::debug!("Refreshed V0 message blockhash");
+                            refreshed
                         }
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                "Failed to reconstruct V0 message, falling back to original message. \
-                                Transaction may fail if blockhash is stale."
+                                "Failed to refresh V0 blockhash, using original message. \
+                                 Transaction may fail if blockhash is stale."
                             );
-                            // Fallback to original message if reconstruction fails
-                            // This maintains backward compatibility
                             versioned_tx.message.clone()
                         }
                     }
                 } else {
                     tracing::debug!(
-                        "V0 transaction detected: Reconstruction disabled, using original message"
+                        "V0 transaction detected: refresh disabled, using original message"
                     );
                     // Reconstruction disabled - use original message
                     versioned_tx.message.clone()
@@ -1629,15 +1711,15 @@ impl Executor {
 
         tracing::debug!("Created signed VersionedTransaction");
 
-        // Serialize the signed transaction using bincode 1.3 for Solana compatibility
-        // bincode 2.0 (standard) uses u64 for lengths, but Solana requires u16/u32 logic
-        // consistent with bincode 1.3
-        let signed_bytes = bincode1::serialize(&signed_tx).map_err(|e| {
-            ExecutorError::TransactionFailed(format!(
-                "Failed to serialize versioned transaction: {}",
-                e
-            ))
-        })?;
+        // Serialize the signed transaction with the unified bincode 2.x serde
+        // API using the legacy config (identical wire format to bincode 1.3).
+        let signed_bytes =
+            bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy()).map_err(|e| {
+                ExecutorError::TransactionFailed(format!(
+                    "Failed to serialize versioned transaction: {}",
+                    e
+                ))
+            })?;
 
         // Validate signed transaction size before submission
         self.validate_transaction_size(&signed_bytes)?;
@@ -1783,6 +1865,34 @@ impl Executor {
         Ok(signature.to_string())
     }
 
+    /// Unified slippage estimate (F5/F6). Prefers Jupiter's real `priceImpactPct`
+    /// when available, falls back to the liquidity-aware sqrt model, then the
+    /// config size-tier. Returns both the expected-impact fraction (for cost
+    /// bookkeeping) and the strategy-clamped Jupiter tolerance (`slippageBps`).
+    fn slippage_estimate(
+        &self,
+        signal: &Signal,
+        jupiter_impact_pct: Option<Decimal>,
+    ) -> SlippageEstimate {
+        let fallback = slippage::FallbackTiers {
+            small_fraction: self.config.strategy.slippage_fallback_small_percent,
+            large_fraction: self.config.strategy.slippage_fallback_large_percent,
+            threshold_sol: self.config.strategy.slippage_fallback_threshold_sol,
+        };
+        let sol_price = self
+            .price_cache
+            .as_ref()
+            .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
+        slippage::estimate(
+            signal.payload.strategy,
+            jupiter_impact_pct,
+            signal.payload.amount_sol,
+            signal.liquidity_usd,
+            sol_price,
+            fallback,
+        )
+    }
+
     /// Calculate dynamic Jito tip based on strategy and history
     pub fn calculate_jito_tip(&self, signal: &Signal) -> Decimal {
         // Use TipManager if available, otherwise fall back to simple strategy-based calculation
@@ -1817,12 +1927,19 @@ impl Executor {
         signal: &Signal,
         price_impact_pct: Option<Decimal>,
         tip: Decimal,
+        route_fee_sol: Option<Decimal>,
     ) -> Result<(), ExecutorError> {
-        let dex_fee = signal.payload.amount_sol * self.config.strategy.dex_fee_rate;
-        let price_impact = price_impact_pct
-            .map(|pct| pct / Decimal::from(100))
-            .unwrap_or(Decimal::ZERO);
-        let slippage = signal.payload.amount_sol * price_impact;
+        // P2-17/F22: real per-route fee when available, else flat config rate.
+        let dex_fee = route_fee_sol.unwrap_or_else(|| {
+            signal.payload.amount_sol * self.config.strategy.dex_fee_rate
+        });
+        // F5/F6: use the SAME unified slippage estimate as the post-trade
+        // recorded cost, so the gate and the recorded cost never disagree.
+        // When Jupiter's priceImpactPct is absent this falls back to the
+        // liquidity/config estimate (NOT zero — the gate must not under-count).
+        let slippage = self
+            .slippage_estimate(signal, price_impact_pct)
+            .expected_cost_sol(signal.payload.amount_sol);
         let total_cost = tip + dex_fee + slippage;
         let cost_pct = if !signal.payload.amount_sol.is_zero() {
             total_cost / signal.payload.amount_sol
@@ -2008,9 +2125,10 @@ impl Executor {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
                     })?;
 
-                let fill_price_sol = lamports_per_base_to_sol_per_token(
-                    result.fill_price_lamports_per_base.unwrap_or(Decimal::ZERO),
+                let fill_price_sol = convert_fill_price(
+                    result.fill_price_lamports_per_base,
                     signal.token_decimals,
+                    &signal.trade_uuid,
                 );
                 Ok((
                     result.price_impact_pct,
@@ -2053,9 +2171,10 @@ impl Executor {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
                     })?;
 
-                let fill_price_sol = lamports_per_base_to_sol_per_token(
-                    result.fill_price_lamports_per_base.unwrap_or(Decimal::ZERO),
+                let fill_price_sol = convert_fill_price(
+                    result.fill_price_lamports_per_base,
                     signal.token_decimals,
+                    &signal.trade_uuid,
                 );
                 Ok((result.price_impact_pct, fill_price_sol, None))
             }
@@ -2079,6 +2198,7 @@ impl Executor {
             price_impact_pct: price_impact,
             token_amount,
             estimated_fee_sol: Some(estimated_fee_sol),
+            route_fee_sol: None,
         })
     }
 
@@ -2145,6 +2265,7 @@ impl Executor {
             price_impact_pct: price_impact,
             token_amount,
             estimated_fee_sol: Some(estimated_fee_sol),
+            route_fee_sol: None,
         })
     }
 

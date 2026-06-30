@@ -65,6 +65,12 @@ jito:
 
 jupiter:
   api_url: "https://api.jup.ag/swap/v1"  # Migrated from deprecated v6 endpoint
+  # Jupiter API key — sent as x-api-key on all Jupiter requests. Required in Live
+  # trade mode (keyless access is being phased out; legacy rate limits expire 2026-06-30).
+  # Set via env: CHIMERA_JUPITER__API_KEY (not stored in this file).
+  # Use the Swap v2 self-sign endpoint (/swap/v2/build) instead of deprecated v1
+  # Metis (/swap + /quote). Off by default until devnet-validated.
+  use_swap_v2: false
   # devnet_simulation_mode: Set via CHIMERA_JUPITER__DEVNET_SIMULATION_MODE env var
 
 queue:

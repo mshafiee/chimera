@@ -298,9 +298,7 @@ impl TokenMetadataFetcher {
 
         // Get current price from Jupiter (v2 API) — use pre-built client (FIX 5)
         let price_url = format!("https://lite-api.jup.ag/price/v2?ids={}", token_address);
-        let response = self
-            .http_client
-            .get(&price_url)
+        let response = crate::jupiter::with_api_key(self.http_client.get(&price_url))
             .send()
             .await
             .map_err(|e| AppError::Http(format!("Jupiter price request failed: {}", e)))?;
@@ -484,9 +482,7 @@ impl TokenMetadataFetcher {
             self.jupiter_api_url, token_address, sol_mint, test_amount
         );
 
-        let response = self
-            .http_client
-            .get(&quote_url)
+        let response = crate::jupiter::with_api_key(self.http_client.get(&quote_url))
             .send()
             .await
             .map_err(|e| AppError::Http(format!("Jupiter sell-quote request failed: {}", e)))?;

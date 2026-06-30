@@ -10,6 +10,7 @@ pub mod db_abstraction;
 pub mod engine;
 pub mod error;
 pub mod handlers;
+pub mod jupiter;
 pub mod metrics;
 pub mod middleware;
 pub mod models;

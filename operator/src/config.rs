@@ -474,17 +474,61 @@ fn default_tip_percent_max() -> Decimal {
 }
 
 /// Jupiter API configuration
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct JupiterConfig {
     /// Jupiter API base URL
     #[serde(default = "default_jupiter_api_url")]
     pub api_url: String,
+    /// Jupiter API key (sent as `x-api-key` on every Jupiter request).
+    ///
+    /// Load via env `CHIMERA_JUPITER__API_KEY`. Required in `Live` trade mode
+    /// (see [`AppConfig::validate`]); keyless access is being phased out by
+    /// Jupiter (legacy rate limits expire 2026-06-30).
+    #[serde(default)]
+    pub api_key: Option<String>,
     /// Enable V0 message reconstruction on blockhash expiry
     #[serde(default = "default_reconstruct_v0")]
     pub reconstruct_v0_on_blockhash_expiry: bool,
     /// Reject V0 transactions entirely (fallback if reconstruction fails)
     #[serde(default = "default_reject_v0")]
     pub reject_v0_transactions: bool,
+    /// Use the Swap v2 self-sign endpoint (`/swap/v2/build`) instead of the
+    /// deprecated v1 Metis endpoint (`/swap/v1/quote` + `/swap/v1/swap`).
+    ///
+    /// Flag-gated so v2 can be validated on devnet before flipping the default.
+    #[serde(default = "default_use_swap_v2")]
+    pub use_swap_v2: bool,
+    /// Compare per-DEX routes (via Jupiter `dexes=`) against the aggregate quote
+    /// and pick the best `outAmount`. On by default; disable to issue a single
+    /// aggregate quote (lower Jupiter API quota use) when routing diversity
+    /// isn't needed.
+    #[serde(default = "default_multi_dex_comparison")]
+    pub multi_dex_comparison: bool,
+}
+
+impl std::fmt::Debug for JupiterConfig {
+    /// Redact `api_key` so any `{:?}`/tracing print of `AppConfig` cannot leak
+    /// the live Jupiter credential (mirrors `ApiKeyConfig`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JupiterConfig")
+            .field("api_url", &self.api_url)
+            .field(
+                "api_key",
+                &self
+                    .api_key
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("[unset]"),
+            )
+            .field(
+                "reconstruct_v0_on_blockhash_expiry",
+                &self.reconstruct_v0_on_blockhash_expiry,
+            )
+            .field("reject_v0_transactions", &self.reject_v0_transactions)
+            .field("use_swap_v2", &self.use_swap_v2)
+            .field("multi_dex_comparison", &self.multi_dex_comparison)
+            .finish()
+    }
 }
 
 fn default_jupiter_api_url() -> String {
@@ -497,6 +541,14 @@ fn default_reconstruct_v0() -> bool {
 
 fn default_reject_v0() -> bool {
     false
+}
+
+fn default_use_swap_v2() -> bool {
+    false
+}
+
+fn default_multi_dex_comparison() -> bool {
+    true
 }
 
 /// Queue configuration
@@ -1574,6 +1626,25 @@ impl AppConfig {
             if self.notifications.telegram.chat_id.is_empty() {
                 return Err(ConfigError::Message(
                     "Telegram notifications are enabled but chat_id is not set (set TELEGRAM_CHAT_ID)".to_string(),
+                ));
+            }
+        }
+
+        // Jupiter API key is mandatory in Live mode (keyless access is being
+        // phased out; legacy rate limits expire 2026-06-30). Paper/Devnet may run
+        // without it but will be rate-limited.
+        if self.trade_mode == TradeMode::Live {
+            let key_missing = self
+                .jupiter
+                .api_key
+                .as_ref()
+                .map(|k| k.trim().is_empty())
+                .unwrap_or(true);
+            if key_missing {
+                return Err(ConfigError::Message(
+                    "jupiter.api_key is required in Live trade mode (set CHIMERA_JUPITER__API_KEY). \
+                     Jupiter keyless access is deprecated."
+                        .to_string(),
                 ));
             }
         }

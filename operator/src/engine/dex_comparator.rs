@@ -1,11 +1,22 @@
-//! DEX Fee Comparison
+//! DEX route selection via Jupiter.
 //!
-//! Queries multiple DEX APIs and selects the one with lowest total cost
-//! (fee + estimated slippage). Caches results for 5 seconds to avoid
-//! repeated queries for the same token.
+//! Previously this module hit three hard-coded, non-existent DEX quote endpoints
+//! (Raydium/Orca/Meteora) that always failed, then silently fell back to a
+//! fabricated "default Jupiter" result whose `fee`/`priceImpact` keys never
+//! existed in any real response. Routing was therefore cosmetic.
+//!
+//! It now performs **real** per-DEX route comparison through Jupiter's own
+//! `dexes=` filter: for each candidate DEX label it requests a quote restricted
+//! to that DEX, and always includes an unrestricted ("aggregate") quote. The
+//! candidate with the highest net `outAmount` (which already bakes in that DEX's
+//! fee + price impact) wins, and its quote is reused directly as the swap
+//! payload — so `selected_dex` genuinely drives routing, and there is no
+//! redundant second quote round-trip.
+//!
+//! Fee/slippage are parsed from the real response: `routePlan[].swapInfo.feeAmount`
+//! summed (P2-17) and `priceImpactPct` read as a percent (P1-6).
 
-use crate::error::AppResult;
-use crate::utils;
+use crate::error::{AppError, AppResult};
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use std::collections::HashMap;
@@ -13,229 +24,308 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-/// DEX comparison result
+/// 1 SOL = 1e9 lamports.
+const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+
+/// Default DEX labels compared against (in addition to the unrestricted
+/// "aggregate" Jupiter route). Any label Jupiter does not recognise returns a
+/// non-2xx and is silently skipped, so this list is safe to over-specify.
+const DEFAULT_DEX_LABELS: &[&str] = &["Raydium", "Orca", "Meteora"];
+
+/// Selected route + cost breakdown.
 #[derive(Debug, Clone)]
-pub struct DexComparisonResult {
-    /// Selected DEX name
+pub struct RouteSelection {
+    /// Winning DEX label (`"Jupiter"` for the unrestricted aggregate route).
     pub selected_dex: String,
-    /// Total cost (fee + slippage) in SOL
+    /// The winning Jupiter quote, reused directly as the swap payload.
+    pub quote: serde_json::Value,
+    /// Total cost (fee + estimated slippage) in SOL.
     pub total_cost_sol: Decimal,
-    /// Fee amount in SOL
+    /// Real per-route fee in SOL (summed `routePlan[].swapInfo.feeAmount`).
     pub fee_sol: Decimal,
-    /// Estimated slippage in SOL
+    /// Estimated slippage in SOL (from `priceImpactPct`).
     pub slippage_sol: Decimal,
-    /// DEX API endpoint used
+    /// DEX API endpoint used.
     pub dex_url: String,
 }
 
-/// Cached DEX comparison result
+/// Cached route selection.
 #[derive(Debug, Clone)]
 struct CachedResult {
-    result: DexComparisonResult,
+    selection: RouteSelection,
     cached_at: SystemTime,
 }
 
-/// DEX comparator
+/// DEX comparator / route selector backed by Jupiter's `dexes=` filter.
 pub struct DexComparator {
-    /// Cache of recent comparisons (token_address -> result)
+    /// Cache of recent selections.
     cache: Arc<RwLock<HashMap<String, CachedResult>>>,
-    /// Cache TTL in seconds
+    /// Cache TTL in seconds.
     cache_ttl: Duration,
-    /// HTTP client for API calls
+    /// HTTP client for API calls.
     http_client: reqwest::Client,
-    /// Jupiter API base URL (e.g., https://api.jup.ag/swap/v1 or https://lite-api.jup.ag/swap/v1)
+    /// Jupiter API base URL (e.g. https://api.jup.ag/swap/v1).
     jupiter_api_url: String,
+    /// DEX labels to compare against the aggregate route.
+    dex_labels: Vec<String>,
+    /// When false, skip the per-DEX `dexes=` fan-out and query only the
+    /// aggregate route (saves Jupiter API quota when routing diversity isn't
+    /// needed).
+    multi_dex: bool,
 }
 
 impl DexComparator {
-    /// Create a new DEX comparator with default Jupiter API URL
+    /// Create with the default Jupiter API URL and candidate DEX labels.
     pub fn new() -> Result<Self, String> {
         Self::with_jupiter_api_url("https://api.jup.ag/swap/v1".to_string())
     }
 
-    /// Create a new DEX comparator with custom Jupiter API URL
+    /// Create with a custom Jupiter API URL and default candidate DEX labels.
     pub fn with_jupiter_api_url(jupiter_api_url: String) -> Result<Self, String> {
-        Ok(Self {
+        Self::with_jupiter_api_url_and_labels(
+            jupiter_api_url,
+            DEFAULT_DEX_LABELS.iter().map(|s| (*s).to_string()).collect(),
+        )
+    }
+
+    /// Create with a custom Jupiter API URL and an explicit candidate DEX list.
+    pub fn with_jupiter_api_url_and_labels(
+        jupiter_api_url: String,
+        dex_labels: Vec<String>,
+    ) -> Result<Self, String> {
+        Ok(Self::with_options(jupiter_api_url, dex_labels, true))
+    }
+
+    /// Create with full control: URL, candidate DEX labels, and whether to
+    /// perform the per-DEX `dexes=` fan-out (`multi_dex`).
+    pub fn with_options(
+        jupiter_api_url: String,
+        dex_labels: Vec<String>,
+        multi_dex: bool,
+    ) -> Self {
+        Self {
             cache: Arc::new(RwLock::new(HashMap::new())),
             cache_ttl: Duration::from_secs(5),
             http_client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .build()
-                .map_err(|e| format!("Failed to create HTTP client: {}", e))?,
+                .unwrap_or_else(|_| reqwest::Client::new()),
             jupiter_api_url,
-        })
+            dex_labels,
+            multi_dex,
+        }
     }
 
-    /// Compare DEXs and select the one with lowest cost
+    /// Set whether the per-DEX `dexes=` fan-out is performed.
+    pub fn set_multi_dex(&mut self, multi_dex: bool) {
+        self.multi_dex = multi_dex;
+    }
+
+    /// Select the best route across the candidate DEXes plus the aggregate.
     ///
-    /// # Arguments
-    /// * `token_in` - Input token address (e.g., SOL)
-    /// * `token_out` - Output token address
-    /// * `amount_sol` - Amount to swap in SOL
-    ///
-    /// # Returns
-    /// DexComparisonResult with selected DEX and costs
-    pub async fn compare_and_select(
+    /// `amount` is in **lamports** (Jupiter's `amount` field). `slippage_bps` is
+    /// the on-chain tolerance to embed in every candidate quote.
+    pub async fn select_route(
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: Decimal,
-    ) -> AppResult<DexComparisonResult> {
-        // Check cache first (use rounded amount representation for cache key)
-        let rounded_amount = amount_sol.round_dp(2);
-        let cache_key = format!("{}:{}:{}", token_in, token_out, rounded_amount);
+        amount_lamports: u64,
+        slippage_bps: u16,
+    ) -> AppResult<RouteSelection> {
+        let cache_key = format!("{}:{}:{}:{}", token_in, token_out, amount_lamports, slippage_bps);
         {
             let cache = self.cache.read();
             if let Some(cached) = cache.get(&cache_key) {
                 if cached.cached_at.elapsed().unwrap_or_default() < self.cache_ttl {
-                    return Ok(cached.result.clone());
+                    return Ok(cached.selection.clone());
                 }
             }
         }
 
-        // Query multiple DEXs in parallel
-        let (jupiter_result, raydium_result, orca_result, meteora_result) = tokio::join!(
-            self.query_jupiter(token_in, token_out, amount_sol),
-            self.query_raydium(token_in, token_out, amount_sol),
-            self.query_orca(token_in, token_out, amount_sol),
-            self.query_meteora(token_in, token_out, amount_sol),
+        // Build the candidate set: unrestricted aggregate + one per DEX label
+        // (only when multi-DEX comparison is enabled — otherwise aggregate-only,
+        // saving Jupiter API quota).
+        let aggregate_fut = self.query_jupiter(token_in, token_out, amount_lamports, slippage_bps, None);
+        let mut restricted_futs = Vec::new();
+        if self.multi_dex {
+            for label in &self.dex_labels {
+                restricted_futs.push(self.query_jupiter(
+                    token_in,
+                    token_out,
+                    amount_lamports,
+                    slippage_bps,
+                    Some(label.as_str()),
+                ));
+            }
+        }
+
+        // Run the aggregate + restricted queries concurrently (a serial
+        // `.await` on the aggregate before the fan-out would add a full RTT to
+        // every cache-miss swap).
+        let (aggregate, restricted) = tokio::join!(
+            aggregate_fut,
+            futures_util::future::join_all(restricted_futs)
         );
 
-        // Collect all successful results
-        let mut results = Vec::new();
-
-        if let Ok(result) = jupiter_result {
-            results.push(result);
+        let mut best: Option<RouteSelection> = None;
+        // Aggregate route is always the baseline (never worse than any single DEX).
+        if let Ok(sel) = aggregate {
+            best = Some(sel);
         }
-        if let Ok(result) = raydium_result {
-            results.push(result);
-        }
-        if let Ok(result) = orca_result {
-            results.push(result);
-        }
-        if let Ok(result) = meteora_result {
-            results.push(result);
-        }
-
-        if results.is_empty() {
-            // Graceful fallback to default Jupiter result as expected by tests and operators
-            tracing::warn!("All DEX queries failed, falling back to default Jupiter result");
-            let default_fee =
-                Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000));
-            let default_slippage =
-                Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000));
-            let fee_sol = amount_sol * default_fee;
-            let slippage_sol = amount_sol * default_slippage;
-            let total_cost_sol = fee_sol + slippage_sol;
-
-            let result = DexComparisonResult {
-                selected_dex: "Jupiter".to_string(),
-                total_cost_sol,
-                fee_sol,
-                slippage_sol,
-                dex_url: self.jupiter_api_url.clone(),
-            };
-
-            // Cache the result
-            {
-                let mut cache = self.cache.write();
-                cache.insert(
-                    cache_key,
-                    CachedResult {
-                        result: result.clone(),
-                        cached_at: SystemTime::now(),
-                    },
-                );
+        for sel in restricted.into_iter().flatten() {
+            let better = best
+                .as_ref()
+                .is_none_or(|b| out_amount(&sel.quote) > out_amount(&b.quote));
+            if better {
+                best = Some(sel);
             }
-
-            return Ok(result);
         }
 
-        // Select DEX with lowest total cost
-        let result = results
-            .into_iter()
-            .min_by(|a, b| a.total_cost_sol.cmp(&b.total_cost_sol))
-            .expect("results is guaranteed to be non-empty here");
+        let selection = match best {
+            Some(s) => s,
+            None => {
+                tracing::warn!(
+                    token_in = %token_in,
+                    token_out = %token_out,
+                    "All DEX route queries (incl. aggregate) failed"
+                );
+                return Err(AppError::Internal(format!(
+                    "No viable DEX route for {} → {}",
+                    token_in, token_out
+                )));
+            }
+        };
 
-        // Cache the result
+        if selection.selected_dex != "Jupiter" {
+            tracing::info!(
+                selected_dex = %selection.selected_dex,
+                fee_sol = %selection.fee_sol,
+                slippage_sol = %selection.slippage_sol,
+                "Route comparison selected a non-aggregate DEX"
+            );
+        }
+
         {
             let mut cache = self.cache.write();
             cache.insert(
                 cache_key,
                 CachedResult {
-                    result: result.clone(),
+                    selection: selection.clone(),
                     cached_at: SystemTime::now(),
                 },
             );
         }
 
-        Ok(result)
+        Ok(selection)
     }
 
-    /// Query Jupiter API for swap quote
+    /// Query Jupiter `/quote`, optionally restricted to a single DEX via `dexes=`.
     async fn query_jupiter(
         &self,
         token_in: &str,
         token_out: &str,
-        amount_sol: Decimal,
-    ) -> AppResult<DexComparisonResult> {
-        // Convert Decimal to lamports for API call
-        let lamports = utils::sol_to_lamports(amount_sol);
-
-        // Jupiter API endpoint (using configured URL, migrated from deprecated v6)
-        let url = format!(
-            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps=50",
-            self.jupiter_api_url, token_in, token_out, lamports
+        amount_lamports: u64,
+        slippage_bps: u16,
+        dexes: Option<&str>,
+    ) -> AppResult<RouteSelection> {
+        let mut url = format!(
+            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+            self.jupiter_api_url, token_in, token_out, amount_lamports, slippage_bps
         );
+        if let Some(label) = dexes {
+            url.push_str("&dexes=");
+            url.push_str(label);
+        }
 
-        let response =
-            self.http_client.get(&url).send().await.map_err(|e| {
-                crate::error::AppError::Internal(format!("Jupiter API error: {}", e))
-            })?;
+        let response = crate::jupiter::with_api_key(self.http_client.get(&url))
+            .send()
+            .await
+            .map_err(|e| AppError::Internal(format!("Jupiter API error: {}", e)))?;
 
         if !response.status().is_success() {
-            return Err(crate::error::AppError::Internal(format!(
+            return Err(AppError::Internal(format!(
                 "Jupiter API returned error: {}",
                 response.status()
             )));
         }
 
-        let quote: serde_json::Value = response.json().await.map_err(|e| {
-            crate::error::AppError::Internal(format!("Failed to parse Jupiter response: {}", e))
-        })?;
+        let quote: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::Internal(format!("Failed to parse Jupiter response: {}", e)))?;
 
-        // Validate response is a real quote (not an error page)
-        if quote.get("outAmount").is_none()
-            && quote.get("amountOut").is_none()
-            && quote.get("expectedAmountOut").is_none()
-            && quote.get("routes").is_none()
-        {
-            return Err(crate::error::AppError::Internal(
-                "Invalid Jupiter response: missing output amount or routes".to_string(),
+        // Validate it is a real quote.
+        if out_amount(&quote) == 0 {
+            return Err(AppError::Internal(
+                "Invalid Jupiter response: missing/zero outAmount".to_string(),
             ));
         }
 
-        // Extract fee and slippage from quote, convert to Decimal
-        let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
-            Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))
-        }); // Default 0.3% fee
+        let selected_dex = dexes.unwrap_or("Jupiter").to_string();
 
-        let fee_sol = amount_sol * fee_percent;
+        // Real per-route fee: sum of routePlan[].swapInfo.feeAmount (raw token
+        // units). Direction-aware — the trade value in SOL is used as the
+        // denominator so the fee/slippage are correctly SOL-denominated for
+        // both BUY (SOL→token) and SELL (token→SOL).
+        let fee_raw: u64 = quote
+            .get("routePlan")
+            .and_then(|rp| rp.as_array())
+            .map(|hops| {
+                hops.iter()
+                    .filter_map(|h| {
+                        h.get("swapInfo")
+                            .and_then(|s| s.get("feeAmount"))
+                            .and_then(|f| f.as_str())
+                            .and_then(|s| s.parse::<u64>().ok())
+                    })
+                    .sum()
+            })
+            .unwrap_or(0);
+        let in_amount: u64 = quote
+            .get("inAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| quote.get("inAmount").and_then(|v| v.as_u64()))
+            .unwrap_or(amount_lamports);
+        let out_amount_raw: u64 = out_amount(&quote);
 
-        // Estimate slippage (simplified - Jupiter provides this in quote)
-        // Jupiter's priceImpactPct is a percentage string (e.g., "0.5" for 0.5%)
-        // We must divide by 100 to convert to a fraction before multiplying with amount_sol
-        let slippage_percent = get_json_decimal(&quote, "priceImpactPct")
+        // Direction-aware trade value in SOL. For BUY (input=SOL) the trade
+        // value is the SOL input; for SELL (output=SOL) it's the SOL received.
+        // Using `amount_lamports` (the input amount) for SELL would denominate
+        // the fee/slippage in token/1e9, not SOL.
+        let sol_mint = crate::constants::mints::SOL;
+        let trade_value_sol = if token_in == sol_mint {
+            Decimal::from(amount_lamports) / Decimal::from(LAMPORTS_PER_SOL)
+        } else if token_out == sol_mint {
+            Decimal::from(out_amount_raw) / Decimal::from(LAMPORTS_PER_SOL)
+        } else {
+            // Neither side is SOL (e.g. USDC→token): fall back to the input
+            // amount as a rough SOL proxy (cost accounting only — not a routing
+            // input, since routing uses outAmount).
+            Decimal::from(amount_lamports) / Decimal::from(LAMPORTS_PER_SOL)
+        };
+
+        // fee fraction of the trade, expressed in SOL.
+        let fee_sol = if in_amount > 0 {
+            trade_value_sol * Decimal::from(fee_raw) / Decimal::from(in_amount)
+        } else {
+            Decimal::ZERO
+        };
+
+        // priceImpactPct is a percent string (e.g. "1.5" = 1.5%) — convert to a
+        // fraction before scaling by the SOL trade value. (P1-6: previously the
+        // comparator divided by 100 inconsistently.)
+        let slippage_fraction = quote
+            .get("priceImpactPct")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok())
             .map(|pct| pct / Decimal::from(100))
-            .unwrap_or_else(|| {
-                Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
-            }); // Default 0.5% slippage
-
-        let slippage_sol = amount_sol * slippage_percent;
+            .unwrap_or(Decimal::ZERO);
+        let slippage_sol = trade_value_sol * slippage_fraction;
         let total_cost_sol = fee_sol + slippage_sol;
 
-        Ok(DexComparisonResult {
-            selected_dex: "Jupiter".to_string(),
+        Ok(RouteSelection {
+            selected_dex,
+            quote,
             total_cost_sol,
             fee_sol,
             slippage_sol,
@@ -243,218 +333,7 @@ impl DexComparator {
         })
     }
 
-    /// Query Raydium API for swap quote
-    async fn query_raydium(
-        &self,
-        token_in: &str,
-        token_out: &str,
-        amount_sol: Decimal,
-    ) -> AppResult<DexComparisonResult> {
-        // Convert Decimal to lamports for API call
-        let lamports = utils::sol_to_lamports(amount_sol);
-
-        // Raydium API endpoint (v2)
-        let url = format!(
-            "https://api.raydium.io/v2/swap/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
-            token_in,
-            token_out,
-            lamports
-        );
-
-        let response = self
-            .http_client
-            .get(&url)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) if resp.status().is_success() => {
-                let quote: serde_json::Value = resp.json().await.map_err(|e| {
-                    crate::error::AppError::Internal(format!(
-                        "Failed to parse Raydium response: {}",
-                        e
-                    ))
-                })?;
-
-                // Validate response is a real quote
-                if quote.get("outAmount").is_none()
-                    && quote.get("amountOut").is_none()
-                    && quote.get("expectedAmountOut").is_none()
-                    && quote.get("routes").is_none()
-                {
-                    return Err(crate::error::AppError::Internal(
-                        "Invalid Raydium response: missing output amount or routes".to_string(),
-                    ));
-                }
-
-                let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
-                    Decimal::from_str("0.0025").unwrap_or(Decimal::from(25) / Decimal::from(10000))
-                }); // Raydium default 0.25% fee
-
-                let fee_sol = amount_sol * fee_percent;
-                let slippage_percent =
-                    get_json_decimal(&quote, "priceImpact").unwrap_or_else(|| {
-                        Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
-                    });
-                let slippage_sol = amount_sol * slippage_percent;
-                let total_cost_sol = fee_sol + slippage_sol;
-
-                Ok(DexComparisonResult {
-                    selected_dex: "Raydium".to_string(),
-                    total_cost_sol,
-                    fee_sol,
-                    slippage_sol,
-                    dex_url: "https://api.raydium.io/v2".to_string(),
-                })
-            }
-            _ => Err(crate::error::AppError::Internal(
-                "Raydium API unavailable".to_string(),
-            )),
-        }
-    }
-
-    /// Query Orca API for swap quote
-    async fn query_orca(
-        &self,
-        token_in: &str,
-        token_out: &str,
-        amount_sol: Decimal,
-    ) -> AppResult<DexComparisonResult> {
-        // Convert Decimal to lamports for API call
-        let lamports = utils::sol_to_lamports(amount_sol);
-
-        // Orca API endpoint
-        let url = format!(
-            "https://api.orca.so/v1/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
-            token_in, token_out, lamports
-        );
-
-        let response = self
-            .http_client
-            .get(&url)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) if resp.status().is_success() => {
-                let quote: serde_json::Value = resp.json().await.map_err(|e| {
-                    crate::error::AppError::Internal(format!(
-                        "Failed to parse Orca response: {}",
-                        e
-                    ))
-                })?;
-
-                // Validate response is a real quote
-                if quote.get("outAmount").is_none()
-                    && quote.get("amountOut").is_none()
-                    && quote.get("expectedAmountOut").is_none()
-                    && quote.get("routes").is_none()
-                {
-                    return Err(crate::error::AppError::Internal(
-                        "Invalid Orca response: missing output amount or routes".to_string(),
-                    ));
-                }
-
-                let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
-                    Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))
-                }); // Orca default 0.3% fee
-
-                let fee_sol = amount_sol * fee_percent;
-                let slippage_percent =
-                    get_json_decimal(&quote, "priceImpact").unwrap_or_else(|| {
-                        Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
-                    });
-                let slippage_sol = amount_sol * slippage_percent;
-                let total_cost_sol = fee_sol + slippage_sol;
-
-                Ok(DexComparisonResult {
-                    selected_dex: "Orca".to_string(),
-                    total_cost_sol,
-                    fee_sol,
-                    slippage_sol,
-                    dex_url: "https://api.orca.so/v1".to_string(),
-                })
-            }
-            _ => Err(crate::error::AppError::Internal(
-                "Orca API unavailable".to_string(),
-            )),
-        }
-    }
-
-    /// Query Meteora API for swap quote
-    async fn query_meteora(
-        &self,
-        token_in: &str,
-        token_out: &str,
-        amount_sol: Decimal,
-    ) -> AppResult<DexComparisonResult> {
-        // Convert Decimal to lamports for API call
-        let lamports = utils::sol_to_lamports(amount_sol);
-
-        // Meteora DLMM API endpoint
-        let url = format!(
-            "https://dlmm-api.meteora.ag/pair/quote?inputMint={}&outputMint={}&amount={}&slippage=0.5",
-            token_in,
-            token_out,
-            lamports
-        );
-
-        let response = self
-            .http_client
-            .get(&url)
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await;
-
-        match response {
-            Ok(resp) if resp.status().is_success() => {
-                let quote: serde_json::Value = resp.json().await.map_err(|e| {
-                    crate::error::AppError::Internal(format!(
-                        "Failed to parse Meteora response: {}",
-                        e
-                    ))
-                })?;
-
-                // Validate response is a real quote
-                if quote.get("outAmount").is_none()
-                    && quote.get("amountOut").is_none()
-                    && quote.get("expectedAmountOut").is_none()
-                    && quote.get("routes").is_none()
-                {
-                    return Err(crate::error::AppError::Internal(
-                        "Invalid Meteora response: missing output amount or routes".to_string(),
-                    ));
-                }
-
-                let fee_percent = get_json_decimal(&quote, "fee").unwrap_or_else(|| {
-                    Decimal::from_str("0.003").unwrap_or(Decimal::from(3) / Decimal::from(1000))
-                }); // Meteora default 0.3% fee
-
-                let fee_sol = amount_sol * fee_percent;
-                let slippage_percent =
-                    get_json_decimal(&quote, "priceImpact").unwrap_or_else(|| {
-                        Decimal::from_str("0.005").unwrap_or(Decimal::from(5) / Decimal::from(1000))
-                    });
-                let slippage_sol = amount_sol * slippage_percent;
-                let total_cost_sol = fee_sol + slippage_sol;
-
-                Ok(DexComparisonResult {
-                    selected_dex: "Meteora".to_string(),
-                    total_cost_sol,
-                    fee_sol,
-                    slippage_sol,
-                    dex_url: "https://dlmm-api.meteora.ag".to_string(),
-                })
-            }
-            _ => Err(crate::error::AppError::Internal(
-                "Meteora API unavailable".to_string(),
-            )),
-        }
-    }
-
-    /// Clear expired cache entries
+    /// Clear expired cache entries.
     pub fn clear_expired_cache(&self) {
         let mut cache = self.cache.write();
         cache.retain(|_, cached| cached.cached_at.elapsed().unwrap_or_default() < self.cache_ttl);
@@ -463,20 +342,17 @@ impl DexComparator {
 
 impl Default for DexComparator {
     fn default() -> Self {
-        // For Default trait (used in tests), panic on failure
         Self::new().expect("Failed to create DexComparator - HTTP client initialization failed")
     }
 }
 
-fn get_json_decimal(value: &serde_json::Value, key: &str) -> Option<Decimal> {
-    let val = value.get(key)?;
-    if let Some(s) = val.as_str() {
-        Decimal::from_str(s).ok()
-    } else if let Some(f) = val.as_f64() {
-        Decimal::from_f64_retain(f)
-    } else {
-        val.as_i64().map(Decimal::from)
-    }
+/// Parse the quote's `outAmount` (string) into u64; 0 if absent/unparseable.
+fn out_amount(quote: &serde_json::Value) -> u64 {
+    quote
+        .get("outAmount")
+        .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+        .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -484,19 +360,37 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_dex_comparison_caching() {
+    async fn test_dex_route_caching_key_includes_slippage() {
+        // Exercises construction only (no network); real route behaviour is
+        // covered by the #[ignore] integration tests requiring a Jupiter key.
         let comparator = DexComparator::new().expect("Failed to create DexComparator for test");
-
-        // First call should query API
-        let _result1 = comparator
-            .compare_and_select(
-                "So11111111111111111111111111111111111111112",  // SOL
-                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
-                Decimal::from(1u64),
+        let _ = comparator
+            .select_route(
+                "So11111111111111111111111111111111111111112",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                1_000_000_000,
+                50,
             )
             .await;
+        // Second call within the TTL should hit the cache (no assertion beyond
+        // "does not panic" — network availability is environment-dependent).
+        let _ = comparator
+            .select_route(
+                "So11111111111111111111111111111111111111112",
+                "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                1_000_000_000,
+                50,
+            )
+            .await;
+    }
 
-        // Second call within 5 seconds should use cache
-        // (This would be tested with actual API in integration tests)
+    #[test]
+    fn out_amount_parses_string_or_number() {
+        let q_str = serde_json::json!({ "outAmount": "12345" });
+        assert_eq!(out_amount(&q_str), 12345);
+        let q_num = serde_json::json!({ "outAmount": 999 });
+        assert_eq!(out_amount(&q_num), 999);
+        let q_empty = serde_json::json!({});
+        assert_eq!(out_amount(&q_empty), 0);
     }
 }

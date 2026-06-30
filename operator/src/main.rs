@@ -181,6 +181,20 @@ async fn main() -> anyhow::Result<()> {
     config.trade_mode =
         resolve_trade_mode(explicit_mode, config.trade_mode, &config.rpc.primary_url);
 
+    // Install the Jupiter API key into the process-global credential store.
+    // Attached as `x-api-key` on every Jupiter request (quote/swap/price).
+    // F1: keyless access is being phased out; Live mode hard-fails without it
+    // (enforced in AppConfig::validate).
+    chimera_operator::jupiter::set_api_key(config.jupiter.api_key.clone());
+    if config.jupiter.api_key.is_some() {
+        tracing::info!("Jupiter API key installed (x-api-key will be sent on all Jupiter requests)");
+    } else {
+        tracing::warn!(
+            "No Jupiter API key configured (CHIMERA_JUPITER__API_KEY) — requests will be rate-limited; \
+             Live trade mode will refuse to start"
+        );
+    }
+
     match config.trade_mode {
         TradeMode::Paper => tracing::warn!("┌─────────────────────────────────────────┐"),
         _ => tracing::info!("┌─────────────────────────────────────────┐"),
@@ -2201,15 +2215,43 @@ fn build_exit_signal_amount(
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
 
-/// Initialize tracing/logging
+/// Initialize tracing/logging with file output. Falls back to stderr when the
+/// log directory is not writable (dev environments without /app/data/logs).
 fn init_tracing() {
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "chimera_operator=debug,tower_http=debug".into()),
-        )
-        .with(tracing_subscriber::fmt::layer().json())
-        .init();
+    // Ensure log directory exists (the production container mount).
+    let log_dir = std::env::var("CHIMERA_LOG_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/app/data/logs".into());
+    std::fs::create_dir_all(&log_dir).ok();
+
+    let log_path = format!("{}/operator.log", log_dir);
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "chimera_operator=debug,tower_http=debug".into());
+
+    match std::fs::File::create(&log_path) {
+        Ok(file) => {
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(tracing_subscriber::fmt::layer().json().with_writer(Arc::new(file)))
+                .init();
+            tracing::info!("File logging configured: {}", log_path);
+        }
+        Err(e) => {
+            eprintln!(
+                "WARN: cannot create log file {} ({}): falling back to stderr",
+                log_path, e
+            );
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(std::io::stderr),
+                )
+                .init();
+        }
+    }
 }
 
 /// Load and validate configuration

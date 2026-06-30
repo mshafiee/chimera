@@ -8,6 +8,18 @@ pub fn helius_api_base_url() -> String {
         .unwrap_or_else(|| "https://api.helius.xyz/v0".into())
 }
 
+/// Helius **Solana RPC** endpoint (with the API key), used for JSON-RPC bundle
+/// methods (`sendBundle`, `getBundleStatuses`). Per Helius docs these live at
+/// the RPC host (`mainnet.helius-rpc.com`), NOT at `api.helius.xyz/v0`.
+/// Overridable via `HELIUS_RPC_BASE_URL`.
+pub fn helius_rpc_url(api_key: &str) -> String {
+    let base = std::env::var("HELIUS_RPC_BASE_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "https://mainnet.helius-rpc.com".into());
+    format!("{}?api-key={}", base, api_key)
+}
+
 /// Safely convert SOL (Decimal) to Lamports (u64) using Decimal to avoid precision loss
 pub fn sol_to_lamports(sol: Decimal) -> u64 {
     // 1 SOL = 1,000,000,000 Lamports
