@@ -225,6 +225,8 @@ services:
     volumes:
       - ./evaluation:/evaluation:rw
       - ./evaluation/anomalies:/evaluation/anomalies:rw
+    env_file:
+      - docker/env.evaluation
     environment:
       - PROMETHEUS_URL=http://prometheus-eval:9090
       - OPERATOR_METRICS_URL=http://chimera-operator:8080/metrics  # Fixed: use container name
@@ -232,9 +234,6 @@ services:
       - ANOMALY_CHECK_INTERVAL=60  # Check every minute
       - ALERT_THRESHOLD_WARNING=80
       - ALERT_THRESHOLD_CRITICAL=95
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
     depends_on:
       - prometheus-eval
     networks:

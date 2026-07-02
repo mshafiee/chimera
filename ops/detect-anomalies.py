@@ -125,11 +125,11 @@ class AnomalyDetector:
             'description': 'RPC error rate'
         },
 
-        # Circuit breaker state
+        # Circuit breaker state (2=Active, 1=Cooldown, 0=Tripped)
         'chimera_circuit_breaker_state': {
             'warning': 1,
-            'critical': 1,
-            'description': 'Circuit breaker state (1=tripped)'
+            'critical': 0,
+            'description': 'Circuit breaker state (2=Active, 1=Cooldown, 0=Tripped)'
         },
 
         # Position limits
@@ -228,12 +228,23 @@ class AnomalyDetector:
             severity = None
             threshold = None
 
-            if value >= critical_threshold:
-                severity = Severity.CRITICAL
-                threshold = critical_threshold
-            elif value >= warning_threshold:
-                severity = Severity.WARNING
-                threshold = warning_threshold
+            # Special handling for circuit breaker state (lower values = worse)
+            # 2=Active, 1=Cooldown, 0=Tripped
+            if metric_name == 'chimera_circuit_breaker_state':
+                if value <= critical_threshold:
+                    severity = Severity.CRITICAL
+                    threshold = critical_threshold
+                elif value <= warning_threshold:
+                    severity = Severity.WARNING
+                    threshold = warning_threshold
+            else:
+                # Standard threshold checking (higher values = worse)
+                if value >= critical_threshold:
+                    severity = Severity.CRITICAL
+                    threshold = critical_threshold
+                elif value >= warning_threshold:
+                    severity = Severity.WARNING
+                    threshold = warning_threshold
 
             if severity:
                 # Calculate deviation percentage
