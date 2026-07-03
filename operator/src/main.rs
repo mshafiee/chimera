@@ -278,8 +278,8 @@ async fn main() -> anyhow::Result<()> {
         true, // Allow anonymous readonly for development dashboard
     ));
 
-    // Initialize price cache
-    let price_cache = match PriceCache::new() {
+    // Initialize price cache with Jupiter configuration
+    let price_cache = match PriceCache::with_jupiter_price_api(config.jupiter.price_api_url.clone()) {
         Ok(cache) => Arc::new(cache),
         Err(e) => {
             tracing::error!(error = %e, "Failed to initialize price cache — HTTP client build failed");

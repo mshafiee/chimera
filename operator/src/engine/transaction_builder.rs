@@ -296,7 +296,7 @@ impl TransactionBuilder {
                         ));
                     }
                 }
-                return Err(AppError::Internal(format!("{}", e))); // Re-throw the original error if circuit breaker didn't trip
+                return Err(Self::wrap_jupiter_error(&e)); // Re-throw the original error if circuit breaker didn't trip
             }
         };
 
@@ -594,12 +594,14 @@ impl TransactionBuilder {
             "Requesting Jupiter v2 /order"
         );
 
-        // Build URL with parameters
-        let url_with_params = format!("{}/?{}", url, request_params
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-            .collect::<Vec<_>>()
-            .join("&"));
+        // Build URL with parameters (optimized to reduce allocations)
+        let url_with_params = {
+            let mut params = Vec::with_capacity(request_params.len() * 2);
+            for (k, v) in &request_params {
+                params.push(format!("{}={}", k, urlencoding::encode(v)));
+            }
+            format!("{}/?{}", url, params.join("&"))
+        };
 
         let response = crate::jupiter::with_api_key(
             self.http_client.get(&url_with_params),
@@ -905,6 +907,11 @@ impl TransactionBuilder {
             in_amount,
             out_amount,
         })
+    }
+
+    /// Helper function to wrap Jupiter errors consistently
+    fn wrap_jupiter_error(error: &dyn std::error::Error) -> AppError {
+        AppError::Internal(format!("Jupiter API failure: {}", error))
     }
 }
 

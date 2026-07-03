@@ -87,6 +87,8 @@ pub struct PriceCache {
     sol_mint: String,
     /// Reusable HTTP client (FIX [R-L4]: built once, not per-fetch)
     http_client: reqwest::Client,
+    /// Jupiter Price API base URL (configurable)
+    jupiter_price_api_url: String,
 }
 
 impl PriceCache {
@@ -117,6 +119,27 @@ impl PriceCache {
             updater_running: Arc::new(RwLock::new(false)),
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
             http_client: Self::build_http_client()?,
+            jupiter_price_api_url: "https://api.jup.ag/price".to_string(),
+        })
+    }
+
+    /// Create with custom Jupiter Price API URL
+    ///
+    /// Returns an error if the HTTP client cannot be built.
+    pub fn with_jupiter_price_api(jupiter_price_api_url: String) -> Result<Self, PriceCacheError> {
+        Ok(Self {
+            inner: Arc::new(RwLock::new(PriceCacheInner {
+                prices: HashMap::new(),
+                price_history: HashMap::new(),
+                cache_hits: 0,
+                cache_misses: 0,
+            })),
+            ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
+            active_tokens: Arc::new(RwLock::new(Vec::new())),
+            updater_running: Arc::new(RwLock::new(false)),
+            sol_mint: "So11111111111111111111111111111111111111112".to_string(),
+            http_client: Self::build_http_client()?,
+            jupiter_price_api_url,
         })
     }
 
@@ -136,6 +159,7 @@ impl PriceCache {
             updater_running: Arc::new(RwLock::new(false)),
             sol_mint: "So11111111111111111111111111111111111111112".to_string(),
             http_client: Self::build_http_client()?,
+            jupiter_price_api_url: "https://api.jup.ag/price".to_string(),
         })
     }
 
@@ -436,7 +460,7 @@ impl PriceCache {
 
         // Build URL with comma-separated token addresses
         let token_list = tokens.join(",");
-        let url = format!("https://api.jup.ag/price/v3?ids={}", token_list);
+        let url = format!("{}/v3?ids={}", self.jupiter_price_api_url.trim_end_matches('/'), token_list);
 
         tracing::debug!(
             token_count = tokens.len(),

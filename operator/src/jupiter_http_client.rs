@@ -101,7 +101,8 @@ impl JupiterHttpClient {
             .timeout(config.request_timeout)
             .connect_timeout(config.connect_timeout)
             .pool_max_idle_per_host(config.max_idle_connections_per_host)
-            .pool_idle_timeout(config.keep_alive_duration);
+            .pool_idle_timeout(config.keep_alive_duration)
+            .tcp_nodelay(true);  // Reduce latency by disabling Nagle's algorithm
 
         let client = client_builder.build().map_err(|e| {
             AppError::Internal(format!("Failed to create Jupiter HTTP client: {}", e))

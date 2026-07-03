@@ -524,6 +524,9 @@ pub struct JupiterConfig {
     /// (e.g., "Raydium,Orca+V2,Meteora+DLMM"). Only affects Metis, not other routers.
     #[serde(default)]
     pub exclude_dexes: Option<String>,
+    /// Jupiter Price API base URL for fetching token prices (v3+).
+    #[serde(default = "default_jupiter_price_api_url")]
+    pub price_api_url: String,
 }
 
 impl std::fmt::Debug for JupiterConfig {
@@ -573,6 +576,10 @@ fn default_enable_rtse() -> bool {
 
 fn default_jupiter_api_url() -> String {
     "https://api.jup.ag/swap/v2".to_string()  // Updated to v2
+}
+
+fn default_jupiter_price_api_url() -> String {
+    "https://api.jup.ag/price".to_string()
 }
 
 /// Queue configuration

@@ -64,13 +64,12 @@ jito:
   tip_percent_max: 0.10
 
 jupiter:
-  api_url: "https://api.jup.ag/swap/v1"  # Migrated from deprecated v6 endpoint
+  api_url: "https://api.jup.ag/swap/v2"  # Updated to v2 endpoint for enhanced features
   # Jupiter API key — sent as x-api-key on all Jupiter requests. Required in Live
   # trade mode (keyless access is being phased out; legacy rate limits expire 2026-06-30).
   # Set via env: CHIMERA_JUPITER__API_KEY (not stored in this file).
-  # Use the Swap v2 self-sign endpoint (/swap/v2/build) instead of deprecated v1
-  # Metis (/swap + /quote). Off by default until devnet-validated.
-  use_swap_v2: false
+  # Use the Swap v2 Meta-Aggregator with RTSE, Jupiter Beam, and gasless swaps enabled.
+  use_swap_v2: true  # Enabled for optimal routing and MEV protection
   # devnet_simulation_mode: Set via CHIMERA_JUPITER__DEVNET_SIMULATION_MODE env var
 
 queue:

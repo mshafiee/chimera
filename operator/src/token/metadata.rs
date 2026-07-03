@@ -68,24 +68,11 @@ pub struct TokenMetadataFetcher {
 impl TokenMetadataFetcher {
     /// Create a new metadata fetcher
     pub fn new(rpc_url: &str) -> Self {
-        Self::new_with_rate_limiter(rpc_url, None)
-    }
-
-    /// Create a new metadata fetcher with optional rate limiter
-    pub fn new_with_rate_limiter(rpc_url: &str, rate_limiter: Option<Arc<RateLimiter>>) -> Self {
-        Self::new_with_rate_limiter_and_jupiter(
-            rpc_url,
-            rate_limiter,
-            "https://api.jup.ag/swap/v1".to_string(),
-        )
+        Self::new_with_rate_limiter_and_jupiter(rpc_url, None, "https://api.jup.ag/swap/v2".to_string())
     }
 
     /// Create a new metadata fetcher with optional rate limiter and Jupiter API URL
-    pub fn new_with_rate_limiter_and_jupiter(
-        rpc_url: &str,
-        rate_limiter: Option<Arc<RateLimiter>>,
-        jupiter_api_url: String,
-    ) -> Self {
+    pub fn new_with_rate_limiter_and_jupiter(rpc_url: &str, rate_limiter: Option<Arc<RateLimiter>>, jupiter_api_url: String) -> Self {
         let rpc_client = RpcClient::new_with_timeout(rpc_url.to_string(), Duration::from_secs(10));
         let rpc_client_arc = Arc::new(rpc_client);
 
@@ -112,19 +99,7 @@ impl TokenMetadataFetcher {
 
     /// Create from an existing RPC client
     pub fn with_client(rpc_client: Arc<RpcClient>) -> Self {
-        Self::with_client_and_rate_limiter(rpc_client, None)
-    }
-
-    /// Create from an existing RPC client with optional rate limiter
-    pub fn with_client_and_rate_limiter(
-        rpc_client: Arc<RpcClient>,
-        rate_limiter: Option<Arc<RateLimiter>>,
-    ) -> Self {
-        Self::with_client_rate_limiter_and_jupiter(
-            rpc_client,
-            rate_limiter,
-            "https://api.jup.ag/swap/v1".to_string(),
-        )
+        Self::with_client_rate_limiter_and_jupiter(rpc_client, None, "https://api.jup.ag/swap/v2".to_string())
     }
 
     /// Create from an existing RPC client with optional rate limiter and Jupiter API URL

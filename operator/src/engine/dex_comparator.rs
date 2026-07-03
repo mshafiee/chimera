@@ -77,7 +77,7 @@ pub struct DexComparator {
 impl DexComparator {
     /// Create with the default Jupiter API URL and candidate DEX labels.
     pub fn new() -> Result<Self, String> {
-        Self::with_jupiter_api_url("https://api.jup.ag/swap/v1".to_string())
+        Self::with_jupiter_api_url("https://api.jup.ag/swap/v2".to_string())
     }
 
     /// Create with a custom Jupiter API URL and default candidate DEX labels.
