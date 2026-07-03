@@ -1,8 +1,4 @@
-# config/config.yaml
+# Chimera Configuration for Paper Trading
 
-rpc:
-  primary_provider: "helius"
-  # SAFETY: Developer Plan limit is 50 RPS.
-  # We set to 40 to leave buffer for system overhead.
-  rate_limit_per_second: 40 
-  use_enriched_api: true # Use Helius HTTP API for history (saves credits)
+# Trade mode: paper, devnet, or live
+trade_mode: paper

@@ -423,14 +423,23 @@ impl SignalProcessor {
 
         match result {
             Ok(outcome) => {
+                let is_paper_trade = outcome.signature.starts_with("simulated_");
+
                 tracing::info!(
                     trade_uuid = %trade_uuid,
                     tx_signature = %outcome.signature,
-                    "Trade executed successfully"
+                    is_paper_trade = is_paper_trade,
+                    action = ?signal.payload.action,
+                    "Trade executed successfully - checking position lifecycle"
                 );
 
                 // Handle BUY signals — activate trade and open position
                 if signal.payload.action == Action::Buy {
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        is_paper_trade = is_paper_trade,
+                        "BUY signal detected - opening position"
+                    );
                     let fill_price_sol = outcome.fill_price_sol_per_token;
                     let sol_price_usd = self
                         .price_cache
@@ -484,6 +493,12 @@ impl SignalProcessor {
                         .await
                     {
                         Ok(()) => {
+                            tracing::info!(
+                                trade_uuid = %trade_uuid,
+                                is_paper_trade = is_paper_trade,
+                                entry_price = %entry_price,
+                                "Position opened successfully for BUY signal"
+                            );
                             if let Some(token_amount) = outcome.token_amount {
                                 if let Err(e) = self
                                     .db
@@ -530,6 +545,14 @@ impl SignalProcessor {
                         }
                     }
                 } else if signal.payload.action == Action::Sell {
+                    let is_paper_trade = outcome.signature.starts_with("simulated_");
+
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        is_paper_trade = is_paper_trade,
+                        "SELL signal detected - closing position"
+                    );
+
                     let fill_price_sol = outcome.fill_price_sol_per_token;
                     let sol_price_usd = self
                         .price_cache
@@ -593,6 +616,14 @@ impl SignalProcessor {
                         }
                     };
 
+                    tracing::info!(
+                        trade_uuid = %trade_uuid,
+                        is_paper_trade = is_paper_trade,
+                        exit_price = %exit_price,
+                        exit_fraction = %exit_fraction,
+                        "Calling close_position_full for SELL signal"
+                    );
+
                     if let Err(e) = self
                         .db
                         .close_position_full(
@@ -608,6 +639,12 @@ impl SignalProcessor {
                         .await
                     {
                         tracing::error!(error = %e, "Failed to close position");
+                    } else {
+                        tracing::info!(
+                            trade_uuid = %trade_uuid,
+                            is_paper_trade = is_paper_trade,
+                            "Position closed successfully for SELL signal"
+                        );
                     }
 
                     if let Err(e) = self
