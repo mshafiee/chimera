@@ -306,6 +306,9 @@ pub struct CircuitBreakerConfig {
     /// Cooldown period in minutes after circuit trips
     #[serde(default = "default_cooldown")]
     pub cooldown_minutes: u32,
+    /// Maximum consecutive Jupiter API failures before halting
+    #[serde(default = "default_max_jupiter_failures")]
+    pub max_jupiter_failures: u32,
 }
 
 fn default_max_loss() -> Decimal {
@@ -326,6 +329,10 @@ fn default_portfolio_stop_loss_percent() -> Decimal {
 
 fn default_cooldown() -> u32 {
     30
+}
+
+fn default_max_jupiter_failures() -> u32 {
+    10  // Allow up to 10 consecutive Jupiter API failures before halting
 }
 
 /// Strategy allocation configuration
@@ -492,10 +499,11 @@ pub struct JupiterConfig {
     /// Reject V0 transactions entirely (fallback if reconstruction fails)
     #[serde(default = "default_reject_v0")]
     pub reject_v0_transactions: bool,
-    /// Use the Swap v2 self-sign endpoint (`/swap/v2/build`) instead of the
+    /// Use the Swap v2 Meta-Aggregator (`/order`) instead of the
     /// deprecated v1 Metis endpoint (`/swap/v1/quote` + `/swap/v1/swap`).
     ///
-    /// Flag-gated so v2 can be validated on devnet before flipping the default.
+    /// v2 provides RTSE, Jupiter Beam (MEV protection), gasless support,
+    /// and multi-router competition (Metis, JupiterZ RFQ, Dflow, OKX).
     #[serde(default = "default_use_swap_v2")]
     pub use_swap_v2: bool,
     /// Compare per-DEX routes (via Jupiter `dexes=`) against the aggregate quote
@@ -504,6 +512,18 @@ pub struct JupiterConfig {
     /// isn't needed.
     #[serde(default = "default_multi_dex_comparison")]
     pub multi_dex_comparison: bool,
+    /// Enable RTSE (Real-Time Slippage Estimation) for automatic slippage
+    /// optimization based on current market conditions. Only applies to v2.
+    #[serde(default = "default_enable_rtse")]
+    pub enable_rtse: bool,
+    /// Comma-separated list of routers to exclude (e.g., "metis,jupiterz,dflow,okx").
+    /// Only applies to v2 Meta-Aggregator.
+    #[serde(default)]
+    pub exclude_routers: Option<String>,
+    /// Comma-separated list of DEXes to exclude from Metis router
+    /// (e.g., "Raydium,Orca+V2,Meteora+DLMM"). Only affects Metis, not other routers.
+    #[serde(default)]
+    pub exclude_dexes: Option<String>,
 }
 
 impl std::fmt::Debug for JupiterConfig {
@@ -549,6 +569,14 @@ fn default_use_swap_v2() -> bool {
 
 fn default_multi_dex_comparison() -> bool {
     true
+}
+
+fn default_enable_rtse() -> bool {
+    true  // Enable RTSE by default for better slippage protection
+}
+
+fn default_jupiter_api_url() -> String {
+    "https://api.jup.ag/swap/v2".to_string()  // Updated to v2
 }
 
 /// Queue configuration

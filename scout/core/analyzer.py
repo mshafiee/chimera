@@ -252,7 +252,7 @@ class PortfolioTracker:
         # Jupiter Price API supports bulk requests via comma-separated IDs
         # Max ~100 tokens per request to avoid URL length issues
         batch_size = 100
-        base_url = "https://lite-api.jup.ag/price/v2"
+        base_url = "https://api.jup.ag/price/v3"  # Migrated from lite-api.jup.ag/price/v2
         
         for i in range(0, len(token_addresses), batch_size):
             batch = token_addresses[i:i + batch_size]

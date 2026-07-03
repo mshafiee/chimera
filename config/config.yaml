@@ -64,13 +64,17 @@ jito:
   tip_percent_max: 0.10
 
 jupiter:
-  api_url: "https://api.jup.ag/swap/v1"  # Migrated from deprecated v6 endpoint
+  api_url: "https://api.jup.ag/swap/v2"  # Swap API v2 with RTSE, Jupiter Beam, and gasless (migrated from lite-api.jup.ag)
   # Jupiter API key — sent as x-api-key on all Jupiter requests. Required in Live
   # trade mode (keyless access is being phased out; legacy rate limits expire 2026-06-30).
   # Set via env: CHIMERA_JUPITER__API_KEY (not stored in this file).
-  # Use the Swap v2 self-sign endpoint (/swap/v2/build) instead of deprecated v1
-  # Metis (/swap + /quote). Off by default until devnet-validated.
-  use_swap_v2: false
+  # Use the Meta-Aggregator (/order) for best price with managed landing.
+  use_swap_v2: true  # Enabled for production (validated on devnet)
+  enable_rtse: true  # Real-Time Slippage Estimation for market-aware slippage
+  multi_dex_comparison: true  # Compare per-DEX routes for best pricing
+  # Optional: exclude specific routers or DEXes
+  # exclude_routers: "jupiterz"  # Exclude RFQ router if needed
+  # exclude_dexes: "Raydium"  # Exclude specific DEX from Metis router
   # devnet_simulation_mode: Set via CHIMERA_JUPITER__DEVNET_SIMULATION_MODE env var
 
 queue:

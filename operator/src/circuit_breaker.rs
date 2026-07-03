@@ -85,6 +85,12 @@ pub enum TripReason {
         loss_pct: Decimal,
         threshold: Decimal,
     },
+    /// Jupiter API failures exceeded threshold
+    JupiterApiFailures {
+        consecutive_failures: u32,
+        threshold: u32,
+        error_type: String,
+    },
     /// Manual trip by admin
     Manual { reason: String },
 }
@@ -129,6 +135,17 @@ impl std::fmt::Display for TripReason {
                     threshold.round_dp(2)
                 )
             }
+            Self::JupiterApiFailures {
+                consecutive_failures,
+                threshold,
+                error_type,
+            } => {
+                write!(
+                    f,
+                    "{} consecutive Jupiter API failures (type: {}) exceeded threshold {}",
+                    consecutive_failures, error_type, threshold
+                )
+            }
             Self::Manual { reason } => write!(f, "Manual: {}", reason),
         }
     }
@@ -140,6 +157,10 @@ struct InternalState {
     tripped_at: Option<DateTime<Utc>>,
     trip_reason: Option<TripReason>,
     last_check: Option<DateTime<Utc>>,
+    /// Consecutive Jupiter API failures
+    jupiter_failure_count: u32,
+    /// Last Jupiter API failure type
+    last_jupiter_error: Option<String>,
 }
 
 /// Circuit Breaker
@@ -192,6 +213,8 @@ impl CircuitBreaker {
                 tripped_at: None,
                 trip_reason: None,
                 last_check: None,
+                jupiter_failure_count: 0,
+                last_jupiter_error: None,
             })),
             check_interval: Duration::seconds(5), // Reduced from 30s to 5s for faster loss detection
             ws_state,
@@ -675,6 +698,70 @@ impl CircuitBreaker {
         }
     }
 }
+
+    /// Record a Jupiter API failure and check if threshold is exceeded
+    ///
+    /// This should be called when Jupiter API calls fail. If consecutive failures
+    /// exceed the threshold, the circuit breaker will trip automatically.
+    #[tracing::instrument(skip(self))]
+    pub fn record_jupiter_failure(&self, error_type: String) -> AppResult<bool> {
+        let mut state = self.state.write();
+
+        // Increment failure counter
+        state.jupiter_failure_count += 1;
+        state.last_jupiter_error = Some(error_type.clone());
+
+        let current_failures = state.jupiter_failure_count;
+        let threshold = self.config.max_jupiter_failures;
+
+        tracing::warn!(
+            jupiter_failures = current_failures,
+            threshold = threshold,
+            error_type = %error_type,
+            "Jupiter API failure recorded"
+        );
+
+        // Check if threshold exceeded
+        if current_failures >= threshold {
+            drop(state); // Release lock before calling trip
+            let reason = TripReason::JupiterApiFailures {
+                consecutive_failures: current_failures,
+                threshold,
+                error_type,
+            };
+
+            // Trip the circuit breaker (will re-acquire lock)
+            let rt = tokio::runtime::Handle::try_current()
+                .map_err(|e| AppError::Internal(format!("No tokio runtime: {}", e)))?;
+
+            rt.block_on(async {
+                self.trip(reason).await
+            })?;
+
+            return Ok(true); // Circuit breaker was tripped
+        }
+
+        Ok(false) // Circuit breaker not tripped
+    }
+
+    /// Reset Jupiter failure counter (called on successful Jupiter API call)
+    #[tracing::instrument(skip(self))]
+    pub fn reset_jupiter_failures(&self) {
+        let mut state = self.state.write();
+        if state.jupiter_failure_count > 0 {
+            tracing::info!(
+                previous_failures = state.jupiter_failure_count,
+                "Jupiter API failures cleared after successful call"
+            );
+        }
+        state.jupiter_failure_count = 0;
+        state.last_jupiter_error = None;
+    }
+
+    /// Get current Jupiter failure count
+    pub fn get_jupiter_failure_count(&self) -> u32 {
+        self.state.read().jupiter_failure_count
+    }
 
 /// Circuit breaker status for API responses
 #[derive(Debug, Clone)]

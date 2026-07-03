@@ -219,7 +219,10 @@ impl DexComparator {
         Ok(selection)
     }
 
-    /// Query Jupiter `/quote`, optionally restricted to a single DEX via `dexes=`.
+    /// Query Jupiter `/quote` (v1) or `/order` (v2), optionally restricted to a single DEX via `dexes=`.
+    ///
+    /// For v2, uses the `/order` endpoint which provides better pricing with all routers competing.
+    /// For v1 fallback, uses the traditional `/quote` endpoint.
     async fn query_jupiter(
         &self,
         token_in: &str,
@@ -228,11 +231,24 @@ impl DexComparator {
         slippage_bps: u16,
         dexes: Option<&str>,
     ) -> AppResult<RouteSelection> {
+        // Determine if we're using v2 API (includes /v2 in URL)
+        let use_v2 = self.jupiter_api_url.contains("/v2") || self.jupiter_api_url.contains("swap/v2");
+
+        let (endpoint, quote_key) = if use_v2 {
+            // v2 uses /order endpoint for Meta-Aggregator
+            ("/order", "transaction")
+        } else {
+            // v1 uses /quote endpoint
+            ("/quote", "swapTransaction")
+        };
+
         let mut url = format!(
-            "{}/quote?inputMint={}&outputMint={}&amount={}&slippageBps={}",
-            self.jupiter_api_url, token_in, token_out, amount_lamports, slippage_bps
+            "{}{}?inputMint={}&outputMint={}&amount={}&slippageBps={}",
+            self.jupiter_api_url, endpoint, token_in, token_out, amount_lamports, slippage_bps
         );
-        if let Some(label) = dexes {
+
+        // Add DEX restriction for v1 (v2 handles this differently via excludeDexes)
+        if let Some(label) = dexes && !use_v2 {
             url.push_str("&dexes=");
             url.push_str(label);
         }
@@ -242,17 +258,38 @@ impl DexComparator {
             .await
             .map_err(|e| AppError::Internal(format!("Jupiter API error: {}", e)))?;
 
-        if !response.status().is_success() {
-            return Err(AppError::Internal(format!(
-                "Jupiter API returned error: {}",
-                response.status()
-            )));
-        }
-
+        let status = response.status();
         let quote: serde_json::Value = response
             .json()
             .await
             .map_err(|e| AppError::Internal(format!("Failed to parse Jupiter response: {}", e)))?;
+
+        if !status.is_success() {
+            // Log more details for debugging
+            let error_msg = quote.get("error")
+                .and_then(|v| v.as_str())
+                .or_else(|| quote.get("errorMessage").and_then(|v| v.as_str()))
+                .unwrap_or("Unknown Jupiter API error");
+
+            tracing::warn!(
+                url = %url,
+                status = %status,
+                error = %error_msg,
+                dexes = ?dexes,
+                "Jupiter API request failed"
+            );
+
+            // Return error for critical failures, but allow missing DEX labels to pass silently
+            if dexes.is_some() && (status.as_u16() == 400 || status.as_u16() == 404) {
+                // Silently skip unsupported DEX labels (Jupiter returns non-2xx for unrecognized labels)
+                return Err(AppError::Internal(format!("DEX label not supported: {}", dexes.unwrap())));
+            }
+
+            return Err(AppError::Internal(format!(
+                "Jupiter API returned error: {} - {}",
+                status, error_msg
+            )));
+        }
 
         // Validate it is a real quote.
         if out_amount(&quote) == 0 {
@@ -263,10 +300,8 @@ impl DexComparator {
 
         let selected_dex = dexes.unwrap_or("Jupiter").to_string();
 
-        // Real per-route fee: sum of routePlan[].swapInfo.feeAmount (raw token
-        // units). Direction-aware — the trade value in SOL is used as the
-        // denominator so the fee/slippage are correctly SOL-denominated for
-        // both BUY (SOL→token) and SELL (token→SOL).
+        // Real per-route fee: sum of routePlan[].swapInfo.feeAmount (raw token units).
+        // Works for both v1 and v2 responses.
         let fee_raw: u64 = quote
             .get("routePlan")
             .and_then(|rp| rp.as_array())
@@ -311,15 +346,19 @@ impl DexComparator {
             Decimal::ZERO
         };
 
-        // priceImpactPct is a percent string (e.g. "1.5" = 1.5%) — convert to a
-        // fraction before scaling by the SOL trade value. (P1-6: previously the
-        // comparator divided by 100 inconsistently.)
-        let slippage_fraction = quote
-            .get("priceImpactPct")
-            .and_then(|v| v.as_str())
-            .and_then(|s| Decimal::from_str(s).ok())
-            .map(|pct| pct / Decimal::from(100))
-            .unwrap_or(Decimal::ZERO);
+        // Price impact handling: support both v1 and v2 formats
+        // v1: priceImpactPct as string (e.g., "1.5" = 1.5%)
+        // v2: priceImpact as decimal (e.g., -0.015 = -1.5%)
+        let slippage_fraction = if let Some(pct_str) = quote.get("priceImpactPct").and_then(|v| v.as_str()) {
+            // v1 format: percentage string
+            Decimal::from_str(pct_str).ok().map(|pct| pct / Decimal::from(100))
+        } else if let Some(pct_decimal) = quote.get("priceImpact").and_then(|v| v.as_f64()) {
+            // v2 format: decimal (already a fraction, just need absolute value)
+            Some(Decimal::from_f64(pct_decimal.abs()).unwrap_or(Decimal::ZERO))
+        } else {
+            None
+        }.unwrap_or(Decimal::ZERO);
+
         let slippage_sol = trade_value_sol * slippage_fraction;
         let total_cost_sol = fee_sol + slippage_sol;
 

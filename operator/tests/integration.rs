@@ -55,3 +55,8 @@ mod execution_proof_tests;
 
 #[path = "integration/parallel_execution_test.rs"]
 mod parallel_execution_test;
+
+// ── Jupiter Integration Tests ─────────────────────────────────────────────────────
+
+#[path = "integration/jupiter_v2_integration_tests.rs"]
+mod jupiter_v2_integration_tests;

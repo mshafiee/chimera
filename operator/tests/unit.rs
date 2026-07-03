@@ -57,3 +57,8 @@ mod signal_pipeline_tests;
 
 #[path = "unit/trade_mode_tests.rs"]
 mod trade_mode_tests;
+
+// ── Jupiter Error Handling Unit Tests ───────────────────────────────────────────
+
+#[path = "unit/jupiter_error_handling_tests.rs"]
+mod jupiter_error_handling_tests;

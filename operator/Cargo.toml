@@ -75,6 +75,7 @@ futures-util = "0.3"
 
 # HTTP Client for Telegram notifications and RPC
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+urlencoding = "2.1"
 hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = "0.27"
 
@@ -106,3 +107,4 @@ tower = { version = "0.4", features = ["util"] }
 tokio = { version = "1.37", features = ["test-util"] }
 mockall = "0.13"
 rstest = "0.21"
+async-trait = "0.1"

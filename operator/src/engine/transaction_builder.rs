@@ -6,6 +6,7 @@
 use crate::config::AppConfig;
 use crate::engine::dex_comparator::DexComparator;
 use crate::error::AppResult;
+use crate::jupiter_error_handling::{execute_with_jupiter_error_handling, RetryConfig};
 use crate::models::{Action, Signal};
 use crate::vault::VaultSecrets;
 use rust_decimal::prelude::*;
@@ -28,6 +29,8 @@ pub struct TransactionBuilder {
     http_client: reqwest::Client,
     /// DEX comparator for dynamic slippage estimation
     dex_comparator: DexComparator,
+    /// Optional circuit breaker for Jupiter failure tracking
+    circuit_breaker: Option<Arc<crate::circuit_breaker::CircuitBreaker>>,
 }
 
 /// Built transaction ready for signing and submission
@@ -111,6 +114,15 @@ pub struct QuoteResult {
 impl TransactionBuilder {
     /// Create a new transaction builder
     pub fn new(rpc_client: Arc<RpcClient>, config: Arc<AppConfig>) -> AppResult<Self> {
+        Self::with_circuit_breaker(rpc_client, config, None)
+    }
+
+    /// Create a new transaction builder with circuit breaker integration
+    pub fn with_circuit_breaker(
+        rpc_client: Arc<RpcClient>,
+        config: Arc<AppConfig>,
+        circuit_breaker: Option<Arc<crate::circuit_breaker::CircuitBreaker>>,
+    ) -> AppResult<Self> {
         // Create HTTP client with proper TLS and timeout configuration
         let http_client = match reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
@@ -146,6 +158,7 @@ impl TransactionBuilder {
             config,
             http_client,
             dex_comparator,
+            circuit_breaker,
         })
     }
 
@@ -242,19 +255,51 @@ impl TransactionBuilder {
             }
         };
 
-        // Get swap transaction from Jupiter Swap API.
-        // P1-5: the route selection performs the (single) multi-DEX comparison
-        // and returns the winning quote, which is reused directly as the swap
-        // payload — no second quote round-trip.
-        let swap_response = self
-            .get_jupiter_swap(
+        // Get swap transaction from Jupiter Swap API with enhanced error handling.
+        // Uses retry logic with exponential backoff for resilient Jupiter API calls.
+        let retry_config = RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 100,
+            max_delay_ms: 5000,
+            backoff_multiplier: 2.0,
+            jitter_factor: 0.1,
+        };
+
+        let swap_response = execute_with_jupiter_error_handling(
+            || self.get_jupiter_swap(
                 input_mint,
                 output_mint,
                 amount,
                 wallet_keypair.pubkey(),
                 slippage_bps,
-            )
-            .await?;
+            ),
+            &retry_config,
+            "Jupiter swap API call"
+        ).await;
+
+        // Track Jupiter API failures/success with circuit breaker
+        match &swap_response {
+            Ok(_) => {
+                // Reset failure counter on success
+                if let Some(cb) = &self.circuit_breaker {
+                    cb.reset_jupiter_failures();
+                }
+            }
+            Err(e) => {
+                // Record failure with circuit breaker
+                if let Some(cb) = &self.circuit_breaker {
+                    let error_type = format!("swap_error: {}", e);
+                    if cb.record_jupiter_failure(error_type).unwrap_or(false) {
+                        // Circuit breaker was tripped, return with circuit breaker error
+                        return Err(AppError::CircuitBreaker(
+                            "Jupiter API failures exceeded threshold - trading halted".to_string()
+                        ));
+                    }
+                }
+            }
+        };
+
+        swap_response?
 
         // Extract quote-derived fields before consuming swap_response
         let price_impact_pct = swap_response.price_impact_pct;
@@ -476,10 +521,197 @@ impl TransactionBuilder {
 
     /// Get swap transaction from Jupiter Swap API.
     ///
-    /// Performs the multi-DEX route comparison (single round of Jupiter quotes,
-    /// reused for the swap payload) and posts the winning quote to `/swap`
-    /// (v1 Metis) or `/swap/v2/build` (v2 self-sign) depending on config.
+    /// For v2: Uses Meta-Aggregator `/order` endpoint with all routers competing
+    /// (Metis, JupiterZ RFQ, Dflow, OKX) for best price. Includes RTSE, Jupiter Beam,
+    /// and gasless support.
+    ///
+    /// For v1 fallback: Performs multi-DEX route comparison and posts winning quote
+    /// to `/swap` (v1 Metis).
     async fn get_jupiter_swap(
+        &self,
+        input_mint: Pubkey,
+        output_mint: Pubkey,
+        amount: u64,
+        user_public_key: Pubkey,
+        slippage_bps: u16,
+    ) -> AppResult<JupiterSwapResponse> {
+        if self.config.jupiter.use_swap_v2 {
+            // v2 Meta-Aggregator: single `/order` call with all routers competing
+            self.get_jupiter_v2_order(input_mint, output_mint, amount, user_public_key, slippage_bps).await
+        } else {
+            // v1 fallback: multi-DEX comparison + swap
+            self.get_jupiter_v1_swap(input_mint, output_mint, amount, user_public_key, slippage_bps).await
+        }
+    }
+
+    /// Get swap transaction using Jupiter v2 Meta-Aggregator `/order` endpoint.
+    ///
+    /// This provides the best price as all routers compete (Metis, JupiterZ RFQ, Dflow, OKX).
+    /// Includes RTSE (Real-Time Slippage Estimation), Jupiter Beam for MEV protection,
+    /// and automatic gasless support.
+    async fn get_jupiter_v2_order(
+        &self,
+        input_mint: Pubkey,
+        output_mint: Pubkey,
+        amount: u64,
+        user_public_key: Pubkey,
+        slippage_bps: u16,
+    ) -> AppResult<JupiterSwapResponse> {
+        // Determine if we should use RTSE (Real-Time Slippage Estimation)
+        // RTSE automatically prioritizes slippage-protected routes
+        let slippage_param = if self.config.jupiter.enable_rtse {
+            "rtse"  // Let Jupiter determine optimal slippage based on market conditions
+        } else {
+            &slippage_bps.to_string()
+        };
+
+        // Build v2 /order request
+        let url = format!("{}/order", self.config.jupiter.api_url.trim_end_matches('/'));
+
+        let mut request_params = vec![
+            ("inputMint", input_mint.to_string()),
+            ("outputMint", output_mint.to_string()),
+            ("amount", amount.to_string()),
+            ("taker", user_public_key.to_string()),
+            ("slippageBps", slippage_param.to_string()),
+            ("swapMode", "ExactIn".to_string()),
+        ];
+
+        // Add optional routing parameters
+        if self.config.jupiter.exclude_routers.is_some() {
+            request_params.push(("excludeRouters", self.config.jupiter.exclude_routers.clone().unwrap()));
+        }
+        if self.config.jupiter.exclude_dexes.is_some() {
+            request_params.push(("excludeDexes", self.config.jupiter.exclude_dexes.clone().unwrap()));
+        }
+
+        tracing::debug!(
+            url = %url,
+            input_mint = %input_mint,
+            output_mint = %output_mint,
+            amount = amount,
+            slippage_bps = %slippage_param,
+            "Requesting Jupiter v2 /order"
+        );
+
+        // Build URL with parameters
+        let url_with_params = format!("{}/?{}", url, request_params
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
+            .collect::<Vec<_>>()
+            .join("&"));
+
+        let response = crate::jupiter::with_api_key(
+            self.http_client.get(&url_with_params),
+        )
+        .send()
+        .await
+        .map_err(|e| {
+            crate::error::AppError::Http(format!("Jupiter v2 /order request failed: {}", e))
+        })?;
+
+        let status = response.status();
+        let raw: serde_json::Value = response.json().await.map_err(|e| {
+            crate::error::AppError::Parse(format!("Failed to parse Jupiter v2 /order response: {}", e))
+        })?;
+
+        if !status.is_success() {
+            let error_msg = raw.get("error")
+                .and_then(|v| v.as_str())
+                .or_else(|| raw.get("errorMessage").and_then(|v| v.as_str()))
+                .unwrap_or("Unknown Jupiter API error");
+
+            tracing::error!(
+                status = %status,
+                error = %error_msg,
+                raw_response = ?raw,
+                "Jupiter v2 /order request failed"
+            );
+
+            return Err(crate::error::AppError::Http(format!(
+                "Jupiter v2 /order failed: {} - {}", status, error_msg
+            )));
+        }
+
+        // Parse v2 /order response
+        // v2 returns `transaction` (base64) or `quote` fields directly
+        let swap_transaction = raw.get("transaction")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::AppError::Parse(format!(
+                    "Jupiter v2 /order response missing 'transaction' field: {}",
+                    raw
+                ))
+            })?
+            .to_string();
+
+        // Extract price impact from v2 response (decimal, e.g., -0.001 = -0.1%)
+        let price_impact_pct: Option<Decimal> = raw.get("priceImpact")
+            .and_then(|v| v.as_f64())
+            .map(|p| Decimal::from_f64((p * 100.0).abs()).unwrap_or(Decimal::ZERO));
+
+        // Extract route information for logging
+        let router = raw.get("router")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let mode = raw.get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        tracing::info!(
+            router = %router,
+            mode = %mode,
+            price_impact_pct = ?price_impact_pct,
+            "Jupiter v2 /order successful"
+        );
+
+        // Compute fill price from amounts
+        let in_amount = raw.get("inAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| raw.get("inAmount").and_then(|v| v.as_u64()));
+
+        let out_amount = raw.get("outAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| raw.get("outAmount").and_then(|v| v.as_u64()));
+
+        let fill_price_lamports_per_base = match (in_amount, out_amount) {
+            (Some(inn), Some(out)) if out > 0 && inn > 0 => {
+                Some(Decimal::from(inn) / Decimal::from(out))
+            },
+            _ => None,
+        };
+
+        // Extract fee information from routePlan
+        let route_fee_sol: Option<Decimal> = raw.get("routePlan")
+            .and_then(|plan| plan.as_array())
+            .and_then(|steps| {
+                let mut total_fee = Decimal::ZERO;
+                for step in steps.iter().filter_map(|s| s.as_object()) {
+                    if let Some(swap_info) = step.get("swapInfo").and_then(|si| si.as_object()) {
+                        if let Some(fee_amount) = swap_info.get("feeAmount")
+                            .and_then(|f| f.as_str().and_then(|s| Decimal::from_str(s).ok())) {
+                            total_fee += fee_amount;
+                        }
+                    }
+                }
+                if total_fee > Decimal::ZERO {
+                    Some(total_fee / Decimal::from(LAMPORTS_PER_SOL))
+                } else {
+                    None
+                }
+            });
+
+        Ok(JupiterSwapResponse {
+            swap_transaction,
+            price_impact_pct,
+            fill_price_lamports_per_base,
+            route_fee_sol,
+        })
+    }
+
+    /// Get swap transaction using Jupiter v1 fallback (multi-DEX comparison + swap).
+    async fn get_jupiter_v1_swap(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,
@@ -509,29 +741,10 @@ impl TransactionBuilder {
 
         let selected_dex = route.selected_dex.as_str();
 
-        // Then get the swap transaction.
-        // P1-8: Swap v2 (`/swap/v2/build`, self-sign) replaces deprecated v1
-        // Metis (`/swap` + `/quote`). Flag-gated; v1 remains the default until
-        // devnet-validated.
-        let url = if self.config.jupiter.use_swap_v2 {
-            // `api_url` is the v1 base (e.g. "https://api.jup.ag/swap/v1"). The
-            // v2 build endpoint lives at the same host under "/swap/v2/build",
-            // so strip the "/swap/v1" suffix rather than appending to it
-            // (otherwise the path becomes ".../swap/v1/v2/build" and 404s).
-            let base = self
-                .config
-                .jupiter
-                .api_url
-                .trim_end_matches('/')
-                .strip_suffix("/swap/v1")
-                .unwrap_or(&self.config.jupiter.api_url);
-            format!("{}/swap/v2/build", base)
-        } else {
-            format!("{}/swap", self.config.jupiter.api_url)
-        };
+        // Then get the swap transaction using v1 Metis endpoint
+        let url = format!("{}/swap", self.config.jupiter.api_url);
 
-        // v2 rename differences: `quoteResponse`→`quoteResponse` (unchanged for
-        // build), response uses `transaction` instead of `swapTransaction`.
+        // v1 swap endpoint payload
         let payload = serde_json::json!({
             "quoteResponse": quote,
             "userPublicKey": user_public_key.to_string(),
@@ -539,16 +752,12 @@ impl TransactionBuilder {
             "dynamicComputeUnitLimit": true,
             "prioritizationFeeLamports": "auto",
             "asLegacyTransaction": true,
-            "options": {
-                "slippageBps": slippage_bps,
-            }
         });
 
         tracing::debug!(
             url = %url,
-            use_swap_v2 = self.config.jupiter.use_swap_v2,
             selected_dex = %selected_dex,
-            "Requesting Jupiter swap"
+            "Requesting Jupiter v1 swap (fallback)"
         );
 
         let response = crate::jupiter::with_api_key(
@@ -557,6 +766,51 @@ impl TransactionBuilder {
         .send()
         .await
         .map_err(|e| {
+            crate::error::AppError::Http(format!("Jupiter v1 swap request failed: {}", e))
+        })?;
+
+        let raw: serde_json::Value = response.json().await.map_err(|e| {
+            crate::error::AppError::Parse(format!("Failed to parse Jupiter v1 swap response: {}", e))
+        })?;
+
+        // v1 returns `swapTransaction`
+        let swap_transaction = raw
+            .get("swapTransaction")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::AppError::Parse(format!(
+                    "Jupiter v1 swap response missing 'swapTransaction': {}",
+                    raw
+                ))
+            })?
+            .to_string();
+
+        // Compute fill price from quote amounts
+        let in_amount = quote
+            .get("inAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| quote.get("inAmount").and_then(|v| v.as_u64()));
+
+        let out_amount = quote
+            .get("outAmount")
+            .and_then(|v| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()));
+
+        let fill_price_lamports_per_base = match (in_amount, out_amount) {
+            (Some(inn), Some(out)) if out > 0 && inn > 0 => {
+                Some(Decimal::from(inn) / Decimal::from(out))
+            },
+            _ => None,
+        };
+
+        Ok(JupiterSwapResponse {
+            swap_transaction,
+            price_impact_pct,
+            fill_price_lamports_per_base,
+            route_fee_sol: Some(route.fee_sol),
+        })
+    }
+
             crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e))
         })?;
 

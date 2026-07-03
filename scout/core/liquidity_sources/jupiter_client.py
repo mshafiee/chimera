@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import os
 from datetime import datetime
 from typing import Optional
 import aiohttp
@@ -9,14 +10,14 @@ from ..models import LiquidityData
 
 
 class JupiterLiquidityClient:
-    """Client for Jupiter Price API to fetch price and liquidity estimates."""
+    """Client for Jupiter Price API v3 to fetch price and liquidity estimates."""
 
-    def __init__(self, api_url: str = "https://lite-api.jup.ag/price", session: Optional[aiohttp.ClientSession] = None):
+    def __init__(self, api_url: str = "https://api.jup.ag/price", session: Optional[aiohttp.ClientSession] = None):
         """
         Initialize Jupiter client.
 
         Args:
-            api_url: Jupiter Price API URL
+            api_url: Jupiter Price API v3 URL (migrated from lite-api.jup.ag/price/v2)
             session: Optional aiohttp session (for connection pooling)
         """
         self.api_url = api_url
@@ -24,6 +25,8 @@ class JupiterLiquidityClient:
         self.last_request_time = 0.0
         self._session = session
         self._own_session = False
+        # Get API key from environment for authenticated requests
+        self.api_key = os.getenv("CHIMERA_JUPITER__API_KEY")
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -51,8 +54,8 @@ class JupiterLiquidityClient:
         """
         Get current price and liquidity estimate for a token.
 
-        Note: Jupiter Price API doesn't directly provide liquidity,
-        but we can use price data as a proxy indicator.
+        Note: Jupiter Price API v3 provides improved price accuracy and reliability.
+        Liquidity data is not directly available, so we use price as a proxy indicator.
 
         Args:
             token_address: Token mint address
@@ -62,15 +65,21 @@ class JupiterLiquidityClient:
         """
         await self._rate_limit()
 
-        url = f"{self.api_url}/v2"
+        # Use v3 endpoint for improved accuracy and reliability
+        url = f"{self.api_url}/v3"
         params = {"ids": token_address}
+
+        headers = {}
+        if self.api_key:
+            headers["x-api-key"] = self.api_key
 
         try:
             session = await self._get_session()
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 response.raise_for_status()
                 data = await response.json() or {}
 
+                # v3 response format: {"data": {"token_address": {"price": ...}}}
                 price_data = (
                     data.get("data", {})
                     .get(token_address, {})
@@ -92,17 +101,17 @@ class JupiterLiquidityClient:
                     price_usd=price_f,
                     volume_24h_usd=0.0,  # Not available from Jupiter
                     timestamp=datetime.utcnow(),
-                    source="jupiter",
+                    source="jupiter_v3",
                 )
 
         except aiohttp.ClientError as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"Jupiter API request failed: {e}")
+            logger.debug(f"Jupiter v3 API request failed: {e}")
         except (ValueError, KeyError, TypeError) as e:
             import logging
             logger = logging.getLogger(__name__)
-            logger.debug(f"Jupiter response parsing failed: {e}")
+            logger.debug(f"Jupiter v3 response parsing failed: {e}")
 
         return None
 
@@ -118,7 +127,7 @@ class JupiterLiquidityClient:
         if liq_data and liq_data.price_usd > 0:
             return liq_data.price_usd
         return None
-    
+
     async def close(self):
         """Public method to close session if we own it."""
         await self._close_session()

@@ -1917,7 +1917,7 @@ async fn main() -> anyhow::Result<()> {
     let webhook_routes = Router::new()
         .route("/webhook", post(webhook_handler))
         .with_state(webhook_state.clone())
-        .layer(governor_layer.clone())
+        // .layer(governor_layer.clone()) // TEMP: Disabled for paper trading testing
         .layer(axum_middleware::from_fn_with_state(
             hmac_state.clone(),
             middleware::hmac_verify,

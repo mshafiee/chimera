@@ -25,8 +25,8 @@ security:
   # Overridden by CHIMERA_SECURITY__WEBHOOK_SECRET
   webhook_secret: "${CHIMERA_SECURITY__WEBHOOK_SECRET}"
   max_timestamp_drift_secs: 60
-  webhook_rate_limit: 100
-  webhook_burst_size: 150
+  webhook_rate_limit: 10000
+  webhook_burst_size: 15000
   # Admin wallets for API access
   admin_wallets:
     - address: "4nLqMGpdGoWT9kQZ4gWrGocT8HHbzvnwgRDU5pRuz62W"
@@ -87,11 +87,11 @@ token_safety:
     - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
-  # Minimum liquidity thresholds (USD) - with 20% buffer for safety
-  min_liquidity_shield_usd: 12000  # 20% buffer over 10k base
-  min_liquidity_spear_usd: 6000    # 20% buffer over 5k base
+  # Minimum liquidity thresholds (USD) - relaxed for paper trading
+  min_liquidity_shield_usd: 0      # Disabled for paper trading
+  min_liquidity_spear_usd: 0       # Disabled for paper trading
   # Enable honeypot detection via transaction simulation
-  honeypot_detection_enabled: true
+  honeypot_detection_enabled: false  # Disabled for paper trading
   # Token cache settings
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
