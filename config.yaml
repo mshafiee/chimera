@@ -1,4 +1,177 @@
-# Chimera Configuration for Paper Trading
+# Chimera Operator Configuration
+# v1.0.0
 
-# Trade mode: paper, devnet, or live
-trade_mode: paper
+server:
+  host: "0.0.0.0"
+  port: 8080
+  request_timeout_ms: 30000
+
+rpc:
+  primary_provider: "helius"
+  # Override via CHIMERA_RPC__PRIMARY_URL env var
+  primary_url: "https://api.mainnet-beta.solana.com"
+  # Override via CHIMERA_RPC__FALLBACK_URL env var
+  fallback_url: "https://api.mainnet-beta.solana.com"
+  rate_limit_per_second: 40
+  timeout_ms: 2000
+  max_consecutive_failures: 3
+  functional_health_check: true   # Also probe getLatestBlockhash after getHealth to catch providers that return ok unconditionally
+
+database:
+  path: "data/chimera.db"
+  max_connections: 5
+
+security:
+  # Overridden by CHIMERA_SECURITY__WEBHOOK_SECRET
+  webhook_secret: "${CHIMERA_SECURITY__WEBHOOK_SECRET}"
+  max_timestamp_drift_secs: 60
+  webhook_rate_limit: 100
+  webhook_burst_size: 150
+  # Admin wallets for API access
+  admin_wallets:
+    - address: "4nLqMGpdGoWT9kQZ4gWrGocT8HHbzvnwgRDU5pRuz62W"
+      role: "admin"
+  # API keys for automated scripts
+  api_keys:
+    - key: "dev-admin-key"
+      role: "admin"
+
+circuit_breakers:
+  max_loss_24h_usd: 500
+  max_consecutive_losses: 5
+  max_drawdown_percent: 15
+  cooldown_minutes: 30
+
+strategy:
+  shield_percent: 70
+  spear_percent: 30
+  max_position_sol: 1.0
+  min_position_sol: 0.01
+  shield_signal_quality_threshold: 0.55
+  spear_signal_quality_threshold: 0.35
+  dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
+  shield_max_total_cost_percent: 0.05  # Rejects Shield trades if costs exceed 5% of trade size
+  spear_max_total_cost_percent: 0.08   # Rejects Spear trades if costs exceed 8% of trade size
+  slippage_fallback_small_percent: 0.005   # 0.5% slippage estimate for trades < threshold when Jupiter impact unavailable
+  slippage_fallback_large_percent: 0.01    # 1.0% slippage estimate for trades >= threshold
+  slippage_fallback_threshold_sol: 0.5     # SOL boundary between small/large for slippage fallback
+
+jito:
+  enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
+  tip_floor_sol: 0.001
+  tip_ceiling_sol: 0.01
+  tip_percentile: 50
+  tip_percent_max: 0.10
+
+jupiter:
+  api_url: "https://api.jup.ag/swap/v1"  # Migrated from deprecated v6 endpoint
+  # Jupiter API key — sent as x-api-key on all Jupiter requests. Required in Live
+  # trade mode (keyless access is being phased out; legacy rate limits expire 2026-06-30).
+  # Set via env: CHIMERA_JUPITER__API_KEY (not stored in this file).
+  # Use the Swap v2 self-sign endpoint (/swap/v2/build) instead of deprecated v1
+  # Metis (/swap + /quote). Off by default until devnet-validated.
+  use_swap_v2: false
+  # devnet_simulation_mode: Set via CHIMERA_JUPITER__DEVNET_SIMULATION_MODE env var
+
+queue:
+  capacity: 1000
+  load_shed_threshold_percent: 80
+
+token_safety:
+  # Known safe tokens (allowed to have freeze/mint authority)
+  freeze_authority_whitelist:
+    - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+    - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+    - "So11111111111111111111111111111111111111112"   # Wrapped SOL
+  mint_authority_whitelist:
+    - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
+    - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
+    - "So11111111111111111111111111111111111111112"   # Wrapped SOL
+  # Minimum liquidity thresholds (USD) - with 20% buffer for safety
+  min_liquidity_shield_usd: 12000  # 20% buffer over 10k base
+  min_liquidity_spear_usd: 6000    # 20% buffer over 5k base
+  # Enable honeypot detection via transaction simulation
+  honeypot_detection_enabled: true
+  # Token cache settings
+  cache_capacity: 1000
+  cache_ttl_seconds: 3600  # 1 hour
+  # Minimum token age in hours to allow a BUY signal (0 disables the check)
+  min_token_age_hours: 1.0
+  # When false (default), tokens not indexed by DexScreener are treated as $0 liquidity
+  # and BUY signals are rejected. Set true to re-enable the legacy supply-based heuristic
+  # for not-yet-indexed tokens (riskier — may allow very new/unlisted tokens through).
+  allow_unlisted_heuristic: false
+
+# Notification settings
+notifications:
+  telegram:
+    enabled: true
+    # Set via environment: TELEGRAM_BOT_TOKEN
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    # Set via environment: TELEGRAM_CHAT_ID  
+    chat_id: "${TELEGRAM_CHAT_ID}"
+    rate_limit_seconds: 60
+  rules:
+    circuit_breaker_triggered: true
+    wallet_drained: true
+    position_exited: true
+    wallet_promoted: true
+    daily_summary: true
+    rpc_fallback: true
+  daily_summary:
+    enabled: true
+    hour_utc: 20  # 8 PM UTC
+    minute: 0
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  helius_api_key: "${HELIUS_API_KEY}"
+  helius_webhook_url: "https://captivity-grunge-curtsy.ngrok-free.dev/api/v1/monitoring/helius-webhook"
+  webhook_registration_batch_size: 10
+  webhook_registration_delay_ms: 200
+  webhook_processing_rate_limit: 45
+  rpc_polling_enabled: true
+  rpc_poll_interval_secs: 8
+  rpc_poll_batch_size: 6
+  rpc_poll_rate_limit: 40
+  max_active_wallets: 20
+  auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
+  # Webhook lifecycle management
+  webhook_lifecycle:
+    auto_register_enabled: true    # Auto-register webhooks for promoted wallets
+    auto_cleanup_enabled: true     # Auto-cleanup webhooks for demoted wallets
+    health_check_interval_secs: 3600  # Health check every hour
+    stale_threshold_days: 7       # Cleanup webhooks inactive for 7+ days
+    max_registration_retries: 3   # Retry failed registrations up to 3 times
+    helius_reconciliation_enabled: true  # Check Helius dashboard and clean up unprofitable webhooks
+    helius_delete_orphaned: true   # Delete webhooks for wallets that don't meet profitability criteria
+    helius_dry_run: false          # Log only, don't delete (set to true for testing)
+
+# Profit management configuration
+profit_management:
+  targets: [25, 50, 100, 200]  # Percentage targets
+  tiered_exit_percent: 25       # Sell 25% at each target
+  trailing_stop_activation: 30  # Activate after +30%
+  trailing_stop_distance: 20    # -20% from peak
+  hard_stop_loss: -25           # -25% max loss; allows high-WQS wallets their intended -20% dynamic stop
+  time_exit_hours: 24           # Exit profitable positions after 24h
+  wick_protection_secs: 30      # Grace period after entry before stop-loss can fire (covers Solana confirmation delays)
+
+# Position sizing configuration
+position_sizing:
+  base_size_sol: 0.1
+  max_size_sol: 2.0
+  min_size_sol: 0.02
+  consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
+  max_concurrent_positions: 5
+  use_kelly_sizing: true   # Kelly Criterion sizing enabled
+  total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
+  off_hours_size_multiplier: 0.5  # 50% position size during 02:00–06:00 UTC (wider spreads, lower liquidity)
+
+# MEV protection configuration
+mev_protection:
+  always_use_jito: true
+  exit_tip_sol: 0.0055  # Reduced by 20% from 0.007
+  consensus_tip_sol: 0.0024  # Reduced by 20% from 0.003
+  standard_tip_sol: 0.0012  # Reduced by 20% from 0.0015

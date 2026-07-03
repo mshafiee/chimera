@@ -298,11 +298,15 @@ impl CircuitBreaker {
             self.db.get_evaluation_data().await?;
 
         let total_capital = *self.total_capital_sol.read();
-        if total_capital > dec!(0.1) {
+        // Skip portfolio stop check for paper trading or zero/low capital scenarios
+        // Paper trading often uses test wallets with minimal or no capital
+        if total_capital > dec!(1.0) {
             let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
             let loss_threshold = -self.config.portfolio_stop_loss_percent;
-            if daily_loss_percent < loss_threshold {
+
+            // Only trip if we have actual losses (not just zero/no capital)
+            if daily_loss_percent < loss_threshold && daily_loss_percent != Decimal::ZERO {
                 return Ok(Some(TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs(),
                     threshold: self.config.portfolio_stop_loss_percent,
