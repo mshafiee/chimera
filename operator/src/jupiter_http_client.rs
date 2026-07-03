@@ -187,7 +187,8 @@ impl JupiterHttpClient {
         let status = self.get_health_status();
         let consecutive_failures = status.consecutive_failures;
 
-        let is_healthy = consecutive_failures < 5;
+        // Use same threshold as update_request_status for consistency
+        let is_healthy = consecutive_failures < 3;
 
         // Update health status
         let mut status_lock = self.health_status.write();
@@ -262,7 +263,7 @@ mod tests {
         assert!(client.is_ok(), "Should create client successfully");
 
         let client = client.unwrap();
-        let health = client.get_health_status().await;
+        let health = client.get_health_status();
 
         assert!(health.is_healthy, "New client should be healthy");
         assert_eq!(health.consecutive_failures, 0);
@@ -274,7 +275,7 @@ mod tests {
 
         // Record successful request
         client.update_request_status(true).await;
-        let health = client.get_health_status().await;
+        let health = client.get_health_status();
 
         assert_eq!(health.total_requests, 1);
         assert_eq!(health.successful_requests, 1);
@@ -286,13 +287,13 @@ mod tests {
         client.update_request_status(false).await;
         client.update_request_status(false).await;
 
-        let health = client.get_health_status().await;
+        let health = client.get_health_status();
         assert_eq!(health.consecutive_failures, 3);
         assert!(!health.is_healthy, "Should be unhealthy after 3 failures");
 
         // Reset health
         client.reset_health_status().await;
-        let health = client.get_health_status().await;
+        let health = client.get_health_status();
         assert!(health.is_healthy, "Should be healthy after reset");
         assert_eq!(health.consecutive_failures, 0);
     }
@@ -326,28 +327,26 @@ mod tests {
     }
 
     #[tokio::test]
-    fn test_connection_efficiency() {
+    async fn test_connection_efficiency() {
         let client = JupiterHttpClient::with_defaults().unwrap();
 
         // Initially no connections reused
         let efficiency = client.get_connection_efficiency();
         assert_eq!(efficiency, 0.0, "Initial efficiency should be 0");
 
-        // Simulate some connection reuses
+        // Simulate some requests and connection reuses
         for _ in 0..10 {
+            client.update_request_status(true).await;
             client.increment_connection_reuses();
         }
 
-        // After simulating total requests and connection reuses
-        let metrics = client.get_metrics();
-        *Arc::try_unwrap(metrics).unwrap().total_requests.lock().unwrap() = 20;
-
+        // After 10 requests with 10 connection reuses, efficiency should be 100%
         let efficiency = client.get_connection_efficiency();
-        assert_eq!(efficiency, 50.0, "Should be 50% reuse rate");
+        assert_eq!(efficiency, 100.0, "Should be 100% reuse rate when all requests reuse connections");
     }
 
     #[tokio::test]
-    fn test_default_config() {
+    async fn test_default_config() {
         let config = JupiterClientConfig::default();
 
         assert_eq!(config.max_idle_connections, 100);
@@ -370,9 +369,8 @@ mod tests {
         client.update_request_status(false).await;
         client.update_request_status(false).await;
         client.update_request_status(false).await;
-        client.update_request_status(false).await;
 
         let health = client.health_check().await.unwrap();
-        assert!(!health, "Should be unhealthy after 4 failures");
+        assert!(!health, "Should be unhealthy after 3 failures");
     }
 }
