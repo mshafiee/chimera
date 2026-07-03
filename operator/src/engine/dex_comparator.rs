@@ -248,9 +248,11 @@ impl DexComparator {
         );
 
         // Add DEX restriction for v1 (v2 handles this differently via excludeDexes)
-        if let Some(label) = dexes && !use_v2 {
-            url.push_str("&dexes=");
-            url.push_str(label);
+        if dexes.is_some() && !use_v2 {
+            if let Some(label) = dexes {
+                url.push_str("&dexes=");
+                url.push_str(label);
+            }
         }
 
         let response = crate::jupiter::with_api_key(self.http_client.get(&url))

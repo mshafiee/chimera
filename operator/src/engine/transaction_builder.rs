@@ -296,10 +296,9 @@ impl TransactionBuilder {
                         ));
                     }
                 }
+                return Err(e); // Re-throw the original error if circuit breaker didn't trip
             }
         };
-
-        swap_response?
 
         // Extract quote-derived fields before consuming swap_response
         let price_impact_pct = swap_response.price_impact_pct;
@@ -810,63 +809,11 @@ impl TransactionBuilder {
             route_fee_sol: Some(route.fee_sol),
         })
     }
+}
 
-            crate::error::AppError::Http(format!("Jupiter swap request failed: {}", e))
-        })?;
-
-        let raw: serde_json::Value = response.json().await.map_err(|e| {
-            crate::error::AppError::Parse(format!("Failed to parse Jupiter swap: {}", e))
-        })?;
-
-        // v2 returns `transaction`, v1 returns `swapTransaction`.
-        let swap_transaction = raw
-            .get("swapTransaction")
-            .or_else(|| raw.get("transaction"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                crate::error::AppError::Parse(format!(
-                    "Jupiter swap response missing swapTransaction/transaction: {}",
-                    raw
-                ))
-            })?
-            .to_string();
-
-        let mut swap_response = JupiterSwapResponse {
-            swap_transaction,
-            price_impact_pct: None,
-            fill_price_lamports_per_base: None,
-            route_fee_sol: Some(route.fee_sol),
-        };
-        swap_response.price_impact_pct = price_impact_pct;
-
-        // Compute fill price from quote amounts: lamports_in / base_units_out
-        swap_response.fill_price_lamports_per_base = {
-            let in_amount = quote
-                .get("inAmount")
-                .and_then(|v| v.as_str().and_then(|s: &str| s.parse::<u64>().ok()))
-                .or_else(|| quote.get("inAmount").and_then(|v| v.as_u64()));
-            let out_amount = quote
-                .get("outAmount")
-                .and_then(|v| v.as_str().and_then(|s: &str| s.parse::<u64>().ok()))
-                .or_else(|| quote.get("outAmount").and_then(|v| v.as_u64()));
-            match (in_amount, out_amount) {
-                (Some(inn), Some(out)) if out > 0 && inn > 0 => {
-                    let in_dec = Decimal::from(inn);
-                    let out_dec = Decimal::from(out);
-                    if output_mint.to_string() == crate::constants::mints::SOL {
-                        // SELL (TOKEN→SOL): out_amount is SOL lamports, in_amount is token base units
-                        Some(out_dec / in_dec)
-                    } else {
-                        // BUY (SOL→TOKEN): in_amount is SOL lamports, out_amount is token base units
-                        Some(in_dec / out_dec)
-                    }
-                }
-                _ => None,
-            }
-        };
-
-        Ok(swap_response)
-    }
+/// Jupiter quote response (v1 API format)
+/// We use serde_json::Value to handle the full response flexibly
+pub type JupiterQuote = serde_json::Value;
 
     /// Get a single (unrestricted) Jupiter quote. Used for paper/devnet price
     /// discovery where multi-DEX comparison is unnecessary.

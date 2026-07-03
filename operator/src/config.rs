@@ -551,10 +551,6 @@ impl std::fmt::Debug for JupiterConfig {
     }
 }
 
-fn default_jupiter_api_url() -> String {
-    "https://api.jup.ag/swap/v1".to_string()
-}
-
 fn default_reconstruct_v0() -> bool {
     true
 }
