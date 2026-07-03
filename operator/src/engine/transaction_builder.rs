@@ -4,8 +4,8 @@
 //! Supports both Jito bundles and standard TPU submission
 
 use crate::config::AppConfig;
-use crate::engine::dex_comparator::DexComparator;
-use crate::error::AppResult;
+use crate::engine::dex_comparator::{DexComparator, LAMPORTS_PER_SOL};
+use crate::error::{AppError, AppResult};
 use crate::jupiter_error_handling::{execute_with_jupiter_error_handling, RetryConfig};
 use crate::models::{Action, Signal};
 use crate::vault::VaultSecrets;
@@ -296,11 +296,12 @@ impl TransactionBuilder {
                         ));
                     }
                 }
-                return Err(e); // Re-throw the original error if circuit breaker didn't trip
+                return Err(AppError::Internal(format!("{}", e))); // Re-throw the original error if circuit breaker didn't trip
             }
         };
 
         // Extract quote-derived fields before consuming swap_response
+        let swap_response = swap_response?; // Unwrap the Result
         let price_impact_pct = swap_response.price_impact_pct;
         let fill_price_lamports_per_base = swap_response.fill_price_lamports_per_base;
         let route_fee_sol = swap_response.route_fee_sol;
@@ -809,11 +810,6 @@ impl TransactionBuilder {
             route_fee_sol: Some(route.fee_sol),
         })
     }
-}
-
-/// Jupiter quote response (v1 API format)
-/// We use serde_json::Value to handle the full response flexibly
-pub type JupiterQuote = serde_json::Value;
 
     /// Get a single (unrestricted) Jupiter quote. Used for paper/devnet price
     /// discovery where multi-DEX comparison is unnecessary.

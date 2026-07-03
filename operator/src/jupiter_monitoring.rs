@@ -310,13 +310,6 @@ impl JupiterMetrics {
         }
 
         self.jupiter_request_duration_seconds.observe(duration_secs);
-
-        // Record endpoint-specific duration
-        if let Some(endpoint_metric) = self.jupiter_request_duration_by_endpoint_seconds
-            .get_metric_with_label_values(&[endpoint])
-        {
-            endpoint_metric.observe(duration_secs);
-        }
     }
 
     /// Record a Jupiter API error
@@ -421,7 +414,7 @@ impl JupiterMetrics {
         let mut buffer = Vec::new();
         let encoder = prometheus::TextEncoder::new();
 
-        let result = self.registry.export(&encoder, &mut buffer);
+        let result = encoder.encode(&self.registry.gather(), &mut buffer);
         match result {
             Ok(_) => String::from_utf8(buffer).unwrap_or_else(|_| "Error encoding metrics".to_string()),
             Err(e) => format!("Error exporting metrics: {}", e),
@@ -432,29 +425,29 @@ impl JupiterMetrics {
     pub fn get_summary(&self) -> JupiterMetricsSummary {
         let custom_metrics = self.custom_metrics.read();
         JupiterMetricsSummary {
-            total_requests: self.jupiter_requests_total.get(),
-            successful_requests: self.jupiter_requests_success_total.get(),
-            failed_requests: self.jupiter_requests_failed_total.get(),
-            error_count: self.jupiter_errors_total.get(),
-            rate_limit_errors: self.jupiter_rate_limit_errors_total.get(),
-            timeout_errors: self.jupiter_timeout_errors_total.get(),
-            circuit_breaker_trips: self.jupiter_circuit_breaker_trips_total.get(),
-            consecutive_failures: self.jupiter_consecutive_failures.get(),
-            active_connections: self.jupiter_active_connections.get(),
-            idle_connections: self.jupiter_idle_connections.get(),
-            connection_reuses: self.jupiter_connection_reuses_total.get(),
+            total_requests: self.jupiter_requests_total.get() as i64,
+            successful_requests: self.jupiter_requests_success_total.get() as i64,
+            failed_requests: self.jupiter_requests_failed_total.get() as i64,
+            error_count: self.jupiter_errors_total.get() as i64,
+            rate_limit_errors: self.jupiter_rate_limit_errors_total.get() as i64,
+            timeout_errors: self.jupiter_timeout_errors_total.get() as i64,
+            circuit_breaker_trips: self.jupiter_circuit_breaker_trips_total.get() as i64,
+            consecutive_failures: self.jupiter_consecutive_failures.get() as i64,
+            active_connections: self.jupiter_active_connections.get() as i64,
+            idle_connections: self.jupiter_idle_connections.get() as i64,
+            connection_reuses: self.jupiter_connection_reuses_total.get() as i64,
             avg_response_time_ms: self.jupiter_avg_response_time_ms.get(),
             p95_response_time_ms: self.jupiter_p95_response_time_ms.get(),
             p99_response_time_ms: self.jupiter_p99_response_time_ms.get(),
-            rtse_usage: self.jupiter_rtse_usage_total.get(),
-            jupiter_beam_usage: self.jupiter_jupiter_beam_usage_total.get(),
-            gasless_usage: self.jupiter_gasless_swap_usage_total.get(),
-            v2_usage: self.jupiter_v2_usage_total.get(),
-            v1_usage: self.jupiter_v1_usage_total.get(),
-            cache_hits: self.jupiter_route_cache_hits_total.get(),
-            cache_misses: self.jupiter_route_cache_misses_total.get(),
+            rtse_usage: self.jupiter_rtse_usage_total.get() as i64,
+            jupiter_beam_usage: self.jupiter_jupiter_beam_usage_total.get() as i64,
+            gasless_usage: self.jupiter_gasless_swap_usage_total.get() as i64,
+            v2_usage: self.jupiter_v2_usage_total.get() as i64,
+            v1_usage: self.jupiter_v1_usage_total.get() as i64,
+            cache_hits: self.jupiter_route_cache_hits_total.get() as i64,
+            cache_misses: self.jupiter_route_cache_misses_total.get() as i64,
             quota_usage_percent: self.jupiter_quota_usage_percent.get(),
-            quota_remaining: self.jupiter_quota_remaining.get(),
+            quota_remaining: self.jupiter_quota_remaining.get() as i64,
             custom_metrics: custom_metrics.clone(),
         }
     }

@@ -105,7 +105,7 @@ impl JupiterError {
                 AppError::ServiceUnavailable(format!("Jupiter rate limit: {}", self.message))
             }
             JupiterErrorType::Authentication => {
-                AppError::Config(format!("Jupiter authentication failed: {}", self.message))
+                AppError::Internal(format!("Jupiter authentication failed: {}", self.message))
             }
             JupiterErrorType::BadRequest => {
                 AppError::Validation(format!("Jupiter bad request: {}", self.message))
@@ -193,7 +193,7 @@ where
                 return Ok(result);
             }
             Err(e) => {
-                last_error = Some(e.clone());
+                last_error = Some(e.to_string());
 
                 // Check if error is retryable
                 let delay = if attempt < config.max_retries {
@@ -226,9 +226,9 @@ where
         }
     }
 
-    Err(last_error.unwrap_or_else(|| {
-        AppError::Internal(format!("{} failed with unknown error", operation_name))
-    }))
+    Err(AppError::Internal(last_error.unwrap_or_else(|| {
+        format!("{} failed with unknown error", operation_name)
+    })))
 }
 
 /// Execute an operation with Jupiter-specific error handling

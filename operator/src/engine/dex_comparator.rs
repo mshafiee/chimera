@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// 1 SOL = 1e9 lamports.
-const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
+pub const LAMPORTS_PER_SOL: u64 = 1_000_000_000;
 
 /// Default DEX labels compared against (in addition to the unrestricted
 /// "aggregate" Jupiter route). Any label Jupiter does not recognise returns a

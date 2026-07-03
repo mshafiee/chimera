@@ -10,7 +10,7 @@
 
 use crate::config::CircuitBreakerConfig;
 use crate::db_abstraction::{Database, datetime_to_string};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::notifications::{CompositeNotifier, NotificationEvent};
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
@@ -697,7 +697,6 @@ impl CircuitBreaker {
             },
         }
     }
-}
 
     /// Record a Jupiter API failure and check if threshold is exceeded
     ///
@@ -762,6 +761,7 @@ impl CircuitBreaker {
     pub fn get_jupiter_failure_count(&self) -> u32 {
         self.state.read().jupiter_failure_count
     }
+}
 
 /// Circuit breaker status for API responses
 #[derive(Debug, Clone)]

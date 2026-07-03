@@ -204,7 +204,7 @@ impl JupiterSkillsIntegration {
         }
 
         // Return combined issues and warnings
-        let all_issues = issues.into_iter().chain(warnings).collect();
+        let all_issues: Vec<String> = issues.into_iter().chain(warnings).collect();
 
         if all_issues.is_empty() {
             Ok(vec!["Jupiter integration follows best practices".to_string()])

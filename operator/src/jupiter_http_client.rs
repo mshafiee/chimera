@@ -7,8 +7,7 @@ use crate::error::{AppError, AppResult};
 use reqwest::Client;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 /// Jupiter HTTP client configuration optimized for high-frequency API calls
 #[derive(Debug, Clone)]
@@ -77,7 +76,7 @@ pub struct HealthStatus {
 }
 
 /// Client metrics for monitoring
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ClientMetrics {
     /// Total requests
     pub total_requests: u64,
@@ -102,12 +101,7 @@ impl JupiterHttpClient {
             .timeout(config.request_timeout)
             .connect_timeout(config.connect_timeout)
             .pool_max_idle_per_host(config.max_idle_connections_per_host)
-            .pool_idle_timeout(config.keep_alive_duration)
-            .http2_prior_knowledge()
-            .http2_keep_alive_interval(config.keep_alive_duration)
-            .http2_keep_alive_timeout(config.keep_alive_duration)
-            .http2_keep_alive_while_idle(true)
-            .tcp_keepalive(config.tcp_keepalive);
+            .pool_idle_timeout(config.keep_alive_duration);
 
         let client = client_builder.build().map_err(|e| {
             AppError::Internal(format!("Failed to create Jupiter HTTP client: {}", e))
@@ -142,18 +136,18 @@ impl JupiterHttpClient {
     }
 
     /// Get current health status
-    pub async fn get_health_status(&self) -> HealthStatus {
-        self.health_status.read().clone()
+    pub fn get_health_status(&self) -> HealthStatus {
+        (*self.health_status.read()).clone()
     }
 
     /// Get current metrics
     pub fn get_metrics(&self) -> ClientMetrics {
-        self.metrics.lock().clone()
+        (*self.metrics.lock()).clone()
     }
 
     /// Update health status after a request
     pub async fn update_request_status(&self, success: bool) {
-        let mut status = self.health_status.write().await;
+        let mut status = self.health_status.write();
         let mut metrics = self.metrics.lock();
 
         status.total_requests += 1;
@@ -189,13 +183,13 @@ impl JupiterHttpClient {
     /// Perform health check on the client
     pub async fn health_check(&self) -> AppResult<bool> {
         // Simple health check: verify client is not in a broken state
-        let status = self.get_health_status().await;
+        let status = self.get_health_status();
         let consecutive_failures = status.consecutive_failures;
 
         let is_healthy = consecutive_failures < 5;
 
         // Update health status
-        let mut status_lock = self.health_status.write().await;
+        let mut status_lock = self.health_status.write();
         status_lock.is_healthy = is_healthy;
         status_lock.last_check = chrono::Utc::now();
 
@@ -204,7 +198,7 @@ impl JupiterHttpClient {
 
     /// Reset health status (for manual recovery)
     pub async fn reset_health_status(&self) {
-        let mut status = self.health_status.write().await;
+        let mut status = self.health_status.write();
         status.is_healthy = true;
         status.consecutive_failures = 0;
         status.last_check = chrono::Utc::now();
