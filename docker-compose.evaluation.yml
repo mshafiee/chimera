@@ -206,6 +206,7 @@ services:
       - EVAL_DB_PATH=/evaluation/evaluation.db
       - DAY_NUM=${DAY_NUM:-1}
       - HOUR_START=${HOUR_START:-0}
+      - OPERATOR_URL=http://chimera-operator:8080
       - PROMETHEUS_URL=http://operator:8080/metrics
       - SCOUT_PROMETHEUS_URL=http://scout:8081/metrics
     depends_on:

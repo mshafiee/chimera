@@ -1,25 +1,26 @@
 #!/bin/bash
 set -e
 
-# Chimera Data Collector Entry Point
-# Converts the one-time process-evaluation-metrics.py script into a long-running service
-# Implements hourly data collection with proper CLI arguments
-
-echo "=================================="
-echo "Chimera Data Collector Service"
-echo "=================================="
+# Chimera Data Collector Service
+# Fetches metrics from operator and stores them as files for processing
 
 # Initialize counters from environment variables or defaults
 DAY_NUM=${DAY_NUM:-1}
 HOUR_START=${HOUR_START:-0}
 EVAL_DIR=${EVAL_DIR:-/evaluation}
 DB_PATH=${EVAL_DB_PATH:-/evaluation/evaluation.db}
+OPERATOR_URL=${OPERATOR_URL:-http://chimera-operator:8080}
+
+echo "=================================="
+echo "Chimera Data Collector Service"
+echo "=================================="
 
 echo "Configuration:"
 echo "  Day Number: ${DAY_NUM}"
 echo "  Start Hour: ${HOUR_START}"
 echo "  Evaluation Directory: ${EVAL_DIR}"
 echo "  Database Path: ${DB_PATH}"
+echo "  Operator URL: ${OPERATOR_URL}"
 echo ""
 
 # Ensure evaluation directory exists
@@ -32,19 +33,34 @@ while true; do
     echo ""
     echo "=================================="
     echo "Starting collection: Day ${DAY_NUM}, Hour ${HOUR_START}"
-    echo "Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-    echo "=================================="
-
-    # Create day-specific directory structure
+    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     DAY_DIR="${EVAL_DIR}/day-${DAY_NUM}"
     mkdir -p "${DAY_DIR}"
 
-    # Generate current timestamp
-    TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "Timestamp: ${TIMESTAMP}"
+    echo "=================================="
 
+    # Fetch operator metrics file
+    echo "Fetching metrics from operator..."
+    METRICS_FILE="${DAY_DIR}/operator-metrics-${TIMESTAMP}.txt"
+    if curl -s "${OPERATOR_URL}/metrics" > "${METRICS_FILE}" 2>/dev/null; then
+        echo "✅ Saved metrics file: $(basename ${METRICS_FILE})"
+    else
+        echo "⚠️  Failed to fetch metrics from ${OPERATOR_URL}/metrics"
+    fi
+
+    # Fetch health status file
+    echo "Fetching health status from operator..."
+    HEALTH_FILE="${DAY_DIR}/health-status-${TIMESTAMP}.json"
+    if curl -s "${OPERATOR_URL}/api/v1/health" > "${HEALTH_FILE}" 2>/dev/null; then
+        echo "✅ Saved health status: $(basename ${HEALTH_FILE})"
+    else
+        echo "⚠️  Failed to fetch health status from ${OPERATOR_URL}/api/v1/health"
+    fi
+
+    # Process metrics with existing script
     echo "Processing metrics for Day ${DAY_NUM}, Hour ${HOUR_START}..."
 
-    # Run the processing script with all required arguments
     if python3 /app/process-evaluation-metrics.py \
         --day "${DAY_NUM}" \
         --hour "${HOUR_START}" \
