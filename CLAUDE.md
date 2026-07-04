@@ -327,6 +327,22 @@ CHIMERA_JUPITER__DEVNET_SIMULATION_MODE=true cargo run
 - **Slow Path:** Deep liquidity validation, simulation via Jupiter/DexScreener
 - Configurable thresholds by strategy
 
+### Decimals Caching (Jupiter Price API v3)
+- **Purpose:** Eliminate Helius RPC calls for token decimals
+- **Implementation:** 
+  - Jupiter Price API v3 returns decimals alongside price data
+  - Decimals cached separately with 24-hour TTL (immutable for minted tokens)
+  - Fast path via `PriceCache::get_decimals()` for sub-microsecond lookups
+  - Fallback to Helius RPC for tokens not in Jupiter index
+- **API Reference:**
+  - `PriceCache::get_decimals(token_address)` - Get decimals from cache
+  - `TokenMetadataFetcher::get_decimals_only()` - Fast path with RPC fallback
+  - `TokenParser::get_token_decimals()` - Updated to use cache first
+- **Benefits:**
+  - **Helius Credit Savings:** Eliminates `getAccountInfo` calls for decimals
+  - **Latency:** ~1μs cache hit vs ~50ms RPC call
+  - **Cache Hit Rate:** High for actively traded tokens
+
 ### RPC Interaction
 - **Primary:** Helius + Jito Bundle submission for prioritization
 - **Dynamic Tips:** Percentile-based Jito tip calculation (configurable)
@@ -548,6 +564,27 @@ Configure alerts in `ops/prometheus/alerts.yml` for:
 ---
 
 ## Important Notes for Development
+
+### RPC Call Optimization
+The bot implements several strategies to minimize Helius credit consumption:
+
+1. **Decimals Caching:** Uses Jupiter Price API v3 for decimals (free)
+   - Eliminates `getAccountInfo` calls for token decimals
+   - 24-hour cache TTL since decimals are immutable
+   - Sub-microsecond cache hits vs ~50ms RPC calls
+
+2. **DexScreener for Liquidity:** Uses DexScreener free API instead of on-chain queries
+   - `allow_unlisted_heuristic: false` (strict mode)
+   - Returns $0 for unlisted tokens rather than expensive pool enumeration
+   - No on-chain `PoolEnumerator` queries for liquidity validation
+
+3. **Metadata Caching:** 1-hour TTL for token metadata (freeze/mint authority)
+   - Reduces repeated safety checks for the same token
+   - `TokenCache` with LRU eviction
+
+4. **Price Caching:** 30-second TTL with 5-second refresh
+   - Background updater for actively tracked tokens
+   - Staleness detection for risk calculations
 
 ### Decimal Precision
 - **Financial fields:** Use `rust_decimal::Decimal` in Rust, `Decimal` class in Python

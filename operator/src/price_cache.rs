@@ -79,6 +79,10 @@ struct PriceCacheInner {
     cache_hits: u64,
     /// Cache miss counter (for performance monitoring)
     cache_misses: u64,
+    /// Decimals cache hit counter (for performance monitoring)
+    decimals_cache_hits: u64,
+    /// Decimals cache miss counter (for performance monitoring)
+    decimals_cache_misses: u64,
 }
 
 /// Price cache for token prices
@@ -122,6 +126,8 @@ impl PriceCache {
                 decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
+                decimals_cache_hits: 0,
+                decimals_cache_misses: 0,
             })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -143,6 +149,8 @@ impl PriceCache {
                 decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
+                decimals_cache_hits: 0,
+                decimals_cache_misses: 0,
             })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -164,6 +172,8 @@ impl PriceCache {
                 decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
+                decimals_cache_hits: 0,
+                decimals_cache_misses: 0,
             })),
             ttl: Duration::seconds(ttl_secs),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -380,23 +390,33 @@ impl PriceCache {
     pub fn get_decimals(&self, token_address: &str) -> Option<u8> {
         let mut inner = self.inner.write();
 
-        // Check decimals cache first
-        if let Some((decimals, fetched_at)) = inner.decimals.get(token_address) {
+        // Check decimals cache first - copy values to release borrow before mutable operations
+        let (decimals_value, is_valid) = if let Some((decimals, fetched_at)) = inner.decimals.get(token_address) {
             let elapsed = fetched_at.elapsed().as_secs() as i64;
-            if elapsed < DECIMALS_TTL_SECS {
-                return Some(*decimals);
-            }
-            // Cache expired - remove entry
+            (*decimals, elapsed < DECIMALS_TTL_SECS)
+        } else {
+            (0, false)
+        };
+
+        if is_valid {
+            inner.decimals_cache_hits += 1;
+            return Some(decimals_value);
+        }
+
+        // Cache expired - remove entry if it existed
+        if inner.decimals.contains_key(token_address) {
             inner.decimals.remove(token_address);
         }
 
         // Fallback: check if we have it in a recent price entry
-        if let Some(entry) = inner.prices.get(token_address) {
-            if let Some(decimals) = entry.decimals {
-                return Some(decimals);
-            }
+        let price_decimals = inner.prices.get(token_address).and_then(|entry| entry.decimals);
+
+        if let Some(decimals) = price_decimals {
+            inner.decimals_cache_hits += 1;
+            return Some(decimals);
         }
 
+        inner.decimals_cache_misses += 1;
         None
     }
 
@@ -657,6 +677,9 @@ impl PriceCache {
             total_misses: inner.cache_misses,
             hit_rate,
             miss_rate,
+            decimals_cache_entries: inner.decimals.len(),
+            decimals_cache_hits: inner.decimals_cache_hits,
+            decimals_cache_misses: inner.decimals_cache_misses,
         }
     }
 
@@ -708,6 +731,8 @@ impl Default for PriceCache {
                 decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
+                decimals_cache_hits: 0,
+                decimals_cache_misses: 0,
             })),
             ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
             active_tokens: Arc::new(RwLock::new(Vec::new())),
@@ -751,6 +776,12 @@ pub struct PriceCacheStats {
     pub hit_rate: f64,
     /// Cache miss rate percentage
     pub miss_rate: f64,
+    /// Total decimals cache entries
+    pub decimals_cache_entries: usize,
+    /// Decimals cache hits (successful lookups)
+    pub decimals_cache_hits: u64,
+    /// Decimals cache misses (failed lookups)
+    pub decimals_cache_misses: u64,
 }
 
 /// Jupiter Price API V3 response structure

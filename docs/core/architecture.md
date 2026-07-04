@@ -218,6 +218,56 @@ CLOSED (exit confirmed)
 
 ---
 
+## Off-Chain Data Sources
+
+### Jupiter Price API v3
+
+**Purpose:** Token price and decimals caching
+
+**Integration:**
+- Endpoint: `https://api.jup.ag/price/v3`
+- Authentication: `x-api-key` header (optional but recommended)
+- Update interval: 5 seconds for actively tracked tokens
+- Price cache TTL: 30 seconds
+- Decimals cache TTL: 24 hours (immutable data)
+
+**Data Structure:**
+```rust
+struct JupiterPriceData {
+    usdPrice: f64,        // Current USD price
+    decimals: u8,         // Token decimals
+    blockId: u64,         // Solana block when price computed
+    priceChange24h: f64,  // 24h price change percentage
+    liquidity: f64,        // Total liquidity across DEXs
+    createdAt: String,    // ISO datetime when token created
+}
+```
+
+**Credit Optimization:**
+By caching decimals from Jupiter, the bot eliminates Helius RPC `getAccountInfo`
+calls for token decimals. Each cached decimals lookup saves approximately 1 Helius credit.
+
+**Cache Statistics:**
+- `decimals_cache_entries`: Total decimals cached
+- `decimals_cache_hits`: Successful lookups (credits saved)
+- `decimals_cache_misses`: Cache misses requiring RPC fallback
+
+### DexScreener API
+
+**Purpose:** Liquidity validation (alternative to on-chain pool queries)
+
+**Integration:**
+- Endpoint: `https://api.dexscreener.com/latest/dex/tokens/{address}`
+- No authentication required
+- Aggregates liquidity across Raydium, Orca, Meteora, and other DEXs
+
+**Strict Mode (`allow_unlisted_heuristic: false`):**
+- Tokens not indexed by DexScreener are treated as $0 liquidity
+- BUY signals are rejected for unlisted tokens
+- No expensive on-chain pool enumeration fallback
+
+---
+
 ## Security Architecture
 
 ### Authentication Methods
