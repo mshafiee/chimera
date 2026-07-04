@@ -42,14 +42,18 @@ async fn test_jupiter_v2_order_endpoint() {
     // Create a test signal
     let keypair = Keypair::new();
     let signal = Signal {
-        id: "test_v2_order".to_string(),
-        timestamp: chrono::Utc::now(),
+        trade_uuid: "test_v2_order".to_string(),
+        timestamp: chrono::Utc::now().timestamp(),
         payload: SignalPayload {
             action: Action::Buy,
             token: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(), // USDC
             amount_sol: dec!(0.1),
             ..Default::default()
         },
+        source_ip: None,
+        liquidity_usd: None,
+        force_slow_path: false,
+        token_decimals: None,
     };
 
     // Build swap transaction with v2 /order endpoint
@@ -84,14 +88,18 @@ async fn test_jupiter_v2_rtse_support() {
 
     let keypair = Keypair::new();
     let signal = Signal {
-        id: "test_rtse".to_string(),
-        timestamp: chrono::Utc::now(),
+        trade_uuid: "test_rtse".to_string(),
+        timestamp: chrono::Utc::now().timestamp(),
         payload: SignalPayload {
             action: Action::Buy,
             token: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".to_string(),
             amount_sol: dec!(0.1),
             ..Default::default()
         },
+        source_ip: None,
+        liquidity_usd: None,
+        force_slow_path: false,
+        token_decimals: None,
     };
 
     // Build transaction with RTSE enabled
@@ -129,14 +137,18 @@ async fn test_jupiter_v2_error_handling() {
 
     // Test with invalid token address
     let invalid_signal = Signal {
-        id: "test_invalid_token".to_string(),
-        timestamp: chrono::Utc::now(),
+        trade_uuid: "test_invalid_token".to_string(),
+        timestamp: chrono::Utc::now().timestamp(),
         payload: SignalPayload {
             action: Action::Buy,
             token: "InvalidTokenMintAddress123".to_string(), // Invalid mint
             amount_sol: dec!(0.1),
             ..Default::default()
         },
+        source_ip: None,
+        liquidity_usd: None,
+        force_slow_path: false,
+        token_decimals: None,
     };
 
     let result = tx_builder

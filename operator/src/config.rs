@@ -1684,6 +1684,88 @@ impl AppConfig {
     }
 }
 
+impl Default for AppConfig {
+    fn default() -> Self {
+        AppConfig {
+            server: ServerConfig {
+                host: default_host(),
+                port: default_port(),
+                worker_threads: default_worker_threads(),
+                request_timeout_ms: default_request_timeout(),
+            },
+            rpc: RpcConfig {
+                primary_provider: default_primary_provider(),
+                primary_url: default_primary_url(),
+                fallback_url: None,
+                rate_limit_per_second: default_rate_limit(),
+                timeout_ms: default_rpc_timeout(),
+                max_consecutive_failures: default_max_failures(),
+                functional_health_check: true,
+            },
+            database: DatabaseConfig {
+                path: "data/chimera.db".into(),
+                max_connections: 5,
+            },
+            security: SecurityConfig {
+                webhook_secret: "${CHIMERA_SECURITY__WEBHOOK_SECRET}".to_string(),
+                webhook_secret_previous: None,
+                max_timestamp_drift_secs: default_max_timestamp_drift(),
+                webhook_rate_limit: 10000,
+                webhook_burst_size: 15000,
+                admin_wallets: vec![],
+                api_keys: vec![],
+            },
+            circuit_breakers: CircuitBreakerConfig {
+                max_loss_24h_usd: default_max_loss(),
+                max_consecutive_losses: default_max_consecutive_losses(),
+                max_drawdown_percent: default_max_drawdown(),
+                portfolio_stop_loss_percent: default_portfolio_stop_loss_percent(),
+                cooldown_minutes: default_cooldown(),
+                max_jupiter_failures: default_max_jupiter_failures(),
+            },
+            strategy: StrategyConfig {
+                shield_percent: 70,
+                spear_percent: 30,
+                max_position_sol: dec!(1.0),
+                min_position_sol: dec!(0.01),
+                shield_signal_quality_threshold: 0.65,
+                spear_signal_quality_threshold: 0.50,
+                dex_fee_rate: dec!(0.003),
+                shield_max_total_cost_percent: dec!(0.05),
+                spear_max_total_cost_percent: dec!(0.08),
+                slippage_fallback_small_percent: dec!(0.005),
+                slippage_fallback_large_percent: dec!(0.01),
+                slippage_fallback_threshold_sol: dec!(0.5),
+            },
+            jito: JitoConfig {
+                enabled: true,
+                searcher_endpoint: None,
+                helius_fallback: false,
+                tip_floor_sol: dec!(0.001),
+                tip_ceiling_sol: dec!(0.01),
+                tip_percentile: 50,
+                tip_percent_max: dec!(0.10),
+            },
+            trade_mode: TradeMode::default(),
+            jupiter: JupiterConfig::default(),
+            queue: QueueConfig {
+                capacity: default_queue_capacity(),
+                load_shed_threshold_percent: 80,
+                parallel_enabled: false,
+                num_workers: None,
+                max_concurrent_rpc: None,
+            },
+            token_safety: TokenSafetyConfig::default(),
+            notifications: NotificationsConfig::default(),
+            monitoring: None,
+            profit_management: ProfitManagementConfig::default(),
+            position_sizing: PositionSizingConfig::default(),
+            mev_protection: MevProtectionConfig::default(),
+            degradation: DegradationConfig::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

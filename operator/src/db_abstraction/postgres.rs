@@ -240,7 +240,7 @@ impl Database for PostgresBackend {
         .bind(&trade.token_symbol)
         .bind(&trade.strategy)
         .bind(&trade.side)
-        .bind(position.entry_amount_sol)
+        .bind(&trade.amount_sol)
         .bind(&trade.status)
         .fetch_one(&self.pool)
         .await?;
@@ -3878,6 +3878,96 @@ impl Database for PostgresBackend {
             null_price_pnl_sol,
         ))
     }
+
+    /// Atomic operation: Insert trade and create position in a single transaction
+    async fn insert_trade_and_create_position(
+        &self,
+        trade: &InsertTrade,
+        position: &InsertPosition,
+    ) -> AppResult<i64> {
+        // Use PostgreSQL transaction for atomicity
+        let mut tx = self.pool.begin().await?;
+
+        // Insert trade
+        let trade_id = sqlx::query(
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
+        )
+        .bind(&trade.trade_uuid)
+        .bind(&trade.wallet_address)
+        .bind(&trade.token_address)
+        .bind(&trade.strategy)
+        .bind(&trade.side)
+        .bind(&trade.amount_sol)
+        .bind(&trade.status)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e))?
+        .try_get("id")
+        .map_err(|e| AppError::Database(e))?;
+
+        // Insert position
+        sqlx::query(
+            "INSERT INTO positions (trade_uuid, token_address, amount_sol, state, entry_price_sol, created_at, updated_at) VALUES ($1, $2, $3, 'ACTIVE', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        .bind(&trade.trade_uuid)
+        .bind(&trade.token_address)
+        .bind(&position.entry_amount_sol)
+        .bind(&position.entry_price)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e))?;
+
+        // Commit transaction
+        tx.commit().await.map_err(|e| {
+            AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+                "Failed to commit transaction: {}", e
+            ))))
+        })?;
+
+        Ok(trade_id)
+    }
+
+    /// Atomic operation: Update trade status and position state in a single transaction
+    async fn update_trade_status_and_position(
+        &self,
+        trade_uuid: &str,
+        trade_status: &str,
+        position_state: Option<&str>,
+    ) -> AppResult<()> {
+        // Use PostgreSQL transaction for atomicity
+        let mut tx = self.pool.begin().await?;
+
+        // Update trade status
+        sqlx::query(
+            "UPDATE trades SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
+        )
+        .bind(trade_status)
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e))?;
+
+        // Update position state if provided
+        if let Some(state) = position_state {
+            sqlx::query(
+                "UPDATE positions SET state = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
+            )
+            .bind(state)
+            .bind(trade_uuid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Database(e))?;
+        }
+
+        // Commit transaction
+        tx.commit().await.map_err(|e| {
+            AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+                "Failed to commit transaction: {}", e
+            ))))
+        })?;
+
+        Ok(())
+    }
 }
 
 // ========================================================================
@@ -4099,101 +4189,94 @@ impl PostgresBackend {
             last_updated_url: row.try_get("last_updated_url").ok(),
         })
     }
-}
 
-/// Atomic operation: Insert trade and create position in a single transaction
-async fn insert_trade_and_create_position(
-    &self,
-    trade: &InsertTrade,
-    position: &InsertPosition,
-) -> AppResult<i64> {
-    // Use PostgreSQL transaction for atomicity
-    let mut tx = self.pool.begin().await.map_err(|e| {
-        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
-            "Failed to begin transaction: {}", e
-        ))))
-    })?;
+    /// Atomic operation: Insert trade and create position in a single transaction
+    async fn insert_trade_and_create_position(
+        &self,
+        trade: &InsertTrade,
+        position: &InsertPosition,
+    ) -> AppResult<i64> {
+        // Use PostgreSQL transaction for atomicity
+        let mut tx = self.pool.begin().await?;
 
-    // Insert trade
-    let trade_id = sqlx::query(
-        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
-    )
-    .bind(&trade.trade_uuid)
-    .bind(&trade.wallet_address)
-    .bind(&trade.token_address)
-    .bind(&trade.strategy)
-    .bind(&trade.side)
-    .bind(position.entry_amount_sol)
-    .bind(&trade.status)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|e| AppError::Database(e))?
-    .id;
-
-    // Insert position
-    sqlx::query(
-        "INSERT INTO positions (trade_uuid, token_address, amount_sol, state, entry_price_sol, created_at, updated_at) VALUES ($1, $2, $3, 'ACTIVE', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
-    )
-    .bind(&trade.trade_uuid)
-    .bind(&trade.token_address)
-    .bind(&position.entry_amount_sol)
-    .bind(&position.entry_price)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| AppError::Database(e))?;
-
-    // Commit transaction
-    tx.commit().await.map_err(|e| {
-        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
-            "Failed to commit transaction: {}", e
-        ))))
-    })?;
-
-    Ok(trade_id)
-}
-
-/// Atomic operation: Update trade status and position state in a single transaction
-async fn update_trade_status_and_position(
-    &self,
-    trade_uuid: &str,
-    trade_status: &str,
-    position_state: Option<&str>,
-) -> AppResult<()> {
-    // Use PostgreSQL transaction for atomicity
-    let mut tx = self.pool.begin().await.map_err(|e| {
-        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
-            "Failed to begin transaction: {}", e
-        ))))
-    })?;
-
-    // Update trade status
-    sqlx::query(
-        "UPDATE trades SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
-    )
-    .bind(trade_status)
-    .bind(trade_uuid)
-    .execute(&mut **tx)
-    .await
-    .map_err(|e| AppError::Database(e))?;
-
-    // Update position state if provided
-    if let Some(state) = position_state {
-        sqlx::query(
-            "UPDATE positions SET state = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
+        // Insert trade
+        let trade_id = sqlx::query(
+            "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
         )
-        .bind(state)
-        .bind(trade_uuid)
-        .execute(&mut **tx)
+        .bind(&trade.trade_uuid)
+        .bind(&trade.wallet_address)
+        .bind(&trade.token_address)
+        .bind(&trade.strategy)
+        .bind(&trade.side)
+        .bind(&trade.amount_sol)
+        .bind(&trade.status)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e))?
+        .try_get("id")
+        .map_err(|e| AppError::Database(e))?;
+
+        // Insert position
+        sqlx::query(
+            "INSERT INTO positions (trade_uuid, token_address, amount_sol, state, entry_price_sol, created_at, updated_at) VALUES ($1, $2, $3, 'ACTIVE', $4, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        .bind(&trade.trade_uuid)
+        .bind(&trade.token_address)
+        .bind(&position.entry_amount_sol)
+        .bind(&position.entry_price)
+        .execute(&mut *tx)
         .await
         .map_err(|e| AppError::Database(e))?;
+
+        // Commit transaction
+        tx.commit().await.map_err(|e| {
+            AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+                "Failed to commit transaction: {}", e
+            ))))
+        })?;
+
+        Ok(trade_id)
     }
 
-    // Commit transaction
-    tx.commit().await.map_err(|e| {
-        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
-            "Failed to commit transaction: {}", e
-        ))))
-    })?;
+    /// Atomic operation: Update trade status and position state in a single transaction
+    async fn update_trade_status_and_position(
+        &self,
+        trade_uuid: &str,
+        trade_status: &str,
+        position_state: Option<&str>,
+    ) -> AppResult<()> {
+        // Use PostgreSQL transaction for atomicity
+        let mut tx = self.pool.begin().await?;
 
-    Ok(())
+        // Update trade status
+        sqlx::query(
+            "UPDATE trades SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
+        )
+        .bind(trade_status)
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e))?;
+
+        // Update position state if provided
+        if let Some(state) = position_state {
+            sqlx::query(
+                "UPDATE positions SET state = $1, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = $2"
+            )
+            .bind(state)
+            .bind(trade_uuid)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| AppError::Database(e))?;
+        }
+
+        // Commit transaction
+        tx.commit().await.map_err(|e| {
+            AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+                "Failed to commit transaction: {}", e
+            ))))
+        })?;
+
+        Ok(())
+    }
 }

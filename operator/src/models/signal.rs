@@ -5,9 +5,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Trading strategy types
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Strategy {
+    #[default]
     /// Conservative strategy - lower risk, lower reward
     Shield,
     /// Aggressive strategy - higher risk, higher reward
@@ -43,9 +44,10 @@ impl std::fmt::Display for Strategy {
 }
 
 /// Trade action (buy or sell)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Action {
+    #[default]
     Buy,
     Sell,
 }
@@ -60,20 +62,25 @@ impl std::fmt::Display for Action {
 }
 
 /// Incoming webhook signal payload
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SignalPayload {
     /// Trading strategy
+    #[serde(default)]
     pub strategy: Strategy,
     /// Token symbol (e.g., "BONK")
+    #[serde(default = "default_token")]
     pub token: String,
     /// Token mint address (Solana pubkey)
     #[serde(default)]
     pub token_address: Option<String>,
     /// Trade action
+    #[serde(default)]
     pub action: Action,
     /// Amount in SOL
+    #[serde(default = "default_amount")]
     pub amount_sol: Decimal,
     /// Wallet address being copied
+    #[serde(default = "default_wallet")]
     pub wallet_address: String,
     /// Optional trade UUID from signal provider
     #[serde(default)]
@@ -81,6 +88,18 @@ pub struct SignalPayload {
     /// Optional fraction of the position to exit (used for partial exits)
     #[serde(default)]
     pub exit_fraction: Option<Decimal>,
+}
+
+fn default_token() -> String {
+    "UNKNOWN".to_string()
+}
+
+fn default_amount() -> Decimal {
+    Decimal::ZERO
+}
+
+fn default_wallet() -> String {
+    "UNKNOWN_WALLET".to_string()
 }
 
 impl SignalPayload {

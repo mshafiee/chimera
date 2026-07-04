@@ -120,8 +120,8 @@ impl DbPool {
     /// Get number of idle connections
     pub fn num_idle(&self) -> u32 {
         match self {
-            DbPool::SQLite(pool) => pool.num_idle(),
-            DbPool::PostgreSQL(pool) => pool.num_idle(),
+            DbPool::SQLite(pool) => pool.num_idle() as u32,
+            DbPool::PostgreSQL(pool) => pool.num_idle() as u32,
         }
     }
 

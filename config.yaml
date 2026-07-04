@@ -18,7 +18,7 @@ rpc:
   functional_health_check: true   # Also probe getLatestBlockhash after getHealth to catch providers that return ok unconditionally
 
 database:
-  path: "data/chimera.db"
+  path: "/Users/mohammad/Documents/GitHub/chimera/data/chimera.db"
   max_connections: 5
 
 security:
@@ -37,9 +37,9 @@ security:
       role: "admin"
 
 circuit_breakers:
-  max_loss_24h_usd: 500
-  max_consecutive_losses: 5
-  max_drawdown_percent: 15
+  max_loss_24h_usd: 1000
+  max_consecutive_losses: 7
+  max_drawdown_percent: 20
   cooldown_minutes: 30
 
 strategy:
@@ -47,8 +47,8 @@ strategy:
   spear_percent: 30
   max_position_sol: 1.0
   min_position_sol: 0.01
-  shield_signal_quality_threshold: 0.55
-  spear_signal_quality_threshold: 0.35
+  shield_signal_quality_threshold: 0.65
+  spear_signal_quality_threshold: 0.50
   dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
   shield_max_total_cost_percent: 0.05  # Rejects Shield trades if costs exceed 5% of trade size
   spear_max_total_cost_percent: 0.08   # Rejects Spear trades if costs exceed 8% of trade size
@@ -86,16 +86,16 @@ token_safety:
     - "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # USDC
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
-  # Minimum liquidity thresholds (USD) - relaxed for paper trading
-  min_liquidity_shield_usd: 0      # Disabled for paper trading
-  min_liquidity_spear_usd: 0       # Disabled for paper trading
+  # Minimum liquidity thresholds (USD) - Production-safe values
+  min_liquidity_shield_usd: 25000      # Production: 150% buffer over $10k base
+  min_liquidity_spear_usd: 15000       # Production: 200% buffer over $5k base
   # Enable honeypot detection via transaction simulation
-  honeypot_detection_enabled: false  # Disabled for paper trading
+  honeypot_detection_enabled: true   # Production: Always enabled for safety
   # Token cache settings
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 1.0
+  min_token_age_hours: 24.0        # Production: 24 hours minimum for established tokens
   # When false (default), tokens not indexed by DexScreener are treated as $0 liquidity
   # and BUY signals are rejected. Set true to re-enable the legacy supply-based heuristic
   # for not-yet-indexed tokens (riskier — may allow very new/unlisted tokens through).

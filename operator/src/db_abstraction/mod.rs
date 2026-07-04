@@ -740,7 +740,7 @@ pub trait Database: Send + Sync {
     /// Default implementation for atomic trade insertion (non-transactional fallback)
     ///
     /// Backends can override this with proper transaction support.
-    fn insert_trade_and_create_position_default(
+    async fn insert_trade_and_create_position_default(
         &self,
         trade: &InsertTrade,
         position: &InsertPosition,
@@ -759,7 +759,7 @@ pub trait Database: Send + Sync {
     /// Default implementation for atomic status update (non-transactional fallback)
     ///
     /// Backends can override this with proper transaction support.
-    fn update_trade_status_and_position_default(
+    async fn update_trade_status_and_position_default(
         &self,
         trade_uuid: &str,
         trade_status: &str,
@@ -771,7 +771,7 @@ pub trait Database: Send + Sync {
             status: trade_status.to_string(),
             tx_signature: None,
             error_message: None,
-            updated_at: chrono::Utc::now().to_string(),
+            network_fee_sol: None,
         };
 
         timed_query("update_trade_status_and_position_update_trade", self.update_trade_status(&update)).await?;

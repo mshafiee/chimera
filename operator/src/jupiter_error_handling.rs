@@ -127,7 +127,6 @@ impl JupiterError {
             request_params: None,
             response_body: None,
         }
-        }
     }
 
     /// Create a network error
