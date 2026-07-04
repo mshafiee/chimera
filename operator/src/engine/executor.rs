@@ -589,7 +589,7 @@ impl Executor {
 
                     // Record tip if using Jito and tip manager is available
                     let jito_tip = if rpc_mode == RpcMode::Jito {
-                        let tip = self.calculate_jito_tip(signal);
+                        let tip = self.calculate_jito_tip(signal).await;
                         if let Some(ref tip_manager) = self.tip_manager {
                             if let Err(e) = tip_manager
                                 .record_tip(
@@ -674,7 +674,7 @@ impl Executor {
 
                     // Record costs even for failed trades — Jito tip was still paid
                     if rpc_mode == RpcMode::Jito {
-                        let jito_tip = self.calculate_jito_tip(signal);
+                        let jito_tip = self.calculate_jito_tip(signal).await;
                         if let Err(cost_err) = self
                             .db
                             .update_trade_costs(
@@ -1273,6 +1273,18 @@ impl Executor {
 
     /// Execute via Jito bundle
     async fn execute_jito(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+        // Check if this is an exit trade and Helius Staked Connections are enabled
+        let is_exit = signal.payload.action == crate::models::Action::Sell;
+        let use_helius_for_exit = is_exit && self.config.jito.helius_staked_exits;
+
+        if use_helius_for_exit {
+            tracing::info!(
+                trade_uuid = %signal.trade_uuid,
+                "Exit trade: using Helius Staked Connections for high landing rate"
+            );
+            return self.execute_via_helius_staked(signal).await;
+        }
+
         tracing::info!(
             trade_uuid = %signal.trade_uuid,
             "Executing trade via Jito bundle"
@@ -1318,7 +1330,7 @@ impl Executor {
             .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
 
         // Calculate dynamic tip
-        let tip = self.calculate_jito_tip(signal);
+        let tip = self.calculate_jito_tip(signal).await;
 
         // Check total execution cost cap (uses the unified estimate now)
         self.check_execution_costs(
@@ -1725,6 +1737,344 @@ impl Executor {
         // NOT at api.helius.xyz/v0/bundles.
         let url = crate::utils::helius_rpc_url(api_key);
         crate::engine::jito_searcher::resolve_bundle_status(&self.http_client, &url, bundle_id).await
+    }
+
+    /// Execute via Helius RPC with Staked Connections (high landing rate for exits)
+    async fn execute_via_helius_staked(
+        &self,
+        signal: &Signal,
+    ) -> Result<ExecutionOutcome, ExecutorError> {
+        tracing::info!(
+            trade_uuid = %signal.trade_uuid,
+            "Executing exit trade via Helius Staked Connections"
+        );
+
+        // Load wallet keypair from vault
+        let secrets = load_secrets_with_fallback().map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
+        })?;
+        let wallet_keypair = load_wallet_keypair(&secrets).map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load keypair: {}", e))
+        })?;
+
+        // Build transaction (use active RPC client)
+        let active_client = self.active_rpc_client();
+        let transaction_builder =
+            TransactionBuilder::new(active_client.clone(), self.config.clone()).map_err(|e| {
+                ExecutorError::TransactionFailed(format!(
+                    "Failed to create transaction builder: {}",
+                    e
+                ))
+            })?;
+
+        let pre_slippage = self.slippage_estimate(signal, None);
+        let built_tx = transaction_builder
+            .build_swap_transaction(signal, &wallet_keypair, pre_slippage.tolerance_bps)
+            .await
+            .map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to build transaction: {}", e))
+            })?;
+
+        // Capture actual price impact and fill price from Jupiter quote
+        let price_impact = built_tx.price_impact_pct();
+        let fill_price_sol = built_tx
+            .fill_price_lamports_per_base()
+            .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
+
+        // Calculate dynamic tip (for cost tracking, though Helius uses priority fees)
+        let tip = self.calculate_jito_tip(signal).await;
+
+        // Check total execution cost cap
+        self.check_execution_costs(
+            signal,
+            built_tx.price_impact_pct(),
+            tip,
+            built_tx.route_fee_sol(),
+        ).await?;
+
+        tracing::debug!(
+            tip_sol = tip.to_f64().unwrap_or(0.0),
+            strategy = %signal.payload.strategy,
+            "Calculated tip for cost tracking (Helius uses priority fees)"
+        );
+
+        // Submit via Helius RPC with staked connection prioritization
+        let (signature, confirmed) = match &built_tx {
+            crate::engine::transaction_builder::BuiltTransaction::Legacy {
+                transaction,
+                ..
+            } => {
+                let sig = self
+                    .submit_transaction_helius_staked(transaction, &wallet_keypair)
+                    .await?;
+                let confirmed = self
+                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                    .await?;
+                (sig, confirmed)
+            }
+            crate::engine::transaction_builder::BuiltTransaction::Versioned {
+                transaction_bytes,
+                ..
+            } => {
+                let sig = self
+                    .submit_versioned_transaction_helius_staked(
+                        transaction_bytes,
+                        &wallet_keypair,
+                        built_tx.blockhash(),
+                    )
+                    .await?;
+                let confirmed = self
+                    .poll_signature_confirmation(&sig, &signal.trade_uuid)
+                    .await?;
+                (sig, confirmed)
+            }
+        };
+
+        // Record costs (tip is tracked but Helius uses priority fees)
+        let dex_fee_sol = built_tx.route_fee_sol().unwrap_or_else(|| {
+            signal.payload.amount_sol * self.config.strategy.dex_fee_rate
+        });
+        let slippage = self.slippage_estimate(signal, built_tx.price_impact_pct());
+        let slippage_cost_sol = slippage.expected_cost_sol(signal.payload.amount_sol);
+
+        if let Err(e) = self
+            .db
+            .update_trade_costs(
+                &signal.trade_uuid,
+                tip, // Track tip for consistency, though Helius uses priority fees
+                dex_fee_sol,
+                slippage_cost_sol,
+            )
+            .await
+        {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                error = %e,
+                "Failed to update trade costs for Helius exit"
+            );
+        }
+
+        Ok(ExecutionOutcome::live(
+            signature,
+            confirmed,
+            fill_price_sol,
+            price_impact,
+            built_tx.route_fee_sol(),
+        ))
+    }
+
+    /// Submit transaction via Helius RPC with staked connection prioritization
+    async fn submit_transaction_helius_staked(
+        &self,
+        transaction: &Transaction,
+        keypair: &solana_sdk::signature::Keypair,
+    ) -> Result<String, ExecutorError> {
+        // Get Helius API key from vault for staked connection
+        let secrets = load_secrets_with_fallback().map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
+        })?;
+
+        let helius_api_key = secrets.rpc_api_key.as_ref().ok_or_else(|| {
+            ExecutorError::TransactionFailed(
+                "Helius API key not found in vault for staked connection".to_string(),
+            )
+        })?;
+
+        let helius_url = crate::utils::helius_rpc_url(helius_api_key);
+
+        let tx_bytes = bincode::serde::encode_to_vec(transaction, bincode::config::legacy())
+            .map_err(|e| ExecutorError::TransactionFailed(format!("Serialization error: {}", e)))?;
+
+        self.validate_transaction_size(&tx_bytes)?;
+
+        let tx_base64 = BASE64.encode(&tx_bytes);
+
+        // Submit with prioritization fee for staked connection priority
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                tx_base64,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "maxRetries": 3,
+                    "prioritizationFee": 10000  // 10000 lamports priority fee for staked connection
+                }
+            ]
+        });
+
+        let rpc_timeout = Duration::from_secs(30);
+
+        let response = timeout(
+            rpc_timeout,
+            self.http_client.post(&helius_url).json(&payload).send(),
+        )
+        .await
+        .map_err(|_| {
+            ExecutorError::TransactionFailed(
+                "Helius staked connection submission timed out after 30s".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            ExecutorError::Rpc(format!("Helius staked connection request failed: {}", e))
+        })?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ExecutorError::Rpc(format!("Failed to parse Helius response: {}", e)))?;
+
+        let signature = result
+            .get("result")
+            .and_then(|r| r.as_str())
+            .ok_or_else(|| ExecutorError::Rpc("No signature in Helius response".to_string()))?;
+
+        tracing::info!(
+            signature = %signature,
+            "Transaction submitted via Helius Staked Connection"
+        );
+
+        Ok(signature.to_string())
+    }
+
+    /// Submit versioned transaction via Helius RPC with staked connection prioritization
+    async fn submit_versioned_transaction_helius_staked(
+        &self,
+        transaction_bytes: &[u8],
+        wallet_keypair: &solana_sdk::signature::Keypair,
+        recent_blockhash: solana_sdk::hash::Hash,
+    ) -> Result<String, ExecutorError> {
+        tracing::debug!("Starting VersionedTransaction submission via Helius Staked Connection");
+
+        // Validate transaction size
+        self.validate_transaction_size(transaction_bytes)?;
+
+        // Parse the versioned transaction
+        let versioned_tx: VersionedTransaction =
+            bincode::serde::decode_from_slice(transaction_bytes, bincode::config::legacy())
+                .map_err(|e| {
+                    tracing::error!(error = %e, "Failed to deserialize versioned transaction");
+                    ExecutorError::TransactionFailed(format!(
+                        "Failed to deserialize versioned transaction: {}",
+                        e
+                    ))
+                })?
+                .0;
+
+        // Get Helius API key from vault
+        let secrets = load_secrets_with_fallback().map_err(|e| {
+            ExecutorError::TransactionFailed(format!("Failed to load vault: {}", e))
+        })?;
+
+        let helius_api_key = secrets.rpc_api_key.as_ref().ok_or_else(|| {
+            ExecutorError::TransactionFailed(
+                "Helius API key not found in vault for staked connection".to_string(),
+            )
+        })?;
+
+        let helius_url = crate::utils::helius_rpc_url(helius_api_key);
+
+        // Update the message's recent_blockhash if needed (reuse V0 reconstruction logic)
+        use solana_sdk::message::VersionedMessage;
+        use solana_sdk::signature::Signer;
+
+        let updated_message = match &versioned_tx.message {
+            VersionedMessage::Legacy(legacy_msg) => {
+                let mut new_msg = legacy_msg.clone();
+                new_msg.recent_blockhash = recent_blockhash;
+                VersionedMessage::Legacy(new_msg)
+            }
+            VersionedMessage::V0(_) => {
+                // V0 blockhash already refreshed in builder, use as-is
+                versioned_tx.message.clone()
+            }
+        };
+
+        // Get the message hash and sign
+        let message_hash = updated_message.hash();
+        let signature = wallet_keypair
+            .try_sign_message(&message_hash.to_bytes())
+            .map_err(|e| {
+                tracing::error!(error = %e, "Failed to sign message");
+                ExecutorError::TransactionFailed(format!("Failed to sign message: {}", e))
+            })?;
+
+        // Create new transaction with updated signature
+        let mut new_signatures = versioned_tx.signatures.clone();
+        if new_signatures.is_empty() {
+            new_signatures.push(signature);
+        } else {
+            new_signatures[0] = signature;
+        }
+
+        let signed_tx = VersionedTransaction {
+            signatures: new_signatures,
+            message: updated_message,
+        };
+
+        // Serialize the signed transaction
+        let signed_bytes =
+            bincode::serde::encode_to_vec(&signed_tx, bincode::config::legacy()).map_err(|e| {
+                ExecutorError::TransactionFailed(format!(
+                    "Failed to serialize versioned transaction: {}",
+                    e
+                ))
+            })?;
+
+        self.validate_transaction_size(&signed_bytes)?;
+
+        let tx_base64 = BASE64.encode(&signed_bytes);
+
+        // Submit via Helius with prioritization fee
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "sendTransaction",
+            "params": [
+                tx_base64,
+                {
+                    "encoding": "base64",
+                    "skipPreflight": false,
+                    "maxRetries": 3,
+                    "prioritizationFee": 10000
+                }
+            ]
+        });
+
+        let rpc_timeout = Duration::from_secs(30);
+
+        let response = timeout(
+            rpc_timeout,
+            self.http_client.post(&helius_url).json(&payload).send(),
+        )
+        .await
+        .map_err(|_| {
+            ExecutorError::TransactionFailed(
+                "Helius staked connection submission timed out after 30s".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            ExecutorError::Rpc(format!("Helius staked connection request failed: {}", e))
+        })?;
+
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ExecutorError::Rpc(format!("Failed to parse Helius response: {}", e)))?;
+
+        let sig = result
+            .get("result")
+            .and_then(|r| r.as_str())
+            .ok_or_else(|| ExecutorError::Rpc("No signature in Helius response".to_string()))?;
+
+        tracing::info!(
+            signature = %sig,
+            "Versioned transaction submitted via Helius Staked Connection"
+        );
+
+        Ok(sig.to_string())
     }
 
     /// Execute via standard TPU
@@ -2191,12 +2541,19 @@ impl Executor {
         )
     }
 
-    /// Calculate dynamic Jito tip based on strategy and history
-    pub fn calculate_jito_tip(&self, signal: &Signal) -> Decimal {
+    /// Calculate dynamic Jito tip based on strategy and history with failure rate scaling
+    pub async fn calculate_jito_tip(&self, signal: &Signal) -> Decimal {
         // Use TipManager if available, otherwise fall back to simple strategy-based calculation
         if let Some(ref tip_manager) = self.tip_manager {
-            // Pass Decimal directly - no conversion needed
-            tip_manager.calculate_tip(signal.payload.strategy, signal.payload.amount_sol)
+            // Get recent failure rate for dynamic tip scaling
+            let failure_rate = tip_manager.get_recent_failure_rate().await.unwrap_or(0.0);
+
+            // Use dynamic tip scaling with failure rate data
+            tip_manager.calculate_dynamic_tip_with_load(
+                signal.payload.strategy,
+                signal.payload.amount_sol,
+                failure_rate,
+            ).await
         } else {
             // Fallback to simple strategy-based tip calculation
             let base_tip = match signal.payload.strategy {
@@ -2293,8 +2650,8 @@ impl Executor {
     }
 
     /// Calculate adaptive Jito tip with increase on retry attempts
-    fn calculate_adaptive_jito_tip(&self, signal: &Signal, attempt: u32) -> u64 {
-        let base_tip_sol = self.calculate_jito_tip(signal);
+    async fn calculate_adaptive_jito_tip(&self, signal: &Signal, attempt: u32) -> u64 {
+        let base_tip_sol = self.calculate_jito_tip(signal).await;
 
         if attempt > 1 {
             // Increase tip by 20% per retry attempt (compensating)

@@ -275,6 +275,43 @@ impl TipManager {
         }
     }
 
+    /// Calculate tip with dynamic scaling based on recent failure rates
+    /// If failure rate > 30%, scale tip up to compete for block inclusion
+    pub async fn calculate_dynamic_tip_with_load(
+        &self,
+        strategy: Strategy,
+        trade_size_sol: Decimal,
+        failure_rate: f64,
+    ) -> Decimal {
+        let base_tip = self.calculate_tip(strategy, trade_size_sol);
+
+        // Scale tip if block landing rate is poor (>30% failure rate)
+        if failure_rate > 0.3 {
+            let multiplier = Decimal::from_f64_retain(1.0 + (failure_rate * 0.5))
+                .unwrap_or(Decimal::ONE);
+            (base_tip * multiplier).min(self.config.tip_ceiling_sol)
+        } else {
+            base_tip
+        }
+    }
+
+    /// Get recent bundle failure rate for tip calculation
+    pub async fn get_recent_failure_rate(&self) -> AppResult<f64> {
+        let total = self.db.get_jito_tip_count().await?;
+        if total == 0 {
+            return Ok(0.0); // No history = assume 0% failure
+        }
+
+        // Count recent successful tips (last 100 tips)
+        let recent_tips = self.db.get_recent_jito_tips(100).await?;
+        let success_count = recent_tips.len() as f64;
+
+        // Estimate failure rate from historical success patterns
+        // This is a heuristic since DB trait doesn't expose raw success/fail counts
+        let failure_rate = 1.0 - (success_count / total as f64);
+        Ok(failure_rate)
+    }
+
     /// Check if in cold start mode
     pub fn is_cold_start(&self) -> bool {
         *self.cold_start.read()

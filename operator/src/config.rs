@@ -467,6 +467,10 @@ pub struct JitoConfig {
     /// Maximum retry attempts for Jito-specific errors (default: 5)
     #[serde(default = "default_jito_max_retries")]
     pub max_retries: u32,
+    /// Use Helius Staked Connections for exit trades (higher landing rate during congestion)
+    /// Default: true for production efficiency
+    #[serde(default = "default_helius_staked_exits")]
+    pub helius_staked_exits: bool,
 }
 
 fn default_jito_enabled() -> bool {
@@ -507,6 +511,10 @@ fn default_jito_disable_fallback() -> bool {
 
 fn default_jito_max_retries() -> u32 {
     5
+}
+
+fn default_helius_staked_exits() -> bool {
+    true  // Enable by default for production
 }
 
 /// Jupiter API configuration
