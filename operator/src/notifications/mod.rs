@@ -71,6 +71,20 @@ pub enum NotificationEvent {
         trade_count: u32,
         win_rate: f64,
     },
+    /// Jito fallback was triggered
+    JitoFallbackTriggered {
+        reason: String,
+        failure_count: u32,
+        threshold: u32,
+    },
+    /// Jito recovered (switched back from Standard)
+    JitoRecovered { latency_ms: u64 },
+    /// Jito health changed status
+    JitoHealthChanged {
+        healthy: bool,
+        latency_ms: Option<u64>,
+        success_rate: f64,
+    },
 }
 
 impl NotificationEvent {
@@ -85,6 +99,15 @@ impl NotificationEvent {
             NotificationEvent::RpcFallback { .. } => AlertLevel::Important,
             NotificationEvent::WalletPromoted { .. } => AlertLevel::Info,
             NotificationEvent::DailySummary { .. } => AlertLevel::Info,
+            NotificationEvent::JitoFallbackTriggered { .. } => AlertLevel::Important,
+            NotificationEvent::JitoRecovered { .. } => AlertLevel::Info,
+            NotificationEvent::JitoHealthChanged { healthy, .. } => {
+                if *healthy {
+                    AlertLevel::Info
+                } else {
+                    AlertLevel::Important
+                }
+            }
         }
     }
 
@@ -156,6 +179,36 @@ impl NotificationEvent {
                 format!(
                     "{prefix}{} Daily: {:+.2} USD | Trades: {} | Win: {:.1}%",
                     emoji, pnl_usd_f64, trade_count, win_rate
+                )
+            }
+            NotificationEvent::JitoFallbackTriggered {
+                reason,
+                failure_count,
+                threshold,
+            } => {
+                format!(
+                    "{prefix}⚠️ Jito fallback triggered after {}/{} failures: {}",
+                    failure_count, threshold, reason
+                )
+            }
+            NotificationEvent::JitoRecovered { latency_ms } => {
+                format!(
+                    "{prefix}✅ Jito recovered (latency: {}ms)",
+                    latency_ms
+                )
+            }
+            NotificationEvent::JitoHealthChanged {
+                healthy,
+                latency_ms,
+                success_rate,
+            } => {
+                let status = if *healthy { "healthy" } else { "unhealthy" };
+                let latency = latency_ms.unwrap_or(0);
+                format!(
+                    "{prefix}🔄 Jito health: {} (latency: {}ms, success_rate: {:.1}%)",
+                    status,
+                    latency,
+                    success_rate * 100.0
                 )
             }
         }

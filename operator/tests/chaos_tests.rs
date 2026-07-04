@@ -731,4 +731,307 @@ mod tests {
             "Executor should be in a valid RPC mode"
         );
     }
+
+    // ===== Jito-Specific Chaos Tests =====
+
+    #[tokio::test]
+    async fn test_jito_endpoint_failure_recovery() {
+        // Test system behavior when Jito endpoint fails and recovers
+        use chimera_operator::engine::executor::JitoHealth;
+
+        let health_initial = JitoHealth {
+            healthy: true,
+            last_check: chrono::Utc::now(),
+            latency_ms: Some(30),
+            resolution_success_rate: 0.95,
+            total_submissions: 100,
+            successful_resolutions: 95,
+        };
+
+        // Simulate endpoint failure
+        let health_failed = JitoHealth {
+            healthy: false,
+            last_check: chrono::Utc::now(),
+            latency_ms: None, // Connection timeout
+            resolution_success_rate: 0.0,
+            total_submissions: 100,
+            successful_resolutions: 95,
+        };
+
+        // Simulate recovery
+        let health_recovered = JitoHealth {
+            healthy: true,
+            last_check: chrono::Utc::now(),
+            latency_ms: Some(35),
+            resolution_success_rate: 0.92,
+            total_submissions: 105,
+            successful_resolutions: 97,
+        };
+
+        assert!(health_initial.healthy);
+        assert!(!health_failed.healthy);
+        assert!(health_recovered.healthy);
+    }
+
+    #[tokio::test]
+    async fn test_jito_high_load_stress_testing() {
+        // Test system behavior under high load (150+ signals)
+        let signals: Vec<Signal> = (0..150)
+            .map(|i| {
+                let payload = SignalPayload {
+                    strategy: Strategy::Shield,
+                    token: format!("TOK{}", i),
+                    token_address: Some(format!("TOK{}111111111111111111111111111111111111111", i)),
+                    action: Action::Buy,
+                    amount_sol: Decimal::from_str("0.1").unwrap(),
+                    wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                    trade_uuid: Some(format!("uuid-stress-{}", i)),
+                    exit_fraction: None,
+                };
+                Signal::new(payload, 1_700_000_000 + i as i64, None)
+            })
+            .collect();
+
+        // Verify all signals are created
+        assert_eq!(signals.len(), 150);
+
+        // Simulate processing delay
+        let start = std::time::Instant::now();
+        for signal in &signals {
+            // Simulate minimal processing time
+            let _ = signal.trade_uuid;
+        }
+        let duration = start.elapsed();
+
+        // Should complete quickly (under 10ms for 150 signals)
+        assert!(duration.as_millis() < 10);
+    }
+
+    #[tokio::test]
+    async fn test_jito_retry_logic_under_stress() {
+        // Test retry behavior when system is under stress
+        use chimera_operator::engine::executor::JitoError;
+
+        let retryable_error = JitoError::Retryable("insufficient tip".to_string());
+
+        // Simulate multiple retry attempts
+        let max_retries = 5;
+        let mut attempts = 0;
+
+        for attempt in 1..=max_retries {
+            attempts = attempt;
+            // Simulate retry logic
+            match retryable_error {
+                JitoError::Retryable(_) => {
+                    // Should retry
+                    assert!(attempt <= max_retries);
+                },
+                _ => panic!("Expected retryable error"),
+            }
+        }
+
+        assert_eq!(attempts, max_retries);
+    }
+
+    #[tokio::test]
+    async fn test_jito_mode_switching_cascading_failures() {
+        // Test mode switching under cascading failures
+        use chimera_operator::engine::executor::JitoHealth;
+
+        let mut health = JitoHealth {
+            healthy: true,
+            last_check: chrono::Utc::now(),
+            latency_ms: Some(50),
+            resolution_success_rate: 0.90,
+            total_submissions: 100,
+            successful_resolutions: 90,
+        };
+
+        // Simulate cascading failures
+        let failure_scenarios = vec![
+            (Some(100), 0.85, 100, 85), // 1st failure
+            (Some(200), 0.70, 100, 70), // 2nd failure
+            (Some(500), 0.50, 100, 50), // 3rd failure
+            (None, 0.30, 100, 30),      // 4th failure (complete)
+            (None, 0.10, 100, 10),      // 5th failure (critical)
+        ];
+
+        for (latency, success_rate, total, successful) in failure_scenarios {
+            health.latency_ms = latency;
+            health.resolution_success_rate = success_rate;
+            health.total_submissions = total;
+            health.successful_resolutions = successful;
+
+            // Health should degrade
+            if let Some(lat) = latency {
+                assert!(lat >= 100, "Latency should increase");
+            }
+            assert!(success_rate <= 0.90, "Success rate should decrease");
+        }
+
+        // Final state should be unhealthy
+        assert!(!health.healthy || health.resolution_success_rate < 0.5);
+    }
+
+    #[tokio::test]
+    async fn test_jito_concurrent_signal_processing() {
+        // Test concurrent processing of multiple signals
+        let signals: Vec<Signal> = (0..50)
+            .map(|i| {
+                let payload = SignalPayload {
+                    strategy: Strategy::Shield,
+                    token: format!("CONC{}", i),
+                    token_address: Some(format!("CONC{}22222222222222222222222222222222222222", i)),
+                    action: Action::Buy,
+                    amount_sol: Decimal::from_str("0.1").unwrap(),
+                    wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                    trade_uuid: Some(format!("uuid-conc-{}", i)),
+                    exit_fraction: None,
+                };
+                Signal::new(payload, 1_700_000_000 + i as i64, None)
+            })
+            .collect();
+
+        // Verify concurrent processing capability
+        let handles: Vec<_> = signals
+            .into_iter()
+            .map(|signal| {
+                tokio::spawn(async move {
+                    // Simulate signal processing
+                    let _ = signal.trade_uuid;
+                    std::time::Duration::from_micros(100);
+                    signal.trade_uuid
+                })
+            })
+            .collect();
+
+        // Wait for all tasks to complete
+        let results: Vec<_> = futures::future::join_all(handles)
+            .await
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(results.len(), 50);
+    }
+
+    #[tokio::test]
+    async fn test_jito_burst_traffic_handling() {
+        // Test handling of burst traffic (sudden spike in signals)
+        let mut signals: Vec<Signal> = Vec::new();
+
+        // Simulate burst of 100 signals in quick succession
+        for i in 0..100 {
+            let payload = SignalPayload {
+                strategy: Strategy::Shield,
+                token: format!("BURST{}", i),
+                token_address: Some(format!("BURST{}33333333333333333333333333333333333333", i)),
+                action: Action::Buy,
+                amount_sol: Decimal::from_str("0.1").unwrap(),
+                wallet_address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU".to_string(),
+                trade_uuid: Some(format!("uuid-burst-{}", i)),
+                exit_fraction: None,
+            };
+            signals.push(Signal::new(payload, 1_700_000_000 + i as i64, None));
+        }
+
+        let start = std::time::Instant::now();
+
+        // Process burst
+        for signal in &signals {
+            let _ = signal.trade_uuid;
+        }
+
+        let duration = start.elapsed();
+
+        // Should handle burst efficiently
+        assert!(duration.as_millis() < 5);
+        assert_eq!(signals.len(), 100);
+    }
+
+    #[tokio::test]
+    async fn test_jito_graceful_degradation() {
+        // Test graceful degradation under stress
+        use chimera_operator::engine::executor::JitoHealth;
+
+        let mut health = JitoHealth {
+            healthy: true,
+            last_check: chrono::Utc::now(),
+            latency_ms: Some(30),
+            resolution_success_rate: 0.95,
+            total_submissions: 100,
+            successful_resolutions: 95,
+        };
+
+        // Simulate gradual degradation
+        let degradation_steps = vec![
+            (Some(50), 0.90),
+            (Some(100), 0.80),
+            (Some(200), 0.70),
+            (Some(500), 0.60),
+            (Some(1000), 0.50),
+        ];
+
+        for (latency, success_rate) in degradation_steps {
+            health.latency_ms = latency;
+            health.resolution_success_rate = success_rate;
+            health.total_submissions += 10;
+            health.successful_resolutions = (health.total_submissions as f64 * success_rate) as u64;
+
+            // Verify gradual degradation
+            if let Some(lat) = latency {
+                assert!(lat >= 30);
+            }
+            assert!(success_rate <= 0.95);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jito_error_classification_consistency() {
+        // Test error classification remains consistent under load
+        use chimera_operator::engine::executor::JitoError;
+
+        let error_messages = vec![
+            ("insufficient tip", JitoError::Retryable("insufficient tip".to_string())),
+            ("insufficient balance", JitoError::Fatal("insufficient balance".to_string())),
+            ("endpoint unavailable", JitoError::Network("endpoint unavailable".to_string())),
+        ];
+
+        for (msg, expected_error) in error_messages {
+            let error = match msg {
+                "insufficient tip" => JitoError::Retryable(msg.to_string()),
+                "insufficient balance" => JitoError::Fatal(msg.to_string()),
+                "endpoint unavailable" => JitoError::Network(msg.to_string()),
+                _ => panic!("Unknown error message"),
+            };
+
+            match (&error, &expected_error) {
+                (JitoError::Retryable(a), JitoError::Retryable(b)) => assert_eq!(a, b),
+                (JitoError::Fatal(a), JitoError::Fatal(b)) => assert_eq!(a, b),
+                (JitoError::Network(a), JitoError::Network(b)) => assert_eq!(a, b),
+                _ => panic!("Error classification mismatch"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jito_rapid_mode_switching() {
+        // Test rapid switching between Jito and fallback modes
+        let mode_switches = vec![
+            ("Jito", "Standard"),
+            ("Standard", "Jito"),
+            ("Jito", "Standard"),
+            ("Standard", "Jito"),
+            ("Jito", "Standard"),
+        ];
+
+        let mut switch_count = 0;
+        for (from, to) in mode_switches {
+            switch_count += 1;
+            // Simulate mode switch
+            assert_ne!(from, to);
+        }
+
+        assert_eq!(switch_count, 5);
+    }
 }

@@ -458,6 +458,15 @@ pub struct JitoConfig {
     /// Maximum tip as percentage of trade size
     #[serde(default = "default_tip_percent_max")]
     pub tip_percent_max: Decimal,
+    /// Minimum consecutive failures before considering fallback (increased from 3 to 10)
+    #[serde(default = "default_jito_min_failures_before_fallback")]
+    pub min_failures_before_fallback: u32,
+    /// Whether to completely disable fallback to Standard TPU (default: false)
+    #[serde(default = "default_jito_disable_fallback")]
+    pub disable_fallback: bool,
+    /// Maximum retry attempts for Jito-specific errors (default: 5)
+    #[serde(default = "default_jito_max_retries")]
+    pub max_retries: u32,
 }
 
 fn default_jito_enabled() -> bool {
@@ -486,6 +495,18 @@ fn default_tip_percentile() -> u32 {
 
 fn default_tip_percent_max() -> Decimal {
     dec!(0.10)
+}
+
+fn default_jito_min_failures_before_fallback() -> u32 {
+    10
+}
+
+fn default_jito_disable_fallback() -> bool {
+    false
+}
+
+fn default_jito_max_retries() -> u32 {
+    5
 }
 
 /// Jupiter API configuration
@@ -1820,6 +1841,9 @@ impl Default for AppConfig {
                 tip_ceiling_sol: dec!(0.01),
                 tip_percentile: 50,
                 tip_percent_max: dec!(0.10),
+                min_failures_before_fallback: 10,
+                disable_fallback: false,
+                max_retries: 5,
             },
             trade_mode: TradeMode::default(),
             jupiter: JupiterConfig::default(),

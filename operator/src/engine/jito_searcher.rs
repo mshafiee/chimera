@@ -121,6 +121,11 @@ impl JitoSearcherClient {
         })
     }
 
+    /// Get the Jito endpoint URL
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
     /// Submit a **single-transaction** bundle (the swap tx already has the tip
     /// inlined — see `engine::tip_inlining`). D3: one signature, all-or-nothing
     /// at the transaction level, replacing the `[tip_tx, swap_tx]` two-tx bundle

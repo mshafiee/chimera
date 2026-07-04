@@ -86,6 +86,10 @@ impl RateLimiter {
                 format!("wallet_promoted:{}", address)
             }
             NotificationEvent::DailySummary { .. } => "daily_summary".to_string(),
+            // Jito-specific notifications: use same routing as RPC fallback
+            NotificationEvent::JitoFallbackTriggered { .. } => "jito_fallback".to_string(),
+            NotificationEvent::JitoRecovered { .. } => "jito_recovered".to_string(),
+            NotificationEvent::JitoHealthChanged { .. } => "jito_health".to_string(),
         }
     }
 }

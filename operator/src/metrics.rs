@@ -56,6 +56,16 @@ pub struct MetricsState {
     pub webhook_rate_limiter_usage: prometheus::Gauge,
     /// Database query latency histogram (in milliseconds)
     pub db_query_latency: Histogram,
+    /// Jito bundle submissions total counter (by mode: jito, helius, standard)
+    pub jito_submissions: IntCounterVec,
+    /// Jito bundle resolutions total counter (by status: success, failed)
+    pub jito_resolutions: IntCounterVec,
+    /// Jito endpoint health gauge (1 = healthy, 0 = unhealthy)
+    pub jito_health: IntGauge,
+    /// Jito fallback trigger counter (by reason)
+    pub jito_fallback_total: IntCounterVec,
+    /// Jito retry counter (by attempt number)
+    pub jito_retry_total: IntCounterVec,
 }
 
 impl MetricsState {
@@ -271,6 +281,68 @@ impl MetricsState {
             .register(Box::new(db_query_latency.clone()))
             .map_err(|e| format!("Failed to register db_query_latency: {}", e))?;
 
+        // Jito bundle submissions counter (by mode: jito, helius, standard)
+        let jito_submissions = IntCounterVec::new(
+            Opts::new(
+                "chimera_jito_submissions_total",
+                "Total Jito bundle submissions by mode",
+            ),
+            &["mode"],
+        )
+        .map_err(|e| format!("Failed to create jito_submissions counter: {}", e))?;
+        registry
+            .register(Box::new(jito_submissions.clone()))
+            .map_err(|e| format!("Failed to register jito_submissions: {}", e))?;
+
+        // Jito bundle resolutions counter (by status: success, failed)
+        let jito_resolutions = IntCounterVec::new(
+            Opts::new(
+                "chimera_jito_resolutions_total",
+                "Total Jito bundle resolutions by status",
+            ),
+            &["status"],
+        )
+        .map_err(|e| format!("Failed to create jito_resolutions counter: {}", e))?;
+        registry
+            .register(Box::new(jito_resolutions.clone()))
+            .map_err(|e| format!("Failed to register jito_resolutions: {}", e))?;
+
+        // Jito endpoint health gauge
+        let jito_health = IntGauge::with_opts(Opts::new(
+            "chimera_jito_health",
+            "Jito endpoint health (1 = healthy, 0 = unhealthy)",
+        ))
+        .map_err(|e| format!("Failed to create jito_health gauge: {}", e))?;
+        registry
+            .register(Box::new(jito_health.clone()))
+            .map_err(|e| format!("Failed to register jito_health: {}", e))?;
+
+        // Jito fallback trigger counter (by reason)
+        let jito_fallback_total = IntCounterVec::new(
+            Opts::new(
+                "chimera_jito_fallback_total",
+                "Total Jito fallback triggers by reason",
+            ),
+            &["reason"],
+        )
+        .map_err(|e| format!("Failed to create jito_fallback_total counter: {}", e))?;
+        registry
+            .register(Box::new(jito_fallback_total.clone()))
+            .map_err(|e| format!("Failed to register jito_fallback: {}", e))?;
+
+        // Jito retry counter (by attempt number)
+        let jito_retry_total = IntCounterVec::new(
+            Opts::new(
+                "chimera_jito_retry_total",
+                "Total Jito retry attempts by attempt number",
+            ),
+            &["attempt"],
+        )
+        .map_err(|e| format!("Failed to create jito_retry_total counter: {}", e))?;
+        registry
+            .register(Box::new(jito_retry_total.clone()))
+            .map_err(|e| format!("Failed to register jito_retry: {}", e))?;
+
         Ok(Self {
             registry,
             queue_depth,
@@ -292,6 +364,11 @@ impl MetricsState {
             webhook_rate_limiter_health,
             webhook_rate_limiter_usage,
             db_query_latency,
+            jito_submissions,
+            jito_resolutions,
+            jito_health,
+            jito_fallback_total,
+            jito_retry_total,
         })
     }
 

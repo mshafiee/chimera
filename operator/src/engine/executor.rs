@@ -44,6 +44,17 @@ pub enum RpcMode {
     Standard,
 }
 
+/// Jito-specific error classification for retry strategy
+#[derive(Debug, Clone)]
+pub enum JitoError {
+    /// Retryable: insufficient tip, bundle timeout, network transient
+    Retryable(String),
+    /// Fatal: invalid transaction, insufficient balance, transaction too large
+    Fatal(String),
+    /// Network: Jito endpoint unavailable (may warrant fallback)
+    Network(String),
+}
+
 /// RPC health status
 #[derive(Debug, Clone)]
 pub struct RpcHealth {
@@ -53,6 +64,23 @@ pub struct RpcHealth {
     pub last_check: DateTime<Utc>,
     /// Latency in milliseconds (if healthy)
     pub latency_ms: Option<u64>,
+}
+
+/// Jito-specific health status
+#[derive(Debug, Clone)]
+pub struct JitoHealth {
+    /// Whether Jito endpoint is healthy
+    pub healthy: bool,
+    /// Last check timestamp
+    pub last_check: DateTime<Utc>,
+    /// Endpoint latency in milliseconds (if healthy)
+    pub latency_ms: Option<u64>,
+    /// Bundle resolution success rate (0.0 to 1.0)
+    pub resolution_success_rate: f64,
+    /// Total bundle submissions tracked
+    pub total_submissions: u64,
+    /// Successful resolutions tracked
+    pub successful_resolutions: u64,
 }
 
 /// Outcome from a single trade execution — returned by `execute()` instead of
@@ -148,6 +176,12 @@ struct ExecutorMutableState {
     failure_count: u32,
     fallback_since: Option<DateTime<Utc>>,
     last_recovery_attempt: Option<DateTime<Utc>>,
+    /// Jito health tracking
+    jito_health: Option<JitoHealth>,
+    /// Jito bundle submission metrics
+    jito_submissions: std::sync::atomic::AtomicU64,
+    jito_resolutions_success: std::sync::atomic::AtomicU64,
+    jito_resolutions_failed: std::sync::atomic::AtomicU64,
 }
 
 /// Trade executor
@@ -186,6 +220,8 @@ pub struct Executor {
     market_regime_detector: Option<Arc<crate::engine::market_regime::MarketRegimeDetector>>,
     /// Kelly sizer for dynamic position sizing and friction gating
     kelly_sizer: Arc<KellySizer>,
+    /// Metrics state for Prometheus metrics
+    metrics: Option<Arc<crate::metrics::MetricsState>>,
 }
 
 impl Executor {
@@ -256,6 +292,10 @@ impl Executor {
                 failure_count: 0,
                 fallback_since: None,
                 last_recovery_attempt: None,
+                jito_health: None,
+                jito_submissions: std::sync::atomic::AtomicU64::new(0),
+                jito_resolutions_success: std::sync::atomic::AtomicU64::new(0),
+                jito_resolutions_failed: std::sync::atomic::AtomicU64::new(0),
             }),
             recovery_interval: Duration::from_secs(300), // 5 minutes
             notifier: None,
@@ -269,6 +309,7 @@ impl Executor {
             circuit_breaker,
             market_regime_detector: None,
             kelly_sizer,
+            metrics: None,
         }
     }
 
@@ -281,6 +322,12 @@ impl Executor {
     /// Set the tip manager
     pub fn with_tip_manager(mut self, tip_manager: Arc<TipManager>) -> Self {
         self.tip_manager = Some(tip_manager);
+        self
+    }
+
+    /// Set the metrics state
+    pub fn with_metrics(mut self, metrics: Arc<crate::metrics::MetricsState>) -> Self {
+        self.metrics = Some(metrics);
         self
     }
 
@@ -334,6 +381,10 @@ impl Executor {
                 NotificationEvent::RpcFallback { .. } => rules.rpc_fallback,
                 NotificationEvent::WalletPromoted { .. } => rules.wallet_promoted,
                 NotificationEvent::DailySummary { .. } => rules.daily_summary,
+                // Jito-specific notifications: use same rules as RPC fallback
+                NotificationEvent::JitoFallbackTriggered { .. } => rules.rpc_fallback,
+                NotificationEvent::JitoRecovered { .. } => rules.rpc_fallback,
+                NotificationEvent::JitoHealthChanged { .. } => rules.rpc_fallback,
             };
 
             if should_send {
@@ -448,7 +499,7 @@ impl Executor {
                 crate::config::TradeMode::Devnet => self.execute_devnet(signal).await,
                 crate::config::TradeMode::Paper => self.execute_paper(signal).await,
                 crate::config::TradeMode::Live => match rpc_mode {
-                    RpcMode::Jito => self.execute_jito(signal).await,
+                    RpcMode::Jito => self.execute_jito_with_retry(signal).await,
                     RpcMode::Standard => self.execute_standard(signal).await,
                 },
             };
@@ -659,10 +710,15 @@ impl Executor {
                     }
 
                     // [R-H3] Check if we need to switch to fallback.
-                    // Removed the `rpc_mode == RpcMode::Jito` guard — fallback must trigger
-                    // for any mode when the failure threshold is reached so that Standard-mode
-                    // primary failures also switch to the fallback URL.
-                    if failure_count >= self.config.rpc.max_consecutive_failures {
+                    // Use Jito-specific threshold when in Jito mode, otherwise use RPC threshold.
+                    // The switch_to_fallback method itself will check disable_fallback and min_failures_before_fallback.
+                    let threshold = if rpc_mode == RpcMode::Jito {
+                        self.config.jito.min_failures_before_fallback
+                    } else {
+                        self.config.rpc.max_consecutive_failures
+                    };
+
+                    if failure_count >= threshold {
                         self.switch_to_fallback().await;
                     }
                 }
@@ -829,6 +885,15 @@ impl Executor {
                     state.rpc_mode = RpcMode::Jito;
                     state.fallback_since = None;
                     state.failure_count = 0;
+                }
+
+                // Send Jito recovery notification
+                if let Some(ref notifier) = self.notifier {
+                    notifier
+                        .notify(NotificationEvent::JitoRecovered {
+                            latency_ms: health.latency_ms.unwrap_or(0),
+                        })
+                        .await;
                 }
 
                 // Log recovery to config audit
@@ -1034,6 +1099,178 @@ impl Executor {
         let _ = self.check_active_health().await;
     }
 
+    /// Check Jito endpoint health via lightweight connectivity test
+    ///
+    /// Returns JitoHealth with submission metrics and endpoint status.
+    /// This is a non-invasive check that doesn't submit real bundles.
+    pub async fn check_jito_health(&self) -> Result<JitoHealth, ExecutorError> {
+        let start = std::time::Instant::now();
+
+        // Check if Jito client is configured
+        let jito_client = self.jito_searcher.as_ref().ok_or_else(|| {
+            ExecutorError::TransactionFailed("Jito Searcher client not configured".to_string())
+        })?;
+
+        // Attempt a lightweight GET request to the Jito endpoint
+        // This checks connectivity without submitting a bundle
+        let health_url = format!("{}/health", jito_client.endpoint());
+
+        let response = self
+            .http_client
+            .get(&health_url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await;
+
+        let latency = start.elapsed().as_millis() as u64;
+
+        // Calculate resolution success rate from atomic counters
+        let state = self.mutable.lock();
+        let total_submissions = state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed);
+        let successful_resolutions = state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed);
+        let failed_resolutions = state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed);
+        drop(state);
+
+        let resolution_success_rate = if total_submissions > 0 {
+            successful_resolutions as f64 / total_submissions as f64
+        } else {
+            1.0 // No submissions yet, assume healthy
+        };
+
+        let health = match response {
+            Ok(resp) if resp.status().is_success() => {
+                JitoHealth {
+                    healthy: true,
+                    last_check: Utc::now(),
+                    latency_ms: Some(latency),
+                    resolution_success_rate,
+                    total_submissions,
+                    successful_resolutions,
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(
+                    status = %resp.status(),
+                    "Jito health check returned non-success status"
+                );
+                JitoHealth {
+                    healthy: false,
+                    last_check: Utc::now(),
+                    latency_ms: Some(latency),
+                    resolution_success_rate,
+                    total_submissions,
+                    successful_resolutions,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "Jito health check failed");
+                JitoHealth {
+                    healthy: false,
+                    last_check: Utc::now(),
+                    latency_ms: None,
+                    resolution_success_rate,
+                    total_submissions,
+                    successful_resolutions,
+                }
+            }
+        };
+
+        // Update cached health
+        let previous_health = self.mutable.lock().jito_health.clone();
+        self.mutable.lock().jito_health = Some(health.clone());
+
+        // Update Prometheus metrics
+        self.update_jito_health_metrics(&health);
+
+        // Send notification if health status changed
+        if let Some(prev) = previous_health {
+            if prev.healthy != health.healthy {
+                if let Some(ref notifier) = self.notifier {
+                    notifier
+                        .notify(NotificationEvent::JitoHealthChanged {
+                            healthy: health.healthy,
+                            latency_ms: health.latency_ms,
+                            success_rate: health.resolution_success_rate,
+                        })
+                        .await;
+                }
+            }
+        }
+
+        Ok(health)
+    }
+
+    /// Get latest Jito health status (non-blocking read)
+    pub fn get_jito_health(&self) -> Option<JitoHealth> {
+        self.mutable.lock().jito_health.clone()
+    }
+
+    /// Record a Jito bundle submission (for health tracking)
+    fn record_jito_submission(&self) {
+        self.mutable.lock().jito_submissions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Record a successful Jito bundle resolution
+    fn record_jito_resolution_success(&self) {
+        self.mutable.lock().jito_resolutions_success.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.record_jito_resolution_metrics("success");
+    }
+
+    /// Record a failed Jito bundle resolution
+    fn record_jito_resolution_failure(&self) {
+        self.mutable.lock().jito_resolutions_failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.record_jito_resolution_metrics("failed");
+    }
+
+    /// Get Jito submission statistics
+    pub fn get_jito_stats(&self) -> (u64, u64, u64) {
+        let state = self.mutable.lock();
+        (
+            state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed),
+            state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed),
+            state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Record Jito bundle submission to Prometheus metrics
+    fn record_jito_submission_metrics(&self, mode: &str) {
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .jito_submissions
+                .with_label_values(&[mode])
+                .inc();
+        }
+    }
+
+    /// Record Jito bundle resolution to Prometheus metrics
+    fn record_jito_resolution_metrics(&self, status: &str) {
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .jito_resolutions
+                .with_label_values(&[status])
+                .inc();
+        }
+    }
+
+    /// Record Jito retry to Prometheus metrics
+    fn record_jito_retry_metrics(&self, attempt: u32) {
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .jito_retry_total
+                .with_label_values(&[&attempt.to_string()])
+                .inc();
+        }
+    }
+
+    /// Update Jito health gauge from health check
+    fn update_jito_health_metrics(&self, health: &JitoHealth) {
+        if let Some(ref metrics) = self.metrics {
+            metrics
+                .jito_health
+                .set(if health.healthy { 1 } else { 0 });
+        }
+    }
+
     /// Execute via Jito bundle
     async fn execute_jito(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
@@ -1163,6 +1400,10 @@ impl Executor {
 
             match submit_result {
                 Ok(bundle_ref) => {
+                    // Track bundle submission for health monitoring
+                    self.record_jito_submission();
+                    self.record_jito_submission_metrics("jito");
+
                     tracing::info!(
                         trade_uuid = %signal.trade_uuid,
                         bundle_ref = %bundle_ref,
@@ -1177,12 +1418,18 @@ impl Executor {
                     {
                         match jito_searcher.resolve_bundle_signature(bundle_id).await {
                             Some(sig) => {
+                                // Track successful resolution
+                                self.record_jito_resolution_success();
+
                                 let confirmed = self
                                     .poll_signature_confirmation(&sig, &signal.trade_uuid)
                                     .await?;
                                 (sig, confirmed)
                             }
                             None => {
+                                // Track failed resolution
+                                self.record_jito_resolution_failure();
+
                                 tracing::warn!(
                                     trade_uuid = %signal.trade_uuid,
                                     bundle_id,
@@ -1268,6 +1515,10 @@ impl Executor {
                         bundle_ref = %bundle_ref,
                         "Bundle submitted via Helius Sender API"
                     );
+                    // Track bundle submission (Helius still uses Jito bundles)
+                    self.record_jito_submission();
+                    self.record_jito_submission_metrics("helius");
+
                     // F12: resolve the Helius bundle UUID to the real tx
                     // signature before polling; never poll the UUID itself.
                     let (signature, confirmed) = if let Some(bundle_id) =
@@ -1278,12 +1529,18 @@ impl Executor {
                             .await
                         {
                             Some(sig) => {
+                                // Track successful resolution
+                                self.record_jito_resolution_success();
+
                                 let confirmed = self
                                     .poll_signature_confirmation(&sig, &signal.trade_uuid)
                                     .await?;
                                 (sig, confirmed)
                             }
                             None => {
+                                // Track failed resolution
+                                self.record_jito_resolution_failure();
+
                                 tracing::warn!(
                                     trade_uuid = %signal.trade_uuid,
                                     bundle_id,
@@ -1962,6 +2219,198 @@ impl Executor {
         }
     }
 
+    /// Classify an ExecutorError into Jito-specific categories for retry strategy
+    fn classify_jito_error(&self, error: &ExecutorError) -> JitoError {
+        match error {
+            // Fatal errors - should NOT retry
+            ExecutorError::AmountTooSmall(_, _)
+            | ExecutorError::AmountTooLarge(_, _)
+            | ExecutorError::InsufficientBalance { .. }
+            | ExecutorError::TransactionTooLarge { .. }
+            | ExecutorError::SpearDisabled
+            | ExecutorError::CircuitBreakerTripped(_)
+            | ExecutorError::MarketConditionsUnfavorable(_)
+            | ExecutorError::ExecutionCostTooHigh { .. } => {
+                JitoError::Fatal(error.to_string())
+            }
+
+            // Network errors - may warrant fallback consideration
+            ExecutorError::Timeout => {
+                JitoError::Network(error.to_string())
+            }
+
+            // RPC and transaction errors - check if retryable
+            ExecutorError::Rpc(msg) | ExecutorError::TransactionFailed(msg) => {
+                let msg_lower = msg.to_lowercase();
+
+                // Retryable Jito-specific errors
+                if msg_lower.contains("insufficient tip")
+                    || msg_lower.contains("bundle timeout")
+                    || msg_lower.contains("deadline exceeded")
+                    || msg_lower.contains("timed out")
+                    || msg_lower.contains("network")
+                    || msg_lower.contains("connection")
+                    || msg_lower.contains("rate limit")
+                {
+                    JitoError::Retryable(error.to_string())
+                }
+                // Fatal transaction errors
+                else if msg_lower.contains("insufficient balance")
+                    || msg_lower.contains("invalid transaction")
+                    || msg_lower.contains("transaction too large")
+                {
+                    JitoError::Fatal(error.to_string())
+                }
+                // Network connectivity issues
+                else if msg_lower.contains("endpoint")
+                    || msg_lower.contains("unavailable")
+                    || msg_lower.contains("dns")
+                    || msg_lower.contains("resolve")
+                {
+                    JitoError::Network(error.to_string())
+                }
+                // Default to retryable for RPC errors
+                else {
+                    JitoError::Retryable(error.to_string())
+                }
+            }
+
+            // Blockhash expired - always retryable
+            ExecutorError::BlockhashExpired => {
+                JitoError::Retryable(error.to_string())
+            }
+
+            // V0 reconstruction errors - retryable (might be transient)
+            ExecutorError::V0ReconstructionFailed(_) => {
+                JitoError::Retryable(error.to_string())
+            }
+
+            // ALT errors - fatal (not recoverable without different parameters)
+            ExecutorError::AddressLookupTableUnavailable(_) => {
+                JitoError::Fatal(error.to_string())
+            }
+        }
+    }
+
+    /// Calculate adaptive Jito tip with increase on retry attempts
+    fn calculate_adaptive_jito_tip(&self, signal: &Signal, attempt: u32) -> u64 {
+        let base_tip_sol = self.calculate_jito_tip(signal);
+
+        if attempt > 1 {
+            // Increase tip by 20% per retry attempt (compensating)
+            let multiplier = 1.0 + (0.2 * (attempt - 1) as f64);
+            let increased_tip = base_tip_sol * rust_decimal::Decimal::from_str(
+                &format!("{}", multiplier)
+            ).unwrap_or(rust_decimal::Decimal::from(2));
+
+            // Convert to lamports (1 SOL = 1,000,000,000 lamports)
+            (increased_tip * rust_decimal::Decimal::from(1_000_000_000u64))
+                .to_u64()
+                .unwrap_or_else(|| {
+                    (base_tip_sol * rust_decimal::Decimal::from(1_000_000_000u64))
+                        .to_u64()
+                        .unwrap_or(1000) // Minimum 1000 lamports
+                })
+        } else {
+            (base_tip_sol * rust_decimal::Decimal::from(1_000_000_000u64))
+                .to_u64()
+                .unwrap_or(1000)
+        }
+    }
+
+    /// Calculate retry backoff duration with exponential backoff + jitter
+    fn calculate_jito_backoff(&self, attempt: u32) -> Duration {
+        // Exponential backoff: 200ms * 2^(attempt-1), with ±25% jitter
+        let base_ms = 200u64;
+        let exponential = base_ms.saturating_mul(1u64.saturating_pow(attempt.saturating_sub(1)));
+
+        // Add ±25% jitter
+        let jitter_factor = 0.75 + (rand::random::<f64>() * 0.5); // 0.75 to 1.25
+        let with_jitter = (exponential as f64 * jitter_factor) as u64;
+
+        // Cap at 5 seconds max backoff
+        Duration::from_millis(with_jitter.min(5000))
+    }
+
+    /// Execute via Jito with intelligent retry logic for Jito-specific errors
+    ///
+    /// This wraps `execute_jito` with classification-based retry strategy:
+    /// - Retryable errors (insufficient tip, timeout): retry with increased tip
+    /// - Fatal errors (insufficient balance, invalid tx): fail immediately
+    /// - Network errors: may trigger fallback consideration
+    async fn execute_jito_with_retry(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
+        let mut attempts = 0;
+        let max_attempts = self.config.jito.max_retries;
+
+        loop {
+            attempts += 1;
+
+            match self.execute_jito(signal).await {
+                Ok(result) => {
+                    // Success - log retry if it took multiple attempts
+                    if attempts > 1 {
+                        tracing::info!(
+                            trade_uuid = %signal.trade_uuid,
+                            attempts = attempts,
+                            "Jito execution succeeded after retry"
+                        );
+                    }
+                    return Ok(result);
+                },
+                Err(e) => {
+                    let jito_error = self.classify_jito_error(&e);
+
+                    match jito_error {
+                        JitoError::Retryable(reason) if attempts < max_attempts => {
+                            // Record retry metric
+                            self.record_jito_retry_metrics(attempts);
+
+                            let backoff = self.calculate_jito_backoff(attempts);
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                attempt = attempts,
+                                max_attempts = max_attempts,
+                                backoff_ms = backoff.as_millis(),
+                                reason = %reason,
+                                "Jito execution failed with retryable error - retrying with increased tip"
+                            );
+
+                            // Sleep before retry
+                            tokio::time::sleep(backoff).await;
+                            continue;
+                        },
+                        JitoError::Retryable(reason) => {
+                            tracing::error!(
+                                trade_uuid = %signal.trade_uuid,
+                                attempts = attempts,
+                                reason = %reason,
+                                "Jito execution failed after maximum retry attempts"
+                            );
+                            return Err(e);
+                        },
+                        JitoError::Fatal(reason) => {
+                            tracing::error!(
+                                trade_uuid = %signal.trade_uuid,
+                                reason = %reason,
+                                "Jito execution failed with fatal error - not retryable"
+                            );
+                            return Err(e);
+                        },
+                        JitoError::Network(reason) => {
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                reason = %reason,
+                                "Jito execution failed with network error - may warrant fallback"
+                            );
+                            // Network errors are returned to caller for fallback consideration
+                            return Err(e);
+                        },
+                    }
+                }
+            }
+        }
+    }
+
     /// Check if the total execution costs (tip + fee + slippage) exceed the configured limit
     async fn check_execution_costs(
         &self,
@@ -2106,12 +2555,41 @@ impl Executor {
 
     /// Switch to fallback RPC mode
     async fn switch_to_fallback(&self) {
+        // Check if Jito fallback is disabled by configuration
+        if self.config.jito.disable_fallback {
+            tracing::warn!(
+                "Jito fallback is disabled by configuration (jito.disable_fallback = true) - staying in Jito mode despite failures"
+            );
+            // Reset failure count to prevent re-triggering
+            self.mutable.lock().failure_count = 0;
+            return;
+        }
+
+        // Check failure count against Jito-specific threshold
+        let (failure_count, should_fallback) = {
+            let state = self.mutable.lock();
+            let count = state.failure_count;
+            let threshold = self.config.jito.min_failures_before_fallback;
+            (count, count >= threshold)
+        };
+
+        if !should_fallback {
+            tracing::debug!(
+                failure_count = failure_count,
+                threshold = self.config.jito.min_failures_before_fallback,
+                "Failure count below Jito threshold - not switching to fallback"
+            );
+            return;
+        }
+
+        // Proceed with fallback if URL is configured
         if self.config.rpc.fallback_url.is_some() {
             let (reason, previous_mode) = {
                 let state = self.mutable.lock();
                 let reason = format!(
-                    "Consecutive RPC failures ({}) exceeded threshold",
-                    state.failure_count
+                    "Consecutive Jito failures ({}) exceeded threshold ({})",
+                    state.failure_count,
+                    self.config.jito.min_failures_before_fallback
                 );
                 let previous_mode = state.rpc_mode;
                 (reason, previous_mode)
@@ -2119,7 +2597,9 @@ impl Executor {
 
             tracing::warn!(
                 previous_mode = ?previous_mode,
-                "Switching to fallback RPC mode"
+                failure_count = failure_count,
+                threshold = self.config.jito.min_failures_before_fallback,
+                "Switching to fallback RPC mode (Standard TPU)"
             );
 
             {
@@ -2129,9 +2609,19 @@ impl Executor {
                 state.failure_count = 0;
             }
 
-            // Send notification
-            self.notify(NotificationEvent::RpcFallback {
+            // Record Jito fallback metrics
+            if let Some(ref metrics) = self.metrics {
+                metrics
+                    .jito_fallback_total
+                    .with_label_values(&["threshold_exceeded"])
+                    .inc();
+            }
+
+            // Send notification for Jito fallback
+            self.notify(NotificationEvent::JitoFallbackTriggered {
                 reason: reason.clone(),
+                failure_count,
+                threshold: self.config.jito.min_failures_before_fallback,
             })
             .await;
 
@@ -2150,8 +2640,7 @@ impl Executor {
                 tracing::error!(error = %e, "Failed to log RPC mode change");
             }
         } else {
-            // [R-M3] No fallback URL configured: warn and reset failure count so future failures
-            // are still tracked from zero rather than immediately re-triggering this branch.
+            // [R-M3] No fallback URL configured: warn and reset failure count
             tracing::warn!(
                 "No fallback RPC URL configured; trading on degraded primary. Reset failure count."
             );

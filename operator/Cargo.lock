@@ -982,6 +982,7 @@ dependencies = [
  "config",
  "dashmap 6.2.1",
  "dotenvy",
+ "futures",
  "futures-util",
  "getrandom 0.2.17",
  "hex",
