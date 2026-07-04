@@ -436,6 +436,7 @@ async fn main() -> anyhow::Result<()> {
             Some(rpc_rate_limiter.clone()),
             config.jupiter.api_url.clone(),
         )
+        .with_price_cache(price_cache.clone())
         .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic),
     );
     let token_safety_config = TokenSafetyConfig {
@@ -483,6 +484,8 @@ async fn main() -> anyhow::Result<()> {
             Some(price_cache.clone()),
             Some(token_parser.clone()),
             Some(portfolio_heat.clone()),
+            None, // state_registry
+            None, // write_queue
         );
     tracing::info!("Engine created");
 

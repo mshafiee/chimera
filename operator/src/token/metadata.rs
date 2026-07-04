@@ -63,12 +63,20 @@ pub struct TokenMetadataFetcher {
     dexscreener_base_url: String,
     /// When true, use supply heuristic for tokens not indexed by DexScreener
     allow_unlisted_heuristic: bool,
+    /// Optional price cache reference for decimals lookup (offloads RPC calls to Jupiter)
+    price_cache: Option<Arc<crate::price_cache::PriceCache>>,
 }
 
 impl TokenMetadataFetcher {
     /// Create a new metadata fetcher
     pub fn new(rpc_url: &str) -> Self {
         Self::new_with_rate_limiter_and_jupiter(rpc_url, None, "https://api.jup.ag/swap/v2".to_string())
+    }
+
+    /// Set the price cache for decimals lookup
+    pub fn with_price_cache(mut self, price_cache: Arc<crate::price_cache::PriceCache>) -> Self {
+        self.price_cache = Some(price_cache);
+        self
     }
 
     /// Create a new metadata fetcher with optional rate limiter and Jupiter API URL
@@ -94,12 +102,19 @@ impl TokenMetadataFetcher {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
             allow_unlisted_heuristic: false,
+            price_cache: None,
         }
     }
 
     /// Create from an existing RPC client
     pub fn with_client(rpc_client: Arc<RpcClient>) -> Self {
         Self::with_client_rate_limiter_and_jupiter(rpc_client, None, "https://api.jup.ag/swap/v2".to_string())
+    }
+
+    /// Set the price cache for decimals lookup (builder pattern for with_client)
+    pub fn with_price_cache_builder(mut self, price_cache: Arc<crate::price_cache::PriceCache>) -> Self {
+        self.price_cache = Some(price_cache);
+        self
     }
 
     /// Create from an existing RPC client with optional rate limiter and Jupiter API URL
@@ -124,6 +139,7 @@ impl TokenMetadataFetcher {
                 .unwrap_or_else(|_| reqwest::Client::new()),
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
             allow_unlisted_heuristic: false,
+            price_cache: None,
         }
     }
 
@@ -528,6 +544,46 @@ impl TokenMetadataFetcher {
     /// Get cache size
     pub fn cache_size(&self) -> usize {
         self.metadata_cache.read().len()
+    }
+
+    /// Get only token decimals (fast path using Jupiter cache).
+    /// Returns None if not in Jupiter cache, falls back to full metadata fetch.
+    ///
+    /// This is optimized for decimals-only queries to avoid unnecessary RPC calls.
+    /// Checks the PriceCache first (populated by Jupiter Price API v3), and only
+    /// falls back to the expensive RPC metadata fetch if not found.
+    pub async fn get_decimals_only(&self, token_address: &str) -> Option<u8> {
+        // Check PriceCache first (fast path - uses Jupiter data)
+        if let Some(ref price_cache) = self.price_cache {
+            if let Some(decimals) = price_cache.get_decimals(token_address) {
+                tracing::debug!(
+                    token = token_address,
+                    decimals = decimals,
+                    "Decimals from Jupiter cache (no RPC call)"
+                );
+                return Some(decimals);
+            }
+        }
+
+        // Fallback: fetch full metadata from RPC
+        match self.get_metadata(token_address).await {
+            Ok(metadata) => {
+                tracing::debug!(
+                    token = token_address,
+                    decimals = metadata.decimals,
+                    "Decimals from RPC fallback"
+                );
+                Some(metadata.decimals)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    token = token_address,
+                    error = %e,
+                    "Failed to fetch decimals"
+                );
+                None
+            }
+        }
     }
 }
 

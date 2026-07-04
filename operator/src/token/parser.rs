@@ -238,7 +238,16 @@ impl TokenParser {
 
     /// Get token decimals from on-chain metadata.
     /// Returns None if metadata is unavailable.
+    ///
+    /// Uses fast path via Jupiter Price API v3 cache when available,
+    /// falling back to RPC metadata fetch only when necessary.
     pub async fn get_token_decimals(&self, token_address: &str) -> Option<u8> {
+        // Try fast path via PriceCache (Jupiter data)
+        if let Some(decimals) = self.fetcher.get_decimals_only(token_address).await {
+            return Some(decimals);
+        }
+
+        // Fallback to existing behavior (RPC metadata fetch)
         match self.fetcher.get_metadata(token_address).await {
             Ok(metadata) => Some(metadata.decimals),
             Err(e) => {

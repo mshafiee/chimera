@@ -14,6 +14,7 @@ use rust_decimal::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::time::interval;
 
 /// Default cache TTL in seconds
@@ -21,6 +22,9 @@ const DEFAULT_CACHE_TTL_SECS: i64 = 30;
 
 /// Price update interval for active tokens
 const PRICE_UPDATE_INTERVAL_SECS: u64 = 5;
+
+/// Decimals cache TTL in seconds (24 hours - decimals are immutable for minted tokens)
+const DECIMALS_TTL_SECS: i64 = 86400;
 
 /// Staleness threshold in seconds: if a token's cached price is older than this
 /// window, it is considered stale and `get_price_usd` returns None.
@@ -37,6 +41,8 @@ pub struct PriceEntry {
     pub fetched_at: DateTime<Utc>,
     /// Price source
     pub source: PriceSource,
+    /// Token decimals from Jupiter (optional - not all tokens may have this)
+    pub decimals: Option<u8>,
 }
 
 /// Price data source
@@ -67,6 +73,8 @@ struct PriceCacheInner {
     prices: HashMap<String, PriceEntry>,
     /// Price history for volatility calculation (token -> VecDeque of (timestamp, price))
     price_history: HashMap<String, VecDeque<(DateTime<Utc>, Decimal)>>,
+    /// Decimals cache from Jupiter (token -> (decimals, fetched_at))
+    decimals: HashMap<String, (u8, Instant)>,
     /// Cache hit counter (for performance monitoring)
     cache_hits: u64,
     /// Cache miss counter (for performance monitoring)
@@ -111,6 +119,7 @@ impl PriceCache {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
+                decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
             })),
@@ -131,6 +140,7 @@ impl PriceCache {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
+                decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
             })),
@@ -151,6 +161,7 @@ impl PriceCache {
             inner: Arc::new(RwLock::new(PriceCacheInner {
                 prices: HashMap::new(),
                 price_history: HashMap::new(),
+                decimals: HashMap::new(),
                 cache_hits: 0,
                 cache_misses: 0,
             })),
@@ -235,7 +246,7 @@ impl PriceCache {
 
     /// Set price for a token.
     /// FIX [B-H7]: Updates both prices and price_history atomically under one lock.
-    pub fn set_price(&self, token_address: &str, price_usd: Decimal, source: PriceSource) {
+    pub fn set_price(&self, token_address: &str, price_usd: Decimal, source: PriceSource, decimals: Option<u8>) {
         let now = Utc::now();
         // Acquire a single write lock and update both maps atomically.
         let mut inner = self.inner.write();
@@ -245,6 +256,7 @@ impl PriceCache {
                 price_usd,
                 fetched_at: now,
                 source,
+                decimals,
             },
         );
 
@@ -274,6 +286,7 @@ impl PriceCache {
         price_usd: Decimal,
         source: PriceSource,
         time: DateTime<Utc>,
+        decimals: Option<u8>,
     ) {
         let mut inner = self.inner.write();
         inner.prices.insert(
@@ -282,6 +295,7 @@ impl PriceCache {
                 price_usd,
                 fetched_at: time,
                 source,
+                decimals,
             },
         );
 
@@ -361,6 +375,31 @@ impl PriceCache {
         self.calculate_volatility(&self.sol_mint)
     }
 
+    /// Get token decimals from Jupiter cache.
+    /// Returns None if token not in cache or cache entry expired.
+    pub fn get_decimals(&self, token_address: &str) -> Option<u8> {
+        let mut inner = self.inner.write();
+
+        // Check decimals cache first
+        if let Some((decimals, fetched_at)) = inner.decimals.get(token_address) {
+            let elapsed = fetched_at.elapsed().as_secs() as i64;
+            if elapsed < DECIMALS_TTL_SECS {
+                return Some(*decimals);
+            }
+            // Cache expired - remove entry
+            inner.decimals.remove(token_address);
+        }
+
+        // Fallback: check if we have it in a recent price entry
+        if let Some(entry) = inner.prices.get(token_address) {
+            if let Some(decimals) = entry.decimals {
+                return Some(decimals);
+            }
+        }
+
+        None
+    }
+
     /// Add token to active tracking
     pub fn track_token(&self, token_address: &str) {
         let mut tokens = self.active_tokens.write();
@@ -437,10 +476,18 @@ impl PriceCache {
     /// Update prices for a list of tokens
     async fn update_prices(&self, tokens: &[String]) -> Result<(), PriceCacheError> {
         // Fetch prices from Jupiter API
-        let prices = self.fetch_prices_jupiter(tokens).await?;
+        let (prices, decimals_map) = self.fetch_prices_jupiter(tokens).await?;
 
-        for (token, price) in prices {
-            self.set_price(&token, price, PriceSource::Jupiter);
+        for (token, price, decimals) in prices {
+            self.set_price(&token, price, PriceSource::Jupiter, decimals);
+        }
+
+        // Store decimals in separate cache
+        if !decimals_map.is_empty() {
+            let mut inner = self.inner.write();
+            for (token, (decimals, _)) in decimals_map {
+                inner.decimals.insert(token, (decimals, std::time::Instant::now()));
+            }
         }
 
         tracing::debug!(token_count = tokens.len(), "Updated prices");
@@ -450,12 +497,13 @@ impl PriceCache {
 
     /// Fetch prices from Jupiter Price API.
     /// FIX [R-L4]: Uses the reusable `self.http_client` rather than rebuilding on every call.
+    /// Returns (prices_with_decimals, decimals_map) where decimals_map maps token -> (decimals, block_id)
     async fn fetch_prices_jupiter(
         &self,
         tokens: &[String],
-    ) -> Result<Vec<(String, Decimal)>, PriceCacheError> {
+    ) -> Result<(Vec<(String, Decimal, Option<u8>)>, HashMap<String, (u8, u64)>), PriceCacheError> {
         if tokens.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), HashMap::new()));
         }
 
         // Build URL with comma-separated token addresses
@@ -495,6 +543,7 @@ impl PriceCache {
 
         // Extract prices from response and convert to Decimal
         let mut results = Vec::new();
+        let mut decimals_map = HashMap::new();
         for token in tokens {
             if let Some(price_data) = data.data.get(token) {
                 // Jupiter returns price in USD as f64, convert to Decimal for precision
@@ -517,7 +566,9 @@ impl PriceCache {
                         }
                     }
                 };
-                results.push((token.clone(), price));
+                // Store decimals for separate cache
+                decimals_map.insert(token.clone(), (price_data.decimals, price_data.blockId));
+                results.push((token.clone(), price, Some(price_data.decimals)));
             } else {
                 tracing::warn!(token = token, "Token not found in Jupiter price response");
                 // Skip tokens not found in response
@@ -530,7 +581,7 @@ impl PriceCache {
             "Fetched prices from Jupiter"
         );
 
-        Ok(results)
+        Ok((results, decimals_map))
     }
 
     /// Calculate unrealized PnL for a position
@@ -649,7 +700,22 @@ impl Default for PriceCache {
         // For Default trait (used in tests and config defaults), we panic on failure
         // to maintain the trait contract. Production code should use new() or with_ttl()
         // and handle the Result properly.
-        Self::new().expect("Failed to create PriceCache - HTTP client initialization failed")
+        // Note: This creates an instance with empty decimals cache
+        Self {
+            inner: Arc::new(RwLock::new(PriceCacheInner {
+                prices: HashMap::new(),
+                price_history: HashMap::new(),
+                decimals: HashMap::new(),
+                cache_hits: 0,
+                cache_misses: 0,
+            })),
+            ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
+            active_tokens: Arc::new(RwLock::new(Vec::new())),
+            updater_running: Arc::new(RwLock::new(false)),
+            sol_mint: "So11111111111111111111111111111111111111112".to_string(),
+            http_client: Self::build_http_client().expect("Failed to build HTTP client"),
+            jupiter_price_api_url: "https://api.jup.ag/price".to_string(),
+        }
     }
 }
 
@@ -741,6 +807,7 @@ mod tests {
             "token1",
             Decimal::from_str("1.5").unwrap(),
             PriceSource::Jupiter,
+            Some(9),
         );
 
         let price = cache.get_price_usd("token1");
@@ -772,6 +839,7 @@ mod tests {
             "token1",
             Decimal::from_str("2.0").unwrap(),
             PriceSource::Jupiter,
+            Some(6),
         );
 
         let pnl = cache.calculate_unrealized_pnl(
@@ -793,6 +861,7 @@ mod tests {
             "token1",
             Decimal::from_str("1.0").unwrap(),
             PriceSource::Jupiter,
+            Some(9),
         );
         cache.track_token("token1");
         cache.track_token("token2");
@@ -800,5 +869,56 @@ mod tests {
         let stats = cache.stats();
         assert_eq!(stats.total_entries, 1);
         assert_eq!(stats.tracked_tokens, 2);
+    }
+
+    // ==========================================================================
+    // DECIMALS CACHE TESTS
+    // ==========================================================================
+
+    #[test]
+    fn test_decimals_cache_hit() {
+        let cache = PriceCache::new().expect("Failed to create cache");
+        cache.set_price(
+            "token1",
+            Decimal::from(1.0),
+            PriceSource::Jupiter,
+            Some(6),
+        );
+
+        assert_eq!(cache.get_decimals("token1"), Some(6));
+    }
+
+    #[test]
+    fn test_decimals_cache_miss() {
+        let cache = PriceCache::new().expect("Failed to create cache");
+        assert_eq!(cache.get_decimals("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_decimals_none_in_entry() {
+        let cache = PriceCache::new().expect("Failed to create cache");
+        cache.set_price(
+            "token1",
+            Decimal::from(1.0),
+            PriceSource::Jupiter,
+            None, // No decimals data
+        );
+
+        assert_eq!(cache.get_decimals("token1"), None);
+    }
+
+    #[test]
+    fn test_decimals_fallback_to_price_entry() {
+        let cache = PriceCache::new().expect("Failed to create cache");
+        // Set price with decimals (this stores decimals in PriceEntry)
+        cache.set_price(
+            "token1",
+            Decimal::from(1.0),
+            PriceSource::Jupiter,
+            Some(9),
+        );
+
+        // Even without separate decimals cache, we should get decimals from PriceEntry
+        assert_eq!(cache.get_decimals("token1"), Some(9));
     }
 }
