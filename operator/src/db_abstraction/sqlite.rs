@@ -1166,8 +1166,15 @@ impl Database for SqliteBackend {
 
     async fn get_max_drawdown_percent(&self, total_capital_sol: Decimal) -> AppResult<Decimal> {
         // Fetch closed positions' realized PnL in order (TEXT → Decimal)
+        // Only query closed positions from the last 24 hours to find the session peak
         let closed_rows: Vec<(String,)> = sqlx::query_as(
-            r#"SELECT COALESCE(realized_pnl_sol, '0') FROM positions WHERE state = 'CLOSED' ORDER BY closed_at ASC"#,
+            r#"
+            SELECT COALESCE(realized_pnl_sol, '0')
+            FROM positions
+            WHERE state = 'CLOSED'
+              AND closed_at >= datetime('now', '-24 hours')
+            ORDER BY closed_at ASC
+            "#,
         )
         .fetch_all(&self.pool)
         .await?;

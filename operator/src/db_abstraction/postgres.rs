@@ -1134,8 +1134,15 @@ impl Database for PostgresBackend {
     }
 
     async fn get_max_drawdown_percent(&self, cap: Decimal) -> AppResult<Decimal> {
+        // Only query closed positions from the last 24 hours to find the session peak
         let closed_rows: Vec<Decimal> = sqlx::query_scalar::<_, Decimal>(
-            r#"SELECT COALESCE(realized_pnl_sol, 0.0) FROM positions WHERE state = 'CLOSED' ORDER BY closed_at ASC"#,
+            r#"
+            SELECT COALESCE(realized_pnl_sol, 0.0)
+            FROM positions
+            WHERE state = 'CLOSED'
+              AND closed_at >= NOW() - INTERVAL '24 hours'
+            ORDER BY closed_at ASC
+            "#,
         )
         .fetch_all(&self.pool)
         .await
