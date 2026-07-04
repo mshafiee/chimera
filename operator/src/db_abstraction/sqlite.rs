@@ -4164,6 +4164,103 @@ fn infer_severity(discrepancy: &str) -> String {
     }
 }
 
+/// Atomic operation: Insert trade and create position in a single transaction
+async fn insert_trade_and_create_position(
+    &self,
+    trade: &InsertTrade,
+    position: &InsertPosition,
+) -> AppResult<i64> {
+    // Use SQLite transaction for atomicity
+    let mut tx = self.pool.begin().await.map_err(|e| {
+        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+            "Failed to begin transaction: {}", e
+        ))))
+    })?;
+
+    // Insert trade
+    let trade_id = sqlx::query(
+        "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    .bind(&trade.trade_uuid)
+    .bind(&trade.wallet_address)
+    .bind(&trade.token_address)
+    .bind(&trade.strategy)
+    .bind(&trade.side)
+    .bind(trade.amount_sol)
+    .bind(&trade.status)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| AppError::Database(e))?
+    .last_insert_rowid();
+
+    // Insert position
+    sqlx::query(
+        "INSERT INTO positions (trade_uuid, token_address, amount_sol, state, entry_price_sol, created_at, updated_at) VALUES (?, ?, ?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+    .bind(&trade.trade_uuid)
+    .bind(&trade.token_address)
+    .bind(&position.entry_amount_sol)
+    .bind(&position.entry_price)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| AppError::Database(e))?;
+
+    // Commit transaction
+    tx.commit().await.map_err(|e| {
+        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+            "Failed to commit transaction: {}", e
+        ))))
+    })?;
+
+    Ok(trade_id)
+}
+
+/// Atomic operation: Update trade status and position state in a single transaction
+async fn update_trade_status_and_position(
+    &self,
+    trade_uuid: &str,
+    trade_status: &str,
+    position_state: Option<&str>,
+) -> AppResult<()> {
+    // Use SQLite transaction for atomicity
+    let mut tx = self.pool.begin().await.map_err(|e| {
+        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+            "Failed to begin transaction: {}", e
+        ))))
+    })?;
+
+    // Update trade status
+    sqlx::query(
+        "UPDATE trades SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = ?"
+    )
+    .bind(trade_status)
+    .bind(trade_uuid)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| AppError::Database(e))?;
+
+    // Update position state if provided
+    if let Some(state) = position_state {
+        sqlx::query(
+            "UPDATE positions SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE trade_uuid = ?"
+        )
+        .bind(state)
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| AppError::Database(e))?;
+    }
+
+    // Commit transaction
+    tx.commit().await.map_err(|e| {
+        AppError::Database(sqlx::Error::Io(std::io::Error::other(format!(
+            "Failed to commit transaction: {}", e
+        ))))
+    })?;
+
+    Ok(())
+}
+
 fn datetime_from_timestamp(ts: f64) -> String {
     format!("{}", ts)
 }

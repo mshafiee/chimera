@@ -170,16 +170,15 @@ fn test_retry_delay_jitter_variation() {
     };
 
     // Calculate multiple delays at the same attempt number
-    let mut delays = vec
-![Vec::new(); 10];
+    let mut delays = Vec::new();
     for _ in 0..10 {
         let delay = calculate_retry_delay(2, &config);
         delays.push(delay);
     }
 
     // Verify there's variation due to jitter
-    let min_delay = delays.iter().min().unwrap();
-    let max_delay = delays.iter().max().unwrap();
+    let min_delay = *delays.iter().min().unwrap();
+    let max_delay = *delays.iter().max().unwrap();
 
     assert!(
         max_delay.as_millis() > min_delay.as_millis(),
@@ -322,6 +321,7 @@ fn test_retry_delay_first_attempt() {
 #[test]
 fn test_retry_delay_boundary_conditions() {
     let config = RetryConfig {
+        max_retries: 3,
         initial_delay_ms: 50,
         max_delay_ms: 200,
         backoff_multiplier: 2.0,

@@ -4,6 +4,7 @@
 //! Includes RPC failover with automatic recovery to primary.
 
 use crate::config::AppConfig;
+use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState as CBState};
 use crate::db_abstraction::Database;
 use crate::engine::tips::TipManager;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
@@ -176,6 +177,8 @@ pub struct Executor {
     jito_searcher: Option<crate::engine::jito_searcher::JitoSearcherClient>,
     /// Price cache for volatility calculation
     price_cache: Option<Arc<PriceCache>>,
+    /// Circuit breaker for checking trading permission
+    circuit_breaker: Option<Arc<crate::circuit_breaker::CircuitBreaker>>,
     /// Shared market regime detector — reused across calls to avoid per-call construction.
     /// [R-L1] Previously a new MarketRegimeDetector was instantiated on every check_execution_costs
     /// call; now it is a field so the internal price_history is preserved across calls.
@@ -185,6 +188,15 @@ pub struct Executor {
 impl Executor {
     /// Create a new executor
     pub fn new(config: Arc<AppConfig>, db: Arc<dyn Database>) -> Self {
+        Self::with_circuit_breaker(config, db, None)
+    }
+
+    /// Create a new executor with optional circuit breaker
+    pub fn with_circuit_breaker(
+        config: Arc<AppConfig>,
+        db: Arc<dyn Database>,
+        circuit_breaker: Option<Arc<CircuitBreaker>>
+    ) -> Self {
         let rpc_mode = if config.jito.enabled {
             RpcMode::Jito
         } else {
@@ -248,6 +260,7 @@ impl Executor {
             tip_manager: None,
             jito_searcher,
             price_cache: None,
+            circuit_breaker,
             market_regime_detector: None,
         }
     }
@@ -367,6 +380,27 @@ impl Executor {
             // Check if Spear is allowed in current mode
             if signal.payload.strategy == Strategy::Spear && rpc_mode == RpcMode::Standard {
                 return Err(ExecutorError::SpearDisabled);
+            }
+
+            // Check circuit breaker for ENTRY trades (EXIT trades always allowed for stop-loss priority)
+            if signal.payload.action == crate::models::Action::Buy {
+                if let Some(circuit_breaker) = &self.circuit_breaker {
+                    let current_state = circuit_breaker.current_state();
+                    if current_state != CBState::Active {
+                        let trip_reason = circuit_breaker.trip_reason();
+                        let error_msg = format!(
+                            "Circuit breaker is {:?}, reason: {:?}",
+                            current_state, trip_reason
+                        );
+                        tracing::warn!(
+                            trade_uuid = %signal.trade_uuid,
+                            circuit_breaker_state = ?current_state,
+                            trip_reason = ?trip_reason,
+                            "Trade rejected due to circuit breaker"
+                        );
+                        return Err(ExecutorError::CircuitBreakerTripped(error_msg));
+                    }
+                }
             }
 
             // Check market conditions for BUY signals only — exits must always be allowed

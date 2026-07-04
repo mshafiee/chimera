@@ -21,6 +21,39 @@ pub use types::{
 use crate::error::{AppError, AppResult};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
+
+/// Database query timing and monitoring utility
+///
+/// Records query execution time and logs slow queries (>100ms)
+pub async fn timed_query<F, T>(
+    metric_name: &str,
+    operation: F,
+) -> AppResult<T>
+where
+    F: std::future::Future<Output = AppResult<T>>,
+{
+    let start = Instant::now();
+    let result = operation.await;
+    let duration = start.elapsed();
+
+    // Log slow queries
+    if duration.as_millis() > 100 {
+        tracing::warn!(
+            query = metric_name,
+            duration_ms = duration.as_millis(),
+            "Slow database query detected"
+        );
+    } else {
+        tracing::debug!(
+            query = metric_name,
+            duration_ms = duration.as_millis(),
+            "Database query completed"
+        );
+    }
+
+    result
+}
 
 /// Database trait defining all database operations
 #[async_trait::async_trait]
@@ -667,6 +700,90 @@ pub trait Database: Send + Sync {
 
     /// Get a reference to the underlying database pool
     fn pool(&self) -> DbPool;
+
+    /// Get pool statistics for monitoring
+    fn pool_stats(&self) -> PoolStats {
+        let pool = self.pool();
+        PoolStats {
+            active_connections: pool.size() - pool.num_idle(),
+            idle_connections: pool.num_idle(),
+            max_connections: pool.size(),
+            utilization_percent: pool.utilization() * 100.0,
+        }
+    }
+
+    // ========================================================================
+    // ATOMIC BATCH OPERATIONS
+    // ========================================================================
+
+    /// Atomic operation: Insert trade and create position in a single transaction
+    ///
+    /// This is used for trade entry to ensure both the trade record and position
+    /// are created atomically, preventing inconsistent state.
+    async fn insert_trade_and_create_position(
+        &self,
+        trade: &InsertTrade,
+        position: &InsertPosition,
+    ) -> AppResult<i64>;
+
+    /// Atomic operation: Update trade status and position state in a single transaction
+    ///
+    /// This is used for trade lifecycle transitions to ensure both the trade status
+    /// and position state remain consistent.
+    async fn update_trade_status_and_position(
+        &self,
+        trade_uuid: &str,
+        trade_status: &str,
+        position_state: Option<&str>,
+    ) -> AppResult<()>;
+
+    /// Default implementation for atomic trade insertion (non-transactional fallback)
+    ///
+    /// Backends can override this with proper transaction support.
+    fn insert_trade_and_create_position_default(
+        &self,
+        trade: &InsertTrade,
+        position: &InsertPosition,
+    ) -> AppResult<i64> {
+        // Fallback: execute as separate operations
+        let trade_id = timed_query("insert_trade_and_create_position_insert_trade", self.insert_trade(trade)).await?;
+
+        // Create position with the trade_id
+        let mut position = position.clone();
+        // Note: InsertPosition would need a trade_id field for proper foreign key
+        timed_query("insert_trade_and_create_position_insert_position", self.insert_position(&position)).await?;
+
+        Ok(trade_id)
+    }
+
+    /// Default implementation for atomic status update (non-transactional fallback)
+    ///
+    /// Backends can override this with proper transaction support.
+    fn update_trade_status_and_position_default(
+        &self,
+        trade_uuid: &str,
+        trade_status: &str,
+        position_state: Option<&str>,
+    ) -> AppResult<()> {
+        // Update trade status
+        let update = UpdateTradeStatus {
+            trade_uuid: trade_uuid.to_string(),
+            status: trade_status.to_string(),
+            tx_signature: None,
+            error_message: None,
+            updated_at: chrono::Utc::now().to_string(),
+        };
+
+        timed_query("update_trade_status_and_position_update_trade", self.update_trade_status(&update)).await?;
+
+        // Update position state if provided
+        if let Some(state) = position_state {
+            // Would need to implement update_position_state method
+            tracing::debug!("Position state update requested: {}", state);
+        }
+
+        Ok(())
+    }
 
     /// Get circuit breaker evaluation data: (unrealized_sol, realized_sol_24h, realized_usd_24h, null_price_sol_24h)
     async fn get_evaluation_data(

@@ -8,10 +8,12 @@
 //! - Circuit breaker integration
 
 use chimera_operator::config::{AppConfig, JupiterConfig};
+use chimera_operator::db_abstraction::Database;
 use chimera_operator::engine::transaction_builder::TransactionBuilder;
 use chimera_operator::jupiter_error_handling::{JupiterError, JupiterErrorType, RetryConfig, calculate_retry_delay};
 use chimera_operator::circuit_breaker::{CircuitBreaker, TripReason};
 use chimera_operator::models::{Action, Signal, SignalPayload};
+use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
 use solana_sdk::{
     pubkey::Pubkey,
@@ -378,6 +380,7 @@ impl Database for MockDatabase {
             state: db_state.cb_state.clone().unwrap_or("Active".to_string()),
             tripped_at: db_state.cb_tripped_at.clone(),
             trip_reason: db_state.cb_reason.clone(),
+            updated_at: chrono::Utc::now().to_string(),
         })
     }
 
@@ -449,11 +452,11 @@ impl MockDatabase {
         Ok(())
     }
 
-    async fn get_dead_letter_queue(&self, _limit: i64) -> chimera_operator::error::AppResult<Vec<chimera_operator::db_abstraction::DeadLetterEntry>> {
+    async fn get_dead_letter_queue(&self, _limit: i64) -> chimera_operator::error::AppResult<Vec<chimera_operator::db_abstraction::DeadLetterItem>> {
         Ok(vec![])
     }
 
-    async fn create_dead_letter_entry(&self, _entry: &chimera_operator::db_abstraction::DeadLetterEntry) -> chimera_operator::error::AppResult<()> {
+    async fn create_dead_letter_entry(&self, _entry: &chimera_operator::db_abstraction::DeadLetterItem) -> chimera_operator::error::AppResult<()> {
         Ok(())
     }
 
@@ -461,7 +464,7 @@ impl MockDatabase {
         Ok(())
     }
 
-    async fn get_config_audit_log(&self, _limit: i64) -> chimera_operator::error::AppResult<Vec<chimera_operator::db_abstraction::ConfigAuditEntry>> {
+    async fn get_config_audit_log(&self, _limit: i64) -> chimera_operator::error::AppResult<Vec<chimera_operator::db_abstraction::ConfigAuditItem>> {
         Ok(vec![])
     }
 
@@ -493,14 +496,13 @@ impl MockDatabase {
         Ok(vec![])
     }
 
-    async fn get_trade_metrics(&self, _hours: i64) -> chimera_operator::error::AppResult<chimera_operator::db_abstraction::TradeMetrics> {
-        Ok(chimera_operator::db_abstraction::TradeMetrics {
+    async fn get_trade_statistics(&self) -> chimera_operator::error::AppResult<chimera_operator::db_abstraction::TradeStatistics> {
+        Ok(chimera_operator::db_abstraction::TradeStatistics {
             total_trades: 0,
             successful_trades: 0,
             failed_trades: 0,
-            total_volume_usd: rust_decimal::Decimal::ZERO,
-            total_pnl_usd: rust_decimal::Decimal::ZERO,
-            avg_pnl_pct: rust_decimal::Decimal::ZERO,
+            total_pnl_sol: rust_decimal::Decimal::ZERO,
+            total_volume_sol: rust_decimal::Decimal::ZERO,
         })
     }
 

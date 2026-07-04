@@ -161,6 +161,8 @@ struct InternalState {
     jupiter_failure_count: u32,
     /// Last Jupiter API failure type
     last_jupiter_error: Option<String>,
+    /// Evaluation in progress flag to prevent concurrent evaluations
+    evaluation_in_progress: bool,
 }
 
 /// Circuit Breaker
@@ -215,6 +217,7 @@ impl CircuitBreaker {
                 last_check: None,
                 jupiter_failure_count: 0,
                 last_jupiter_error: None,
+                evaluation_in_progress: false,
             })),
             check_interval: Duration::seconds(5), // Reduced from 30s to 5s for faster loss detection
             ws_state,
@@ -403,12 +406,27 @@ impl CircuitBreaker {
     /// Evaluate trip conditions and update state
     #[tracing::instrument(skip(self))]
     pub async fn evaluate(&self) -> AppResult<()> {
+        // Atomically check if evaluation is already in progress and skip if true
+        {
+            let mut state = self.state.write();
+            if state.evaluation_in_progress {
+                tracing::debug!("Circuit breaker evaluation already in progress, skipping");
+                return Ok(());
+            }
+            state.evaluation_in_progress = true;
+            // Lock released here
+        }
+
         // FIX [R-M3]: Check interval under write lock but do NOT update last_check yet.
         // last_check is updated only after DB queries succeed (see below).
         {
             let state = self.state.write();
             if let Some(last_check) = state.last_check {
                 if Utc::now().signed_duration_since(last_check) < self.check_interval {
+                    // Clear evaluation flag since we're skipping
+                    drop(state);
+                    let mut state = self.state.write();
+                    state.evaluation_in_progress = false;
                     return Ok(());
                 }
             }
@@ -433,6 +451,11 @@ impl CircuitBreaker {
 
         if should_exit_cooldown {
             self.exit_cooldown().await?;
+            // Clear evaluation flag before returning
+            {
+                let mut state = self.state.write();
+                state.evaluation_in_progress = false;
+            }
             return Ok(());
         }
 
@@ -447,16 +470,28 @@ impl CircuitBreaker {
 
         // If still in cooldown or tripped, don't evaluate further
         if current != CircuitBreakerState::Active {
+            // Clear evaluation flag before returning
+            {
+                let mut state = self.state.write();
+                state.evaluation_in_progress = false;
+            }
             return Ok(());
         }
 
         if let Some(reason) = self.check_breach_conditions().await? {
             self.trip(reason).await?;
+            // Clear evaluation flag before returning
+            {
+                let mut state = self.state.write();
+                state.evaluation_in_progress = false;
+            }
             return Ok(());
         }
         // Update last_check
         {
-            self.state.write().last_check = Some(Utc::now());
+            let mut state = self.state.write();
+            state.last_check = Some(Utc::now());
+            state.evaluation_in_progress = false;
         }
 
         Ok(())

@@ -108,6 +108,33 @@ impl DbPool {
             DbPool::PostgreSQL(pool) => pool.close().await,
         }
     }
+
+    /// Get pool size (total connections)
+    pub fn size(&self) -> u32 {
+        match self {
+            DbPool::SQLite(pool) => pool.size(),
+            DbPool::PostgreSQL(pool) => pool.size(),
+        }
+    }
+
+    /// Get number of idle connections
+    pub fn num_idle(&self) -> u32 {
+        match self {
+            DbPool::SQLite(pool) => pool.num_idle(),
+            DbPool::PostgreSQL(pool) => pool.num_idle(),
+        }
+    }
+
+    /// Get pool utilization as percentage (0.0-1.0)
+    pub fn utilization(&self) -> f64 {
+        let size = self.size() as f64;
+        let idle = self.num_idle() as f64;
+        if size > 0.0 {
+            (size - idle) / size
+        } else {
+            0.0
+        }
+    }
 }
 
 /// Connection pool statistics

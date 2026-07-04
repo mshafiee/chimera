@@ -65,6 +65,7 @@ async fn test_max_loss_24h_threshold() {
         max_drawdown_percent: Decimal::from_str("20.0").unwrap(),
         portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
+        max_jupiter_failures: 5,
     };
 
     let (_cb, _temp_dir) = create_test_circuit_breaker(config).await;
@@ -89,6 +90,7 @@ async fn test_max_consecutive_losses_threshold() {
         max_drawdown_percent: Decimal::from_str("20.0").unwrap(),
         portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
+        max_jupiter_failures: 5,
     };
 
     let (_cb, _temp_dir) = create_test_circuit_breaker(config).await;
@@ -113,6 +115,7 @@ async fn test_max_drawdown_percent_threshold() {
         max_drawdown_percent: Decimal::from_str("15.0").unwrap(),
         portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
+        max_jupiter_failures: 5,
     };
 
     let (_cb, _temp_dir) = create_test_circuit_breaker(config).await;

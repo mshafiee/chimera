@@ -43,6 +43,7 @@ fn tight_config() -> CircuitBreakerConfig {
         max_drawdown_percent: Decimal::from_str("15.0").unwrap(),
         portfolio_stop_loss_percent: Decimal::from_str("5.0").unwrap(),
         cooldown_minutes: 30,
+        max_jupiter_failures: 5,
     }
 }
 

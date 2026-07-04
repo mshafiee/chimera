@@ -3,10 +3,65 @@
 //! Provides structured retry logic, exponential backoff, and comprehensive
 //! error classification for Jupiter API failures.
 
+use crate::circuit_breaker::CircuitBreaker;
 use crate::error::{AppError, AppResult};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use rand::Rng;
+use uuid::Uuid;
+use chrono::Utc;
+
+/// Jupiter API request context for tracing
+#[derive(Debug, Clone)]
+pub struct JupiterRequestContext {
+    /// Unique request identifier
+    pub request_id: String,
+    /// Correlation ID for request tracing across calls
+    pub correlation_id: Option<String>,
+    /// Associated trade UUID (if applicable)
+    pub trade_uuid: Option<String>,
+    /// Retry attempt number
+    pub attempt: u32,
+    /// Request timestamp
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+impl JupiterRequestContext {
+    /// Create a new request context
+    pub fn new() -> Self {
+        Self {
+            request_id: Uuid::new_v4().to_string(),
+            correlation_id: None,
+            trade_uuid: None,
+            attempt: 1,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    /// Create with correlation ID
+    pub fn with_correlation_id(mut self, correlation_id: String) -> Self {
+        self.correlation_id = Some(correlation_id);
+        self
+    }
+
+    /// Create with trade UUID
+    pub fn with_trade_uuid(mut self, trade_uuid: String) -> Self {
+        self.trade_uuid = Some(trade_uuid);
+        self
+    }
+
+    /// Increment attempt number
+    pub fn increment_attempt(&mut self) {
+        self.attempt += 1;
+    }
+}
+
+impl Default for JupiterRequestContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Jupiter API error classification for targeted handling
 #[derive(Debug, Clone, PartialEq)]
@@ -42,6 +97,12 @@ pub struct JupiterError {
     pub retryable: bool,
     /// Suggested retry delay (if applicable)
     pub retry_delay: Option<Duration>,
+    /// Request context for tracing
+    pub request_context: JupiterRequestContext,
+    /// Request parameters (if available)
+    pub request_params: Option<String>,
+    /// Response body (if available)
+    pub response_body: Option<String>,
 }
 
 impl JupiterError {
@@ -62,6 +123,10 @@ impl JupiterError {
             message,
             retryable,
             retry_delay,
+            request_context: JupiterRequestContext::new(),
+            request_params: None,
+            response_body: None,
+        }
         }
     }
 
@@ -73,6 +138,9 @@ impl JupiterError {
             message,
             retryable: true,
             retry_delay: Some(Duration::from_secs(2)),
+            request_context: JupiterRequestContext::new(),
+            request_params: None,
+            response_body: None,
         }
     }
 
@@ -84,6 +152,9 @@ impl JupiterError {
             message,
             retryable: true,
             retry_delay: Some(Duration::from_secs(1)),
+            request_context: JupiterRequestContext::new(),
+            request_params: None,
+            response_body: None,
         }
     }
 
@@ -95,6 +166,9 @@ impl JupiterError {
             message,
             retryable: false,
             retry_delay: None,
+            request_context: JupiterRequestContext::new(),
+            request_params: None,
+            response_body: None,
         }
     }
 
@@ -231,7 +305,93 @@ where
     })))
 }
 
-/// Execute an operation with Jupiter-specific error handling
+/// Retry with backoff and circuit breaker integration
+///
+/// This version integrates with the circuit breaker to track Jupiter API failures
+/// and automatically trip when consecutive failures exceed the threshold.
+pub async fn retry_with_circuit_breaker<F, Fut, T>(
+    operation: F,
+    config: &RetryConfig,
+    operation_name: &str,
+    circuit_breaker: Option<&Arc<CircuitBreaker>>,
+) -> AppResult<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = AppResult<T>>,
+{
+    let mut last_error = None;
+
+    for attempt in 1..=config.max_retries {
+        match operation().await {
+            Ok(result) => {
+                if attempt > 1 {
+                    tracing::info!(
+                        operation = %operation_name,
+                        attempt = attempt,
+                        "Jupiter API operation succeeded after retry"
+                    );
+                }
+
+                // Reset Jupiter failure counter on success
+                if let Some(cb) = circuit_breaker {
+                    cb.reset_jupiter_failures();
+                }
+
+                return Ok(result);
+            }
+            Err(e) => {
+                last_error = Some(e.to_string());
+
+                // Record Jupiter API failure
+                if let Some(cb) = circuit_breaker {
+                    let error_type = e.to_string();
+                    if cb.record_jupiter_failure(error_type)? {
+                        tracing::error!(
+                            operation = %operation_name,
+                            "Circuit breaker tripped due to consecutive Jupiter API failures"
+                        );
+                        return Err(AppError::Internal(
+                            "Circuit breaker tripped due to consecutive Jupiter API failures".to_string()
+                        ));
+                    }
+                }
+
+                // Check if error is retryable
+                let delay = if attempt < config.max_retries {
+                    Some(calculate_retry_delay(attempt, config))
+                } else {
+                    None
+                };
+
+                if let Some(delay) = delay {
+                    tracing::warn!(
+                        operation = %operation_name,
+                        attempt = attempt,
+                        next_attempt = attempt + 1,
+                        delay_ms = delay.as_millis(),
+                        error = %e,
+                        "Jupiter API operation failed, retrying with backoff"
+                    );
+
+                    sleep(delay).await;
+                } else {
+                    tracing::error!(
+                        operation = %operation_name,
+                        attempt = attempt,
+                        error = %e,
+                        "Jupiter API operation failed after all retries"
+                    );
+                    break;
+                }
+            }
+        }
+    }
+
+    Err(AppError::Internal(last_error.unwrap_or_else(|| {
+        format!("{} failed with unknown error", operation_name)
+    })))
+}
+
 pub async fn execute_with_jupiter_error_handling<F, Fut, T>(
     operation: F,
     config: &RetryConfig,
