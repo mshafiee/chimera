@@ -6,6 +6,7 @@
 use crate::config::AppConfig;
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState as CBState};
 use crate::db_abstraction::Database;
+use crate::engine::kelly_sizer::KellySizer;
 use crate::engine::tips::TipManager;
 use crate::engine::transaction_builder::{load_wallet_keypair, TransactionBuilder};
 use crate::engine::{slippage, slippage::SlippageEstimate};
@@ -183,6 +184,8 @@ pub struct Executor {
     /// [R-L1] Previously a new MarketRegimeDetector was instantiated on every check_execution_costs
     /// call; now it is a field so the internal price_history is preserved across calls.
     market_regime_detector: Option<Arc<crate::engine::market_regime::MarketRegimeDetector>>,
+    /// Kelly sizer for dynamic position sizing and friction gating
+    kelly_sizer: Arc<KellySizer>,
 }
 
 impl Executor {
@@ -242,6 +245,9 @@ impl Executor {
             None => None,
         };
 
+        // Create Kelly sizer for dynamic position sizing
+        let kelly_sizer = Arc::new(KellySizer::new(db.clone()));
+
         Self {
             config,
             db,
@@ -262,6 +268,7 @@ impl Executor {
             price_cache: None,
             circuit_breaker,
             market_regime_detector: None,
+            kelly_sizer,
         }
     }
 
@@ -1082,7 +1089,7 @@ impl Executor {
             built_tx.price_impact_pct(),
             tip,
             built_tx.route_fee_sol(),
-        )?;
+        ).await?;
 
         tracing::debug!(
             tip_sol = tip.to_f64().unwrap_or(0.0),
@@ -1514,7 +1521,7 @@ impl Executor {
             built_tx.price_impact_pct(),
             Decimal::ZERO,
             built_tx.route_fee_sol(),
-        )?;
+        ).await?;
 
         // Submit transaction via RPC
         let (signature, confirmed) = match &built_tx {
@@ -1956,7 +1963,7 @@ impl Executor {
     }
 
     /// Check if the total execution costs (tip + fee + slippage) exceed the configured limit
-    fn check_execution_costs(
+    async fn check_execution_costs(
         &self,
         signal: &Signal,
         price_impact_pct: Option<Decimal>,
@@ -1980,6 +1987,59 @@ impl Executor {
         } else {
             Decimal::ZERO
         };
+
+        // [FRICTION-GATING] Apply dynamic friction gating: reject trades where
+        // expected edge (from Kelly sizing) is less than or equal to total friction.
+        // This prevents unprofitable micro-trades where transaction costs eat the
+        // entire mathematical edge.
+        if self.config.strategy.friction_gating_enabled {
+            // Calculate Kelly metrics for this wallet
+            let kelly_result = self.kelly_sizer.calculate_kelly(
+                &signal.payload.wallet_address,
+                signal.payload.strategy,
+                14, // 14-day lookback for recent performance
+            ).await;
+
+            if let Ok(kelly) = kelly_result {
+                // Expected edge = position_size * conservative_kelly_percentage
+                let expected_edge = signal.payload.amount_sol * kelly.conservative_kelly;
+
+                // Only reject if we have a negative or zero expected edge
+                if expected_edge <= total_cost {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        expected_edge_sol = %expected_edge,
+                        total_cost_sol = %total_cost,
+                        win_rate = %kelly.win_rate,
+                        avg_win = %kelly.avg_win,
+                        avg_loss = %kelly.avg_loss,
+                        position_size_sol = %signal.payload.amount_sol,
+                        "Trade rejected: expected edge is less than transaction friction"
+                    );
+                    return Err(ExecutorError::ExecutionCostTooHigh {
+                        cost: total_cost,
+                        cost_pct: cost_pct.to_f64().unwrap_or(0.0) * 100.0,
+                        limit_pct: (expected_edge / signal.payload.amount_sol).to_f64().unwrap_or(0.0) * 100.0,
+                        strategy: signal.payload.strategy,
+                    });
+                }
+
+                tracing::debug!(
+                    trade_uuid = %signal.trade_uuid,
+                    expected_edge_sol = %expected_edge,
+                    total_cost_sol = %total_cost,
+                    net_edge_sol = %(expected_edge - total_cost),
+                    "Friction gating passed: expected edge exceeds transaction costs"
+                );
+            } else {
+                // If Kelly calculation fails (insufficient data, error), log but don't block
+                tracing::debug!(
+                    trade_uuid = %signal.trade_uuid,
+                    error = %kelly_result.err().unwrap_or_default(),
+                    "Kelly calculation failed for friction gating — proceeding with cost-only validation"
+                );
+            }
+        }
 
         let mut limit = match signal.payload.strategy {
             Strategy::Shield => self.config.strategy.shield_max_total_cost_percent,

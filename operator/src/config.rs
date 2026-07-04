@@ -376,6 +376,10 @@ pub struct StrategyConfig {
     /// SOL amount boundary separating "small" from "large" trades for slippage fallback
     #[serde(default = "default_slippage_fallback_threshold")]
     pub slippage_fallback_threshold_sol: Decimal,
+    /// Enable dynamic friction gating: reject trades where expected edge (from Kelly sizing)
+    /// is less than or equal to total transaction friction (tip + fee + slippage)
+    #[serde(default = "default_friction_gating_enabled")]
+    pub friction_gating_enabled: bool,
 }
 
 fn default_shield_percent() -> u32 {
@@ -424,6 +428,10 @@ fn default_slippage_fallback_large() -> Decimal {
 
 fn default_slippage_fallback_threshold() -> Decimal {
     dec!(0.5)
+}
+
+fn default_friction_gating_enabled() -> bool {
+    true // Enabled by default to prevent unprofitable micro-trades
 }
 
 /// Jito bundle tip configuration
@@ -1736,6 +1744,7 @@ impl Default for AppConfig {
                 slippage_fallback_small_percent: dec!(0.005),
                 slippage_fallback_large_percent: dec!(0.01),
                 slippage_fallback_threshold_sol: dec!(0.5),
+                friction_gating_enabled: true,
             },
             jito: JitoConfig {
                 enabled: true,
