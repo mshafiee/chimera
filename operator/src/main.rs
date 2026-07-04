@@ -437,7 +437,9 @@ async fn main() -> anyhow::Result<()> {
             config.jupiter.api_url.clone(),
         )
         .with_price_cache(price_cache.clone())
-        .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic),
+        .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic)
+        .with_liquidity_ttl(config.token_safety.liquidity_cache_ttl_secs)
+        .with_fdv_ttl(config.token_safety.fdv_cache_ttl_secs),
     );
     let token_safety_config = TokenSafetyConfig {
         freeze_authority_whitelist: config
@@ -765,6 +767,14 @@ async fn main() -> anyhow::Result<()> {
         price_cache_clone.start_updater().await;
         // start_updater only returns on error or shutdown; log so silent crashes are visible.
         tracing::error!("Price cache updater exited — token price data will become stale. All price-dependent checks (stop-loss, circuit breaker USD thresholds) are now degraded.");
+    });
+
+    // FIX 1: Spawn liquidity cache updater
+    let token_fetcher_clone = token_fetcher.clone();
+    tokio::spawn(async move {
+        token_fetcher_clone.start_liquidity_updater().await;
+        // This task runs indefinitely; if it exits, liquidity data will become stale.
+        tracing::error!("Liquidity cache updater exited — cached liquidity data will become stale. Pre-validation may reject trades due to stale cache data.");
     });
 
     // Spawn daily summary notification task

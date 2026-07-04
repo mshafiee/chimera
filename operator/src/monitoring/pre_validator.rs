@@ -28,6 +28,8 @@ pub struct PreValidator {
     config: Arc<AppConfig>,
     helius_client: Option<Arc<HeliusClient>>,
     token_fetcher: Option<Arc<TokenMetadataFetcher>>,
+    /// FIX 1: Price cache for non-blocking validation
+    price_cache: Option<Arc<PriceCache>>,
 }
 
 impl PreValidator {
@@ -36,6 +38,7 @@ impl PreValidator {
             config,
             helius_client: None,
             token_fetcher: None,
+            price_cache: None,
         }
     }
 
@@ -48,6 +51,13 @@ impl PreValidator {
     /// Attach a token fetcher to enable liquidity-based slippage estimation.
     pub fn with_token_fetcher(mut self, fetcher: Arc<TokenMetadataFetcher>) -> Self {
         self.token_fetcher = Some(fetcher);
+        self
+    }
+
+    /// Attach a price cache to enable non-blocking validation.
+    /// FIX 1: Required for validate_local() fast path
+    pub fn with_price_cache(mut self, price_cache: Arc<PriceCache>) -> Self {
+        self.price_cache = Some(price_cache);
         self
     }
 
@@ -162,6 +172,102 @@ impl PreValidator {
             estimated_slippage,
             price_drift_percent: price_drift,
         }
+    }
+
+    /// Non-blocking validation using purely local, cached data.
+    /// Returns immediately without awaiting external HTTP requests.
+    ///
+    /// FIX 1: Fast path for trade execution - uses only cached data (O(1) reads)
+    /// Returns immediately even if token not in cache (fail-closed).
+    ///
+    /// # Arguments
+    /// * `token_address` - Token to trade
+    /// * `amount_sol` - Trade size in SOL
+    /// * `tracked_price` - Price when tracked wallet traded
+    /// * `price_cache` - Price cache for current price
+    ///
+    /// # Returns
+    /// Result with estimated slippage if valid, error message if invalid
+    pub fn validate_local(
+        &self,
+        token_address: &str,
+        amount_sol: Decimal,
+        tracked_price: Option<Decimal>,
+        price_cache: Arc<PriceCache>,
+    ) -> Result<Decimal, String> {
+        // 1. Get price from local cache (O(1) read)
+        let current_price = match price_cache.get_price_usd(token_address) {
+            Some(price) => price,
+            None => {
+                return Err("Price not found in local cache".to_string());
+            }
+        };
+
+        // 2. Fast price drift check
+        if let Some(tracked) = tracked_price {
+            if !tracked.is_zero() {
+                let drift = ((current_price - tracked).abs() / tracked) * Decimal::from(100);
+                if drift > Decimal::from(5) {
+                    return Err(format!("Price drifted {:.2}% (max 5%)", drift));
+                }
+            }
+        }
+
+        // 3. Fast liquidity lookup from local metadata cache
+        let liquidity_usd = self
+            .token_fetcher
+            .as_ref()
+            .and_then(|fetcher| fetcher.get_cached_liquidity(token_address))
+            .unwrap_or(Decimal::ZERO);
+
+        let min_liquidity = self
+            .config
+            .token_safety
+            .min_liquidity_spear_usd
+            .min(self.config.token_safety.min_liquidity_shield_usd);
+
+        if liquidity_usd < min_liquidity {
+            return Err(format!(
+                "Cached liquidity ${} below minimum ${}",
+                liquidity_usd, min_liquidity
+            ));
+        }
+
+        // 4. Estimate slippage locally using the cached pool liquidity
+        let estimated_slippage = self.estimate_slippage_local(amount_sol, liquidity_usd, price_cache);
+
+        Ok(estimated_slippage)
+    }
+
+    /// Estimate slippage locally using cached data (no HTTP requests)
+    ///
+    /// FIX 1: Non-blocking slippage estimation using cached liquidity
+    /// Falls back to size-based heuristic if liquidity not cached
+    fn estimate_slippage_local(
+        &self,
+        amount_sol: Decimal,
+        liquidity_usd: Decimal,
+        price_cache: Arc<PriceCache>,
+    ) -> Decimal {
+        let max_slippage = Decimal::from(5);
+
+        if liquidity_usd > Decimal::ZERO {
+            let sol_price = price_cache
+                .get_price_usd(crate::constants::mints::SOL)
+                .unwrap_or_else(|| Decimal::from(150));
+
+            let trade_usd = amount_sol * sol_price;
+
+            // Square-root market impact estimation
+            let impact = ((trade_usd * Decimal::from(2)) / liquidity_usd);
+            return impact.min(max_slippage);
+        }
+
+        // Fallback: size-only heuristic (0.5% base + 0.1% per 0.1 SOL)
+        let base = Decimal::from_str("0.5").unwrap_or(Decimal::ZERO);
+        let size_unit = Decimal::from_str("0.1").unwrap_or(Decimal::ONE);
+        let size_part = (amount_sol / size_unit) * Decimal::from_str("0.1").unwrap_or(Decimal::ZERO);
+        (base + size_part).min(max_slippage)
     }
 
     /// Estimate slippage for a trade.

@@ -18,6 +18,40 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
+
+/// Liquidity cache entry with TTL support
+#[derive(Debug, Clone)]
+struct LiquidityEntry {
+    liquidity_usd: Decimal,
+    fetched_at: DateTime<Utc>,
+    source: String,
+}
+
+impl LiquidityEntry {
+    fn is_stale(&self, ttl_secs: u64) -> bool {
+        let now = Utc::now();
+        let elapsed = (now - self.fetched_at).num_seconds();
+        elapsed > ttl_secs as i64
+    }
+}
+
+/// FDV (Fully Dilimited Valuation) cache entry with TTL support
+#[derive(Debug, Clone)]
+struct FdvEntry {
+    market_cap: Decimal,
+    fdv: Decimal,
+    fetched_at: DateTime<Utc>,
+}
+
+impl FdvEntry {
+    fn is_stale(&self, ttl_secs: u64) -> bool {
+        let now = Utc::now();
+        let elapsed = (now - self.fetched_at).num_seconds();
+        elapsed > ttl_secs as i64
+    }
+}
+
 /// Token metadata from on-chain
 #[derive(Debug, Clone)]
 pub struct TokenMetadata {
@@ -65,6 +99,16 @@ pub struct TokenMetadataFetcher {
     allow_unlisted_heuristic: bool,
     /// Optional price cache reference for decimals lookup (offloads RPC calls to Jupiter)
     price_cache: Option<Arc<crate::price_cache::PriceCache>>,
+
+    /// FIX 1: Liquidity cache with TTL (default: 60 seconds)
+    liquidity_cache: RwLock<HashMap<String, LiquidityEntry>>,
+    /// TTL for liquidity cache entries (default: 60 seconds)
+    liquidity_ttl_secs: u64,
+
+    /// FIX 1: FDV/Market Cap cache with TTL (default: 300 seconds / 5 minutes)
+    fdv_cache: RwLock<HashMap<String, FdvEntry>>,
+    /// TTL for FDV cache entries (default: 300 seconds)
+    fdv_ttl_secs: u64,
 }
 
 impl TokenMetadataFetcher {
@@ -103,6 +147,10 @@ impl TokenMetadataFetcher {
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
             allow_unlisted_heuristic: false,
             price_cache: None,
+            liquidity_cache: RwLock::new(HashMap::new()),
+            liquidity_ttl_secs: 60, // 60 seconds default
+            fdv_cache: RwLock::new(HashMap::new()),
+            fdv_ttl_secs: 300, // 5 minutes default
         }
     }
 
@@ -140,6 +188,10 @@ impl TokenMetadataFetcher {
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
             allow_unlisted_heuristic: false,
             price_cache: None,
+            liquidity_cache: RwLock::new(HashMap::new()),
+            liquidity_ttl_secs: 60,
+            fdv_cache: RwLock::new(HashMap::new()),
+            fdv_ttl_secs: 300,
         }
     }
 
@@ -148,6 +200,140 @@ impl TokenMetadataFetcher {
     pub fn with_unlisted_heuristic(mut self, allow: bool) -> Self {
         self.allow_unlisted_heuristic = allow;
         self
+    }
+
+    /// Set the TTL for liquidity cache entries (default: 60 seconds)
+    pub fn with_liquidity_ttl(mut self, ttl_secs: u64) -> Self {
+        self.liquidity_ttl_secs = ttl_secs;
+        self
+    }
+
+    /// Set the TTL for FDV cache entries (default: 300 seconds / 5 minutes)
+    pub fn with_fdv_ttl(mut self, ttl_secs: u64) -> Self {
+        self.fdv_ttl_secs = ttl_secs;
+        self
+    }
+
+    /// Get cached liquidity for a token (fast path - O(1) read)
+    /// Returns None if token not in cache or entry is stale
+    pub fn get_cached_liquidity(&self, token_address: &str) -> Option<Decimal> {
+        let cache = self.liquidity_cache.read();
+        cache.get(token_address).and_then(|entry| {
+            if entry.is_stale(self.liquidity_ttl_secs) {
+                None
+            } else {
+                Some(entry.liquidity_usd)
+            }
+        })
+    }
+
+    /// Get cached FDV for a token (fast path - O(1) read)
+    /// Returns None if token not in cache or entry is stale
+    pub fn get_cached_fdv(&self, token_address: &str) -> Option<Decimal> {
+        let cache = self.fdv_cache.read();
+        cache.get(token_address).and_then(|entry| {
+            if entry.is_stale(self.fdv_ttl_secs) {
+                None
+            } else {
+                Some(entry.fdv)
+            }
+        })
+    }
+
+    /// Update liquidity cache (internal method)
+    async fn update_liquidity_cache(&self, token_address: &str, liquidity_usd: Decimal) {
+        let entry = LiquidityEntry {
+            liquidity_usd,
+            fetched_at: Utc::now(),
+            source: "dexscreener".to_string(),
+        };
+
+        let mut cache = self.liquidity_cache.write();
+        cache.insert(token_address.to_string(), entry);
+    }
+
+    /// Update FDV cache (internal method)
+    async fn update_fdv_cache(&self, token_address: &str, market_cap: Decimal, fdv: Decimal) {
+        let entry = FdvEntry {
+            market_cap,
+            fdv,
+            fetched_at: Utc::now(),
+        };
+
+        let mut cache = self.fdv_cache.write();
+        cache.insert(token_address.to_string(), entry);
+    }
+
+    /// Start background liquidity cache updater task.
+    ///
+    /// FIX 1: Periodically refreshes liquidity data for actively traded tokens
+    /// to keep cache warm and prevent cache misses during trade execution.
+    /// Runs every 30 seconds by default.
+    ///
+    /// This method spawns a supervised background task that:
+    /// 1. Gets list of tokens from active positions (or recently traded tokens)
+    /// 2. Fetches fresh liquidity from DexScreener
+    /// 3. Updates cache with fresh data
+    /// 4. Logs any failures and continues (resilient)
+    pub async fn start_liquidity_updater(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+
+                if let Err(e) = self.update_all_liquidity().await {
+                    tracing::error!(
+                        error = %e,
+                        "Background liquidity update failed"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Update liquidity for all recently traded tokens (internal method).
+    ///
+    /// FIX 1: Fetches liquidity from DexScreener for tokens in the cache
+    /// to keep data fresh. Called periodically by background updater.
+    async fn update_all_liquidity(&self) -> AppResult<()> {
+        // Get list of tokens currently in cache
+        let tokens_to_update: Vec<String> = {
+            let cache = self.liquidity_cache.read();
+            cache.keys().cloned().collect()
+        };
+
+        if tokens_to_update.is_empty() {
+            tracing::debug!("No tokens in liquidity cache - skipping update");
+            return Ok(());
+        }
+
+        tracing::debug!(
+            token_count = tokens_to_update.len(),
+            "Updating liquidity cache"
+        );
+
+        // Update each token's liquidity
+        for token_address in tokens_to_update {
+            match self.fetch_dexscreener_liquidity(&token_address).await {
+                Ok(liquidity) => {
+                    self.update_liquidity_cache(&token_address, liquidity).await;
+                    tracing::debug!(
+                        token = %token_address,
+                        liquidity_usd = %liquidity,
+                        "Updated liquidity cache"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        token = %token_address,
+                        error = %e,
+                        "Failed to fetch liquidity - will retry on next update cycle"
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Get token metadata, using cache if available and not stale (FIX 12: TTL eviction)
@@ -267,8 +453,26 @@ impl TokenMetadataFetcher {
     /// Returns Decimal for precision in financial calculations
     ///
     /// FIX 5: entire slow-check wrapped in a 10-second tokio timeout to prevent hangs
+    /// FIX 1: Now with cache support - checks cache first before making HTTP call
     pub async fn get_market_cap_fdv(&self, token_address: &str) -> AppResult<Decimal> {
-        tokio::time::timeout(
+        // Fast path: Check cache first
+        if let Some(cached_fdv) = self.get_cached_fdv(token_address) {
+            tracing::debug!(
+                token = token_address,
+                fdv_usd = %cached_fdv,
+                cache_age_secs = self.fdv_ttl_secs,
+                "FDV cache hit"
+            );
+            return Ok(cached_fdv);
+        }
+
+        tracing::debug!(
+            token = token_address,
+            "FDV cache miss - fetching from Jupiter"
+        );
+
+        // Slow path: Fetch from API with timeout
+        let fdv = tokio::time::timeout(
             Duration::from_secs(10),
             self.get_market_cap_fdv_inner(token_address),
         )
@@ -279,7 +483,12 @@ impl TokenMetadataFetcher {
                 "get_market_cap_fdv timed out after 10s"
             );
             Err(AppError::Http("slow check timeout".to_string()))
-        })
+        })?;
+
+        // Update cache with market_cap = fdv (we don't track circulating supply separately)
+        self.update_fdv_cache(token_address, fdv, fdv).await;
+
+        Ok(fdv)
     }
 
     /// Inner implementation for get_market_cap_fdv (called under timeout)
@@ -355,17 +564,39 @@ impl TokenMetadataFetcher {
     /// - true: falls back to a supply-based heuristic estimate (legacy behavior).
     ///
     /// EXIT/SELL paths are unaffected — their liquidity threshold is $0.
+    ///
+    /// FIX 1: Now with cache support - checks cache first before making HTTP call
     pub async fn get_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
+        // Fast path: Check cache first
+        if let Some(cached_liq) = self.get_cached_liquidity(token_address) {
+            tracing::debug!(
+                token = token_address,
+                liquidity_usd = %cached_liq,
+                cache_age_secs = self.liquidity_ttl_secs,
+                "Liquidity cache hit"
+            );
+            return Ok(cached_liq);
+        }
+
+        tracing::debug!(
+            token = token_address,
+            "Liquidity cache miss - fetching from DexScreener"
+        );
+
+        // Slow path: Fetch from API
         let dex_liquidity = self
             .fetch_dexscreener_liquidity(token_address)
             .await
             .unwrap_or(Decimal::ZERO); // network failure → treat as unlisted
 
+        // Update cache
+        self.update_liquidity_cache(token_address, dex_liquidity).await;
+
         if dex_liquidity > Decimal::ZERO {
             tracing::debug!(
                 token = token_address,
                 liquidity_usd = %dex_liquidity,
-                "Fetched DexScreener liquidity"
+                "Fetched DexScreener liquidity and cached"
             );
             return Ok(dex_liquidity);
         }
@@ -539,6 +770,12 @@ impl TokenMetadataFetcher {
         cache.clear();
         let mut last_fetched = self.last_fetched.write();
         last_fetched.clear();
+
+        // FIX 1: Clear liquidity and FDV caches too
+        let mut liquidity_cache = self.liquidity_cache.write();
+        liquidity_cache.clear();
+        let mut fdv_cache = self.fdv_cache.write();
+        fdv_cache.clear();
     }
 
     /// Get cache size

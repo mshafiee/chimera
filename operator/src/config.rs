@@ -683,6 +683,15 @@ pub struct TokenSafetyConfig {
     /// Default 1.0 (reject tokens deployed less than 1 hour ago).
     #[serde(default = "default_min_token_age_hours")]
     pub min_token_age_hours: f64,
+    /// FIX 1: Liquidity cache TTL in seconds (default: 60)
+    #[serde(default = "default_liquidity_cache_ttl")]
+    pub liquidity_cache_ttl_secs: u64,
+    /// FIX 1: FDV cache TTL in seconds (default: 300 / 5 minutes)
+    #[serde(default = "default_fdv_cache_ttl")]
+    pub fdv_cache_ttl_secs: u64,
+    /// FIX 1: Background liquidity updater interval in seconds (default: 30)
+    #[serde(default = "default_liquidity_update_interval")]
+    pub liquidity_update_interval_secs: u64,
 }
 
 fn default_allow_unlisted_heuristic() -> bool {
@@ -691,6 +700,18 @@ fn default_allow_unlisted_heuristic() -> bool {
 
 fn default_min_token_age_hours() -> f64 {
     1.0
+}
+
+fn default_liquidity_cache_ttl() -> u64 {
+    60
+}
+
+fn default_fdv_cache_ttl() -> u64 {
+    300
+}
+
+fn default_liquidity_update_interval() -> u64 {
+    30
 }
 
 fn default_authority_whitelist() -> Vec<String> {
@@ -736,6 +757,9 @@ impl Default for TokenSafetyConfig {
             cache_ttl_seconds: default_token_cache_ttl(),
             allow_unlisted_heuristic: default_allow_unlisted_heuristic(),
             min_token_age_hours: default_min_token_age_hours(),
+            liquidity_cache_ttl_secs: default_liquidity_cache_ttl(),
+            fdv_cache_ttl_secs: default_fdv_cache_ttl(),
+            liquidity_update_interval_secs: default_liquidity_update_interval(),
         }
     }
 }
