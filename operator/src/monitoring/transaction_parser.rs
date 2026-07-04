@@ -421,6 +421,108 @@ fn parse_balance_changes(
     Ok((token_in, token_out, amount_in, amount_out, direction))
 }
 
+/// Parse Helius LaserStream WebSocket message to extract swap details
+///
+/// LaserStream pushes fully enriched transaction data with tokenTransfers,
+/// nativeTransfers, and balance changes. This function extracts swap information
+/// directly from the WSS payload without needing additional RPC calls.
+pub fn parse_laserstream_message(
+    payload: &Value,
+    wallet_address: &str,
+) -> Result<Option<ParsedSwap>> {
+    // LaserStream provides tokenTransfers array with parsed transfer data
+    let token_transfers = payload
+        .get("tokenTransfers")
+        .and_then(|t| t.as_array())
+        .context("Missing tokenTransfers in LaserStream payload")?;
+
+    let mut token_in = String::new();
+    let mut token_out = String::new();
+    let mut amount_in = Decimal::ZERO;
+    let mut amount_out = Decimal::ZERO;
+
+    // Process token transfers to find swap
+    for transfer in token_transfers {
+        let from_user = transfer.get("fromUserAccount").and_then(|a| a.as_str());
+        let to_user = transfer.get("toUserAccount").and_then(|a| a.as_str());
+        let mint = transfer
+            .get("mint")
+            .and_then(|m| m.as_str())
+            .context("Missing mint in token transfer")?;
+        let token_amount_str = transfer
+            .get("tokenAmount")
+            .and_then(|a| a.as_str())
+            .context("Missing tokenAmount in token transfer")?;
+
+        // Parse token amount (string to avoid precision loss)
+        let amount = Decimal::from_str(token_amount_str).unwrap_or(Decimal::ZERO);
+
+        // Track tokens sent from wallet (token_in) and received by wallet (token_out)
+        if from_user == Some(wallet_address) && amount > Decimal::ZERO {
+            token_in = mint.to_string();
+            amount_in = amount;
+        } else if to_user == Some(wallet_address) && amount > Decimal::ZERO {
+            token_out = mint.to_string();
+            amount_out = amount;
+        }
+    }
+
+    // Validate we found both sides of the swap
+    if token_in.is_empty() || token_out.is_empty() {
+        tracing::debug!(
+            wallet = %wallet_address,
+            "Incomplete swap data in LaserStream payload"
+        );
+        return Ok(None);
+    }
+
+    // Determine swap direction
+    let sol_mint = "So11111111111111111111111111111111111111112";
+    let direction = if token_in == sol_mint {
+        SwapDirection::Buy // SOL -> Token
+    } else {
+        SwapDirection::Sell // Token -> SOL
+    };
+
+    // Detect DEX from transaction data (optional enhancement)
+    let dex = detect_dex_from_laserstream(payload)?;
+
+    Ok(Some(ParsedSwap {
+        token_in,
+        token_out,
+        amount_in,
+        amount_out,
+        direction,
+        dex,
+        slippage: None, // Could be calculated from price data if available
+    }))
+}
+
+/// Detect DEX from LaserStream transaction data
+fn detect_dex_from_laserstream(payload: &Value) -> Result<String> {
+    // Check for DEX program IDs in transaction logs
+    if let Some(logs) = payload.get("logs").and_then(|l| l.as_array()) {
+        // Convert JsonValue array to string array before joining
+        let log_strings: Vec<&str> = logs
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        let log_str = log_strings.join(" ");
+
+        if log_str.contains("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4") {
+            return Ok("Jupiter".to_string());
+        } else if log_str.contains("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8") {
+            return Ok("Raydium".to_string());
+        } else if log_str.contains("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc") {
+            return Ok("Orca".to_string());
+        } else if log_str.contains("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P") {
+            return Ok("Pump.fun".to_string());
+        }
+    }
+
+    Ok("Unknown".to_string())
+}
+
 /// Parse Helius webhook payload to extract swap information
 pub fn parse_helius_webhook(
     payload: &crate::monitoring::helius::HeliusWebhookPayload,

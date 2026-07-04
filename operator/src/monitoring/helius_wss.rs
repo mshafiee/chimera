@@ -368,24 +368,50 @@ impl LaserStreamClient {
         let transaction_json = serde_json::to_value(&tx.transaction)
             .context("Failed to serialize transaction data")?;
 
-        let transaction_info = match super::transaction_parser::parse_transaction(&transaction_json, &wallet_address) {
-            Ok(info) => info,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to parse transaction");
+        // Try LaserStream-specific parser first (zero credit, optimized)
+        let parsed_swap = match super::transaction_parser::parse_laserstream_message(&transaction_json, &wallet_address) {
+            Ok(Some(swap)) => {
+                tracing::debug!(
+                    wallet = %wallet_address,
+                    dex = %swap.dex,
+                    direction = ?swap.direction,
+                    "Successfully parsed swap from LaserStream payload"
+                );
+                swap
+            },
+            Ok(None) => {
+                tracing::debug!("LaserStream payload is not a swap transaction");
                 return Ok(());
             }
-        };
-
-        let parsed_swap = match &transaction_info.parsed_swap {
-            Some(parsed) => parsed,
-            None => {
-                tracing::debug!("Transaction is not a relevant swap");
-                return Ok(());
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to parse LaserStream message, trying fallback parser");
+                // Fallback to standard parser if LaserStream format changes
+                match super::transaction_parser::parse_transaction(&transaction_json, &wallet_address) {
+                    Ok(tx_info) => match tx_info.parsed_swap {
+                        Some(swap) => {
+                            tracing::debug!(
+                                wallet = %wallet_address,
+                                dex = %swap.dex,
+                                direction = ?swap.direction,
+                                "Successfully parsed swap from fallback parser"
+                            );
+                            swap
+                        },
+                        None => {
+                            tracing::debug!("Transaction is not a relevant swap");
+                            return Ok(());
+                        }
+                    },
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Failed to parse transaction with fallback parser");
+                        return Ok(());
+                    }
+                }
             }
         };
 
         // Generate signal
-        let signal = self.generate_signal(parsed_swap, &wallet_address)?;
+        let signal = self.generate_signal(&parsed_swap, &wallet_address)?;
 
         // Token safety fast-path check
         if let Some(token_address) = &signal.payload.token_address {

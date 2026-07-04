@@ -135,12 +135,27 @@ monitoring:
   webhook_registration_batch_size: 10
   webhook_registration_delay_ms: 200
   webhook_processing_rate_limit: 45
-  rpc_polling_enabled: true
+  rpc_polling_enabled: true  # Keep as fallback
   rpc_poll_interval_secs: 8
   rpc_poll_batch_size: 6
   rpc_poll_rate_limit: 40
   max_active_wallets: 20
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
+
+  # 🔥 NEW: Enable Helius LaserStream WebSocket (zero-credit transaction parsing)
+  use_websocket: true  # Changed from false to true
+  helius_websocket_url: "wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
+
+  # WebSocket reconnection configuration
+  websocket_reconnect:
+    initial_backoff_secs: 1
+    max_backoff_secs: 60
+    backoff_multiplier: 2.0  # Exponential backoff
+    max_attempts: 0  # 0 = infinite retries
+
+  websocket_health_timeout_secs: 60  # Health check timeout
+  websocket_commitment: "confirmed"  # Commitment level for subscriptions
+
   # Webhook lifecycle management
   webhook_lifecycle:
     auto_register_enabled: true    # Auto-register webhooks for promoted wallets

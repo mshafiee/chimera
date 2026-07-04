@@ -1344,6 +1344,83 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("RPC polling disabled in configuration");
     }
 
+    // Start Helius LaserStream WebSocket if enabled
+    if config
+        .monitoring
+        .as_ref()
+        .map(|m| m.use_websocket)
+        .unwrap_or(false)
+    {
+        tracing::info!("LaserStream WebSocket enabled in config, starting client...");
+
+        // Get Helius API key with proper error handling
+        let helius_api_key = config
+            .monitoring
+            .as_ref()
+            .and_then(|m| m.helius_api_key.as_ref())
+            .ok_or_else(|| anyhow::anyhow!("HELIUS_API_KEY not set in monitoring config"))?;
+
+        let helius_client = chimera_operator::monitoring::helius::HeliusClient::new(
+            helius_api_key.clone(),
+        ).map_err(|e| anyhow::anyhow!("Failed to create Helius client: {}", e))?;
+
+        let laserstream_config = chimera_operator::monitoring::helius_wss::LaserStreamConfig {
+            websocket_url: config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.helius_websocket_url.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "wss://mainnet.helius-rpc.com/?api-key={}",
+                        helius_api_key
+                    )
+                }),
+            reconnect: config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.websocket_reconnect.as_ref())
+                .map(|ws_reconnect| chimera_operator::monitoring::helius_wss::ReconnectConfig {
+                    initial_backoff_secs: ws_reconnect.initial_backoff_secs,
+                    max_backoff_secs: ws_reconnect.max_backoff_secs,
+                    backoff_multiplier: ws_reconnect.backoff_multiplier,
+                    max_attempts: ws_reconnect.max_attempts,
+                })
+                .unwrap_or_else(|| chimera_operator::monitoring::helius_wss::ReconnectConfig::default()),
+            health_timeout_secs: config
+                .monitoring
+                .as_ref()
+                .map(|m| m.websocket_health_timeout_secs)
+                .unwrap_or(60),
+            commitment: config
+                .monitoring
+                .as_ref()
+                .map(|m| m.websocket_commitment.clone())
+                .unwrap_or_else(|| "confirmed".to_string()),
+        };
+
+        let laserstream_client = chimera_operator::monitoring::helius_wss::LaserStreamClient::new(
+            db_pool.clone(),
+            _engine_handle.clone(),
+            laserstream_config,
+            circuit_breaker.clone(),
+            token_parser.clone(),
+            std::sync::Arc::new(helius_client),
+            exit_detector.clone(),
+        );
+
+        // Spawn LaserStream task
+        let laserstream_cancel = cancel_token.clone();
+        tokio::spawn(async move {
+            if let Err(e) = laserstream_client.start(laserstream_cancel).await {
+                tracing::error!(error = %e, "LaserStream WebSocket client failed");
+            }
+        });
+
+        tracing::info!("✓ LaserStream WebSocket client started");
+    } else {
+        tracing::info!("LaserStream WebSocket disabled in config, relying on webhooks + RPC polling");
+    }
+
     // Spawn market regime price history update task (every 5 minutes)
     {
         let regime_token = cancel_token.clone();
