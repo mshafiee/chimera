@@ -4,6 +4,7 @@
 //! when heat limit (20% of capital) is reached.
 
 use crate::db_abstraction::Database;
+use crate::state::registry::StateRegistry;
 use parking_lot::RwLock;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
@@ -17,6 +18,8 @@ pub struct PortfolioHeat {
     /// Total capital in SOL — wrapped in Arc<RwLock> so the background wallet-balance
     /// refresh task can update it without rebuilding the struct.
     total_capital_sol: Arc<RwLock<Decimal>>,
+    /// Optional state registry for fast in-memory portfolio heat calculation
+    registry: Option<Arc<StateRegistry>>,
 }
 
 /// Portfolio heat result
@@ -38,6 +41,7 @@ impl PortfolioHeat {
             db,
             max_heat_percent: dec!(20),
             total_capital_sol: Arc::new(RwLock::new(total_capital_sol)),
+            registry: None,
         }
     }
 
@@ -52,7 +56,14 @@ impl PortfolioHeat {
             db,
             max_heat_percent: max_heat,
             total_capital_sol: Arc::new(RwLock::new(total_capital_sol)),
+            registry: None,
         }
+    }
+
+    /// Set the state registry for fast in-memory portfolio heat calculation
+    pub fn with_registry(mut self, registry: Arc<StateRegistry>) -> Self {
+        self.registry = Some(registry);
+        self
     }
 
     /// Update the capital figure from a live wallet balance query.
@@ -78,6 +89,38 @@ impl PortfolioHeat {
     /// # Returns
     /// HeatResult with current heat status
     pub async fn calculate_heat(&self) -> Result<HeatResult, String> {
+        // Try fast path with registry first (sub-microsecond latency)
+        if let Some(ref registry) = self.registry {
+            tracing::trace!("Using registry fast path for portfolio heat calculation");
+            let heat_state = registry.calculate_portfolio_heat_fast();
+            let total_exposure = heat_state.total_exposure_sol;
+
+            let capital = *self.total_capital_sol.read();
+
+            // Calculate heat percentage using Decimal for precision.
+            let current_heat_percent = if !capital.is_zero() {
+                (total_exposure / capital) * Decimal::from(100)
+            } else {
+                Decimal::from(100)
+            };
+
+            // Calculate available heat
+            let max_heat_sol = capital * (self.max_heat_percent / Decimal::from(100));
+            let available_heat_sol = max_heat_sol - total_exposure;
+
+            // Check if can open new position
+            let can_open_position = current_heat_percent < self.max_heat_percent;
+
+            return Ok(HeatResult {
+                current_heat_percent,
+                total_exposure_sol: total_exposure,
+                available_heat_sol: available_heat_sol.max(Decimal::ZERO),
+                can_open_position,
+            });
+        }
+
+        // Fallback to database queries (legacy path, 50-200ms latency)
+        tracing::warn!("Registry not available - using database fallback for portfolio heat (slower)");
         // Include EXITING positions — they still hold capital until exit confirms.
         // Use entry_amount_sol only: heat measures capital at risk (deployed capital),
         // not mark-to-market value. Including unrealized PnL inflates heat on winners

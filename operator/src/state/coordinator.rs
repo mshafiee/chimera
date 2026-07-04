@@ -152,6 +152,7 @@ impl StateCoordinator {
                 token_address: position.token_address.clone(),
                 token_symbol: position.token_symbol.clone(),
                 state: position.state.clone(),
+                strategy: position.strategy.clone(),
                 entry_amount_sol: position.entry_amount_sol,
                 current_price: position.current_price,
                 unrealized_pnl_sol: position.unrealized_pnl_sol,
@@ -199,10 +200,16 @@ impl StateCoordinator {
         for position in &positions {
             total_exposure += position.entry_amount_sol;
 
-            // Note: Would need strategy info from PositionState for accurate split
-            // For now, evenly distribute
-            shield_exposure += position.entry_amount_sol / Decimal::from(2);
-            spear_exposure += position.entry_amount_sol / Decimal::from(2);
+            // Use actual strategy from PositionState for accurate allocation
+            match position.strategy.as_str() {
+                "SHIELD" => shield_exposure += position.entry_amount_sol,
+                "SPEAR" => spear_exposure += position.entry_amount_sol,
+                _ => {
+                    // Unknown strategy - evenly distribute
+                    shield_exposure += position.entry_amount_sol / Decimal::from(2);
+                    spear_exposure += position.entry_amount_sol / Decimal::from(2);
+                }
+            }
         }
 
         // Add pending trades
@@ -210,9 +217,16 @@ impl StateCoordinator {
             if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing) {
                 if trade.side == "BUY" {
                     total_exposure += trade.amount_sol;
-                    // Distribute pending heat
-                    shield_exposure += trade.amount_sol / Decimal::from(2);
-                    spear_exposure += trade.amount_sol / Decimal::from(2);
+                    // Use actual strategy for accurate allocation
+                    match trade.strategy.as_str() {
+                        "SHIELD" => shield_exposure += trade.amount_sol,
+                        "SPEAR" => spear_exposure += trade.amount_sol,
+                        _ => {
+                            // Unknown strategy - evenly distribute
+                            shield_exposure += trade.amount_sol / Decimal::from(2);
+                            spear_exposure += trade.amount_sol / Decimal::from(2);
+                        }
+                    }
                 }
             }
         }
@@ -307,6 +321,7 @@ impl StateCoordinator {
                         token_address: db_position.token_address.clone(),
                         token_symbol: db_position.token_symbol.clone(),
                         state: db_position.state.clone(),
+                        strategy: db_position.strategy.clone(),
                         entry_amount_sol: db_position.entry_amount_sol,
                         current_price: db_position.current_price,
                         unrealized_pnl_sol: db_position.unrealized_pnl_sol,

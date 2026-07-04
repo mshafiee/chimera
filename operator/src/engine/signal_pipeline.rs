@@ -578,6 +578,7 @@ impl SignalProcessor {
                                     token_address: signal.token_address().to_string(),
                                     token_symbol: Some(signal.payload.token.clone()),
                                     state: "ACTIVE".to_string(),
+                                    strategy: signal.payload.strategy.to_string(),
                                     entry_amount_sol: signal.payload.amount_sol,
                                     current_price: Some(sol_price_usd),
                                     unrealized_pnl_sol: None,

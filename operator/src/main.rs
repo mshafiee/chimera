@@ -465,13 +465,19 @@ async fn main() -> anyhow::Result<()> {
     ));
     tracing::info!("Token parser initialized");
 
-    let portfolio_heat = Arc::new(PortfolioHeat::new(
-        db_pool.clone(),
-        config.position_sizing.total_capital_sol,
-    ));
+    let state_registry = Arc::new(chimera_operator::state::StateRegistry::new());
+    tracing::info!("State registry initialized");
+
+    let portfolio_heat = Arc::new(
+        PortfolioHeat::new(
+            db_pool.clone(),
+            config.position_sizing.total_capital_sol,
+        )
+        .with_registry(Arc::clone(&state_registry))
+    );
     tracing::info!(
         total_capital_sol = ?config.position_sizing.total_capital_sol,
-        "Portfolio heat manager initialized"
+        "Portfolio heat manager initialized with registry fast path"
     );
 
     // Create engine
@@ -486,7 +492,7 @@ async fn main() -> anyhow::Result<()> {
             Some(price_cache.clone()),
             Some(token_parser.clone()),
             Some(portfolio_heat.clone()),
-            None, // state_registry
+            Some(state_registry.clone()), // state_registry for fast portfolio heat
             None, // write_queue
         );
     tracing::info!("Engine created");
