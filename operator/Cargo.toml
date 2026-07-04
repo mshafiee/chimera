@@ -80,6 +80,9 @@ urlencoding = "2.1"
 hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = "0.27"
 
+# WebSocket client for Helius LaserStream
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
 # Prometheus metrics
 prometheus = "0.14.0"
 

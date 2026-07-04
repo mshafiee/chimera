@@ -879,6 +879,38 @@ pub struct MonitoringConfig {
     /// Webhook lifecycle management configuration
     #[serde(default)]
     pub webhook_lifecycle: Option<WebhookLifecycleConfig>,
+    /// Enable Helius LaserStream WebSocket (experimental)
+    #[serde(default = "default_false")]
+    pub use_websocket: bool,
+    /// Helius WebSocket URL (wss://)
+    #[serde(default)]
+    pub helius_websocket_url: Option<String>,
+    /// WebSocket reconnection configuration
+    #[serde(default)]
+    pub websocket_reconnect: Option<WebSocketReconnectConfig>,
+    /// Health check timeout (seconds)
+    #[serde(default = "default_websocket_health_timeout")]
+    pub websocket_health_timeout_secs: u64,
+    /// Commitment level for WebSocket subscriptions (processed, confirmed, finalized)
+    #[serde(default = "default_websocket_commitment")]
+    pub websocket_commitment: String,
+}
+
+/// WebSocket reconnection configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebSocketReconnectConfig {
+    /// Initial backoff in seconds
+    #[serde(default = "default_ws_initial_backoff")]
+    pub initial_backoff_secs: u64,
+    /// Maximum backoff in seconds
+    #[serde(default = "default_ws_max_backoff")]
+    pub max_backoff_secs: u64,
+    /// Backoff multiplier
+    #[serde(default = "default_ws_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+    /// Maximum retry attempts (0 = infinite)
+    #[serde(default = "default_ws_max_attempts")]
+    pub max_attempts: u32,
 }
 
 /// Webhook lifecycle management configuration
@@ -946,6 +978,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_false() -> bool {
+    false
+}
+
 fn default_webhook_batch_size() -> usize {
     10
 }
@@ -999,6 +1035,11 @@ impl Default for MonitoringConfig {
             max_active_wallets: default_max_active_wallets(),
             auto_demote_wallets: default_auto_demote_wallets(),
             webhook_lifecycle: None,
+            use_websocket: false,
+            helius_websocket_url: None,
+            websocket_reconnect: None,
+            websocket_health_timeout_secs: default_websocket_health_timeout(),
+            websocket_commitment: default_websocket_commitment(),
         }
     }
 }
@@ -1359,6 +1400,31 @@ fn default_disk_monitoring_enabled() -> bool {
 
 fn default_rpc_rate_limit_enabled() -> bool {
     true
+}
+
+// WebSocket configuration defaults
+fn default_websocket_health_timeout() -> u64 {
+    60 // 1 minute
+}
+
+fn default_websocket_commitment() -> String {
+    "confirmed".to_string() // Balanced latency (~2-3s) and safety
+}
+
+fn default_ws_initial_backoff() -> u64 {
+    1 // Start with 1 second
+}
+
+fn default_ws_max_backoff() -> u64 {
+    60 // Cap at 60 seconds
+}
+
+fn default_ws_backoff_multiplier() -> f64 {
+    2.0 // Exponential doubling
+}
+
+fn default_ws_max_attempts() -> u32 {
+    0 // Infinite retries
 }
 
 impl Default for DegradationConfig {

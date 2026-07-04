@@ -478,7 +478,7 @@ mod tests {
             entry_amount_sol: Decimal::from(5),
             current_price: None,
             unrealized_pnl_sol: None,
-            updated_at: Instant::now(),
+            updated_at: SystemTime::now(),
         };
 
         registry.insert_position(position).unwrap();
@@ -502,7 +502,7 @@ mod tests {
             entry_amount_sol: Decimal::from(5),
             current_price: None,
             unrealized_pnl_sol: None,
-            updated_at: Instant::now(),
+            updated_at: SystemTime::now(),
         };
 
         registry.insert_position(position).unwrap();

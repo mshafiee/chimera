@@ -1,10 +1,13 @@
 //! Monitoring module for automatic copy trading
 //!
-//! Handles on-chain transaction monitoring via Helius webhooks and RPC polling,
+//! Handles on-chain transaction monitoring via Helius webhooks, WebSocket, and RPC polling,
 //! signal processing, and intelligent trade detection.
 
 pub mod exit_detector;
 pub mod helius;
+pub mod helius_wss;
+pub mod helius_wss_health;
+pub mod helius_wss_subscription;
 pub mod polling_task;
 pub mod pre_validator;
 pub mod rate_limiter;
@@ -17,6 +20,9 @@ pub mod webhook_lifecycle;
 
 pub use exit_detector::ExitDetector;
 pub use helius::HeliusClient;
+pub use helius_wss::{ConnectionState, LaserStreamClient, LaserStreamConfig, ReconnectConfig};
+pub use helius_wss_health::{HealthMetrics, WebSocketHealth};
+pub use helius_wss_subscription::SubscriptionManager;
 pub use polling_task::{start_polling_task, PollingConfig};
 pub use pre_validator::PreValidator;
 pub use rate_limiter::{RateLimitMetrics, RateLimiter, RequestPriority};
