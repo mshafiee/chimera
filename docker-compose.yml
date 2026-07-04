@@ -170,8 +170,8 @@ services:
       - SCOUT_WALLET_TX_MAX_PAGES=10                             # Reduced from 20 (50% reduction)
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
       # WQS Thresholds (calibrated for real-world performance)
-      - SCOUT_MIN_WQS_ACTIVE=40.0                                # Lowered from 60.0
-      - SCOUT_MIN_WQS_CANDIDATE=15.0                             # Lowered from 20.0
+      - SCOUT_MIN_WQS_ACTIVE=75.0                                # Aggressive downsizing: only elite traders
+      - SCOUT_MIN_WQS_CANDIDATE=50.0                             # Raised from 15.0 to maintain gap
       # Clean token list (removed invalid addresses: GCS89xYV, Ac7m5c4t, G0AT7B4R, M00DENG)
       - SCOUT_ACTIVE_TOKENS=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263,EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm,7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr,Grass7B4RdKfBCjTKgSqnXkqjwiG6DuGc62rSdZ9mtm,So11111111111111111111111111111111111111112
       # API Keys for validation (Loaded from env_file)

@@ -153,7 +153,9 @@ SELECT value FROM schema_version WHERE key = 'version';
 log "INFO" "Current schema version: $SCHEMA_VERSION"
 
 # Check for migration scripts
-MIGRATION_DIR="${CHIMERA_HOME}/database/migrations"
+# Note: SQLx migrations are applied automatically by the operator during startup
+# This check is for legacy manual migrations only
+MIGRATION_DIR="${CHIMERA_HOME}/database/migrations_sqlite"
 if [[ -d "$MIGRATION_DIR" ]]; then
     PENDING_MIGRATIONS=$(find "$MIGRATION_DIR" -name "*.sql" -newer "$DB_PATH" 2>/dev/null | wc -l)
     if [[ $PENDING_MIGRATIONS -gt 0 ]]; then

@@ -104,12 +104,12 @@ class ScoutConfig:
     @staticmethod
     def get_min_wqs_active() -> float:
         """Get minimum WQS score for ACTIVE status."""
-        return float(os.getenv("SCOUT_MIN_WQS_ACTIVE", "60.0"))
-    
+        return float(os.getenv("SCOUT_MIN_WQS_ACTIVE", "75.0"))
+
     @staticmethod
     def get_min_wqs_candidate() -> float:
         """Get minimum WQS score for CANDIDATE status."""
-        return float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "15.0"))
+        return float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "50.0"))
 
     # ========================================================================
     # Archetype-Aware WQS Thresholds
@@ -119,13 +119,13 @@ class ScoutConfig:
     def get_min_wqs_whale() -> Optional[float]:
         """Get minimum WQS score for WHALE archetype (lower threshold for high-conviction trades)."""
         val = os.getenv("SCOUT_MIN_WQS_WHALE")
-        return float(val) if val else 55.0
+        return float(val) if val else 70.0
 
     @staticmethod
     def get_min_wqs_swing() -> Optional[float]:
         """Get minimum WQS score for SWING archetype (lower threshold for swing traders)."""
         val = os.getenv("SCOUT_MIN_WQS_SWING")
-        return float(val) if val else 58.0
+        return float(val) if val else 72.0
 
     @staticmethod
     def get_momentum_boost() -> float:

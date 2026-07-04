@@ -20,8 +20,8 @@ NC='\033[0m' # No Color
 
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-OPTIMIZATION_SQL="${SCRIPT_DIR}/postgres_optimization_indexes.sql"
-TEST_SQL="${SCRIPT_DIR}/test_postgres_optimization.sql"
+OPTIMIZATION_SQL="${SCRIPT_DIR}/functional_indexes.sql"
+TEST_SQL="${SCRIPT_DIR}/verification.sql"
 
 # Default PostgreSQL URL (can be overridden by argument)
 DEFAULT_URL="postgresql://chimera:chimera@localhost:5432/chimera"
@@ -200,7 +200,7 @@ main() {
     echo -e "3. Check storage impact: ~15-25% increase expected"
     echo -e "4. Run ANALYZE regularly to update statistics"
     echo ""
-    echo -e "${YELLOW}For detailed usage guide, see: postgres_optimization_guide.md${NC}"
+    echo -e "${YELLOW}For detailed usage guide, see: ../../docs/operations/postgres-optimization-guide.md${NC}"
     echo ""
 }
 

@@ -46,10 +46,10 @@ logger = logging.getLogger(__name__)
 class PromotionCriteria:
     """Criteria for wallet promotion."""
     # Base WQS threshold (default, can be overridden by archetype-specific thresholds)
-    min_wqs_score: float = 65.0
+    min_wqs_score: float = 75.0
     # Archetype-specific thresholds (None means use base threshold)
-    min_wqs_whale: Optional[float] = 55.0  # Lower threshold for high-conviction whale trades
-    min_wqs_swing: Optional[float] = 58.0  # Lower threshold for swing traders
+    min_wqs_whale: Optional[float] = 70.0  # Lower threshold for high-conviction whale trades
+    min_wqs_swing: Optional[float] = 72.0  # Lower threshold for swing traders
     min_wqs_scalper: Optional[float] = None  # Use base threshold
     min_wqs_sniper: Optional[float] = None  # Use base threshold
     min_wqs_insider: Optional[float] = None  # Use base threshold (insiders need high WQS)

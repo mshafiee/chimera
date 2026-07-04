@@ -854,8 +854,8 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIEL
 
 def classify_wallet(
     wqs_score: float,
-    active_threshold: float = 65.0,
-    candidate_threshold: float = 20.0,
+    active_threshold: float = 75.0,
+    candidate_threshold: float = 50.0,
     confidence: Optional[float] = None,
     min_confidence: float = 0.70,
 ) -> str:

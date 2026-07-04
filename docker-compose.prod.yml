@@ -44,8 +44,8 @@ services:
       - SCOUT_WALLET_TX_MAX_PAGES=20
       - SCOUT_DISCOVERY_MIN_SOL=0.05
       # WQS Thresholds
-      - SCOUT_MIN_WQS_ACTIVE=60.0
-      - SCOUT_MIN_WQS_CANDIDATE=30.0
+      - SCOUT_MIN_WQS_ACTIVE=75.0
+      - SCOUT_MIN_WQS_CANDIDATE=50.0
       # Redis Configuration
       - REDIS_ENABLED=true
       - REDIS_URL=redis://chimera-redis:6379
