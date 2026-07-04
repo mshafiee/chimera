@@ -14,6 +14,8 @@ use crate::models::{Action, Signal, Strategy};
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
+use crate::state::{StateRegistry, AsyncWriteQueue, PortfolioHeatState};
+use crate::state::registry::TradeStatus;
 use chrono::{Timelike, Utc};
 use rust_decimal::prelude::*;
 use std::sync::Arc;
@@ -33,6 +35,12 @@ pub struct SignalProcessor {
     ws_state: Option<Arc<WsState>>,
     #[allow(dead_code)] // Reserved for future notification wiring
     notifier: Option<Arc<CompositeNotifier>>,
+    /// State registry for in-memory trade/position tracking
+    #[allow(dead_code)] // Used when available
+    state_registry: Option<Arc<crate::state::StateRegistry>>,
+    /// Async write queue for non-blocking database operations
+    #[allow(dead_code)] // Used when available
+    write_queue: Option<Arc<crate::state::AsyncWriteQueue>>,
 }
 
 impl SignalProcessor {
@@ -47,6 +55,8 @@ impl SignalProcessor {
         price_cache: Option<Arc<PriceCache>>,
         ws_state: Option<Arc<WsState>>,
         notifier: Option<Arc<CompositeNotifier>>,
+        state_registry: Option<Arc<crate::state::StateRegistry>>,
+        write_queue: Option<Arc<crate::state::AsyncWriteQueue>>,
     ) -> Self {
         Self {
             db,
@@ -58,6 +68,8 @@ impl SignalProcessor {
             price_cache,
             ws_state,
             notifier,
+            state_registry,
+            write_queue,
         }
     }
 
@@ -78,19 +90,37 @@ impl SignalProcessor {
         );
 
         // Update status to EXECUTING
-        if let Err(e) = self
-            .db
-            .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+        // First, update in-memory registry for immediate effect
+        if let Some(ref registry) = self.state_registry {
+            if let Err(e) = registry.update_trade_status(&trade_uuid, TradeStatus::Executing) {
+                tracing::error!(error = ?e, trade_uuid = %trade_uuid,
+                              "Failed to update trade status in registry, continuing with DB update");
+                // Continue anyway - DB is the source of truth
+            }
+        }
+
+        // Queue async DB write for persistence
+        if let Some(ref queue) = self.write_queue {
+            if let Err(e) = queue.enqueue(crate::state::WriteOperation::UpdateTradeStatus {
+                trade_uuid: trade_uuid.clone(),
+                status: TradeStatus::Executing,
+                tx_signature: None,
+                error_message: None,
+                network_fee_sol: None,
+            }).await {
+                tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to queue EXECUTING status update");
+            }
+        } else {
+            // Fallback to synchronous DB write
+            if let Err(e) = self.db.update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
                 trade_uuid: trade_uuid.clone(),
                 status: "EXECUTING".to_string(),
                 tx_signature: None,
                 error_message: None,
                 network_fee_sol: None,
-            })
-            .await
-        {
-            tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING — marking FAILED to prevent phantom-QUEUED state");
-            if let Err(e2) = self
+            }).await {
+                tracing::error!(error = %e, trade_uuid = %trade_uuid, "Failed to update status to EXECUTING — marking FAILED to prevent phantom-QUEUED state");
+                if let Err(e2) = self
                 .db
                 .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
                     trade_uuid: trade_uuid.clone(),
@@ -283,37 +313,71 @@ impl SignalProcessor {
             };
 
             // 1. Portfolio Heat Check
-            match portfolio_heat
-                .can_open_position(signal.payload.amount_sol)
-                .await
-            {
-                Ok(false) => {
-                    let reason = "Portfolio heat limit reached at execution time".to_string();
-                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: portfolio heat limit reached");
-
-                    let _ = self
-                        .db
-                        .mark_trade_dead_letter(
-                            &trade_uuid,
-                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                            &reason,
-                        )
-                        .await;
-                    if let Some(ref ws) = self.ws_state {
-                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "DEAD_LETTER".to_string(),
-                            token_symbol: Some(signal.payload.token.clone()),
-                            strategy: signal.payload.strategy.to_string(),
-                        }));
+            let can_open = if let Some(ref registry) = self.state_registry {
+                // Fast path: check in-memory portfolio heat
+                let heat = registry.get_portfolio_heat();
+                let new_exposure = heat.total_exposure_sol + signal.payload.amount_sol;
+                let capital = self.config.position_sizing.total_capital_sol;
+                let max_heat = capital * Decimal::from(20u32) / Decimal::from(100u32);
+                new_exposure <= max_heat
+            } else {
+                // Fallback: database query via PortfolioHeat
+                match portfolio_heat
+                    .can_open_position(signal.payload.amount_sol)
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::error!(error = %e, trade_uuid = %trade_uuid, "Portfolio heat check failed");
+                        true // Allow trade on error (fail-open)
                     }
+                }
+            };
+
+            if !can_open {
+                let reason = format!(
+                    "Portfolio heat limit reached: {} SOL + {} SOL > {} SOL max (20% of capital)",
+                    {
+                        let heat = if let Some(ref registry) = self.state_registry {
+                            registry.get_portfolio_heat()
+                        } else {
+                            // This shouldn't happen as we have portfolio_heat above, but handle gracefully
+                            PortfolioHeatState {
+                                total_exposure_sol: Decimal::ZERO,
+                                shield_exposure_sol: Decimal::ZERO,
+                                spear_exposure_sol: Decimal::ZERO,
+                                pending_heat_sol: Decimal::ZERO,
+                                last_updated: std::time::SystemTime::now(),
+                            }
+                        };
+                        heat.total_exposure_sol
+                    },
+                    signal.payload.amount_sol,
+                    {
+                        let capital = self.config.position_sizing.total_capital_sol;
+                        capital * Decimal::from(20u32) / Decimal::from(100u32)
+                    }
+                );
+                tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: {}", reason);
+
+                let _ = self
+                    .db
+                    .mark_trade_dead_letter(
+                        &trade_uuid,
+                        &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                        &reason,
+                    )
+                    .await;
+                if let Some(ref ws) = self.ws_state {
+                    ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                        trade_uuid: trade_uuid.clone(),
+                        status: "DEAD_LEAD_LETTER".to_string(),
+                        token_symbol: Some(signal.payload.token.clone()),
+                        strategy: signal.payload.strategy.to_string(),
+                    }));
+                }
                     return;
                 }
-                Ok(true) => {}
-                Err(e) => {
-                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Portfolio heat check failed at execution time");
-                }
-            }
 
             // 2. Strategy Allocation Check
             match portfolio_heat
@@ -355,40 +419,45 @@ impl SignalProcessor {
                     tracing::error!(trade_uuid = %trade_uuid, error = %e, "Strategy allocation check failed at execution time");
                 }
             }
-        }
 
         // Duplicate-token guard
         if signal.payload.action == Action::Buy && signal.payload.strategy != Strategy::Exit {
-            if let Some(ref token_address) = signal.payload.token_address {
-                let existing: i64 = match self.db.get_active_positions().await {
+            let token_address = signal.token_address();
+            let existing: i64 = if let Some(ref registry) = self.state_registry {
+                // Fast path: check in-memory registry
+                registry.has_active_position_for_token(token_address) as i64
+            } else {
+                // Fallback: database query
+                match self.db.get_active_positions().await {
                     Ok(positions) => positions
                         .iter()
                         .filter(|p| p.token_address == *token_address)
                         .count() as i64,
                     Err(e) => {
                         let reason = format!(
-                            "DB error during duplicate check — rejecting signal (fail-safe): {}",
-                            e
-                        );
-                        tracing::error!(trade_uuid = %trade_uuid, error = %e, "DB error in duplicate position check — rejecting signal");
-                        let _ = self
-                            .db
-                            .mark_trade_dead_letter(
-                                &trade_uuid,
-                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
-                                &reason,
-                            )
-                            .await;
-                        return;
+                                "DB error during duplicate check — rejecting signal (fail-safe): {}",
+                                e
+                            );
+                            tracing::error!(trade_uuid = %trade_uuid, error = %e, "DB error in duplicate position check — rejecting signal");
+                            let _ = self
+                                .db
+                                .mark_trade_dead_letter(
+                                    &trade_uuid,
+                                    &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                    &reason,
+                                )
+                                .await;
+                            return;
+                        }
                     }
                 };
 
                 if existing > 0 {
                     let reason = format!(
-                        "Duplicate position rejected: already ACTIVE/EXITING in {}",
-                        token_address
+                        "Duplicate token: {} already has {} active position(s)",
+                        token_address, existing
                     );
-                    tracing::warn!(trade_uuid = %trade_uuid, token_address = %token_address, "Duplicate token position rejected");
+                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: duplicate token");
                     let _ = self
                         .db
                         .mark_trade_dead_letter(
@@ -408,6 +477,7 @@ impl SignalProcessor {
                     return;
                 }
             }
+        }
         }
 
         // Execute the trade
@@ -499,6 +569,26 @@ impl SignalProcessor {
                                 entry_price = %entry_price,
                                 "Position opened successfully for BUY signal"
                             );
+
+                            // Update in-memory registry with the new position
+                            if let Some(ref registry) = self.state_registry {
+                                let position_state = crate::state::registry::PositionState {
+                                    trade_uuid: trade_uuid.clone(),
+                                    wallet_address: signal.payload.wallet_address.clone(),
+                                    token_address: signal.token_address().to_string(),
+                                    token_symbol: Some(signal.payload.token.clone()),
+                                    state: "ACTIVE".to_string(),
+                                    entry_amount_sol: signal.payload.amount_sol,
+                                    current_price: Some(sol_price_usd),
+                                    unrealized_pnl_sol: None,
+                                    updated_at: std::time::SystemTime::now(),
+                                };
+                                if let Err(e) = registry.insert_position(position_state) {
+                                    tracing::warn!(error = ?e, trade_uuid = %trade_uuid,
+                                                  "Failed to insert position into registry");
+                                }
+                            }
+
                             if let Some(token_amount) = outcome.token_amount {
                                 if let Err(e) = self
                                     .db
@@ -662,7 +752,7 @@ impl SignalProcessor {
                     }
                 }
             }
-            Err(ExecutorError::MarketConditionsUnfavorable(ref reason)) => {
+            Err(ExecutorError::MarketConditionsUnfavorable(reason)) => {
                 if signal.payload.action == Action::Buy {
                     tracing::warn!(
                         trade_uuid = %trade_uuid,

@@ -54,6 +54,7 @@ use crate::models::Signal;
 use crate::notifications::CompositeNotifier;
 use crate::price_cache::PriceCache;
 use crate::token::TokenParser;
+use crate::state::{StateRegistry, AsyncWriteQueue};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -200,6 +201,12 @@ pub struct Engine {
     signal_processor: signal_pipeline::SignalProcessor,
     /// Token for external shutdown signaling
     shutdown_token: CancellationToken,
+    /// State registry for in-memory trade/position tracking
+    #[allow(dead_code)] // Used via SignalProcessor
+    state_registry: Option<Arc<crate::state::StateRegistry>>,
+    /// Async write queue for database operations
+    #[allow(dead_code)] // Used via SignalProcessor
+    write_queue: Option<Arc<crate::state::AsyncWriteQueue>>,
 }
 
 impl Engine {
@@ -268,16 +275,18 @@ impl Engine {
         tip_manager: Option<Arc<TipManager>>,
         price_cache: Option<Arc<PriceCache>>,
     ) -> (Self, EngineHandle) {
-        Self::new_with_optional_extras_tip_manager_and_price_cache(
+        Self::new_with_extras_tip_manager_price_cache_and_token_parser(
             config,
             db,
-            Some(notifier),
+            notifier,
             metrics,
             ws_state,
             tip_manager,
             price_cache,
-            None,
-            None,
+            None, // token_parser
+            None, // portfolio_heat
+            None, // state_registry
+            None, // write_queue
         )
     }
 
@@ -293,6 +302,8 @@ impl Engine {
         price_cache: Option<Arc<PriceCache>>,
         token_parser: Option<Arc<TokenParser>>,
         portfolio_heat: Option<Arc<PortfolioHeat>>,
+        state_registry: Option<Arc<StateRegistry>>,
+        write_queue: Option<Arc<AsyncWriteQueue>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
             config,
@@ -304,6 +315,8 @@ impl Engine {
             price_cache,
             token_parser,
             portfolio_heat,
+            state_registry,
+            write_queue,
         )
     }
 
@@ -316,7 +329,7 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, None, None, None, None,
+            config, db, notifier, metrics, ws_state, None, None, None, None, None, None,
         )
     }
 
@@ -332,6 +345,8 @@ impl Engine {
         price_cache: Option<Arc<PriceCache>>,
         token_parser: Option<Arc<TokenParser>>,
         portfolio_heat: Option<Arc<PortfolioHeat>>,
+        state_registry: Option<Arc<StateRegistry>>,
+        write_queue: Option<Arc<AsyncWriteQueue>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
         let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
@@ -374,6 +389,8 @@ impl Engine {
             price_cache.clone(),
             ws_state.clone(),
             notifier.clone(),
+            state_registry.clone(),
+            write_queue.clone(),
         );
 
         let engine = Self {
@@ -390,6 +407,8 @@ impl Engine {
             portfolio_heat,
             signal_processor,
             shutdown_token: shutdown_token.clone(),
+            state_registry: state_registry.clone(),
+            write_queue: write_queue.clone(),
         };
 
         (engine, handle)
