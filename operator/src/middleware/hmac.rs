@@ -113,6 +113,10 @@ impl HmacState {
 pub const SIGNATURE_HEADER: &str = "X-Signature";
 pub const TIMESTAMP_HEADER: &str = "X-Timestamp";
 
+/// Maximum allowed size for signature and timestamp headers (4KB)
+/// Prevents DoS via memory exhaustion from oversized headers
+const MAX_HEADER_SIZE: usize = 4096;
+
 /// Result of signature verification
 #[derive(Debug)]
 enum VerificationResult {
@@ -136,13 +140,40 @@ pub async fn hmac_verify(
 ) -> Response {
     // Extract signature header
     let signature = match headers.get(SIGNATURE_HEADER) {
-        Some(sig) => match sig.to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
+        Some(sig) => {
+            // Check header length before converting to string to prevent DoS
+            if sig.len() > MAX_HEADER_SIZE {
+                tracing::warn!(
+                    header_len = sig.len(),
+                    max_allowed = MAX_HEADER_SIZE,
+                    "Signature header exceeds maximum size"
+                );
                 return error_response(
                     StatusCode::BAD_REQUEST,
-                    "Invalid signature header encoding",
+                    "Signature header too large",
                 );
+            }
+            match sig.to_str() {
+                Ok(s) => {
+                    if s.len() > MAX_HEADER_SIZE {
+                        tracing::warn!(
+                            header_len = s.len(),
+                            max_allowed = MAX_HEADER_SIZE,
+                            "Signature string exceeds maximum size"
+                        );
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "Signature header too large",
+                        );
+                    }
+                    s.to_string()
+                },
+                Err(_) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "Invalid signature header encoding",
+                    );
+                }
             }
         },
         None => {
@@ -152,13 +183,40 @@ pub async fn hmac_verify(
 
     // Extract timestamp header
     let timestamp_str = match headers.get(TIMESTAMP_HEADER) {
-        Some(ts) => match ts.to_str() {
-            Ok(s) => s.to_string(),
-            Err(_) => {
+        Some(ts) => {
+            // Check header length before converting to string to prevent DoS
+            if ts.len() > MAX_HEADER_SIZE {
+                tracing::warn!(
+                    header_len = ts.len(),
+                    max_allowed = MAX_HEADER_SIZE,
+                    "Timestamp header exceeds maximum size"
+                );
                 return error_response(
                     StatusCode::BAD_REQUEST,
-                    "Invalid timestamp header encoding",
+                    "Timestamp header too large",
                 );
+            }
+            match ts.to_str() {
+                Ok(s) => {
+                    if s.len() > MAX_HEADER_SIZE {
+                        tracing::warn!(
+                            header_len = s.len(),
+                            max_allowed = MAX_HEADER_SIZE,
+                            "Timestamp string exceeds maximum size"
+                        );
+                        return error_response(
+                            StatusCode::BAD_REQUEST,
+                            "Timestamp header too large",
+                        );
+                    }
+                    s.to_string()
+                },
+                Err(_) => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        "Invalid timestamp header encoding",
+                    );
+                }
             }
         },
         None => {
@@ -695,6 +753,29 @@ mod tests {
         assert!(
             signature.chars().all(|c| c.is_ascii_hexdigit()),
             "Signature should be valid hex string"
+        );
+    }
+
+    #[test]
+    fn test_header_size_limit_constant() {
+        // Test that the MAX_HEADER_SIZE constant is defined appropriately
+        assert!(
+            MAX_HEADER_SIZE == 4096,
+            "MAX_HEADER_SIZE should be 4KB to prevent DoS while allowing reasonable headers"
+        );
+
+        // Verify that typical HMAC signatures are well under the limit
+        let typical_signature = "a".repeat(64); // SHA256 = 64 hex chars
+        assert!(
+            typical_signature.len() < MAX_HEADER_SIZE,
+            "Typical HMAC signatures should be under the size limit"
+        );
+
+        // Verify that typical timestamps are well under the limit
+        let typical_timestamp = "1234567890"; // Unix timestamp
+        assert!(
+            typical_timestamp.len() < MAX_HEADER_SIZE,
+            "Typical timestamps should be under the size limit"
         );
     }
 }

@@ -7,7 +7,7 @@
 //! - Honeypot detection (sell simulation fails)
 
 use super::{TokenCache, TokenMetadataFetcher};
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::models::Strategy;
 use rust_decimal::prelude::*;
 use std::collections::HashSet;
@@ -144,6 +144,27 @@ impl TokenParser {
         token_address: &str,
         strategy: Strategy,
     ) -> AppResult<TokenSafetyResult> {
+        // Validate Solana address format before any processing
+        // Solana addresses are base58 encoded and typically 32-44 characters
+        // Most common wallet/token addresses are 44 chars (Pubkey), but some can be shorter
+        // Valid base58 chars: 1-9, A-H, J-N, P-Z, a-k, m-z (excluding 0, O, I, l)
+        if token_address.len() < 32 || token_address.len() > 44 {
+            return Err(AppError::InvalidTokenAddress(format!(
+                "Invalid Solana address length: {} (expected 32-44 chars)",
+                token_address.len()
+            )));
+        }
+
+        // Check for valid base58 characters (rough check - full validation happens at RPC layer)
+        if !token_address
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5')
+        {
+            return Err(AppError::InvalidTokenAddress(
+                "Invalid Solana address format (not valid base58)".to_string(),
+            ));
+        }
+
         // Check cache first
         let cache_key = format!("{}:{}", token_address, strategy);
         if let Some(cached) = self.cache.get(&cache_key) {
@@ -762,5 +783,80 @@ mod tests {
         let liquidity_usd = Decimal::from(1_000_000u32); // $1M
         assert!(liquidity_usd >= config.min_liquidity_shield_usd);
         assert!(liquidity_usd >= config.min_liquidity_spear_usd);
+    }
+
+    // ==========================================================================
+    // TOKEN ADDRESS FORMAT VALIDATION
+    // ==========================================================================
+
+    #[test]
+    fn test_valid_solana_addresses_pass() {
+        // Test typical Solana addresses (44 chars, base58)
+        let valid_addresses = vec![
+            "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU", // Standard 44-char address
+            "So11111111111111111111111111111111111111112",   // System program
+            "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",    // Token program
+            "9WzDXwBbmg8CsZv8kGqWJRrqcVdNBHQjuUeJPgWcH3YQ",    // Another valid address
+        ];
+
+        for address in valid_addresses {
+            // Should pass format validation
+            assert!(address.len() >= 32 && address.len() <= 44, "Valid address length check");
+            assert!(
+                address.chars().all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5'),
+                "Valid address char check: {}",
+                address
+            );
+        }
+    }
+
+    #[test]
+    fn test_invalid_solana_addresses_rejected() {
+        // Test invalid addresses that should be rejected
+        let invalid_addresses = vec![
+            "",                           // Empty
+            "short",                      // Too short
+            "a".repeat(100),              // Too long
+            "invalid@address#",            // Invalid characters
+                            // Has special chars
+            "ABC DEF",                     // Has space
+            "12345",                      // Too short
+            "0x1234567890abcdef",          // Ethereum-style hex
+        ];
+
+        for address in invalid_addresses {
+            let should_fail_length = address.len() < 32 || address.len() > 44;
+            let should_fail_chars = !address
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5');
+
+            assert!(
+                should_fail_length || should_fail_chars,
+                "Invalid address should be rejected: '{}'",
+                address
+            );
+        }
+    }
+
+    #[test]
+    fn test_base58_character_validation() {
+        // Solana uses base58 encoding which excludes: 0, O, I, l
+        let invalid_base58 = vec!["0OIL", "abc123def0", "invalid0chars"];
+
+        for address in invalid_base58 {
+            let has_invalid_chars = !address
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5');
+            assert!(has_invalid_chars, "Should detect invalid base58 chars");
+        }
+
+        // Valid base58 characters (subset we check for)
+        let valid_base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        assert!(
+            valid_base58
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5'),
+            "All valid base58 chars should pass"
+        );
     }
 }

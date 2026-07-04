@@ -5,6 +5,14 @@
 //! Direct connections from public IPs always use the peer address — accepting
 //! client-supplied forwarded headers from untrusted peers allows IP spoofing to
 //! trivially bypass per-IP rate limits.
+//!
+//! Header priority (most secure to least secure):
+//! 1. X-Real-IP: Single-value, set by trusted proxy, cannot be spoofed by client
+//! 2. Forwarded (RFC 7239): Structured format, harder to spoof than X-Forwarded-For
+//! 3. X-Forwarded-For: Easily spoofed, only use rightmost IP as fallback
+//!
+//! Security Fix: Changed from using leftmost IP to rightmost IP in X-Forwarded-For
+//! to prevent attackers from spoofing their IP address and bypassing rate limits.
 
 use axum::http::Request;
 use std::net::{IpAddr, SocketAddr};
@@ -35,19 +43,18 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
         let from_trusted_proxy = peer_ip.map(|ip| is_trusted_proxy(&ip)).unwrap_or(false);
 
         if from_trusted_proxy {
-            // X-Forwarded-For: client, proxy1, proxy2 — leftmost is the original client
-            if let Some(header_value) = req.headers().get("X-Forwarded-For") {
-                if let Ok(header_str) = header_value.to_str() {
-                    if let Some(client_ip) = header_str.split(',').next() {
-                        let ip = client_ip.trim();
-                        if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
-                            return Ok(ip.to_string());
-                        }
+            // FIX: Use X-Real-IP as primary source - it's single-valued and set by trusted proxy
+            // X-Real-IP cannot be spoofed by client since only trusted proxy sets it
+            if let Some(header_value) = req.headers().get("X-Real-IP") {
+                if let Ok(ip) = header_value.to_str() {
+                    let ip = ip.trim();
+                    if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
+                        return Ok(ip.to_string());
                     }
                 }
             }
 
-            // Forwarded header (RFC 7239)
+            // Forwarded header (RFC 7239) - more secure than X-Forwarded-For
             if let Some(header_value) = req.headers().get("Forwarded") {
                 if let Ok(header_str) = header_value.to_str() {
                     for part in header_str.split(';') {
@@ -62,12 +69,18 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
                 }
             }
 
-            // X-Real-IP
-            if let Some(header_value) = req.headers().get("X-Real-IP") {
-                if let Ok(ip) = header_value.to_str() {
-                    let ip = ip.trim();
-                    if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
-                        return Ok(ip.to_string());
+            // X-Forwarded-For is LESS secure - only use as fallback
+            // WARNING: Client can set X-Forwarded-For to arbitrary values
+            // If used, prefer rightmost IP (closest to trusted proxy) over leftmost
+            if let Some(header_value) = req.headers().get("X-Forwarded-For") {
+                if let Ok(header_str) = header_value.to_str() {
+                    // Use rightmost IP (closest to our trusted proxy) instead of leftmost
+                    // This prevents client from spoofing their IP
+                    if let Some(client_ip) = header_str.split(',').last() {
+                        let ip = client_ip.trim();
+                        if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
+                            return Ok(ip.to_string());
+                        }
                     }
                 }
             }
@@ -107,19 +120,64 @@ mod tests {
     }
 
     #[test]
-    fn test_x_forwarded_for_extraction() {
+    fn test_x_real_ip_preferred_over_forwarded_for() {
         let extractor = ProxyAwareKeyExtractor;
-        let req = create_request_with_header("X-Forwarded-For", "192.168.1.1");
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Real-IP", HeaderValue::from_str("10.0.0.1").unwrap());
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_str("1.2.3.4, 5.6.7.8").unwrap(),
+        );
+
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/"))
+            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+            .body(())
+            .unwrap();
+        *req.headers_mut() = headers;
+
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "192.168.1.1");
+        assert_eq!(key, "10.0.0.1", "X-Real-IP should be preferred over X-Forwarded-For");
     }
 
     #[test]
-    fn test_x_forwarded_for_multiple_ips() {
+    fn test_forwarded_header_preferred_over_x_forwarded_for() {
         let extractor = ProxyAwareKeyExtractor;
-        let req = create_request_with_header("X-Forwarded-For", "192.168.1.1, 10.0.0.1");
+        let mut headers = HeaderMap::new();
+        headers.insert("Forwarded", HeaderValue::from_str("for=10.0.0.1").unwrap());
+        headers.insert(
+            "X-Forwarded-For",
+            HeaderValue::from_str("1.2.3.4, 5.6.7.8").unwrap(),
+        );
+
+        let mut req = Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("/"))
+            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+            .body(())
+            .unwrap();
+        *req.headers_mut() = headers;
+
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "192.168.1.1");
+        assert_eq!(key, "10.0.0.1", "Forwarded header should be preferred over X-Forwarded-For");
+    }
+
+    #[test]
+    fn test_x_forwarded_for_uses_rightmost_ip() {
+        let extractor = ProxyAwareKeyExtractor;
+        // FIX: Rightmost IP should be used (closest to trusted proxy), not leftmost
+        let req = create_request_with_header("X-Forwarded-For", "1.2.3.4, 5.6.7.8");
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "5.6.7.8", "Should use rightmost IP from X-Forwarded-For");
+    }
+
+    #[test]
+    fn test_x_forwarded_for_single_ip() {
+        let extractor = ProxyAwareKeyExtractor;
+        let req = create_request_with_header("X-Forwarded-For", "192.168.1.1");
+        let key = extractor.extract(&req).unwrap();
+        assert_eq!(key, "192.168.1.1", "Single IP in X-Forwarded-For should work");
     }
 
     #[test]
@@ -139,24 +197,13 @@ mod tests {
     }
 
     #[test]
-    fn test_priority_x_forwarded_for_over_forwarded() {
+    fn test_ip_spoofing_prevention() {
         let extractor = ProxyAwareKeyExtractor;
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "X-Forwarded-For",
-            HeaderValue::from_str("192.168.1.1").unwrap(),
-        );
-        headers.insert("Forwarded", HeaderValue::from_str("for=10.0.0.1").unwrap());
-
-        let mut req = Request::builder()
-            .method(Method::GET)
-            .uri(Uri::from_static("/"))
-            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
-            .body(())
-            .unwrap();
-        *req.headers_mut() = headers;
-
+        // Simulate attacker trying to spoof their IP via X-Forwarded-For
+        // X-Forwarded-For: 1.2.3.4 (attacker-controlled), 5.6.7.8 (real client)
+        let req = create_request_with_header("X-Forwarded-For", "1.2.3.4, 5.6.7.8");
         let key = extractor.extract(&req).unwrap();
-        assert_eq!(key, "192.168.1.1");
+        // Should use rightmost (5.6.7.8) not leftmost (1.2.3.4)
+        assert_eq!(key, "5.6.7.8", "Should prevent IP spoofing by using rightmost IP");
     }
 }

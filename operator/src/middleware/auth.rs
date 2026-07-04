@@ -180,8 +180,60 @@ pub struct AuthExtension(pub AuthenticatedUser);
 /// Extracts Bearer token from Authorization header or query parameter and validates against
 /// configured API keys and admin wallets loaded from config.
 ///
-/// Query parameter authentication is supported for WebSocket connections where custom headers
-/// cannot be sent during the handshake.
+/// ⚠️  **SECURITY WARNING: Query Parameter Authentication**
+///
+/// This middleware supports bearer tokens via URL query parameter (?token=xyz) for WebSocket
+/// connections where custom headers cannot be sent during the handshake. This approach has
+/// significant security implications:
+///
+/// **Risks:**
+/// - Tokens are logged in web server access logs (Apache, Nginx, HAProxy)
+/// - Tokens appear in proxy logs and intermediate hop logs
+/// - Tokens are stored in browser history
+/// - Tokens may be exposed in Referer headers when navigating to external sites
+/// - Logs retention policies may keep tokens for months/years
+/// - Log aggregation systems may distribute tokens to multiple systems
+///
+/// **Impact:**
+/// If logs are compromised, leaked, or accidentally exposed, attackers gain valid bearer tokens
+/// that can be used to authenticate as the compromised user until the token expires.
+///
+/// **Mitigation Strategies:**
+/// 1. **Prefer header-based auth:** Always use Authorization header when possible
+/// 2. **Secure logs:** Ensure access logs are protected, encrypted, and have short retention
+/// 3. **Log sanitization:** Configure web servers to redact query parameters from logs
+/// 4. **Short-lived tokens:** Use tokens with minimal TTL (minutes, not days)
+/// 5. **Monitor logs:** Audit who has access to logs and review access patterns
+/// 6. **Alternative for WebSocket:** Consider using Sec-WebSocket-Protocol subprotocol for token transmission
+///
+/// **Example Log Sanitization (Nginx):**
+/// ```nginx
+/// server {
+///     # Redact token parameter from logs
+///     if ($args ~* "(^|&)token=") {
+///         set $args_redacted $args;
+///         rewrite ^(.*)$ $1? permanent;
+///     }
+/// }
+/// ```
+///
+/// **Example Log Sanitization (HAProxy):**
+/// ```haproxy
+/// # Log only the path, not query parameters
+/// option httplog
+/// log-format ${[capture.req.hdr(0)]}
+/// http-request capture-uri base 1000
+/// ```
+///
+/// **Future Improvements:**
+/// - Implement Sec-WebSocket-Protocol subprotocol authentication
+/// - Use one-time upgrade tokens with very short TTL
+/// - Consider cookie-based authentication with HttpOnly, Secure flags
+///
+/// **Current Trade-off:**
+/// WebSocket connections cannot send custom headers during the initial handshake in browser
+/// environments. The query parameter approach is a pragmatic compromise but requires
+/// stringent log security practices.
 ///
 /// On success, adds AuthExtension to request for downstream handlers.
 pub async fn bearer_auth(
@@ -217,11 +269,30 @@ pub async fn bearer_auth(
         None
     };
 
+    // Track authentication method for security monitoring
+    let mut is_query_auth = false;
+
     // If no token in header, check query parameters
     let token = if token.is_some() {
         token
     } else {
-        // Extract token from query parameters (for WebSocket where headers can't be sent)
+        // SECURITY WARNING: Extracting token from query parameters for WebSocket authentication
+        //
+        // This is necessary because browser WebSocket API doesn't support custom headers in
+        // the initial handshake. However, this means:
+        // - Tokens appear in server access logs
+        // - Tokens appear in proxy logs (HAProxy, Nginx, load balancers)
+        // - Tokens are stored in browser history
+        // - Tokens may leak via Referer headers
+        //
+        // Mitigation required:
+        // 1. Configure log sanitization to redact query parameters
+        // 2. Use short-lived tokens (minutes, not days)
+        // 3. Restrict log access and implement log retention policies
+        // 4. Monitor for log exposure incidents
+        //
+        // See function documentation for detailed security analysis and examples.
+
         let uri = request.uri();
         tracing::info!("Checking query params for auth, URI: {}", uri);
         tracing::info!("Query string: {:?}", uri.query());
@@ -242,6 +313,9 @@ pub async fn bearer_auth(
         });
 
         tracing::info!("Extracted query token: {:?}", query_token);
+
+        // SECURITY: Track if we're using query parameter auth (less secure)
+        is_query_auth = query_token.is_some();
 
         if query_token.is_none() || query_token.as_ref().is_none_or(|t| t.is_empty()) {
             // No auth in header or query - check if anonymous readonly is allowed
@@ -267,11 +341,21 @@ pub async fn bearer_auth(
     // Authenticate
     match state.authenticate(token_str).await {
         Some(user) => {
-            tracing::debug!(
-                identifier = %user.identifier,
-                role = %user.role,
-                "User authenticated"
-            );
+            // Log authentication method for security monitoring
+            if is_query_auth {
+                tracing::warn!(
+                    identifier = %user.identifier,
+                    role = %user.role,
+                    "User authenticated via QUERY PARAMETER (security risk - token may be in logs)"
+                );
+            } else {
+                tracing::debug!(
+                    identifier = %user.identifier,
+                    role = %user.role,
+                    "User authenticated via Authorization header (secure)"
+                );
+            }
+
             request.extensions_mut().insert(AuthExtension(user));
             next.run(request).await
         }

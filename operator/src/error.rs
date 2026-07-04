@@ -23,6 +23,10 @@ pub enum AppError {
     #[error("Validation error: {0}")]
     Validation(String),
 
+    /// Invalid Solana token address format
+    #[error("Invalid token address: {0}")]
+    InvalidTokenAddress(String),
+
     /// Authentication error
     #[error("Authentication failed: {0}")]
     Auth(String),
@@ -109,6 +113,14 @@ impl IntoResponse for AppError {
                 ErrorResponse {
                     status: "rejected",
                     reason: "validation_failed".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::InvalidTokenAddress(msg) => (
+                StatusCode::BAD_REQUEST,
+                ErrorResponse {
+                    status: "rejected",
+                    reason: "invalid_token_address".to_string(),
                     details: Some(msg.clone()),
                 },
             ),
