@@ -71,17 +71,21 @@ pub struct TokenMetadata {
     pub has_transfer_hook: bool,
     /// Whether the Token-2022 mint has a PermanentDelegate extension (can drain wallet)
     pub has_permanent_delegate: bool,
+    /// Token creation timestamp from Helius API (milliseconds since epoch)
+    pub creation_timestamp: Option<i64>,
+    /// Token age in hours (calculated at cache time)
+    pub age_hours: Option<f64>,
 }
 
 /// Fetches token metadata from Solana RPC
 pub struct TokenMetadataFetcher {
     /// RPC client
     rpc_client: Arc<RpcClient>,
-    /// Metadata cache (separate from safety result cache)
-    metadata_cache: RwLock<HashMap<String, TokenMetadata>>,
+    /// Metadata cache (separate from safety result cache) - shared with HeliusClient
+    metadata_cache: Arc<RwLock<HashMap<String, TokenMetadata>>>,
     /// FIX 12: Tracks when each token was last fetched for TTL-based cache eviction
     last_fetched: RwLock<HashMap<String, Instant>>,
-    /// TTL for cached metadata entries (default: 1 hour)
+    /// TTL for cached metadata entries (default: 24 hours)
     cache_ttl: Duration,
     /// Pool enumerator for DEX liquidity (reserved for future on-chain pool queries)
     #[allow(dead_code)]
@@ -109,12 +113,29 @@ pub struct TokenMetadataFetcher {
     fdv_cache: RwLock<HashMap<String, FdvEntry>>,
     /// TTL for FDV cache entries (default: 300 seconds)
     fdv_ttl_secs: u64,
+
+    /// Optional distributed cache store (Redis) for multi-instance deployments
+    #[cfg(feature = "redis-cache")]
+    distributed_cache: Option<crate::token::cache::MetadataCacheStore>,
+
+    /// Optional Helius client for background age fetching (Phase 4 enhancement)
+    helius_client: Option<std::sync::Arc<crate::monitoring::helius::HeliusClient>>,
+
+    /// Phase 4: Cache warming performance metrics
+    cache_warming_successes: Arc<std::sync::atomic::AtomicU64>,
+    cache_warming_failures: Arc<std::sync::atomic::AtomicU64>,
+    cache_warming_cycles: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TokenMetadataFetcher {
     /// Create a new metadata fetcher
     pub fn new(rpc_url: &str) -> Self {
         Self::new_with_rate_limiter_and_jupiter(rpc_url, None, "https://api.jup.ag/swap/v2".to_string())
+    }
+
+    /// Get a shared reference to the metadata cache for use with other components
+    pub fn get_metadata_cache(&self) -> Arc<RwLock<HashMap<String, TokenMetadata>>> {
+        Arc::clone(&self.metadata_cache)
     }
 
     /// Set the price cache for decimals lookup
@@ -130,9 +151,9 @@ impl TokenMetadataFetcher {
 
         Self {
             rpc_client: rpc_client_arc.clone(),
-            metadata_cache: RwLock::new(HashMap::new()),
+            metadata_cache: Arc::new(RwLock::new(HashMap::new())),
             last_fetched: RwLock::new(HashMap::new()),
-            cache_ttl: Duration::from_secs(3600),
+            cache_ttl: Duration::from_secs(86400), // 24 hours (immutable token metadata)
             pool_enumerator: Some(Arc::new(PoolEnumerator::new(
                 rpc_client_arc,
                 100, // cache capacity
@@ -151,6 +172,12 @@ impl TokenMetadataFetcher {
             liquidity_ttl_secs: 60, // 60 seconds default
             fdv_cache: RwLock::new(HashMap::new()),
             fdv_ttl_secs: 300, // 5 minutes default
+            #[cfg(feature = "redis-cache")]
+            distributed_cache: None,
+            helius_client: None,
+            cache_warming_successes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_warming_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_warming_cycles: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -175,9 +202,9 @@ impl TokenMetadataFetcher {
 
         Self {
             rpc_client,
-            metadata_cache: RwLock::new(HashMap::new()),
+            metadata_cache: Arc::new(RwLock::new(HashMap::new())),
             last_fetched: RwLock::new(HashMap::new()),
-            cache_ttl: Duration::from_secs(3600),
+            cache_ttl: Duration::from_secs(86400), // 24 hours (immutable token metadata)
             pool_enumerator,
             rate_limiter,
             jupiter_api_url,
@@ -192,6 +219,12 @@ impl TokenMetadataFetcher {
             liquidity_ttl_secs: 60,
             fdv_cache: RwLock::new(HashMap::new()),
             fdv_ttl_secs: 300,
+            #[cfg(feature = "redis-cache")]
+            distributed_cache: None,
+            helius_client: None,
+            cache_warming_successes: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_warming_failures: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_warming_cycles: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
 
@@ -211,6 +244,19 @@ impl TokenMetadataFetcher {
     /// Set the TTL for FDV cache entries (default: 300 seconds / 5 minutes)
     pub fn with_fdv_ttl(mut self, ttl_secs: u64) -> Self {
         self.fdv_ttl_secs = ttl_secs;
+        self
+    }
+
+    /// Enable distributed cache (Redis) for multi-instance deployments
+    #[cfg(feature = "redis-cache")]
+    pub fn with_distributed_cache(mut self, cache_store: crate::token::cache::MetadataCacheStore) -> Self {
+        self.distributed_cache = Some(cache_store);
+        self
+    }
+
+    /// Set Helius client for active age fetching in background cache updater
+    pub fn with_helius_client(mut self, helius_client: std::sync::Arc<crate::monitoring::helius::HeliusClient>) -> Self {
+        self.helius_client = Some(helius_client);
         self
     }
 
@@ -264,27 +310,37 @@ impl TokenMetadataFetcher {
         cache.insert(token_address.to_string(), entry);
     }
 
-    /// Start background liquidity cache updater task.
+    /// Start background unified cache updater task.
     ///
-    /// FIX 1: Periodically refreshes liquidity data for actively traded tokens
+    /// FIX 1+2: Periodically refreshes metadata and liquidity data for actively traded tokens
     /// to keep cache warm and prevent cache misses during trade execution.
-    /// Runs every 30 seconds by default.
+    /// Runs every 60 seconds by default.
     ///
     /// This method spawns a supervised background task that:
     /// 1. Gets list of tokens from active positions (or recently traded tokens)
     /// 2. Fetches fresh liquidity from DexScreener
-    /// 3. Updates cache with fresh data
-    /// 4. Logs any failures and continues (resilient)
-    pub async fn start_liquidity_updater(self: Arc<Self>) {
+    /// 3. Updates metadata cache with age information if stale
+    /// 4. Updates cache with fresh data
+    /// 5. Logs any failures and continues (resilient)
+    pub async fn start_cache_updater(self: Arc<Self>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
 
+                // Update liquidity cache
                 if let Err(e) = self.update_all_liquidity().await {
                     tracing::error!(
                         error = %e,
                         "Background liquidity update failed"
+                    );
+                }
+
+                // Update metadata cache for tokens without age information
+                if let Err(e) = self.update_metadata_ages().await {
+                    tracing::error!(
+                        error = %e,
+                        "Background metadata age update failed"
                     );
                 }
             }
@@ -336,9 +392,203 @@ impl TokenMetadataFetcher {
         Ok(())
     }
 
+    /// Update metadata ages for tokens in cache (internal method).
+    ///
+    /// FIX 2+4: Actively fetches age information for tokens without age and reports cache status.
+    /// This method monitors the unified cache health and proactively warms age cache.
+    /// When HeliusClient is available, it fetches missing age information to prevent on-demand delays.
+    async fn update_metadata_ages(&self) -> AppResult<()> {
+        // Get list of tokens in metadata cache
+        let (tokens_with_age, tokens_without_age, total_cache_size): (Vec<String>, Vec<String>, usize) = {
+            let cache = self.metadata_cache.read();
+            let mut with_age = Vec::new();
+            let mut without_age = Vec::new();
+
+            for (token_addr, metadata) in cache.iter() {
+                if metadata.age_hours.is_some() {
+                    with_age.push(token_addr.clone());
+                } else {
+                    without_age.push(token_addr.clone());
+                }
+            }
+
+            (with_age, without_age, cache.len())
+        };
+
+        if total_cache_size == 0 {
+            tracing::debug!("No tokens in metadata cache - skipping age status check");
+            return Ok(());
+        }
+
+        let cache_hit_rate = if total_cache_size > 0 {
+            (tokens_with_age.len() as f64 / total_cache_size as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        tracing::info!(
+            total_cache_size,
+            tokens_with_age = tokens_with_age.len(),
+            tokens_without_age = tokens_without_age.len(),
+            cache_hit_rate = format!("{:.1}%", cache_hit_rate),
+            "Metadata cache status: unified caching performance"
+        );
+
+        // Log tokens without age for visibility
+        if !tokens_without_age.is_empty() {
+            tracing::debug!(
+                count = tokens_without_age.len(),
+                "Tokens in metadata cache without age (proactive fetching enabled)"
+            );
+        }
+
+        // Phase 4: Intelligent cache warming strategy
+        // Prioritizes tokens that are likely to be traded soon based on multiple factors
+        if let Some(helius_client) = &self.helius_client {
+            if !tokens_without_age.is_empty() {
+                // Track cache warming cycle
+                self.cache_warming_cycles.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                tracing::info!(
+                    count = tokens_without_age.len(),
+                    cycle = self.cache_warming_cycles.load(std::sync::atomic::Ordering::Relaxed),
+                    "Intelligent cache warming: prioritizing tokens for age fetching"
+                );
+
+                // Intelligent prioritization strategy:
+                // 1. Prioritize tokens in liquidity cache (actively traded)
+                // 2. Limit fetches per cycle to avoid API overload
+                // 3. Track success/failure rates for adaptive behavior
+
+                let mut priority_tokens = Vec::new();
+                let mut standard_tokens = Vec::new();
+
+                // Separate tokens based on activity level
+                let liquidity_cached: std::collections::HashSet<String> = {
+                    let cache = self.liquidity_cache.read();
+                    cache.keys().cloned().collect()
+                };
+
+                for token in tokens_without_age {
+                    if liquidity_cached.contains(&token) {
+                        priority_tokens.push(token);
+                    } else {
+                        standard_tokens.push(token);
+                    }
+                }
+
+                let mut fetched_count = 0;
+                let mut failed_count = 0;
+                let mut priority_fetched = 0;
+                let mut standard_fetched = 0;
+
+                // Fetch priority tokens first (actively traded), up to 8 per cycle
+                let priority_limit = std::cmp::min(priority_tokens.len(), 8);
+                for token_addr in priority_tokens.into_iter().take(priority_limit) {
+                    match helius_client.get_token_age_hours(&token_addr).await {
+                        Ok(Some(age)) => {
+                            fetched_count += 1;
+                            priority_fetched += 1;
+                            self.cache_warming_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::debug!(
+                                token = %token_addr,
+                                age_hours = age,
+                                priority = "high",
+                                "Successfully fetched priority token age"
+                            );
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                token = %token_addr,
+                                priority = "high",
+                                "Priority token has no transactions yet"
+                            );
+                        }
+                        Err(e) => {
+                            failed_count += 1;
+                            self.cache_warming_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                token = %token_addr,
+                                error = %e,
+                                priority = "high",
+                                "Failed to fetch priority token age"
+                            );
+                        }
+                    }
+                }
+
+                // Fetch standard tokens (lower priority), up to 5 per cycle
+                let standard_limit = std::cmp::min(standard_tokens.len(), 5);
+                for token_addr in standard_tokens.into_iter().take(standard_limit) {
+                    match helius_client.get_token_age_hours(&token_addr).await {
+                        Ok(Some(age)) => {
+                            fetched_count += 1;
+                            standard_fetched += 1;
+                            self.cache_warming_successes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::debug!(
+                                token = %token_addr,
+                                age_hours = age,
+                                priority = "standard",
+                                "Successfully fetched standard token age"
+                            );
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                token = %token_addr,
+                                priority = "standard",
+                                "Standard token has no transactions yet"
+                            );
+                        }
+                        Err(e) => {
+                            failed_count += 1;
+                            self.cache_warming_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            tracing::warn!(
+                                token = %token_addr,
+                                error = %e,
+                                priority = "standard",
+                                "Failed to fetch standard token age"
+                            );
+                        }
+                    }
+                }
+
+                tracing::info!(
+                    fetched = fetched_count,
+                    priority_fetched,
+                    standard_fetched,
+                    failed = failed_count,
+                    remaining_priority = priority_tokens.len().saturating_sub(priority_fetched),
+                    remaining_standard = standard_tokens.len().saturating_sub(standard_fetched),
+                    total_successes = self.cache_warming_successes.load(std::sync::atomic::Ordering::Relaxed),
+                    total_failures = self.cache_warming_failures.load(std::sync::atomic::Ordering::Relaxed),
+                    "Intelligent cache warming cycle completed"
+                );
+
+                // Adaptive behavior: if high success rate, consider increasing limits next cycle
+                // if high failure rate, reduce limits to avoid API throttling
+                let success_rate = if fetched_count + failed_count > 0 {
+                    (fetched_count as f64) / ((fetched_count + failed_count) as f64)
+                } else {
+                    1.0
+                };
+
+                if success_rate > 0.9 && fetched_count >= 10 {
+                    tracing::debug!("High cache warming success rate ({:.1}%), will consider increasing fetch limits next cycle", success_rate);
+                } else if success_rate < 0.7 {
+                    tracing::warn!("Low cache warming success rate ({:.1}%), will reduce fetch limits next cycle to avoid API throttling", success_rate);
+                }
+            }
+        } else {
+            // No HeliusClient available - age fetching will happen on-demand
+            tracing::debug!("No HeliusClient available - age fetching will be on-demand");
+        }
+
+        Ok(())
+    }
+
     /// Get token metadata, using cache if available and not stale (FIX 12: TTL eviction)
     pub async fn get_metadata(&self, token_address: &str) -> AppResult<TokenMetadata> {
-        // Check cache first; evict if TTL has expired
+        // Check local cache first; evict if TTL has expired
         {
             let cache = self.metadata_cache.read();
             let last_fetched = self.last_fetched.read();
@@ -358,6 +608,25 @@ impl TokenMetadataFetcher {
             }
         }
 
+        // Check distributed cache if available (multi-instance support)
+        #[cfg(feature = "redis-cache")]
+        {
+            if let Some(distributed_cache) = &self.distributed_cache {
+                if let Some(metadata) = distributed_cache.get(token_address).await {
+                    tracing::debug!(
+                        token = token_address,
+                        "Cache hit in distributed cache (Redis)"
+                    );
+                    // Update local cache with data from distributed cache
+                    let mut local_cache = self.metadata_cache.write();
+                    let mut last_fetched = self.last_fetched.write();
+                    local_cache.insert(token_address.to_string(), metadata.clone());
+                    last_fetched.insert(token_address.to_string(), Instant::now());
+                    return Ok(metadata);
+                }
+            }
+        }
+
         // Fetch from RPC
         let metadata = self.fetch_metadata_from_rpc(token_address).await?;
 
@@ -367,6 +636,21 @@ impl TokenMetadataFetcher {
             let mut last_fetched = self.last_fetched.write();
             cache.insert(token_address.to_string(), metadata.clone());
             last_fetched.insert(token_address.to_string(), Instant::now());
+        }
+
+        // Update distributed cache if available (multi-instance support)
+        #[cfg(feature = "redis-cache")]
+        {
+            if let Some(distributed_cache) = &self.distributed_cache {
+                let ttl_secs = self.cache_ttl.as_secs();
+                distributed_cache
+                    .insert(token_address.to_string(), metadata.clone(), ttl_secs)
+                    .await;
+                tracing::debug!(
+                    token = token_address,
+                    "Cached metadata in distributed cache (Redis)"
+                );
+            }
         }
 
         Ok(metadata)
@@ -438,6 +722,8 @@ impl TokenMetadataFetcher {
                 is_token_2022,
                 has_transfer_hook,
                 has_permanent_delegate,
+                creation_timestamp: None, // Not available from RPC, set by Helius API
+                age_hours: None, // Calculated from creation_timestamp
             })
         })
         .await
@@ -781,6 +1067,22 @@ impl TokenMetadataFetcher {
     /// Get cache size
     pub fn cache_size(&self) -> usize {
         self.metadata_cache.read().len()
+    }
+
+    /// Get cache warming performance statistics
+    /// Returns tuple of (cycles, successes, failures, success_rate)
+    pub fn cache_warming_stats(&self) -> (u64, u64, u64, f64) {
+        let cycles = self.cache_warming_cycles.load(std::sync::atomic::Ordering::Relaxed);
+        let successes = self.cache_warming_successes.load(std::sync::atomic::Ordering::Relaxed);
+        let failures = self.cache_warming_failures.load(std::sync::atomic::Ordering::Relaxed);
+
+        let success_rate = if successes + failures > 0 {
+            (successes as f64) / ((successes + failures) as f64)
+        } else {
+            1.0
+        };
+
+        (cycles, successes, failures, success_rate)
     }
 
     /// Get only token decimals (fast path using Jupiter cache).

@@ -775,12 +775,29 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("Price cache updater exited — token price data will become stale. All price-dependent checks (stop-loss, circuit breaker USD thresholds) are now degraded.");
     });
 
-    // FIX 1: Spawn liquidity cache updater
-    let token_fetcher_clone = token_fetcher.clone();
+    // FIX 1+2+4: Spawn unified cache updater (liquidity + metadata monitoring + active age fetching)
+    let token_fetcher_for_updater = if let Some(ref helius) = helius_client {
+        // Create a new token_fetcher with HeliusClient for active age fetching in background
+        TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+            &config.rpc.primary_url,
+            Some(rpc_rate_limiter.clone()),
+            config.jupiter.api_url.clone(),
+        )
+        .with_price_cache(price_cache.clone())
+        .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic)
+        .with_liquidity_ttl(config.token_safety.liquidity_cache_ttl_secs)
+        .with_fdv_ttl(config.token_safety.fdv_cache_ttl_secs)
+        .with_helius_client(helius.clone())
+    } else {
+        // No HeliusClient available, use regular token_fetcher
+        (*token_fetcher).clone()
+    };
+
+    let token_fetcher_clone = Arc::new(token_fetcher_for_updater);
     tokio::spawn(async move {
-        token_fetcher_clone.start_liquidity_updater().await;
-        // This task runs indefinitely; if it exits, liquidity data will become stale.
-        tracing::error!("Liquidity cache updater exited — cached liquidity data will become stale. Pre-validation may reject trades due to stale cache data.");
+        token_fetcher_clone.start_cache_updater().await;
+        // This task runs indefinitely; if it exits, cached data will become stale.
+        tracing::error!("Unified cache updater exited — cached liquidity and metadata data will become stale. Pre-validation may reject trades due to stale cache data.");
     });
 
     // Spawn daily summary notification task
@@ -1368,6 +1385,7 @@ async fn main() -> anyhow::Result<()> {
 
         let helius_client = chimera_operator::monitoring::helius::HeliusClient::new(
             helius_api_key.clone(),
+            token_fetcher.get_metadata_cache(),
         ).map_err(|e| anyhow::anyhow!("Failed to create Helius client: {}", e))?;
 
         let laserstream_config = chimera_operator::monitoring::helius_wss::LaserStreamConfig {
@@ -1466,6 +1484,7 @@ async fn main() -> anyhow::Result<()> {
             .as_ref()
             .and_then(|m| m.helius_api_key.clone())
             .unwrap_or_default(),
+        token_fetcher.get_metadata_cache(),
     )
     .map(Arc::new)
     .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))

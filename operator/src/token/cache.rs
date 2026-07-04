@@ -10,6 +10,7 @@ use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
+use std::collections::HashMap;
 
 /// Cache entry with timestamp for TTL checking
 #[derive(Clone)]
@@ -203,5 +204,165 @@ mod tests {
         assert!(cache.get("token1").is_none());
         assert!(cache.get("token2").is_some());
         assert!(cache.get("token3").is_some());
+    }
+}
+
+/// Unified metadata cache store abstraction
+/// Supports both in-memory and Redis backends for token metadata caching
+#[derive(Clone)]
+pub enum MetadataCacheStore {
+    /// In-memory cache using Arc<RwLock<HashMap>>
+    Memory(std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>),
+    /// Redis cache for multi-instance deployments
+    #[cfg(feature = "redis-cache")]
+    Redis(redis::ConnectionManager),
+}
+
+impl MetadataCacheStore {
+    /// Create a new memory-based cache store
+    pub fn new_memory() -> Self {
+        Self::Memory(std::sync::Arc::new(parking_lot::RwLock::new(std::collections::HashMap::new())))
+    }
+
+    /// Create a memory store from an existing Arc<RwLock<HashMap>>
+    pub fn from_memory_cache(cache: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>) -> Self {
+        Self::Memory(cache)
+    }
+
+    /// Create a new Redis cache store
+    #[cfg(feature = "redis-cache")]
+    pub async fn new_redis(redis_url: &str) -> Result<Self, String> {
+        let client = redis::Client::open(redis_url)
+            .map_err(|e| format!("Failed to create Redis client: {}", e))?;
+
+        let conn_manager = client
+            .get_tokio_conn_manager()
+            .await
+            .map_err(|e| format!("Failed to create Redis connection manager: {}", e))?;
+
+        Ok(Self::Redis(conn_manager))
+    }
+
+    /// Get token metadata from cache
+    pub async fn get(&self, key: &str) -> Option<super::metadata::TokenMetadata> {
+        match self {
+            Self::Memory(cache) => {
+                let cache_read = cache.read();
+                cache_read.get(key).cloned()
+            }
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(conn) => {
+                self.get_from_redis(conn, key).await.ok().flatten()
+            }
+        }
+    }
+
+    /// Insert token metadata into cache with TTL
+    pub async fn insert(&self, key: String, value: super::metadata::TokenMetadata, ttl_secs: u64) {
+        match self {
+            Self::Memory(cache) => {
+                let mut cache_write = cache.write();
+                cache_write.insert(key, value);
+                // Note: TTL for memory cache is handled by TokenMetadataFetcher
+            }
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(conn) => {
+                let _ = self.insert_to_redis(conn, &key, &value, ttl_secs).await;
+            }
+        }
+    }
+
+    /// Clear all cache entries
+    pub async fn clear(&self) {
+        match self {
+            Self::Memory(cache) => {
+                let mut cache_write = cache.write();
+                cache_write.clear();
+            }
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(conn) => {
+                let _ = self.clear_redis(conn).await;
+            }
+        }
+    }
+
+    /// Get cache size
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Memory(cache) => cache.read().len(),
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(_conn) => {
+                // Redis size estimation is expensive, return cached count or 0
+                0
+            }
+        }
+    }
+
+    /// Check if cache is empty
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Self::Memory(cache) => cache.read().is_empty(),
+            #[cfg(feature = "redis-cache")]
+            Self::Redis(_conn) => false, // Assume Redis has data
+        }
+    }
+
+    #[cfg(feature = "redis-cache")]
+    async fn get_from_redis(
+        &self,
+        conn: &redis::ConnectionManager,
+        key: &str,
+    ) -> Result<Option<super::metadata::TokenMetadata>, String> {
+        let key_str = format!("metadata:{}", key);
+        let data: Option<String> = conn
+            .get(key_str)
+            .await
+            .map_err(|e| format!("Redis GET error: {}", e))?;
+
+        match data {
+            Some(json_str) => {
+                let metadata = serde_json::from_str::<super::metadata::TokenMetadata>(&json_str)
+                    .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
+                Ok(Some(metadata))
+            }
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(feature = "redis-cache")]
+    async fn insert_to_redis(
+        &self,
+        conn: &redis::ConnectionManager,
+        key: &str,
+        value: &super::metadata::TokenMetadata,
+        ttl_secs: u64,
+    ) -> Result<(), String> {
+        let key_str = format!("metadata:{}", key);
+        let json_str = serde_json::to_string(value)
+            .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+
+        conn.setex(key_str, ttl_secs, json_str)
+            .await
+            .map_err(|e| format!("Redis SETEX error: {}", e))?;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "redis-cache")]
+    async fn clear_redis(&self, conn: &redis::ConnectionManager) -> Result<(), String> {
+        // Clear all keys with metadata: prefix
+        let pattern = "metadata:*";
+        let keys: Vec<String> = conn
+            .keys(pattern)
+            .await
+            .map_err(|e| format!("Redis KEYS error: {}", e))?;
+
+        if !keys.is_empty() {
+            conn.del(keys)
+                .await
+                .map_err(|e| format!("Redis DEL error: {}", e))?;
+        }
+
+        Ok(())
     }
 }

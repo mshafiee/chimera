@@ -700,6 +700,13 @@ pub struct TokenSafetyConfig {
     /// FIX 1: Background liquidity updater interval in seconds (default: 30)
     #[serde(default = "default_liquidity_update_interval")]
     pub liquidity_update_interval_secs: u64,
+    /// Cache backend type: "memory" or "redis"
+    #[serde(default = "default_cache_backend")]
+    pub cache_backend: String,
+    /// Redis connection URL (only used if cache_backend is "redis")
+    /// Example: "redis://127.0.0.1:6379"
+    #[serde(default)]
+    pub redis_url: Option<String>,
 }
 
 fn default_allow_unlisted_heuristic() -> bool {
@@ -719,7 +726,11 @@ fn default_fdv_cache_ttl() -> u64 {
 }
 
 fn default_liquidity_update_interval() -> u64 {
-    30
+    60 // Updated from 30 to 60 for unified cache updater
+}
+
+fn default_cache_backend() -> String {
+    "memory".to_string()
 }
 
 fn default_authority_whitelist() -> Vec<String> {
@@ -750,7 +761,7 @@ fn default_token_cache_capacity() -> usize {
 }
 
 fn default_token_cache_ttl() -> i64 {
-    3600 // 1 hour
+    86400 // 24 hours (immutable token metadata)
 }
 
 impl Default for TokenSafetyConfig {

@@ -14,21 +14,19 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, Duration};
 
-/// Cache entry for token creation time
-struct TokenAgeCacheEntry {
-    creation_timestamp: i64,
-    cached_at: SystemTime,
-}
-
 /// Helius API client
 pub struct HeliusClient {
     api_key: String,
     client: Client,
     base_url: String,
-    /// Cache for token creation times (mint_address -> cache entry)
-    token_age_cache: Arc<RwLock<HashMap<String, TokenAgeCacheEntry>>>,
-    /// Cache TTL in seconds (default: 1 hour)
-    token_age_cache_ttl: u64,
+    /// Shared metadata cache (from TokenMetadataFetcher)
+    metadata_cache: Arc<RwLock<HashMap<String, crate::token::metadata::TokenMetadata>>>,
+    /// Cache TTL in seconds (default: 24 hours)
+    cache_ttl: u64,
+    /// Performance metrics: cache hits (metadata with age available)
+    cache_hits: Arc<std::sync::atomic::AtomicU64>,
+    /// Performance metrics: cache misses (required Helius API call)
+    cache_misses: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,27 +161,42 @@ pub struct WebhookReconciliationDetail {
 }
 
 impl HeliusClient {
-    pub fn new(api_key: String) -> Result<Self> {
+    pub fn new(
+        api_key: String,
+        metadata_cache: Arc<RwLock<HashMap<String, crate::token::metadata::TokenMetadata>>>,
+    ) -> Result<Self> {
         Ok(Self {
             api_key,
             client: Client::new(),
             base_url: crate::utils::helius_api_base_url(),
-            token_age_cache: Arc::new(RwLock::new(HashMap::new())),
-            token_age_cache_ttl: 3600, // 1 hour
+            metadata_cache,
+            cache_ttl: 86400, // 24 hours (immutable token metadata)
+            cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         })
     }
 
     /// Get current Helius API metrics
     pub fn get_metrics(&self) -> HeliusMetrics {
-        // Calculate cache hits/misses from current cache state
-        let cache_size = self.token_age_cache.read().len() as u64;
+        let cache_hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let cache_misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
+        let cache_size = self.metadata_cache.read().len() as u64;
+
         HeliusMetrics {
-            cache_hits: cache_size, // Approximate: current cache entries as proxy for hits
-            cache_misses: 0,        // Not actively tracked without additional state
+            cache_hits, // Actual cache hits since start
+            cache_misses, // Actual cache misses since start
             successful_requests: 0, // Not actively tracked without additional state
             retried_requests: 0,    // Not actively tracked without additional state
             failed_requests: 0,     // Not actively tracked without additional state
         }
+    }
+
+    /// Get cache statistics for monitoring
+    pub fn get_cache_stats(&self) -> (u64, u64, u64) {
+        let cache_hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
+        let cache_misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
+        let cache_size = self.metadata_cache.read().len() as u64;
+        (cache_hits, cache_misses, cache_size)
     }
 
     /// Get token creation time in hours since creation
@@ -191,44 +204,29 @@ impl HeliusClient {
     /// Returns None if:
     /// - API call fails
     /// - No transactions found for the mint address
-    /// - Token is older than cache TTL (will re-fetch)
+    ///
+    /// Uses shared metadata cache for unified storage of token metadata and age information.
+    /// Age is calculated once and stored in the cache for 24 hours.
     pub async fn get_token_age_hours(&self, mint_address: &str) -> Result<Option<f64>> {
-        // Check cache first
+        // Check shared metadata cache first
         {
-            let cache = self.token_age_cache.read();
-            if let Some(entry) = cache.get(mint_address) {
-                // Check if cache is still valid
-                if let Ok(elapsed) = entry.cached_at.elapsed() {
-                    if elapsed.as_secs() < self.token_age_cache_ttl {
-                        // Calculate age in hours
-                        let current_timestamp = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64;
-                        let age_seconds = current_timestamp - entry.creation_timestamp;
-                        let age_hours = age_seconds as f64 / 3600.0;
-                        return Ok(Some(age_hours));
-                    }
+            let cache = self.metadata_cache.read();
+            if let Some(metadata) = cache.get(mint_address) {
+                // If we have cached age, return it (metadata cache has 24-hour TTL)
+                if let Some(age) = metadata.age_hours {
+                    self.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::debug!(token = mint_address, age = age, "Cache hit for token age");
+                    return Ok(Some(age));
                 }
             }
         }
 
-        // Fetch from API
+        // Cache miss - fetch from Helius API
+        self.cache_misses.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::debug!(token = mint_address, "Cache miss for token age, fetching from Helius API");
         let creation_timestamp = self.get_token_creation_time(mint_address).await?;
 
         if let Some(timestamp) = creation_timestamp {
-            // Cache the result
-            {
-                let mut cache = self.token_age_cache.write();
-                cache.insert(
-                    mint_address.to_string(),
-                    TokenAgeCacheEntry {
-                        creation_timestamp: timestamp,
-                        cached_at: SystemTime::now(),
-                    },
-                );
-            }
-
             // Calculate age in hours
             let current_timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -236,8 +234,41 @@ impl HeliusClient {
                 .as_secs() as i64;
             let age_seconds = current_timestamp - timestamp;
             let age_hours = age_seconds as f64 / 3600.0;
+
+            // Update shared metadata cache with age information
+            {
+                let mut cache = self.metadata_cache.write();
+                // We need to get the existing metadata (if any) and update it with age info
+                // If no metadata exists yet, we create a minimal entry that will be enhanced by TokenMetadataFetcher later
+                let updated_metadata = if let Some(mut existing_metadata) = cache.get(mint_address).cloned() {
+                    // Update existing metadata with age information
+                    existing_metadata.creation_timestamp = Some(timestamp);
+                    existing_metadata.age_hours = Some(age_hours);
+                    existing_metadata
+                } else {
+                    // Create minimal metadata entry with age information
+                    // TokenMetadataFetcher will enrich this with full metadata later
+                    crate::token::metadata::TokenMetadata {
+                        mint: mint_address.to_string(),
+                        freeze_authority: None,
+                        mint_authority: None,
+                        decimals: 0, // Will be updated by TokenMetadataFetcher
+                        supply: 0,   // Will be updated by TokenMetadataFetcher
+                        is_token_2022: false,
+                        has_transfer_hook: false,
+                        has_permanent_delegate: false,
+                        creation_timestamp: Some(timestamp),
+                        age_hours: Some(age_hours),
+                    }
+                };
+
+                cache.insert(mint_address.to_string(), updated_metadata);
+                tracing::debug!(token = mint_address, age = age_hours, "Cached token age in shared metadata cache");
+            }
+
             Ok(Some(age_hours))
         } else {
+            tracing::debug!(token = mint_address, "No token age found (API returned None)");
             Ok(None)
         }
     }

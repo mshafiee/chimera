@@ -40,6 +40,8 @@ use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::{EngineHandle, PortfolioHeat};
 use crate::token::{TokenMetadataFetcher, TokenParser};
+use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Main monitoring state
@@ -87,12 +89,18 @@ impl MonitoringState {
             1,
         ));
 
+        let metadata_cache = token_fetcher
+            .as_ref()
+            .map(|tf| tf.get_metadata_cache())
+            .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
+
         let helius_client = Arc::new(HeliusClient::new(
             config
                 .monitoring
                 .as_ref()
                 .and_then(|m| m.helius_api_key.clone())
                 .unwrap_or_default(),
+            metadata_cache,
         )?);
 
         let signal_aggregator = Arc::new(SignalAggregator::new(db.clone()));

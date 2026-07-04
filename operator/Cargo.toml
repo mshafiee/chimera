@@ -100,8 +100,12 @@ rust_decimal = { version = "1.33", features = ["serde"] }
 rust_decimal_macros = "1"
 sysinfo = "0.38.4"
 
+# Distributed Caching (optional)
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
+
 [features]
 postgres = []
+redis-cache = ["redis"]
 
 [dev-dependencies]
 # Testing utilities
