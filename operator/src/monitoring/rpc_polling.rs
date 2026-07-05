@@ -4,8 +4,7 @@
 //! and prioritized polling to minimize credit usage.
 
 use crate::db_abstraction::Database;
-use crate::monitoring::rate_limiter::RateLimiter;
-use crate::monitoring::rate_limiter::RequestPriority;
+use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority, RpcMethodCategory};
 use crate::monitoring::transaction_parser;
 use anyhow::{Context, Result};
 use lru::LruCache;
@@ -106,9 +105,9 @@ pub async fn poll_wallet_transactions(
     rate_limiter: Arc<RateLimiter>,
     db: Option<&dyn Database>,
 ) -> Result<Vec<WalletTransaction>> {
-    // Rate limit before polling
+    // Rate limit before polling (account query for signature lookup)
     rate_limiter
-        .acquire_standard(RequestPriority::Polling)
+        .acquire_rpc(RpcMethodCategory::AccountQuery, RequestPriority::Polling)
         .await;
 
     // Paginated fetch: signatures are returned newest-first. Walk pages of 10 until
@@ -123,8 +122,9 @@ pub async fn poll_wallet_transactions(
     let mut before_sig: Option<String> = None;
 
     'pages: for _page in 0..MAX_PAGES {
+        // Rate limit for getSignaturesForAddress (account query)
         rate_limiter
-            .acquire_standard(RequestPriority::Polling)
+            .acquire_rpc(RpcMethodCategory::AccountQuery, RequestPriority::Polling)
             .await;
 
         let config = solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
@@ -195,8 +195,10 @@ pub async fn poll_wallet_transactions(
 
     for sig_str in new_signatures.iter().take(5) {
         // Limit to 5 transactions per poll
+        // Rate limit for getTransaction (transaction fetch - heavy operation)
+        // Use Polling priority since this is background operation, not time-sensitive
         rate_limiter
-            .acquire_standard(RequestPriority::Polling)
+            .acquire_rpc(RpcMethodCategory::TransactionFetch, RequestPriority::Polling)
             .await;
 
         // Parse signature string to Signature type

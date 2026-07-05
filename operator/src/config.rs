@@ -135,6 +135,38 @@ fn default_request_timeout() -> u64 {
     30000
 }
 
+/// RPC rate limiting configuration for request-weighted limiting
+#[derive(Debug, Clone, Deserialize)]
+pub struct RpcRateLimitConfig {
+    /// Enable request-weighted limiting (default: true)
+    /// When true, different RPC methods consume different amounts of rate limit capacity
+    /// based on their actual cost and latency (e.g., getTransaction weight 5, getLatestBlockhash weight 1)
+    #[serde(default = "default_weighted_limiting_enabled")]
+    pub weighted_limiting_enabled: bool,
+
+    /// Maximum weighted requests per second (default: inherits rate_limit_per_second)
+    /// This represents the maximum credits per second available for RPC calls
+    #[serde(default = "default_max_weighted_rate")]
+    pub max_weighted_rate: Option<u32>,
+
+    /// Priority-based wait reduction (default: true)
+    /// When true, higher priority requests (Exit/Entry) get reduced wait times
+    #[serde(default = "default_priority_wait_reduction")]
+    pub priority_wait_reduction: bool,
+}
+
+fn default_weighted_limiting_enabled() -> bool {
+    true
+}
+
+fn default_max_weighted_rate() -> Option<u32> {
+    None // Inherits rate_limit_per_second by default
+}
+
+fn default_priority_wait_reduction() -> bool {
+    true
+}
+
 /// RPC endpoint configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct RpcConfig {
@@ -159,6 +191,9 @@ pub struct RpcConfig {
     /// that return "ok" unconditionally regardless of actual node state.
     #[serde(default = "default_functional_health_check")]
     pub functional_health_check: bool,
+    /// Request-weighted rate limiting configuration
+    #[serde(default)]
+    pub rate_limit_config: Option<RpcRateLimitConfig>,
 }
 
 fn default_primary_provider() -> String {
@@ -1962,6 +1997,7 @@ impl Default for AppConfig {
                 timeout_ms: default_rpc_timeout(),
                 max_consecutive_failures: default_max_failures(),
                 functional_health_check: true,
+                rate_limit_config: None,
             },
             database: DatabaseConfig {
                 path: "data/chimera.db".into(),

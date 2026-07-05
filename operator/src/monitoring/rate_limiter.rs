@@ -4,7 +4,7 @@
 //! within Helius Developer plan constraints (50 req/sec).
 
 use parking_lot::Mutex;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -18,6 +18,38 @@ pub enum RequestPriority {
     Entry = 2,
     /// Polling operations (lowest priority)
     Polling = 1,
+}
+
+/// RPC method categories with appropriate weights
+///
+/// Categorizes RPC calls by their actual cost and latency to ensure fair resource allocation.
+/// Heavy operations like getTransaction consume more credits than lightweight status checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RpcMethodCategory {
+    /// Lightweight status checks (weight 1)
+    /// Examples: getLatestBlockhash, getHealth
+    /// Latency: <10ms, High frequency needed
+    StatusCheck,
+
+    /// Standard account queries (weight 2)
+    /// Examples: getAccount, getBalance, getSignatureStatus
+    /// Latency: 50-100ms, Moderate cost
+    AccountQuery,
+
+    /// Transaction retrieval (weight 5)
+    /// Examples: getTransaction, getConfirmedTransaction
+    /// Latency: 500ms-2s, Expensive operations
+    TransactionFetch,
+
+    /// Complex operations (weight 8)
+    /// Examples: getTokenAccountsByOwner, getMultipleAccounts
+    /// Latency: Variable, High data transfer
+    HeavyOperation,
+
+    /// Simulation calls (weight 10)
+    /// Examples: simulateTransaction, quote
+    /// Latency: 1-5s, Compute-intensive
+    Simulation,
 }
 
 /// Request weight for rate limiting
@@ -52,6 +84,10 @@ pub struct RateLimiter {
     credit_usage: Arc<Mutex<u64>>,
     /// Current weighted credit usage in window
     current_credits: Arc<Mutex<u32>>,
+    /// Category-specific request tracking (for metrics)
+    category_requests: Arc<Mutex<HashMap<String, u64>>>,
+    /// Category-specific credit tracking (for metrics)
+    category_credits: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl RateLimiter {
@@ -67,6 +103,8 @@ impl RateLimiter {
             requests: Arc::new(Mutex::new(VecDeque::new())),
             credit_usage: Arc::new(Mutex::new(0)),
             current_credits: Arc::new(Mutex::new(0)),
+            category_requests: Arc::new(Mutex::new(HashMap::new())),
+            category_credits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -139,6 +177,69 @@ impl RateLimiter {
     /// Acquire permission with standard weight (backward compatibility)
     pub async fn acquire_standard(&self, priority: RequestPriority) {
         self.acquire(priority, RequestWeight::STANDARD).await;
+    }
+
+    /// Convert RPC method category to request weight
+    ///
+    /// Maps RPC method categories to their appropriate request weights based on
+    /// actual cost and latency characteristics.
+    fn category_to_weight(&self, category: RpcMethodCategory) -> RequestWeight {
+        match category {
+            RpcMethodCategory::StatusCheck => RequestWeight::STANDARD,
+            RpcMethodCategory::AccountQuery => RequestWeight::new(2),
+            RpcMethodCategory::TransactionFetch => RequestWeight::new(5),
+            RpcMethodCategory::HeavyOperation => RequestWeight::new(8),
+            RpcMethodCategory::Simulation => RequestWeight::SIMULATION,
+        }
+    }
+
+    /// Convert RPC method category to string name for metrics tracking
+    fn category_to_name(&self, category: RpcMethodCategory) -> String {
+        match category {
+            RpcMethodCategory::StatusCheck => "StatusCheck".to_string(),
+            RpcMethodCategory::AccountQuery => "AccountQuery".to_string(),
+            RpcMethodCategory::TransactionFetch => "TransactionFetch".to_string(),
+            RpcMethodCategory::HeavyOperation => "HeavyOperation".to_string(),
+            RpcMethodCategory::Simulation => "Simulation".to_string(),
+        }
+    }
+
+    /// Acquire permission with RPC method categorization
+    ///
+    /// Automatically applies appropriate weights based on RPC method category to ensure
+    /// heavy operations don't starve lightweight status checks.
+    ///
+    /// # Arguments
+    /// * `category` - RPC method category determining weight
+    /// * `priority` - Request priority for wait time adjustment
+    pub async fn acquire_rpc(&self, category: RpcMethodCategory, priority: RequestPriority) {
+        let weight = self.category_to_weight(category);
+        let category_name = self.category_to_name(category);
+        let weight_value = weight.value();
+
+        // Track category usage for metrics
+        {
+            let mut category_requests = self.category_requests.lock();
+            *category_requests.entry(category_name.clone()).or_insert(0) += 1;
+        }
+        {
+            let mut category_credits = self.category_credits.lock();
+            *category_credits.entry(category_name).or_insert(0) += weight_value as u64;
+        }
+
+        self.acquire(priority, weight).await;
+    }
+
+    /// Try to acquire permission with RPC method categorization without blocking
+    ///
+    /// Non-blocking variant for status checks and time-sensitive operations.
+    /// Returns `true` if permission granted, `false` if at limit.
+    ///
+    /// # Arguments
+    /// * `category` - RPC method category determining weight
+    pub fn try_acquire_rpc(&self, category: RpcMethodCategory) -> bool {
+        let weight = self.category_to_weight(category);
+        self.try_acquire_weighted(weight)
     }
 
     /// Try to acquire permission without blocking (returns immediately)
@@ -241,6 +342,12 @@ pub struct RateLimitMetrics {
     pub total_credits_used: u64,
     pub current_credits: u32,
     pub max_credits: u32,
+    /// Request count by RPC category (StatusCheck, AccountQuery, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests_by_category: Option<std::collections::HashMap<String, u64>>,
+    /// Credits used by RPC category
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credits_by_category: Option<std::collections::HashMap<String, u64>>,
 }
 
 impl RateLimiter {
@@ -251,6 +358,8 @@ impl RateLimiter {
     /// - total_credits_used: Total credits consumed since start/reset
     /// - current_credits: Credits used in current sliding window
     /// - max_credits: Maximum credits per window (configured limit)
+    /// - requests_by_category: Request count by RPC category (if available)
+    /// - credits_by_category: Credits consumed by RPC category (if available)
     pub fn get_metrics(&self) -> RateLimitMetrics {
         // Ensure we have clean data
         let now = Instant::now();
@@ -269,11 +378,29 @@ impl RateLimiter {
             }
         }
 
+        // Get category metrics (if any RPC calls have been made)
+        let category_requests = self.category_requests.lock();
+        let category_credits = self.category_credits.lock();
+
+        let requests_by_category = if category_requests.is_empty() {
+            None
+        } else {
+            Some(category_requests.clone())
+        };
+
+        let credits_by_category = if category_credits.is_empty() {
+            None
+        } else {
+            Some(category_credits.clone())
+        };
+
         RateLimitMetrics {
             requests_per_second: requests.len() as f64 / self.window_secs as f64,
             total_credits_used: *self.credit_usage.lock(),
             current_credits: *current_credits,
             max_credits: self.max_credits,
+            requests_by_category,
+            credits_by_category,
         }
     }
 }
