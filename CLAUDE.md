@@ -619,6 +619,29 @@ The bot implements several strategies to minimize Helius credit consumption:
 - Scout uses asyncio for concurrent wallet analysis
 - Avoid blocking calls in hot paths
 
+### Honeypot Detection Security
+
+**CRITICAL**: The `allow_unlisted_heuristic` setting must NEVER be enabled in production:
+- When `false` (default): Safe - unlisted tokens rejected as $0 liquidity
+- When `true`: Dangerous - uses supply-based estimate, bypasses DexScreener validation
+- Attack vector: Tokens with high supply but $0 liquidity (honeypots) can be traded
+- Recommendation: Keep `allow_unlisted_heuristic: false` in all production configs
+- If a token isn't on DexScreener, wait for indexing or use manual whitelist
+
+**Why this is dangerous:**
+The supply-based heuristic assumes tokens with high supply must have liquidity, but supply ≠ liquidity. This creates an attack vector where malicious actors can:
+1. Create tokens with huge supply (costs nothing to mint)
+2. System estimates high liquidity (based on supply thresholds)
+3. BUY signals pass validation (thinks it has sufficient liquidity)
+4. In reality: token is unsellable honeypot with $0 actual liquidity
+5. Users lose funds buying worthless tokens
+
+**Current safety measures:**
+- Runtime warning logs on startup if `allow_unlisted_heuristic` is enabled
+- All config files have explicit security warnings
+- Default is `false` (fail-closed security posture)
+- Comprehensive documentation in CLAUDE.md and config files
+
 ---
 
 ## Deployment Checklist

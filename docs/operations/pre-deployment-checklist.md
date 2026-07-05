@@ -328,6 +328,103 @@ For fresh deployments, secret rotation tracking must be initialized to ensure pr
 - Check for database write permissions
 - Verify initialization entry exists in database
 
+### 4.8 Token Safety Validation
+
+Token safety validation ensures that honeypot detection and liquidity checks are properly configured to prevent trading of malicious or worthless tokens.
+
+#### Why Critical
+- **Honeypot Protection:** Prevents trading of unsellable tokens that can steal funds
+- **Liquidity Validation:** Ensures tokens have sufficient liquidity for exit strategies
+- **Supply Heuristic Risk:** `allow_unlisted_heuristic: true` creates attack vector for fake liquidity
+- **Financial Safety:** Misconfigured token safety can lead to direct financial loss
+
+#### Verification Steps
+
+1. **Check Startup Logs for Warnings:**
+   ```bash
+   # Start the operator and check for security warnings
+   journalctl -u chimera-operator -n 100 | grep "SECURITY RISK"
+   # Should see NO warnings if allow_unlisted_heuristic is false (safe)
+   ```
+
+2. **Verify Config Settings:**
+   ```bash
+   # Check all config files have safe settings
+   grep -r "allow_unlisted_heuristic" config/ operator/config/
+   # All should show: allow_unlisted_heuristic: false
+   ```
+
+3. **Verify Honeypot Detection:**
+   ```bash
+   # Check that honeypot detection is enabled
+   grep "honeypot_detection_enabled" config/config.yaml
+   # Should show: honeypot_detection_enabled: true
+   ```
+
+4. **Verify Liquidity Thresholds:**
+   ```bash
+   # Check minimum liquidity thresholds are appropriate
+   grep -A 2 "min_liquidity" config/config.yaml
+   # Shield should be >= $10,000 (conservative)
+   # Spear should be >= $5,000 (aggressive but safe)
+   ```
+
+5. **Test Unlisted Token Rejection:**
+   ```bash
+   # Test that unlisted tokens return $0 liquidity
+   # (Requires running operator with test token address)
+   # This ensures strict mode is working correctly
+   ```
+
+#### Pass Criteria
+
+- [ ] **allow_unlisted_heuristic: false** in all config files
+- [ ] **honeypot_detection_enabled: true** in production config
+- [ ] **min_liquidity_shield_usd >= 10000** (conservative threshold)
+- [ ] **min_liquidity_spear_usd >= 5000** (aggressive but safe)
+- [ ] No "SECURITY RISK" warnings in startup logs
+- [ ] Config validation passes without errors
+
+#### Failure Actions
+
+**If allow_unlisted_heuristic is true:**
+1. **IMMEDIATE:** Set `allow_unlisted_heuristic: false` in config
+2. **CRITICAL:** Do NOT deploy with this setting enabled in production
+3. **RESTART:** Restart operator after fixing config
+4. **VERIFY:** Check logs show no warnings
+
+**If honeypot detection is disabled:**
+1. **HIGH PRIORITY:** Enable `honeypot_detection_enabled: true`
+2. **RESTART:** Restart operator after fixing config
+3. **TEST:** Verify sell simulation works for test tokens
+
+**If liquidity thresholds too low:**
+1. **RECOMMEND:** Increase to safe minimum values
+2. **CONSULT:** Review with team before deploying lower thresholds
+3. **DOCUMENT:** If using custom thresholds, document rationale
+
+#### Why This Matters
+
+The `allow_unlisted_heuristic` setting when enabled uses a **dangerous supply-based heuristic** to estimate liquidity for tokens not indexed by DexScreener/Jupiter. This creates an attack vector:
+
+1. **Attack Scenario:**
+   - Attacker creates token with 1 trillion supply (costs nothing to mint)
+   - System estimates $50,000 liquidity (high supply threshold)
+   - BUY signal passes liquidity checks (thinks it has $50K liquidity)
+   - In reality: token is unsellable honeypot with $0 actual liquidity
+   - Users lose funds buying worthless tokens
+
+2. **Safe Mode (default):**
+   - `allow_unlisted_heuristic: false` treats unlisted tokens as $0 liquidity
+   - BUY signals are rejected for tokens not on DexScreener
+   - Fail-closed security posture prevents trading unverified tokens
+
+3. **If you need to trade new tokens:**
+   - Wait for DexScreener indexing (usually within minutes of liquidity)
+   - Use manual whitelist for known-safe tokens
+   - Implement proper due diligence processes
+   - Consider the token age gating (24 hours minimum)
+
 ---
 
 ## 5. Deployment Gate Process

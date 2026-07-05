@@ -101,9 +101,13 @@ token_safety:
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
   min_token_age_hours: 1.0
-  # When false (default), tokens not indexed by DexScreener are treated as $0 liquidity
-  # and BUY signals are rejected. Set true to re-enable the legacy supply-based heuristic
-  # for not-yet-indexed tokens (riskier — may allow very new/unlisted tokens through).
+  # ⚠️  SECURITY CRITICAL: NEVER enable this in production ⚠️
+  # When false (default, SAFE), tokens not indexed by DexScreener are treated as $0 liquidity
+  # and BUY signals are rejected (fail-closed security posture).
+  # When true, uses a DANGEROUS supply-based heuristic that assumes high supply = high liquidity.
+  # This creates an attack vector for honeypots and worthless tokens. Supply ≠ liquidity.
+  # ENABLE AT YOUR OWN RISK - May lead to trading unsellable tokens and financial loss.
+  # If you need to trade new tokens, wait for DexScreener indexing (usually within minutes).
   allow_unlisted_heuristic: false
 
 # Notification settings
