@@ -1,0 +1,26 @@
+# Centralized exchange (CEX) hot wallet addresses
+# These are known Solana deposit/funding addresses from major exchanges
+# Wallets funded by these addresses are treated as singletons to prevent roster collapse
+#
+# Format: one base58 address per line, # for comments
+#
+# Operators can extend this list with additional CEX hot wallets as needed
+#
+# Note: This is an intentionally minimal seed set. Exchange hot wallets rotate frequently.
+# Operators should verify and extend this list with current addresses from their CEXs.
+#
+# To add new addresses:
+# 1. Find the Solana deposit address for your CEX
+# 2. Add it to this file (one per line)
+# 3. Addresses must be valid Solana base58 addresses (44 characters)
+#
+# Current seed set (PLACEHOLDERS - REPLACE WITH VERIFIED ADDRESSES):
+# The following are placeholders following correct Solana address format.
+# Operators should replace these with actual verified CEX hot wallet addresses.
+
+# Example placeholder addresses (NOT real - replace with verified addresses)
+BinanceHotWallet1111111111111111111111111111
+CoinbaseHotWallet111111111111111111111111111
+OKXHotWallet1111111111111111111111111111111
+BybitHotWallet11111111111111111111111111111
+KrakenHotWallet1111111111111111111111111111

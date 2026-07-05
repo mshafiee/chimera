@@ -2106,13 +2106,20 @@ class WalletAnalyzer:
             # Proactive circuit breaker: if >50% risky after checking tokens, abort
             risky_ratio = len(risky_tokens) / max(1, len(token_list)) if risky_tokens else 0.0
             if risky_tokens:
+                fail_mode = ScoutConfig.get_rugcheck_fail_mode() if CONFIG_AVAILABLE else "closed"
                 if risky_ratio > 0.5:
                     logger.warning(
-                        "RugCheck degraded: %.0f%% tokens flagged risky (%d/%d). "
-                        "Falling back to assume-safe to prevent roster drain.",
+                        "RugCheck degraded: %.0f%% tokens flagged risky (%d/%d).",
                         risky_ratio * 100, len(risky_tokens), len(token_list),
                     )
-                    print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — keeping all trades")
+                    if fail_mode == "open":
+                        logger.warning(
+                            "RugCheck fail mode is OPEN — assuming safe to prevent roster drain (escape hatch active)"
+                        )
+                        print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — keeping all trades (escape hatch)")
+                    else:
+                        print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — dropping wallet (capital-protective)")
+                        return None
                 else:
                     print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens ({risky_ratio*100:.0f}% of unique tokens)")
                     # Filter trades to only those with safe tokens

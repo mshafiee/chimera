@@ -556,6 +556,25 @@ class ScoutConfig:
         return os.getenv("RUGCHECK_FAIL_MODE", "closed").lower()
 
     # ========================================================================
+    # Clustering & Sybil Detection Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_sybil_hops() -> int:
+        """Get the maximum number of funding hops to trace for sybil detection (default: 2)."""
+        return int(os.getenv("SCOUT_SYBIL_HOPS", "2"))
+
+    @staticmethod
+    def get_sybil_multihop_max() -> int:
+        """Get the maximum number of top-WQS wallets to apply multi-hop detection to (default: 20)."""
+        return int(os.getenv("SCOUT_SYBIL_MULTIHOP_MAX", "20"))
+
+    @staticmethod
+    def get_exchange_funders_path() -> str:
+        """Get the path to the exchange funders configuration file."""
+        return os.getenv("SCOUT_EXCHANGE_FUNDERS_PATH", "scout/config/exchange_funders.txt")
+
+    # ========================================================================
     # ML Model Configuration (Phase 1-5)
     # ========================================================================
 
@@ -1382,6 +1401,17 @@ class ScoutConfig:
             if not strict_mode:
                 msg = "SCOUT_STRICT_HISTORICAL_LIQUIDITY is OFF - backtests may use current liquidity for old trades (SURVIVORSHIP BIAS RISK)"
                 warnings.append(msg)
+
+        # Warn if fail modes are open in production (capital protection reduced)
+        rugcheck_fail_mode = os.getenv("RUGCHECK_FAIL_MODE", "closed").lower()
+        if rugcheck_fail_mode == "open":
+            msg = "RUGCHECK_FAIL_MODE is OPEN - RugCheck outages will assume-safe (CAPITAL PROTECTION REDUCED)"
+            warnings.append(msg)
+
+        safety_fail_mode = os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
+        if safety_fail_mode == "open":
+            msg = "SCOUT_SAFETY_FAIL_MODE is OPEN - token safety failures will assume-safe (CAPITAL PROTECTION REDUCED)"
+            warnings.append(msg)
 
         # Database path validation
         db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
