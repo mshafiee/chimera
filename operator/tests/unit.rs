@@ -62,3 +62,8 @@ mod trade_mode_tests;
 
 #[path = "unit/jupiter_error_handling_tests.rs"]
 mod jupiter_error_handling_tests;
+
+// ── Tiered Polling Unit Tests ─────────────────────────────────────────────────────
+
+#[path = "unit/tiered_polling_tests.rs"]
+mod tiered_polling_tests;

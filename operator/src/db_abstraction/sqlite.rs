@@ -701,6 +701,64 @@ impl Database for SqliteBackend {
         rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
     }
 
+    async fn get_wallets_by_conviction_tier(&self, tier: crate::config::ConvictionTier) -> AppResult<Vec<Wallet>> {
+        use crate::config::ConvictionTier;
+
+        let (status, min_wqs, max_wqs) = match tier {
+            ConvictionTier::High => (Some("ACTIVE"), Some(80), None),
+            ConvictionTier::Regular => (Some("ACTIVE"), Some(60), Some(79)),
+            ConvictionTier::Emerging => (None, None, Some(59)), // Both ACTIVE and CANDIDATE
+        };
+
+        self.get_wallets_with_wqs(status, min_wqs, max_wqs).await
+    }
+
+    async fn get_wallets_with_wqs(
+        &self,
+        status: Option<&str>,
+        min_wqs: Option<i32>,
+        max_wqs: Option<i32>,
+    ) -> AppResult<Vec<Wallet>> {
+        let mut query = String::from(
+            r#"
+            SELECT
+                id, address, status, wqs_score, wqs_confidence,
+                roi_7d, roi_30d, trade_count_30d, win_rate, max_drawdown_30d,
+                avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor,
+                realized_pnl_30d_sol, last_trade_at, promoted_at, ttl_expires_at,
+                notes, archetype, avg_entry_delay_seconds, created_at, updated_at
+            FROM wallets
+            WHERE 1=1
+            "#
+        );
+
+        let mut conditions = Vec::new();
+
+        if let Some(s) = status {
+            conditions.push(format!("status = '{}'", s));
+        }
+        if let Some(min) = min_wqs {
+            conditions.push(format!("wqs_score >= {}", min));
+        }
+        if let Some(max) = max_wqs {
+            conditions.push(format!("wqs_score <= {}", max));
+        }
+
+        if !conditions.is_empty() {
+            query.push_str(" AND ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        query.push_str(" ORDER BY wqs_score DESC");
+
+        let rows = sqlx::query(&query)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::Database)?;
+
+        rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
+    }
+
     // ========================================================================
     // SYSTEM OPERATIONS
     // ========================================================================

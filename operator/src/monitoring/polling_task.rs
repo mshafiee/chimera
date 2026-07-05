@@ -21,8 +21,17 @@ use tokio::sync::RwLock;
 /// Configuration for the polling task
 #[derive(Debug, Clone)]
 pub struct PollingConfig {
-    /// Interval between polling cycles (seconds)
+    /// Legacy single interval (for backward compatibility)
     pub interval_secs: u64,
+    /// Enable tiered polling based on conviction level
+    pub tiered_polling_enabled: bool,
+    /// Tiered polling intervals
+    pub high_conviction_interval_secs: Option<u64>,
+    pub regular_conviction_interval_secs: Option<u64>,
+    pub emerging_conviction_interval_secs: Option<u64>,
+    /// WQS thresholds
+    pub high_conviction_wqs_threshold: Option<i32>,
+    pub regular_conviction_wqs_threshold: Option<i32>,
     /// Number of wallets to poll in each batch
     pub batch_size: usize,
     /// RPC endpoint URL
@@ -31,6 +40,101 @@ pub struct PollingConfig {
     pub rate_limit: u32,
     /// Delay (seconds) before treating a SELL as a position exit
     pub exit_detection_delay_secs: u64,
+}
+
+/// Poll wallets for a specific conviction tier
+async fn poll_wallets_by_tier(
+    db: Arc<dyn Database>,
+    engine: EngineHandle,
+    tier: crate::config::ConvictionTier,
+    config: &PollingConfig,
+    rpc_client: Arc<RpcClient>,
+    rate_limiter: Arc<RateLimiter>,
+    polling_state: Arc<RpcPollingState>,
+    circuit_breaker: Arc<CircuitBreaker>,
+    token_parser: Arc<TokenParser>,
+    exit_detector: Arc<ExitDetector>,
+    pending_exits: Arc<RwLock<Vec<super::ExitSignal>>>,
+) {
+    let interval = match tier {
+        crate::config::ConvictionTier::High => config.high_conviction_interval_secs.unwrap_or(config.interval_secs),
+        crate::config::ConvictionTier::Regular => config.regular_conviction_interval_secs.unwrap_or(config.interval_secs),
+        crate::config::ConvictionTier::Emerging => config.emerging_conviction_interval_secs.unwrap_or(config.interval_secs),
+    };
+
+    // Query wallets for this tier
+    let wallets = match db.get_wallets_by_conviction_tier(tier).await {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::warn!(error = %e, tier = ?tier, "Failed to query wallets for tier");
+            return;
+        }
+    };
+
+    if wallets.is_empty() {
+        tracing::trace!(tier = ?tier, "No wallets to poll for this tier");
+        return;
+    }
+
+    tracing::debug!(
+        tier = ?tier,
+        wallet_count = wallets.len(),
+        interval_secs = interval,
+        "Polling wallets for tier"
+    );
+
+    // Poll wallets for new transactions
+    let transactions = match rpc_polling::poll_wallets_batch(
+        &rpc_client,
+        &wallets.iter().map(|w| w.address.clone()).collect::<Vec<_>>(),
+        interval,
+        config.batch_size,
+        rate_limiter.clone(),
+        polling_state.clone(),
+        Some(db.as_ref()),
+    )
+    .await
+    {
+        Ok(txs) => txs,
+        Err(e) => {
+            tracing::warn!(error = %e, "RPC polling batch failed");
+            return;
+        }
+    };
+
+    if transactions.is_empty() {
+        tracing::trace!("No new transactions detected for tier {:?}", tier);
+        return;
+    }
+
+    tracing::info!(
+        transaction_count = transactions.len(),
+        tier = ?tier,
+        "Detected new transactions from tiered polling, processing..."
+    );
+
+    // Process each transaction (30-second timeout guards against hung RPC calls)
+    for tx in transactions {
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            process_transaction(
+                db.as_ref(),
+                &engine,
+                tx,
+                &circuit_breaker,
+                &token_parser,
+                &exit_detector,
+                &pending_exits,
+                config.exit_detection_delay_secs,
+            ),
+        )
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "Failed to process transaction"),
+            Err(_) => tracing::warn!("process_transaction timed out after 30s"),
+        }
+    }
 }
 
 /// Start the RPC polling background task
@@ -47,10 +151,11 @@ pub async fn start_polling_task(
     exit_detector: Arc<ExitDetector>,
 ) {
     tracing::info!(
-        interval_secs = config.interval_secs,
-        batch_size = config.batch_size,
-        rpc_url = %config.rpc_url,
-        "Starting RPC polling task"
+        tiered = config.tiered_polling_enabled,
+        high_interval = config.high_conviction_interval_secs.unwrap_or(config.interval_secs),
+        regular_interval = config.regular_conviction_interval_secs.unwrap_or(config.interval_secs),
+        emerging_interval = config.emerging_conviction_interval_secs.unwrap_or(config.interval_secs),
+        "Starting RPC polling task with tiered intervals"
     );
 
     let polling_state = Arc::new(RpcPollingState::new());
@@ -65,8 +170,6 @@ pub async fn start_polling_task(
 
     let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-    let mut poll_count = 0u64;
 
     // Shared state for pending exit signals
     let pending_exits: Arc<RwLock<Vec<super::ExitSignal>>> = Arc::new(RwLock::new(Vec::new()));
@@ -113,86 +216,163 @@ pub async fn start_polling_task(
         }
     });
 
-    loop {
-        tokio::select! {
-            _ = cancel_token.cancelled() => {
-                tracing::info!("RPC polling task shutting down");
-                break;
+    if config.tiered_polling_enabled {
+        // Tiered polling: separate intervals for each tier
+        let mut high_interval = tokio::time::interval(Duration::from_secs(
+            config.high_conviction_interval_secs.unwrap_or(config.interval_secs)
+        ));
+        let mut regular_interval = tokio::time::interval(Duration::from_secs(
+            config.regular_conviction_interval_secs.unwrap_or(config.interval_secs)
+        ));
+        let mut emerging_interval = tokio::time::interval(Duration::from_secs(
+            config.emerging_conviction_interval_secs.unwrap_or(config.interval_secs)
+        ));
+
+        high_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        regular_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        emerging_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("RPC polling task shutting down");
+                    break;
+                }
+                _ = high_interval.tick() => {
+                    poll_wallets_by_tier(
+                        db.clone(),
+                        engine.clone(),
+                        crate::config::ConvictionTier::High,
+                        &config,
+                        rpc_client.clone(),
+                        rate_limiter.clone(),
+                        polling_state.clone(),
+                        circuit_breaker.clone(),
+                        token_parser.clone(),
+                        exit_detector.clone(),
+                        pending_exits.clone(),
+                    ).await;
+                }
+                _ = regular_interval.tick() => {
+                    poll_wallets_by_tier(
+                        db.clone(),
+                        engine.clone(),
+                        crate::config::ConvictionTier::Regular,
+                        &config,
+                        rpc_client.clone(),
+                        rate_limiter.clone(),
+                        polling_state.clone(),
+                        circuit_breaker.clone(),
+                        token_parser.clone(),
+                        exit_detector.clone(),
+                        pending_exits.clone(),
+                    ).await;
+                }
+                _ = emerging_interval.tick() => {
+                    poll_wallets_by_tier(
+                        db.clone(),
+                        engine.clone(),
+                        crate::config::ConvictionTier::Emerging,
+                        &config,
+                        rpc_client.clone(),
+                        rate_limiter.clone(),
+                        polling_state.clone(),
+                        circuit_breaker.clone(),
+                        token_parser.clone(),
+                        exit_detector.clone(),
+                        pending_exits.clone(),
+                    ).await;
+                }
             }
-            _ = interval.tick() => {
-                poll_count += 1;
+        }
+    } else {
+        // Legacy single-interval polling (unchanged)
+        let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                // Query ACTIVE wallets from database
-                let wallets = match get_active_monitored_wallets(db.as_ref()).await {
-                    Ok(w) => w,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Failed to query active wallets, skipping poll cycle");
+        let mut poll_count = 0u64;
+
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("RPC polling task shutting down");
+                    break;
+                }
+                _ = interval.tick() => {
+                    poll_count += 1;
+
+                    // Query ACTIVE wallets from database
+                    let wallets = match get_active_monitored_wallets(db.as_ref()).await {
+                        Ok(w) => w,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to query active wallets, skipping poll cycle");
+                            continue;
+                        }
+                    };
+
+                    if wallets.is_empty() {
+                        if poll_count.is_multiple_of(10) { // Log every 10 cycles to avoid spam
+                            tracing::debug!("No active wallets to monitor");
+                        }
                         continue;
                     }
-                };
 
-                if wallets.is_empty() {
-                    if poll_count.is_multiple_of(10) { // Log every 10 cycles to avoid spam
-                        tracing::debug!("No active wallets to monitor");
-                    }
-                    continue;
-                }
+                    tracing::debug!(
+                        wallet_count = wallets.len(),
+                        poll_cycle = poll_count,
+                        "Polling active wallets"
+                    );
 
-                tracing::debug!(
-                    wallet_count = wallets.len(),
-                    poll_cycle = poll_count,
-                    "Polling active wallets"
-                );
-
-                // Poll wallets for new transactions
-                let transactions = match rpc_polling::poll_wallets_batch(
-                    &rpc_client,
-                    &wallets,
-                    config.interval_secs,
-                    config.batch_size,
-                    rate_limiter.clone(),
-                    polling_state.clone(),
-                    Some(db.as_ref()),
-                )
-                .await
-                {
-                    Ok(txs) => txs,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "RPC polling batch failed");
-                        continue;
-                    }
-                };
-
-                if transactions.is_empty() {
-                    tracing::trace!("No new transactions detected");
-                    continue;
-                }
-
-                tracing::info!(
-                    transaction_count = transactions.len(),
-                    "Detected new transactions, processing..."
-                );
-
-                // Process each transaction (30-second timeout guards against hung RPC calls)
-                for tx in transactions {
-                    let result = tokio::time::timeout(
-                        Duration::from_secs(30),
-                        process_transaction(
-                            db.as_ref(),
-                            &engine,
-                            tx,
-                            &circuit_breaker,
-                            &token_parser,
-                            &exit_detector,
-                            &pending_exits,
-                            config.exit_detection_delay_secs,
-                        ),
+                    // Poll wallets for new transactions
+                    let transactions = match rpc_polling::poll_wallets_batch(
+                        &rpc_client,
+                        &wallets,
+                        config.interval_secs,
+                        config.batch_size,
+                        rate_limiter.clone(),
+                        polling_state.clone(),
+                        Some(db.as_ref()),
                     )
-                    .await;
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => tracing::warn!(error = %e, "Failed to process transaction"),
-                        Err(_) => tracing::warn!("process_transaction timed out after 30s"),
+                    .await
+                    {
+                        Ok(txs) => txs,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "RPC polling batch failed");
+                            continue;
+                        }
+                    };
+
+                    if transactions.is_empty() {
+                        tracing::trace!("No new transactions detected");
+                        continue;
+                    }
+
+                    tracing::info!(
+                        transaction_count = transactions.len(),
+                        "Detected new transactions, processing..."
+                    );
+
+                    // Process each transaction (30-second timeout guards against hung RPC calls)
+                    for tx in transactions {
+                        let result = tokio::time::timeout(
+                            Duration::from_secs(30),
+                            process_transaction(
+                                db.as_ref(),
+                                &engine,
+                                tx,
+                                &circuit_breaker,
+                                &token_parser,
+                                &exit_detector,
+                                &pending_exits,
+                                config.exit_detection_delay_secs,
+                            ),
+                        )
+                        .await;
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => tracing::warn!(error = %e, "Failed to process transaction"),
+                            Err(_) => tracing::warn!("process_transaction timed out after 30s"),
+                        }
                     }
                 }
             }

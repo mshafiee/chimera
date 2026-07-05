@@ -91,6 +91,7 @@ fn create_load_config() -> AppConfig {
             min_failures_before_fallback: 10,
             disable_fallback: false,
             max_retries: 5,
+            helius_staked_exits: true,
         },
 
         ..Default::default()

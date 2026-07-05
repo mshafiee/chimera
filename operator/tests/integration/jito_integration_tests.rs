@@ -77,11 +77,16 @@ fn create_test_config() -> Config {
 
         jito: JitoConfig {
             enabled: true,
-            searcher_endpoint: "https://mainnet.block-engine.jito.wtf".to_string(),
-            default_tip_lamports: 1000,
+            searcher_endpoint: Some("https://mainnet.block-engine.jito.wtf".to_string()),
+            helius_fallback: false,
+            tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+            tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
+            tip_percentile: 50,
+            tip_percent_max: Decimal::from_str("0.10").unwrap(),
             min_failures_before_fallback: 10,
             disable_fallback: false,
             max_retries: 5,
+            helius_staked_exits: true,
         },
 
         // Default values for other fields

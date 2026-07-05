@@ -484,7 +484,7 @@ impl TokenMetadataFetcher {
 
                 // Fetch priority tokens first (actively traded), up to 8 per cycle
                 let priority_limit = std::cmp::min(priority_tokens.len(), 8);
-                for token_addr in priority_tokens.into_iter().take(priority_limit) {
+                for token_addr in priority_tokens.iter().take(priority_limit) {
                     match helius_client.get_token_age_hours(&token_addr).await {
                         Ok(Some(age)) => {
                             fetched_count += 1;
@@ -519,7 +519,7 @@ impl TokenMetadataFetcher {
 
                 // Fetch standard tokens (lower priority), up to 5 per cycle
                 let standard_limit = std::cmp::min(standard_tokens.len(), 5);
-                for token_addr in standard_tokens.into_iter().take(standard_limit) {
+                for token_addr in standard_tokens.iter().take(standard_limit) {
                     match helius_client.get_token_age_hours(&token_addr).await {
                         Ok(Some(age)) => {
                             fetched_count += 1;

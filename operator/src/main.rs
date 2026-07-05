@@ -1336,6 +1336,24 @@ async fn main() -> anyhow::Result<()> {
 
         let polling_config = chimera_operator::monitoring::PollingConfig {
             interval_secs,
+            tiered_polling_enabled: config.monitoring.as_ref()
+                .map(|m| m.tiered_polling_enabled)
+                .unwrap_or(true),
+            high_conviction_interval_secs: config.monitoring.as_ref()
+                .and_then(|m| m.tiered_polling.as_ref())
+                .map(|t| t.high_conviction_interval_secs),
+            regular_conviction_interval_secs: config.monitoring.as_ref()
+                .and_then(|m| m.tiered_polling.as_ref())
+                .map(|t| t.regular_conviction_interval_secs),
+            emerging_conviction_interval_secs: config.monitoring.as_ref()
+                .and_then(|m| m.tiered_polling.as_ref())
+                .map(|t| t.emerging_conviction_interval_secs),
+            high_conviction_wqs_threshold: config.monitoring.as_ref()
+                .and_then(|m| m.tiered_polling.as_ref())
+                .map(|t| t.high_conviction_wqs_threshold),
+            regular_conviction_wqs_threshold: config.monitoring.as_ref()
+                .and_then(|m| m.tiered_polling.as_ref())
+                .map(|t| t.regular_conviction_wqs_threshold),
             batch_size,
             rpc_url: config.rpc.primary_url.clone(),
             rate_limit,

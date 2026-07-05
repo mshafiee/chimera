@@ -163,6 +163,17 @@ pub trait Database: Send + Sync {
     /// Get wallets by status
     async fn get_wallets_by_status(&self, status: &str) -> AppResult<Vec<Wallet>>;
 
+    /// Get ACTIVE or CANDIDATE wallets grouped by conviction tier for tiered polling
+    async fn get_wallets_by_conviction_tier(&self, tier: crate::config::ConvictionTier) -> AppResult<Vec<Wallet>>;
+
+    /// Get wallets with WQS scores for batch processing
+    async fn get_wallets_with_wqs(
+        &self,
+        status: Option<&str>,
+        min_wqs: Option<i32>,
+        max_wqs: Option<i32>,
+    ) -> AppResult<Vec<Wallet>>;
+
     // ========================================================================
     // SYSTEM OPERATIONS
     // ========================================================================

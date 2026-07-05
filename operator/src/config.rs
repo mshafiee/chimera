@@ -5,6 +5,7 @@
 
 use config::{Config, ConfigError, Environment, File};
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal_macros::dec;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -779,6 +780,8 @@ impl Default for TokenSafetyConfig {
             liquidity_cache_ttl_secs: default_liquidity_cache_ttl(),
             fdv_cache_ttl_secs: default_fdv_cache_ttl(),
             liquidity_update_interval_secs: default_liquidity_update_interval(),
+            cache_backend: default_cache_backend(),
+            redis_url: None,
         }
     }
 }
@@ -897,6 +900,71 @@ impl Default for DailySummaryConfig {
     }
 }
 
+/// Wallet conviction tier for dynamic polling
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConvictionTier {
+    High,     // WQS > 80
+    Regular,  // WQS 60-80
+    Emerging, // WQS < 60 or CANDIDATE status
+}
+
+/// Dynamic polling configuration per conviction tier
+#[derive(Debug, Clone, Deserialize)]
+pub struct TieredPollingConfig {
+    /// High conviction wallets (WQS > 80): poll every N seconds
+    #[serde(default = "default_high_conviction_interval")]
+    pub high_conviction_interval_secs: u64,
+
+    /// Regular conviction wallets (WQS 60-80): poll every N seconds
+    #[serde(default = "default_regular_conviction_interval")]
+    pub regular_conviction_interval_secs: u64,
+
+    /// Emerging conviction wallets (WQS < 60 or CANDIDATE): poll every N seconds
+    #[serde(default = "default_emerging_conviction_interval")]
+    pub emerging_conviction_interval_secs: u64,
+
+    /// WQS threshold for high conviction
+    #[serde(default = "default_high_conviction_threshold")]
+    pub high_conviction_wqs_threshold: i32,
+
+    /// WQS threshold for regular conviction
+    #[serde(default = "default_regular_conviction_threshold")]
+    pub regular_conviction_wqs_threshold: i32,
+}
+
+impl Default for TieredPollingConfig {
+    fn default() -> Self {
+        Self {
+            high_conviction_interval_secs: default_high_conviction_interval(),
+            regular_conviction_interval_secs: default_regular_conviction_interval(),
+            emerging_conviction_interval_secs: default_emerging_conviction_interval(),
+            high_conviction_wqs_threshold: default_high_conviction_threshold(),
+            regular_conviction_wqs_threshold: default_regular_conviction_threshold(),
+        }
+    }
+}
+
+fn default_high_conviction_interval() -> u64 {
+    5
+}
+
+fn default_regular_conviction_interval() -> u64 {
+    8
+}
+
+fn default_emerging_conviction_interval() -> u64 {
+    30
+}
+
+fn default_high_conviction_threshold() -> i32 {
+    80
+}
+
+fn default_regular_conviction_threshold() -> i32 {
+    60
+}
+
 /// Monitoring configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct MonitoringConfig {
@@ -921,9 +989,15 @@ pub struct MonitoringConfig {
     /// Enable RPC polling fallback
     #[serde(default = "default_true")]
     pub rpc_polling_enabled: bool,
-    /// RPC poll interval in seconds
+    /// RPC poll interval in seconds (legacy, used if tiered polling not enabled)
     #[serde(default = "default_rpc_poll_interval")]
     pub rpc_poll_interval_secs: u64,
+    /// Enable tiered polling based on wallet conviction level
+    #[serde(default = "default_true")]
+    pub tiered_polling_enabled: bool,
+    /// Tiered polling configuration (optional)
+    #[serde(default)]
+    pub tiered_polling: Option<TieredPollingConfig>,
     /// RPC poll batch size
     #[serde(default = "default_rpc_poll_batch")]
     pub rpc_poll_batch_size: usize,
@@ -1093,6 +1167,8 @@ impl Default for MonitoringConfig {
             webhook_processing_rate_limit: default_webhook_rate_limit(),
             rpc_polling_enabled: true,
             rpc_poll_interval_secs: default_rpc_poll_interval(),
+            tiered_polling_enabled: true,
+            tiered_polling: None,
             rpc_poll_batch_size: default_rpc_poll_batch(),
             rpc_poll_rate_limit: default_rpc_poll_rate_limit(),
             exit_detection_delay_secs: default_exit_detection_delay(),
@@ -1104,6 +1180,53 @@ impl Default for MonitoringConfig {
             websocket_reconnect: None,
             websocket_health_timeout_secs: default_websocket_health_timeout(),
             websocket_commitment: default_websocket_commitment(),
+        }
+    }
+}
+
+impl MonitoringConfig {
+    /// Get effective polling interval for a wallet based on WQS score and status
+    pub fn get_polling_interval_for_wallet(&self, wqs_score: Option<rust_decimal::Decimal>, status: &str) -> u64 {
+        if !self.tiered_polling_enabled {
+            return self.rpc_poll_interval_secs;
+        }
+
+        let (high_interval, regular_interval, emerging_interval, high_threshold, regular_threshold) = match &self.tiered_polling {
+            Some(config) => (
+                config.high_conviction_interval_secs,
+                config.regular_conviction_interval_secs,
+                config.emerging_conviction_interval_secs,
+                config.high_conviction_wqs_threshold,
+                config.regular_conviction_wqs_threshold,
+            ),
+            None => (
+                default_high_conviction_interval(),
+                default_regular_conviction_interval(),
+                default_emerging_conviction_interval(),
+                default_high_conviction_threshold(),
+                default_regular_conviction_threshold(),
+            ),
+        };
+
+        // CANDIDATE wallets always use emerging interval
+        if status == "CANDIDATE" {
+            return emerging_interval;
+        }
+
+        // Convert WQS Decimal to integer threshold comparison
+        let wqs = wqs_score
+            .map(|d| {
+                // Round the decimal to nearest integer
+                d.round().to_u32().unwrap_or(0) as i32
+            })
+            .unwrap_or(0);
+
+        if wqs >= high_threshold {
+            high_interval
+        } else if wqs >= regular_threshold {
+            regular_interval
+        } else {
+            emerging_interval
         }
     }
 }
@@ -1887,6 +2010,7 @@ impl Default for AppConfig {
                 min_failures_before_fallback: 10,
                 disable_fallback: false,
                 max_retries: 5,
+                helius_staked_exits: true,
             },
             trade_mode: TradeMode::default(),
             jupiter: JupiterConfig::default(),

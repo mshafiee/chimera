@@ -11,6 +11,22 @@ use rust_decimal::prelude::*;
 const COLD_START_MULTIPLIER: f64 = 2.0;
 const MIN_SAMPLES_FOR_PERCENTILE: u32 = 10;
 
+fn create_test_jito_config() -> chimera_operator::JitoConfig {
+    chimera_operator::JitoConfig {
+        enabled: true,
+        searcher_endpoint: None,
+        helius_fallback: false,
+        tip_floor_sol: Decimal::from_str("0.001").unwrap(),
+        tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
+        tip_percentile: 50,
+        tip_percent_max: Decimal::from_str("0.10").unwrap(),
+        min_failures_before_fallback: 10,
+        disable_fallback: false,
+        max_retries: 5,
+        helius_staked_exits: true,
+    }
+}
+
 #[test]
 fn test_cold_start_multiplier() {
     assert_eq!(
@@ -21,7 +37,7 @@ fn test_cold_start_multiplier() {
 
 #[test]
 fn test_cold_start_tip_calculation() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
@@ -40,7 +56,7 @@ fn test_cold_start_tip_calculation() {
 
 #[test]
 fn test_cold_start_shield_tip() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
@@ -60,7 +76,7 @@ fn test_cold_start_shield_tip() {
 
 #[test]
 fn test_cold_start_spear_tip() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
@@ -80,7 +96,7 @@ fn test_cold_start_spear_tip() {
 
 #[test]
 fn test_cold_start_exit_tip() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
@@ -156,7 +172,7 @@ fn test_percentile_25th_calculation() {
 
 #[test]
 fn test_tip_ceiling_cap() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
@@ -177,7 +193,7 @@ fn test_tip_ceiling_cap() {
 
 #[test]
 fn test_tip_floor_minimum() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),
@@ -198,7 +214,7 @@ fn test_tip_floor_minimum() {
 
 #[test]
 fn test_tip_percent_max_cap() {
-    let config = JitoConfig {
+    let config = create_test_jito_config();
         enabled: true,
         tip_floor_sol: Decimal::from_str("0.001").unwrap(),
         tip_ceiling_sol: Decimal::from_str("0.01").unwrap(),

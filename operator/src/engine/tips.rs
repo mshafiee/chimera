@@ -348,6 +348,10 @@ mod tests {
             tip_percent_max: Decimal::from_str("0.10").unwrap(),
             helius_fallback: false,
             searcher_endpoint: None,
+            min_failures_before_fallback: 10,
+            disable_fallback: false,
+            max_retries: 5,
+            helius_staked_exits: true,
         }
     }
 

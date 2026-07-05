@@ -20,7 +20,7 @@ pub struct HeliusClient {
     client: Client,
     base_url: String,
     /// Shared metadata cache (from TokenMetadataFetcher)
-    metadata_cache: Arc<RwLock<HashMap<String, crate::token::metadata::TokenMetadata>>>,
+    metadata_cache: Arc<RwLock<HashMap<String, crate::token::TokenMetadata>>>,
     /// Cache TTL in seconds (default: 24 hours)
     cache_ttl: u64,
     /// Performance metrics: cache hits (metadata with age available)
@@ -163,7 +163,7 @@ pub struct WebhookReconciliationDetail {
 impl HeliusClient {
     pub fn new(
         api_key: String,
-        metadata_cache: Arc<RwLock<HashMap<String, crate::token::metadata::TokenMetadata>>>,
+        metadata_cache: Arc<RwLock<HashMap<String, crate::token::TokenMetadata>>>,
     ) -> Result<Self> {
         Ok(Self {
             api_key,
@@ -248,7 +248,7 @@ impl HeliusClient {
                 } else {
                     // Create minimal metadata entry with age information
                     // TokenMetadataFetcher will enrich this with full metadata later
-                    crate::token::metadata::TokenMetadata {
+                    crate::token::TokenMetadata {
                         mint: mint_address.to_string(),
                         freeze_authority: None,
                         mint_authority: None,

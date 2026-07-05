@@ -19,6 +19,9 @@ mod db_tests;
 #[path = "integration/webhook_flow_tests.rs"]
 mod webhook_flow_tests;
 
+#[path = "integration/tiered_polling_integration_tests.rs"]
+mod tiered_polling_integration_tests;
+
 #[path = "integration/transaction_builder_tests.rs"]
 mod transaction_builder_tests;
 

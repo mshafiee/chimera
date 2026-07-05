@@ -136,11 +136,20 @@ monitoring:
   webhook_registration_delay_ms: 200
   webhook_processing_rate_limit: 45
   rpc_polling_enabled: true  # Keep as fallback
-  rpc_poll_interval_secs: 8
+  rpc_poll_interval_secs: 8  # Legacy single interval (used if tiered_polling_enabled: false)
   rpc_poll_batch_size: 6
   rpc_poll_rate_limit: 40
   max_active_wallets: 20
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
+
+  # Tiered polling based on wallet conviction level (enabled by default)
+  tiered_polling_enabled: true
+  tiered_polling:
+    high_conviction_interval_secs: 5      # WQS > 80: poll every 5 seconds
+    regular_conviction_interval_secs: 8   # WQS 60-80: poll every 8 seconds
+    emerging_conviction_interval_secs: 30  # WQS < 60 or CANDIDATE: poll every 30 seconds
+    high_conviction_wqs_threshold: 80    # WQS threshold for high conviction
+    regular_conviction_wqs_threshold: 60   # WQS threshold for regular conviction
 
   # 🔥 NEW: Enable Helius LaserStream WebSocket (zero-credit transaction parsing)
   use_websocket: true  # Changed from false to true
