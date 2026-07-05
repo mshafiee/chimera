@@ -2067,6 +2067,7 @@ impl Default for AppConfig {
             position_sizing: PositionSizingConfig::default(),
             mev_protection: MevProtectionConfig::default(),
             degradation: DegradationConfig::default(),
+            execution_lock: crate::engine::ExecutionLockConfig::default(),
         }
     }
 }

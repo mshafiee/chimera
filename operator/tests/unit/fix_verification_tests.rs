@@ -114,11 +114,13 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
         TOKEN,
         Decimal::from_str("100.00").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     price_cache.set_price(
         TOKEN,
         Decimal::from_str("98.00").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
 
     let action = mgr
@@ -165,6 +167,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
         TOKEN,
         Decimal::from_str("84.00").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     let action_a = mgr
         .check_stop_loss(
@@ -186,6 +189,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
         TOKEN,
         Decimal::from_str("79.00").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     let action_b = mgr
         .check_stop_loss(
@@ -236,6 +240,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         TOKEN,
         Decimal::from_str("1.00").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     mgr.register_position(
         "uuid-ratchet-fix",
@@ -251,6 +256,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         TOKEN,
         Decimal::from_str("1.20").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
@@ -259,6 +265,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         TOKEN,
         Decimal::from_str("2.00").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     let _ = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 
@@ -267,6 +274,7 @@ async fn should_ratchet_trailing_stop_price_as_peak_rises() {
         TOKEN,
         Decimal::from_str("1.40").unwrap(),
         PriceSource::Jupiter,
+        Some(9),
     );
     let action = mgr.check_targets("uuid-ratchet-fix", TOKEN, "SHIELD").await;
 

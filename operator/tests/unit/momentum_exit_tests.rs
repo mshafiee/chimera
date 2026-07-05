@@ -34,7 +34,7 @@ mod tests {
         let entry_price = Decimal::from_str("1.0").unwrap();
 
         // Current price same as entry price
-        price_cache.set_price(token, entry_price, PriceSource::Jupiter);
+        price_cache.set_price(token, entry_price, PriceSource::Jupiter, Some(9));
 
         let detector = MomentumExit::new(db, price_cache, 30);
         let action = detector
@@ -62,7 +62,7 @@ mod tests {
         // 4% drop on a 2-minute-old position: should NOT trigger (below 5% early threshold)
         let entry_time_new = SystemTime::now() - Duration::from_secs(120);
         let price_4pct = Decimal::from_str("0.96").unwrap();
-        price_cache.set_price(token, price_4pct, PriceSource::Jupiter);
+        price_cache.set_price(token, price_4pct, PriceSource::Jupiter, Some(9));
         let detector = MomentumExit::new(db.clone(), price_cache.clone(), 30);
         let action_4pct = detector
             .check_momentum("uuid-drop-4", token, entry_price, entry_time_new)
@@ -75,7 +75,7 @@ mod tests {
 
         // 6% drop on a 2-minute-old position: should trigger (above 5% early threshold)
         let price_6pct = Decimal::from_str("0.94").unwrap();
-        price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
+        price_cache.set_price(token, price_6pct, PriceSource::Jupiter, Some(9));
         let detector2 = MomentumExit::new(db.clone(), price_cache.clone(), 30);
         let action_6pct = detector2
             .check_momentum("uuid-drop-6", token, entry_price, entry_time_new)
@@ -88,7 +88,7 @@ mod tests {
 
         // 6% drop on a 20-minute-old position: should NOT trigger (base is back to 8%)
         let entry_time_old = SystemTime::now() - Duration::from_secs(1200);
-        price_cache.set_price(token, price_6pct, PriceSource::Jupiter);
+        price_cache.set_price(token, price_6pct, PriceSource::Jupiter, Some(9));
         let detector3 = MomentumExit::new(db, price_cache, 30);
         let action_6pct_old = detector3
             .check_momentum("uuid-drop-6-old", token, entry_price, entry_time_old)

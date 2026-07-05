@@ -911,7 +911,7 @@ mod tests {
         let cache = PriceCache::new().expect("Failed to create cache");
         cache.set_price(
             "token1",
-            Decimal::from(1.0),
+            Decimal::from_str("1.0").unwrap(),
             PriceSource::Jupiter,
             Some(6),
         );
@@ -930,7 +930,7 @@ mod tests {
         let cache = PriceCache::new().expect("Failed to create cache");
         cache.set_price(
             "token1",
-            Decimal::from(1.0),
+            Decimal::from_str("1.0").unwrap(),
             PriceSource::Jupiter,
             None, // No decimals data
         );
@@ -944,7 +944,7 @@ mod tests {
         // Set price with decimals (this stores decimals in PriceEntry)
         cache.set_price(
             "token1",
-            Decimal::from(1.0),
+            Decimal::from_str("1.0").unwrap(),
             PriceSource::Jupiter,
             Some(9),
         );

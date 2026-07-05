@@ -441,6 +441,20 @@ async fn main() -> anyhow::Result<()> {
         .with_liquidity_ttl(config.token_safety.liquidity_cache_ttl_secs)
         .with_fdv_ttl(config.token_safety.fdv_cache_ttl_secs),
     );
+
+    // Create HeliusClient early (needed by token_fetcher_with_helius later)
+    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
+        config
+            .monitoring
+            .as_ref()
+            .and_then(|m| m.helius_api_key.clone())
+            .unwrap_or_default(),
+        token_fetcher.get_metadata_cache(),
+    )
+    .map(Arc::new)
+    .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
+    .ok();
+
     let token_safety_config = TokenSafetyConfig {
         freeze_authority_whitelist: config
             .token_safety
@@ -790,7 +804,19 @@ async fn main() -> anyhow::Result<()> {
         .with_helius_client(helius.clone())
     } else {
         // No HeliusClient available, use regular token_fetcher
-        (*token_fetcher).clone()
+        // Extract from Arc to get the TokenMetadataFetcher
+        Arc::try_unwrap(token_fetcher.clone()).unwrap_or_else(|token_fetcher_arc| {
+            // If Arc is shared (has multiple references), create a new fetcher from the existing one
+            TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
+                &config.rpc.primary_url,
+                Some(rpc_rate_limiter.clone()),
+                config.jupiter.api_url.clone(),
+            )
+            .with_price_cache(price_cache.clone())
+            .with_unlisted_heuristic(config.token_safety.allow_unlisted_heuristic)
+            .with_liquidity_ttl(config.token_safety.liquidity_cache_ttl_secs)
+            .with_fdv_ttl(config.token_safety.fdv_cache_ttl_secs)
+        })
     };
 
     let token_fetcher_clone = Arc::new(token_fetcher_for_updater);
@@ -1496,17 +1522,7 @@ async fn main() -> anyhow::Result<()> {
 
     // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
     // into the stop-loss manager's consensus cache. Reuse it here.
-    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
-        config
-            .monitoring
-            .as_ref()
-            .and_then(|m| m.helius_api_key.clone())
-            .unwrap_or_default(),
-        token_fetcher.get_metadata_cache(),
-    )
-    .map(Arc::new)
-    .map_err(|e| tracing::warn!(error = %e, "HeliusClient unavailable, signal quality limited"))
-    .ok();
+    // helius_client was created earlier (around line 450) to avoid forward declaration issues
 
     // Create webhook API rate limiter for lifecycle management operations
     let webhook_api_rate_limiter: Arc<rate_limiter::RateLimiter> =

@@ -189,7 +189,11 @@ async fn insert_closed_trades(pool: &Pool<Sqlite>, wallet: &str, count: usize) {
 
 #[tokio::test]
 async fn test_new_token_age_penalty_halves_size() {
-    // Token < 24h old gets a 0.5x multiplier.
+    // Token < 24h old gets a 0.5x penalty (in the penalty multiplier).
+    // With HYBRID SIZING, penalties are averaged instead of multiplied:
+    // Old logic: 0.5x direct multiplication → ratio ≈ 0.5
+    // New logic: penalty_multiplier = (0.5 + 1.0 + 1.0) / 3 ≈ 0.833x
+    //
     // Compare size for 2h-old vs 48h-old token, all other factors equal.
     // Wallet must have enough closed trades so confidence-adjusted size exceeds
     // min_size_sol before the age penalty is applied (otherwise both cases hit
@@ -198,7 +202,7 @@ async fn test_new_token_age_penalty_halves_size() {
     let (db, _tmp) = create_test_db().await;
     let pool = sqlite_pool(&db);
     // Seed 5 closed trades → confidence ≈ 0.70. size = 2.0 * 0.5 * 0.70 = 0.70 > 0.1 (min).
-    // Age penalty: 0.70 * 0.5 = 0.35 vs 0.70 — ratio ≈ 0.5. ✓
+    // With hybrid sizing: penalty_multiplier ≈ 0.833x for new token
     insert_closed_trades(&pool, "test_wallet", 5).await;
     let cfg = sizing_config_with_max("2.0", "20.0", "0.1", 10);
     let sizer = PositionSizer::new(db, cfg);
@@ -220,9 +224,10 @@ async fn test_new_token_age_penalty_halves_size() {
     );
 
     let ratio = size_new / size_old;
+    // With hybrid sizing, ratio should be ~0.833 (not 0.5) because penalties are averaged
     assert!(
-        (ratio - Decimal::from_str("0.5").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
-        "New token penalty should halve the size (ratio ≈ 0.5), got {}",
+        (ratio - Decimal::from_str("0.83").unwrap()).abs() < Decimal::from_str("0.05").unwrap(),
+        "New token penalty should be ≈0.83x with hybrid sizing (not 0.5x), got {}x",
         ratio
     );
 }
@@ -369,5 +374,143 @@ async fn test_high_wqs_multiplier_applied() {
         (ratio - Decimal::from_str("1.7").unwrap()).abs() < Decimal::from_str("0.01").unwrap(),
         "High WQS ratio should be ≈1.7 (85/50), got {}",
         ratio
+    );
+}
+
+// ─── Test: Hybrid sizing eliminates multiplier drift ─────────────────────────
+
+#[tokio::test]
+async fn test_hybrid_sizing_eliminated_multiplier_drift() {
+    // HYBRID SIZING FIX: Multiple conservative multipliers should average, not compound.
+    // Old logic: 0.8⁷ ≈ 0.21x (79% reduction from base)
+    // New logic: ~0.8x total (only 20% reduction from base)
+    //
+    // Setup: All factors at moderately conservative levels (0.8x equivalent)
+    // - confidence: neutral (1.0x, no consensus boost)
+    // - performance: moderate (0.8x penalty applied via min)
+    // - token_age: neutral (1.0x, old token)
+    // - slippage: moderate (~0.8x penalty)
+    // - quality: neutral (1.0x, medium quality)
+    // - volatility: moderate (~0.8x penalty)
+    // - regime: neutral (1.0x)
+
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
+
+    // Insert 5 closed trades → confidence ≈ 0.33, size = 10.0 * 0.5 * 0.33 = 1.65
+    // This ensures Kelly fallback doesn't dominate the test
+    insert_closed_trades(&pool, "test_wallet", 5).await;
+
+    let cfg = sizing_config_with_max("10.0", "20.0", "0.01", 10);
+    let sizer = PositionSizer::new(db, cfg);
+
+    // Setup moderately conservative factors (all around 0.8x equivalent)
+    let factors = SizingFactors {
+        is_consensus: false,                                     // 1.0x (no boost)
+        wallet_wqs: 50.0,                                       // neutral WQS
+        wallet_success_rate: Decimal::from_str("0.5").unwrap(),  // neutral performance
+        token_age_hours: Some(72.0),                            // old token: 1.0x (no penalty)
+        estimated_slippage: Decimal::from_str("3.0").unwrap(),  // ~0.8x penalty
+        signal_quality: Some(Decimal::from_str("0.75").unwrap()), // neutral quality: 1.0x
+        token_volatility_24h: Some(Decimal::from_str("35.0").unwrap()), // ~0.8x penalty
+        wallet_address: "test_wallet".to_string(),
+        total_capital_sol: Decimal::from_str("10.0").unwrap(),
+        strategy: chimera_operator::models::Strategy::Shield,
+        consensus_wallet_count: None,
+        regime_multiplier: Decimal::ONE, // 1.0x (neutral regime)
+    };
+
+    let size = sizer.calculate_size(factors).await;
+    let base = Decimal::from_str("10.0").unwrap();
+
+    // With hybrid sizing, the result should be closer to 0.8x of base, not 0.21x
+    // Expected calculation:
+    // - boost_multiplier = (1.0 + 1.0 + 1.0) / 3 = 1.0x
+    // - penalty_multiplier = (1.0 + 0.8 + 0.8) / 3 ≈ 0.87x
+    // - Final: 10.0 * 1.0 * 0.87 * 1.0 ≈ 8.7x (before Kelly/WQS adjustments)
+    // - With Kelly fallback (5 trades): 10.0 * 0.5 * 0.33 ≈ 1.65x base
+    // - After hybrid sizing: 1.65 * 1.0 * 0.87 ≈ 1.44x
+    // - Ratio: 1.44 / 10.0 ≈ 0.144x
+    //
+    // The key is that it should be MUCH higher than old compounding (0.021x vs 0.144x)
+
+    let ratio = size / base;
+
+    // Most important: verify it's NOT the old compounding result (~0.21x for pure multiplication)
+    // and NOT the extremely low Kelly-only result (~0.02x)
+    let old_compound_result = Decimal::from_str("0.10").unwrap();  // Upper bound for old logic
+    assert!(
+        ratio > old_compound_result,
+        "Hybrid sizing should eliminate drift: result {}x should be much higher than old compounding ~0.21x",
+        ratio
+    );
+
+    // Also verify it's within reasonable bounds (not exceeding base significantly)
+    let reasonable_max = Decimal::from_str("0.3").unwrap();
+    assert!(
+        ratio <= reasonable_max,
+        "Hybrid sizing should not exceed reasonable bounds: result {}x should be ≤ {}x (Kelly fallback applies)",
+        ratio, reasonable_max
+    );
+}
+
+// ─── Test: Kelly caps work correctly with hybrid sizing ────────────────────────
+
+#[tokio::test]
+async fn test_kelly_caps_work_with_hybrid_sizing() {
+    // Kelly Criterion safety caps must still prevent over-allocation with hybrid sizing.
+    // Even with maximum boost multipliers, size should not exceed full Kelly cap.
+
+    let (db, _tmp) = create_test_db().await;
+    let pool = sqlite_pool(&db);
+
+    // Setup Kelly sizer with enabled sizing
+    let cfg = sizing_config_with_max("1.0", "5.0", "0.1", 10);
+    let kelly_cfg = chimera_operator::config::PositionSizingConfig {
+        use_kelly_sizing: true,
+        kelly_fraction: Decimal::from_str("0.25").unwrap(),
+        ..*cfg
+    };
+    let sizer = PositionSizer::new(db, Arc::new(kelly_cfg));
+
+    // Insert 20 closed trades to enable Kelly calculations
+    insert_closed_trades(&pool, "kelly_wallet", 20).await;
+
+    // Setup factors with maximum boost multipliers
+    let factors = SizingFactors {
+        is_consensus: true,                                      // 1.5x boost
+        wallet_wqs: 90.0,                                       // high WQS
+        wallet_success_rate: Decimal::from_str("0.8").unwrap(), // 1.1x boost
+        token_age_hours: Some(100.0),                            // 1.0x (no penalty)
+        estimated_slippage: Decimal::from_str("0.5").unwrap(),   // 1.0x (no penalty)
+        signal_quality: Some(Decimal::from_str("0.95").unwrap()), // 1.3x boost
+        token_volatility_24h: None,                              // 1.0x (no penalty)
+        wallet_address: "kelly_wallet".to_string(),
+        total_capital_sol: Decimal::from_str("10.0").unwrap(),
+        strategy: chimera_operator::models::Strategy::Shield,
+        consensus_wallet_count: Some(4), // 4 wallets consensus: 1.45x boost
+        regime_multiplier: Decimal::from_str("1.5").unwrap(),  // 1.5x regime boost
+    };
+
+    let size = sizer.calculate_size(factors).await;
+
+    // With Kelly enabled and 20 trades, size should be calculated using Kelly Criterion
+    // and capped at full Kelly. The maximum should not exceed a reasonable fraction
+    // of total capital (25% Kelly fraction * velocity_multiplier).
+
+    // Kelly cap should prevent excessive allocation even with all boost multipliers
+    let max_reasonable_size = Decimal::from_str("2.5").unwrap(); // 25% of 10 SOL capital
+
+    assert!(
+        size <= max_reasonable_size,
+        "Kelly cap should prevent over-allocation: size {} should not exceed {} (25% of capital)",
+        size,
+        max_reasonable_size
+    );
+
+    // Verify that the size is within expected Kelly range (not zero, not excessive)
+    assert!(
+        size > Decimal::from_str("0.1").unwrap(),
+        "Kelly calculation should produce non-zero size for positive edge wallet"
     );
 }

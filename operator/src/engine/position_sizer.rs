@@ -261,14 +261,35 @@ impl PositionSizer {
             Decimal::ONE // Default if volatility unknown
         };
 
-        // Apply all multipliers using Decimal arithmetic
-        size *= confidence_mult;
-        size *= performance_mult;
-        size *= token_age_mult;
-        size *= slippage_mult;
-        size *= quality_mult;
-        size *= volatility_mult;
-        size *= factors.regime_multiplier;
+        // Hybrid sizing: eliminate multiplier drift by averaging boosts and penalties separately.
+        // Pure multiplication causes conservative factors to compound (e.g., 0.8⁷ ≈ 0.21x),
+        // resulting in severe under-allocation on profitable signals.
+        //
+        // Solution: Average boost multipliers (≥1.0x) and penalty multipliers (≤1.0x) separately,
+        // then multiply the results. This prevents drift while preserving expressiveness.
+        //
+        // Benefits:
+        // - Conservative factors (0.8x each) now average to 0.8x total, not 0.8⁷ ≈ 0.21x
+        // - Strong signals still get meaningful boosts (average 1.2x - 1.3x)
+        // - Severe penalties (new token, high slippage) still reduce size significantly
+        // - Market regime conditions remain multiplicative (they're structural, not signal-specific)
+
+        // Boost multipliers (≥ 1.0x) - signal strength indicators
+        let boost_multiplier = (
+            confidence_mult.max(Decimal::ONE) +     // consensus boost: 1.0x - 1.5x
+            performance_mult.max(Decimal::ONE) +    // performance boost: 1.0x - 1.1x
+            quality_mult.max(Decimal::ONE)          // quality boost: 1.0x - 1.3x
+        ) / dec!(3.0);  // Average boosts (1.0x - 1.3x range)
+
+        // Penalty multipliers (≤ 1.0x) - risk adjustment factors
+        let penalty_multiplier = (
+            token_age_mult.min(Decimal::ONE) +       // age penalty: 0.5x - 1.0x
+            slippage_mult.min(Decimal::ONE) +       // slippage penalty: 0.5x - 1.0x
+            volatility_mult.min(Decimal::ONE)        // volatility penalty: 0.5x - 1.0x
+        ) / dec!(3.0);  // Average penalties (0.5x - 1.0x range)
+
+        // Apply hybrid sizing with regime multiplicative (special case - market conditions)
+        size = size * boost_multiplier * penalty_multiplier * factors.regime_multiplier;
 
         // When Kelly is active, cap at full Kelly × capital before the strategy_max clamp.
         // Full Kelly already maximises long-term growth; exceeding it guarantees ruin.

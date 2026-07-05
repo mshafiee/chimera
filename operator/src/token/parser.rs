@@ -813,10 +813,11 @@ mod tests {
     #[test]
     fn test_invalid_solana_addresses_rejected() {
         // Test invalid addresses that should be rejected
+        let too_long = "a".repeat(100);
         let invalid_addresses = vec![
             "",                           // Empty
             "short",                      // Too short
-            "a".repeat(100),              // Too long
+            &too_long,                     // Too long
             "invalid@address#",            // Invalid characters
                             // Has special chars
             "ABC DEF",                     // Has space

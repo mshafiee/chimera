@@ -352,6 +352,7 @@ mod tests {
             Decimal::from(100),
             PriceSource::Jupiter,
             now - Duration::hours(1),
+            Some(9), // SOL uses 9 decimals
         );
         detector.update_price_history().await;
 
@@ -360,10 +361,11 @@ mod tests {
             Decimal::from(105),
             PriceSource::Jupiter,
             now - Duration::minutes(30),
+            Some(9), // SOL uses 9 decimals
         );
         detector.update_price_history().await;
 
-        price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now);
+        price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now, Some(9));
         detector.update_price_history().await;
 
         // Even though price went up 10%, span is only 1 hour (< 12 hours required), so must default to Sideways
@@ -385,6 +387,7 @@ mod tests {
             Decimal::from(100),
             PriceSource::Jupiter,
             now - Duration::hours(13),
+            Some(9),
         );
         detector.update_price_history().await;
 
@@ -393,10 +396,11 @@ mod tests {
             Decimal::from(105),
             PriceSource::Jupiter,
             now - Duration::hours(6),
+            Some(9),
         );
         detector.update_price_history().await;
 
-        price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now);
+        price_cache.set_price_with_time(sol_mint, Decimal::from(110), PriceSource::Jupiter, now, Some(9));
         detector.update_price_history().await;
 
         // Span is 13 hours (>= 12 hours) and price went up 10%, so it should detect Bull
@@ -418,14 +422,16 @@ mod tests {
             Decimal::from(100),
             PriceSource::Jupiter,
             now - Duration::hours(1),
+            Some(9),
         );
         price_cache.set_price_with_time(
             token,
             Decimal::from(95),
             PriceSource::Jupiter,
             now - Duration::minutes(30),
+            Some(9),
         );
-        price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now);
+        price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now, Some(9));
 
         // Even though price went down 10%, span is only 1 hour (< 2 hours required), so must default to Sideways
         assert_eq!(detector.detect_token_regime(token), MarketRegime::Sideways);
@@ -446,14 +452,16 @@ mod tests {
             Decimal::from(100),
             PriceSource::Jupiter,
             now - Duration::hours(3),
+            Some(9),
         );
         price_cache.set_price_with_time(
             token,
             Decimal::from(95),
             PriceSource::Jupiter,
             now - Duration::hours(1),
+            Some(9),
         );
-        price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now);
+        price_cache.set_price_with_time(token, Decimal::from(90), PriceSource::Jupiter, now, Some(9));
 
         // Span is 3 hours (>= 2 hours) and price went down 10%, so it should detect Bear
         assert_eq!(detector.detect_token_regime(token), MarketRegime::Bear);
