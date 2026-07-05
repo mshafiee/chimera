@@ -2438,8 +2438,7 @@ fn load_config() -> anyhow::Result<AppConfig> {
     // Security warning for dangerous honeypot detection setting
     if config.token_safety.allow_unlisted_heuristic {
         tracing::error!(
-            "⚠️  SECURITY RISK: allow_unlisted_heuristic is ENABLED. This bypasses DexScreener/Jupiter validation "
-            "and may lead to trading honeypots. Set allow_unlisted_heuristic: false in config.yaml for production safety."
+            "⚠️  SECURITY RISK: allow_unlisted_heuristic is ENABLED. This bypasses DexScreener/Jupiter validation and may lead to trading honeypots. Set allow_unlisted_heuristic: false in config.yaml for production safety."
         );
     }
 

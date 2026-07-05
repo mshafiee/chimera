@@ -281,6 +281,43 @@ impl KellySizer {
     }
 }
 
+impl KellyResult {
+    /// Calculate expected return percentage from Kelly metrics
+    ///
+    /// Formula: (win_rate * avg_win_pct) - (loss_rate * avg_loss_pct)
+    ///
+    /// This represents the expected profit/loss percentage per trade based on
+    /// historical performance. For example, a return of 0.05 means 5% expected
+    /// profit per trade on average.
+    ///
+    /// # Returns
+    /// Expected return as a decimal (e.g., 0.05 = 5%)
+    pub fn expected_return_pct(&self) -> Decimal {
+        let win_rate = self.win_rate;
+        let loss_rate = Decimal::ONE - win_rate;
+        let expected_win = win_rate * self.avg_win;
+        let expected_loss = loss_rate * self.avg_loss;
+        expected_win - expected_loss
+    }
+
+    /// Calculate expected profit in SOL for a given position size
+    ///
+    /// Formula: position_size_sol * expected_return_pct
+    ///
+    /// This gives the actual expected profit in SOL for a specific position size,
+    /// which should be compared against transaction costs (tip, fees, slippage)
+    /// to determine if a trade is mathematically profitable.
+    ///
+    /// # Arguments
+    /// * `position_size_sol` - Position size in SOL
+    ///
+    /// # Returns
+    /// Expected profit in SOL
+    pub fn expected_profit_sol(&self, position_size_sol: Decimal) -> Decimal {
+        position_size_sol * self.expected_return_pct()
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
