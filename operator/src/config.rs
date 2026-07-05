@@ -100,6 +100,9 @@ pub struct AppConfig {
     /// Degradation and reliability monitoring configuration
     #[serde(default)]
     pub degradation: DegradationConfig,
+    /// Execution lock configuration for idempotency
+    #[serde(default)]
+    pub execution_lock: crate::engine::ExecutionLockConfig,
 }
 
 /// HTTP server configuration

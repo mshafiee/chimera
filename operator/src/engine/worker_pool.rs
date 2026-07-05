@@ -98,11 +98,15 @@ impl WorkerPool {
             let active_workers = Arc::clone(&self.active_workers);
             let cancel_token = self.cancel_token.clone();
 
+            // Create worker-specific signal processor with unique worker ID
+            let worker_id_str = format!("worker-{}", worker_id);
+            let worker_processor = signal_processor.with_worker_id(worker_id_str);
+
             self.workers.spawn(async move {
                 Self::worker_loop(
                     worker_id,
                     queue,
-                    signal_processor,
+                    worker_processor,
                     rpc_semaphore,
                     active_workers,
                     cancel_token,

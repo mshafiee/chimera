@@ -6,7 +6,8 @@ mod channel;
 mod degradation;
 pub mod dex_comparator;
 pub mod executor;
-mod jito_searcher;
+mod execution_lock;
+pub mod jito_searcher;
 pub mod kelly_sizer;
 pub mod market_regime;
 pub mod mev_protection;
@@ -32,6 +33,7 @@ pub use channel::*;
 pub use degradation::*;
 pub use dex_comparator::{DexComparator, RouteSelection};
 pub use executor::*;
+pub use execution_lock::{ExecutionLock, ExecutionLockConfig, LockGuard, LockInfo};
 pub use kelly_sizer::{KellyResult, KellySizer};
 pub use market_regime::{MarketRegime, MarketRegimeDetector};
 pub use mev_protection::MevProtection;
@@ -207,6 +209,9 @@ pub struct Engine {
     /// Async write queue for database operations
     #[allow(dead_code)] // Used via SignalProcessor
     write_queue: Option<Arc<crate::state::AsyncWriteQueue>>,
+    /// Execution lock for preventing concurrent processing
+    #[allow(dead_code)] // Used via SignalProcessor
+    execution_lock: Option<Arc<ExecutionLock>>,
 }
 
 impl Engine {
@@ -379,6 +384,17 @@ impl Engine {
             shutdown_token: shutdown_token.clone(),
         };
 
+        // Create execution lock if enabled in configuration
+        let execution_lock_config = config.execution_lock.clone();
+        let execution_lock = if execution_lock_config.enabled {
+            let lock_metrics = metrics.as_ref().map(|m| {
+                Arc::new(crate::metrics::ExecutionLockMetrics::new())
+            });
+            Some(Arc::new(ExecutionLock::new(execution_lock_config, lock_metrics)))
+        } else {
+            None
+        };
+
         let signal_processor = signal_pipeline::SignalProcessor::new(
             db.clone(),
             executor_arc.clone(),
@@ -391,7 +407,15 @@ impl Engine {
             notifier.clone(),
             state_registry.clone(),
             write_queue.clone(),
-        );
+        )
+        .with_worker_id("sequential".to_string()); // Set worker ID for sequential processing
+
+        // Add execution lock to signal processor if enabled
+        let signal_processor = if let Some(ref lock) = execution_lock {
+            signal_processor.with_execution_lock(lock.clone())
+        } else {
+            signal_processor
+        };
 
         let engine = Self {
             config,
@@ -409,6 +433,7 @@ impl Engine {
             shutdown_token: shutdown_token.clone(),
             state_registry: state_registry.clone(),
             write_queue: write_queue.clone(),
+            execution_lock,
         };
 
         (engine, handle)
@@ -444,6 +469,31 @@ impl Engine {
                     interval.tick().await;
                     let depths = queue_clone.depths();
                     metrics.queue_depth.set(depths.total as i64);
+                }
+            });
+        }
+
+        // Spawn execution lock cleanup task
+        if let Some(ref execution_lock) = self.execution_lock {
+            let lock_clone = execution_lock.clone();
+            let cleanup_token = self.shutdown_token.clone();
+            let cleanup_interval = std::time::Duration::from_secs(self.config.execution_lock.cleanup_interval_seconds);
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(cleanup_interval);
+                loop {
+                    tokio::select! {
+                        _ = cleanup_token.cancelled() => {
+                            tracing::info!("Shutting down execution lock cleanup task");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let cleaned = lock_clone.cleanup_expired();
+                            if cleaned > 0 {
+                                tracing::debug!(cleaned = cleaned, "Execution lock cleanup completed");
+                            }
+                        }
+                    }
                 }
             });
         }
@@ -515,6 +565,31 @@ impl Engine {
                     interval.tick().await;
                     let depths = queue_clone.depths();
                     metrics.queue_depth.set(depths.total as i64);
+                }
+            });
+        }
+
+        // Spawn execution lock cleanup task
+        if let Some(ref execution_lock) = self.execution_lock {
+            let lock_clone = execution_lock.clone();
+            let cleanup_token = self.shutdown_token.clone();
+            let cleanup_interval = std::time::Duration::from_secs(self.config.execution_lock.cleanup_interval_seconds);
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(cleanup_interval);
+                loop {
+                    tokio::select! {
+                        _ = cleanup_token.cancelled() => {
+                            tracing::info!("Shutting down execution lock cleanup task");
+                            break;
+                        }
+                        _ = interval.tick() => {
+                            let cleaned = lock_clone.cleanup_expired();
+                            if cleaned > 0 {
+                                tracing::debug!(cleaned = cleaned, "Execution lock cleanup completed");
+                            }
+                        }
+                    }
                 }
             });
         }

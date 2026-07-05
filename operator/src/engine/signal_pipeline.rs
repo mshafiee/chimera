@@ -41,6 +41,11 @@ pub struct SignalProcessor {
     /// Async write queue for non-blocking database operations
     #[allow(dead_code)] // Used when available
     write_queue: Option<Arc<crate::state::AsyncWriteQueue>>,
+    /// Execution lock for preventing concurrent processing of same trade_uuid
+    #[allow(dead_code)] // Used when available
+    execution_lock: Option<Arc<crate::engine::ExecutionLock>>,
+    /// Worker ID for lock attribution (set by worker pool or engine)
+    worker_id: String,
 }
 
 impl SignalProcessor {
@@ -70,7 +75,21 @@ impl SignalProcessor {
             notifier,
             state_registry,
             write_queue,
+            execution_lock: None, // Set via with_execution_lock()
+            worker_id: "sequential".to_string(), // Default worker ID
         }
+    }
+
+    /// Set the execution lock for this signal processor
+    pub fn with_execution_lock(mut self, execution_lock: Arc<crate::engine::ExecutionLock>) -> Self {
+        self.execution_lock = Some(execution_lock);
+        self
+    }
+
+    /// Set the worker ID for this signal processor
+    pub fn with_worker_id(mut self, worker_id: String) -> Self {
+        self.worker_id = worker_id;
+        self
     }
 
     /// Run the full signal processing pipeline.
@@ -88,6 +107,37 @@ impl SignalProcessor {
             token = %signal.payload.token,
             "Processing signal"
         );
+
+        // ACQUIRE EXECUTION LOCK - must happen before any state changes
+        // This prevents concurrent processing of the same trade_uuid
+        let _lock_guard = if let Some(ref execution_lock) = self.execution_lock {
+            match execution_lock.try_acquire(&trade_uuid, &self.worker_id) {
+                Some(guard) => {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        worker_id = %self.worker_id,
+                        "Execution lock acquired"
+                    );
+                    Some(guard)
+                }
+                None => {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        worker_id = %self.worker_id,
+                        "Trade already being processed by another worker, skipping"
+                    );
+                    // Early exit - no processing occurs
+                    return;
+                }
+            }
+        } else {
+            // No execution lock configured, proceed without locking
+            tracing::trace!(
+                trade_uuid = %trade_uuid,
+                "No execution lock configured, proceeding without locking"
+            );
+            None
+        };
 
         // Update status to EXECUTING
         // First, update in-memory registry for immediate effect

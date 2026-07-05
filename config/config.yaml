@@ -203,3 +203,9 @@ mev_protection:
   exit_tip_sol: 0.0055  # Reduced by 20% from 0.007
   consensus_tip_sol: 0.0024  # Reduced by 20% from 0.003
   standard_tip_sol: 0.0012  # Reduced by 20% from 0.0015
+
+# Execution lock configuration for signal processing idempotency
+execution_lock:
+  enabled: true                    # Enable execution-level locking (prevents duplicate processing)
+  lock_timeout_seconds: 120        # Lock timeout in seconds (auto-expiration for crash safety)
+  cleanup_interval_seconds: 30    # Background cleanup interval in seconds

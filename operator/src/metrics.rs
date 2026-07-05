@@ -9,7 +9,7 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{
-    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, Opts, Registry,
+    Encoder, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts, Registry,
     TextEncoder,
 };
 use std::sync::Arc;
@@ -66,6 +66,100 @@ pub struct MetricsState {
     pub jito_fallback_total: IntCounterVec,
     /// Jito retry counter (by attempt number)
     pub jito_retry_total: IntCounterVec,
+}
+
+/// Execution lock metrics for monitoring lock operations
+pub struct ExecutionLockMetrics {
+    /// Lock acquisition success counter
+    pub acquire_success: prometheus::IntCounter,
+    /// Lock acquisition failure counter
+    pub acquire_failed: prometheus::IntCounter,
+    /// Lock acquisition disabled counter
+    pub acquire_disabled: prometheus::IntCounter,
+    /// Lock release counter
+    pub released: prometheus::IntCounter,
+    /// Lock force release counter
+    pub force_released: prometheus::IntCounter,
+    /// Lock expired and reclaimed counter
+    pub expired_reclaimed: prometheus::IntCounter,
+    /// Lock expired and cleaned up counter
+    pub expired_cleaned: prometheus::IntCounter,
+    /// Lock held duration histogram (in seconds)
+    pub held_duration: Histogram,
+}
+
+impl ExecutionLockMetrics {
+    /// Create new execution lock metrics (minimal stub for now)
+    pub fn new() -> Self {
+        Self {
+            acquire_success: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_acquire_success", "Successful lock acquisitions")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            acquire_failed: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_acquire_failed", "Failed lock acquisitions")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            acquire_disabled: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_acquire_disabled", "Disabled lock acquisitions")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            released: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_released", "Lock releases")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            force_released: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_force_released", "Force lock releases")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            expired_reclaimed: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_expired_reclaimed", "Expired locks reclaimed")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            expired_cleaned: IntCounter::with_opts(
+                Opts::new("chimera_execution_lock_expired_cleaned", "Expired locks cleaned up")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            held_duration: Histogram::with_opts(HistogramOpts::new(
+                "chimera_execution_lock_held_duration_seconds",
+                "Duration in seconds that locks are held",
+            ))
+            .unwrap_or_else(|_| Histogram::with_opts(HistogramOpts::new("dummy", "dummy")).unwrap()),
+        }
+    }
+
+    /// Increment successful lock acquisition counter
+    pub fn increment_lock_acquire_success(&self) {
+        let _ = self.acquire_success.inc();
+    }
+
+    /// Increment failed lock acquisition counter
+    pub fn increment_lock_acquire_failed(&self) {
+        let _ = self.acquire_failed.inc();
+    }
+
+    /// Increment disabled lock acquisition counter
+    pub fn increment_lock_acquire_disabled(&self) {
+        let _ = self.acquire_disabled.inc();
+    }
+
+    /// Increment lock release counter
+    pub fn increment_lock_released(&self) {
+        let _ = self.released.inc();
+    }
+
+    /// Increment force release counter
+    pub fn increment_lock_force_released(&self) {
+        let _ = self.force_released.inc();
+    }
+
+    /// Increment expired lock reclaimed counter
+    pub fn increment_lock_expired_reclaimed(&self) {
+        let _ = self.expired_reclaimed.inc();
+    }
+
+    /// Increment expired lock cleaned up counter
+    pub fn increment_lock_expired_cleaned(&self) {
+        let _ = self.expired_cleaned.inc();
+    }
+
+    /// Record lock held duration
+    pub fn record_lock_held_duration(&self, duration: std::time::Duration) {
+        self.held_duration.observe(duration.as_secs_f64());
+    }
 }
 
 impl MetricsState {
