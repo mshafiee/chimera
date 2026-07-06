@@ -14,7 +14,7 @@
                 lint lint-operator lint-scout lint-web clean deploy help \
                 dev dev-operator dev-web db-init db-migrate preflight \
                 rollback backup-verify validation validation-match validation-report \
-                test-prediction-validation schema-check \
+                test-prediction-validation schema-check gen-schema \
                 release release-patch release-minor release-major version-check \
                 version changelog
 
@@ -298,6 +298,13 @@ schema-check:
 	@echo "Checking schema consistency..."
 	@echo "  schema/wallets.sql vs schema.sql: check manually for drift"
 	@echo "Schema check complete."
+
+# Schema generation from YAML definitions
+.PHONY: gen-schema
+gen-schema:
+	@echo "Generating schema files from YAML definitions..."
+	@python3 tools/gen_schema.py
+	@echo "Schema generation complete."
 
 # ============================================================================
 # VERSIONING & RELEASES

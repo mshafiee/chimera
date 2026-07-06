@@ -1,0 +1,16 @@
+table: wallet_copy_performance
+description: "Per-wallet copy trading metrics"
+columns:
+  - {name: wallet_address, type: text, pk: true}
+  - {name: copy_pnl_7d, type: decimal(30,18), default: "0.0"}
+  - {name: copy_pnl_30d, type: decimal(30,18), default: "0.0"}
+  - {name: signal_success_rate, type: decimal(5,4), default: "0.0"}
+  - {name: avg_return_per_trade, type: decimal(10,4), default: "0.0"}
+  - {name: total_trades, type: int, default: 0}
+  - {name: winning_trades, type: int, default: 0}
+  - {name: last_updated, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_wallet_copy_performance_pnl, columns: [copy_pnl_7d], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

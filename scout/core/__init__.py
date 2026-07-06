@@ -21,7 +21,7 @@ elif __name__ == "scout.core":
 
 from .analyzer import WalletAnalyzer
 from .backtester import BacktestSimulator
-from .db_writer import RosterWriter, WalletRecord, write_roster_atomic
+from .roster_writer_db import WalletRecord, write_wallets_to_db
 from .birdeye_client import BirdeyeClient
 from .liquidity import LiquidityProvider
 from .models import (
@@ -44,7 +44,7 @@ for _sub in [
     "analyzer",
     "backtester",
     "birdeye_client",
-    "db_writer",
+    "roster_writer_db",
     "helius_client",
     "liquidity",
     "models",
@@ -62,9 +62,8 @@ __all__ = [
     # Backtester
     "BacktestSimulator",
     # DB Writer
-    "RosterWriter",
     "WalletRecord",
-    "write_roster_atomic",
+    "write_wallets_to_db",
     # Liquidity
     "LiquidityProvider",
     "LiquidityData",

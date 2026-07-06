@@ -1,0 +1,19 @@
+table: webhook_lifecycle_audit
+description: "Track webhook registration and health"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: action, type: text, not_null: true, check: "action IN ('register', 'update', 'delete', 'toggle', 'health_check', 'reconcile')"}
+  - {name: status, type: text, not_null: true, check: "status IN ('success', 'failed', 'pending', 'retry')"}
+  - {name: webhook_id, type: text}
+  - {name: details, type: text}
+  - {name: error_message, type: text}
+  - {name: duration_ms, type: int}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_webhook_lifecycle_audit_wallet, columns: [wallet_address, created_at], desc: true}
+  - {name: idx_webhook_lifecycle_audit_action, columns: [action, created_at], desc: true}
+  - {name: idx_webhook_lifecycle_audit_status, columns: [status, created_at], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

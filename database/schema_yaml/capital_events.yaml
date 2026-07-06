@@ -1,0 +1,19 @@
+table: capital_events
+description: "Capital deposits and withdrawals"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: event_type, type: text, not_null: true, check: "event_type IN ('DEPOSIT', 'WITHDRAWAL', 'PROFIT_DISTRIBUTION', 'LOSS_REALIZATION')"}
+  - {name: amount_sol, type: decimal(30,18), not_null: true}
+  - {name: amount_usd, type: decimal(30,18)}
+  - {name: balance_before_sol, type: decimal(30,18)}
+  - {name: balance_after_sol, type: decimal(30,18)}
+  - {name: tx_signature, type: text}
+  - {name: notes, type: text}
+  - {name: timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_capital_events_wallet, columns: [wallet_address, timestamp], desc: true}
+  - {name: idx_capital_events_type, columns: [event_type, timestamp], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

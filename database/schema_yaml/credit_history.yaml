@@ -1,0 +1,15 @@
+table: credit_history
+description: "Credit usage history for rate limiting"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: credits_used, type: int, not_null: true}
+  - {name: credits_remaining, type: int, not_null: true}
+  - {name: operation_type, type: text, not_null: true}
+  - {name: timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_credit_history_wallet, columns: [wallet_address, timestamp], desc: true}
+  - {name: idx_credit_history_timestamp, columns: [timestamp], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

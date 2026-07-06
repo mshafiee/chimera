@@ -1,0 +1,8 @@
+table: schema_migrations
+description: "Schema migration tracking (idempotent guard for migration files)"
+columns:
+  - {name: version, type: text, pk: true}
+  - {name: applied_at, type: timestamp, not_null: true, default: "CURRENT_TIMESTAMP"}
+indexes: []
+foreign_keys: []
+triggers: []

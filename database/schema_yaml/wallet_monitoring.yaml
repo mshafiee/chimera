@@ -1,0 +1,27 @@
+table: wallet_monitoring
+description: "Track webhook subscriptions and polling state"
+columns:
+  - {name: wallet_address, type: text, pk: true}
+  - {name: helius_webhook_id, type: text}
+  - {name: rpc_polling_active, type: bool, default: false}
+  - {name: last_transaction_signature, type: text}
+  - {name: last_monitored_at, type: timestamp}
+  - {name: monitoring_enabled, type: bool, default: true}
+  - {name: webhook_status, type: text, default: "'active'", check: "webhook_status IN ('active', 'paused', 'failed', 'orphaned')"}
+  - {name: webhook_registered_at, type: timestamp}
+  - {name: webhook_last_health_check, type: timestamp}
+  - {name: webhook_health_status, type: text, default: "'unknown'", check: "webhook_health_status IN ('healthy', 'unhealthy', 'unknown', 'timeout', 'error')"}
+  - {name: registration_attempts, type: int, default: 0}
+  - {name: last_registration_error, type: text}
+  - {name: last_updated_url, type: text}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: updated_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_wallet_monitoring_enabled, columns: [monitoring_enabled], where: "monitoring_enabled = true"}
+  - {name: idx_wallet_monitoring_webhook_status, columns: [webhook_status], where: "webhook_status = 'active'"}
+  - {name: idx_wallet_monitoring_health_check, columns: [webhook_last_health_check]}
+  - {name: idx_wallet_monitoring_helius_webhook_id, columns: [helius_webhook_id], where: "helius_webhook_id IS NOT NULL"}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers:
+  - {name: wallet_monitoring_updated_at, column: updated_at, pg_only: true}

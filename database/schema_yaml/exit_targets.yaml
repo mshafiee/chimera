@@ -1,0 +1,25 @@
+table: exit_targets
+description: "Position-level profit targets and stops"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: trade_uuid, type: text, not_null: true, unique: true}
+  - {name: entry_price, type: decimal(30,18), not_null: true}
+  - {name: entry_amount_sol, type: decimal(30,18), not_null: true}
+  - {name: profit_targets, type: json}
+  - {name: targets_hit, type: json}
+  - {name: trailing_stop_active, type: bool, default: false}
+  - {name: trailing_stop_price, type: decimal(30,18)}
+  - {name: peak_price, type: decimal(30,18)}
+  - {name: peak_profit_percent, type: decimal(10,4)}
+  - {name: stop_loss_price, type: decimal(30,18)}
+  - {name: remaining_fraction, type: decimal(5,4), not_null: true, default: "1.0"}
+  - {name: entry_time, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: last_updated, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_exit_targets_trade, columns: [trade_uuid]}
+  - {name: idx_exit_targets_targets_gin, columns: [profit_targets], type: gin, pg_only: true}
+  - {name: idx_exit_targets_hits_gin, columns: [targets_hit], type: gin, pg_only: true}
+foreign_keys:
+  - {column: trade_uuid, ref_table: trades, ref_col: trade_uuid, on_delete: CASCADE}
+triggers:
+  - {name: exit_targets_updated_at, column: last_updated, pg_only: true}

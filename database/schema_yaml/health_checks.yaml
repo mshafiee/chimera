@@ -1,0 +1,15 @@
+table: health_checks
+description: "System health check results"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: check_name, type: text, not_null: true}
+  - {name: status, type: text, not_null: true, check: "status IN ('HEALTHY', 'DEGRADED', 'UNHEALTHY', 'UNKNOWN')"}
+  - {name: response_time_ms, type: int}
+  - {name: details_json, type: json}
+  - {name: timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_health_checks_name, columns: [check_name, timestamp], desc: true}
+  - {name: idx_health_checks_status, columns: [status, timestamp], desc: true}
+  - {name: idx_health_checks_timestamp, columns: [timestamp], desc: true}
+foreign_keys: []
+triggers: []

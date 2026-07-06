@@ -1,0 +1,17 @@
+table: historical_liquidity
+description: "Historical liquidity data for backtesting and validation"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: token_address, type: text, not_null: true}
+  - {name: liquidity_usd, type: decimal(30,18), not_null: true}
+  - {name: price_usd, type: decimal(30,18)}
+  - {name: volume_24h_usd, type: decimal(30,18)}
+  - {name: timestamp, type: timestamp, not_null: true}
+  - {name: source, type: text}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_historical_liquidity_token_time, columns: [token_address, timestamp], desc: true}
+  - {name: idx_historical_liquidity_timestamp, columns: [timestamp], desc: true}
+  - {name: idx_historical_liquidity_brin, columns: [timestamp], type: brin, pg_only: true}
+foreign_keys: []
+triggers: []

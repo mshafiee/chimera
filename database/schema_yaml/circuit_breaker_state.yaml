@@ -1,0 +1,13 @@
+table: circuit_breaker_state
+description: "Single-row table read on startup to restore circuit breaker state"
+columns:
+  - {name: id, type: int, pk: true}
+  - {name: state, type: text, not_null: true, default: "'Active'"}
+  - {name: tripped_at, type: timestamp}
+  - {name: trip_reason, type: text}
+  - {name: updated_at, type: timestamp, not_null: true, default: "CURRENT_TIMESTAMP"}
+indexes: []
+foreign_keys: []
+triggers: []
+seed:
+  - {id: 1, state: "'Active'"}

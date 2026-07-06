@@ -1,0 +1,19 @@
+table: growth_history
+description: "Account growth tracking over time"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: timestamp, type: timestamp, not_null: true}
+  - {name: balance_sol, type: decimal(30,18), not_null: true}
+  - {name: balance_usd, type: decimal(30,18)}
+  - {name: total_pnl_sol, type: decimal(30,18)}
+  - {name: total_pnl_usd, type: decimal(30,18)}
+  - {name: trade_count, type: int, default: 0}
+  - {name: win_count, type: int, default: 0}
+  - {name: loss_count, type: int, default: 0}
+indexes:
+  - {name: idx_growth_history_wallet, columns: [wallet_address, timestamp], desc: true}
+  - {name: idx_growth_history_timestamp, columns: [timestamp], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

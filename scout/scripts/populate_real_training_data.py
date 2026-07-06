@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from scout.core.helius_client import HeliusClient
 from scout.core.analyzer import WalletAnalyzer
-from scout.core.db_writer import WalletRecord, write_roster_atomic
+from scout.core.roster_writer_db import WalletRecord, write_wallets_to_db
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -147,10 +147,10 @@ async def populate_real_wallet_data(
 
     logger.info(f"Writing {len(wallet_records)} real wallet records to database...")
     try:
-        success = write_roster_atomic(wallet_records, output_db)
+        success_count = write_wallets_to_db(wallet_records)
 
-        if success:
-            logger.info(f"✓ Successfully populated {len(wallet_records)} real wallet records")
+        if success_count > 0:
+            logger.info(f"✓ Successfully populated {success_count}/{len(wallet_records)} real wallet records")
             logger.info(f"  Skipped: {skipped} (below minimum trade count)")
             logger.info(f"  Failed: {failed} (analysis errors)")
 
@@ -167,7 +167,7 @@ async def populate_real_wallet_data(
             if trade_counts:
                 logger.info(f"  Trade Count 30d: {sum(trade_counts)/len(trade_counts):.1f} avg (min={min(trade_counts)}, max={max(trade_counts)})")
 
-            return len(wallet_records)
+            return success_count
         else:
             logger.error("Failed to write to database")
             return 0

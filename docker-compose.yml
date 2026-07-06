@@ -23,13 +23,13 @@ services:
       - POSTGRES_MAX_WAL_SENDERS=3
       - POSTGRES_WAL_KEEP_SIZE=256MB
     volumes:
-      # Data persistence
-      - postgres-data:/var/lib/postgresql/data
-      # Initialization scripts
-      - ./database/schema_postgres.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
-      - ./database/migrations_postgresql:/docker-entrypoint-initdb.d/migrations:ro
-      # Backup scripts
-      - ./ops/backup-postgres.sh:/usr/local/bin/backup-postgres.sh:ro
+       # Data persistence
+       - postgres-data:/var/lib/postgresql/data
+       # Initialization scripts (using generated schema)
+       - ./operator/migrations_postgres/0001_full_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+       - ./scout/schema_scout_tables.sql:/docker-entrypoint-initdb.d/02-scout-tables.sql:ro
+       # Backup scripts
+       - ./ops/backup-postgres.sh:/usr/local/bin/backup-postgres.sh:ro
     command:
       - "postgres"
       - "-c"
@@ -189,30 +189,24 @@ services:
       - docker/env.${COMPOSE_PROFILE:-devnet}
       - docker/env.${COMPOSE_PROFILE:-devnet}.local
     depends_on:
-      - operator
-      - postgres
-      - redis
+       - operator
+       - postgres
+       - redis
     networks:
-      - chimera-network
-    # Run scout on a schedule (daily at 2 AM UTC) with automatic roster merge
+        - chimera-network
+    # Run scout on a schedule (daily at 2 AM UTC)
     command: >
-      sh -c "
-        while true; do
-          echo '[Scout] Starting wallet analysis...';
-          python main.py --output /app/data/roster_new.db --skip-backtest || true;
-          if [ -f /app/data/roster_new.db ]; then
-            echo '[Scout] Analysis complete, triggering roster merge...';
-            curl -X POST http://chimera-operator:8080/api/v1/roster/merge -H 'Content-Type: application/json' -d '{}' || echo '[Scout] Merge API call failed';
-          fi;
-          echo '[Scout] Sleeping for 24 hours...';
+       sh -c "
+         echo '[Scout] Starting wallet analysis...';
+         python main.py || true;
+         echo '[Scout] Analysis complete, sleeping for 24 hours...';
           sleep 86400;
-        done
-      "
+        "
     profiles:
-      - devnet
-      - mainnet-paper
-      - mainnet-prod
-      - evaluation
+       - devnet
+       - mainnet-paper
+       - mainnet-prod
+       - evaluation
 
   # Web Dashboard
   web:

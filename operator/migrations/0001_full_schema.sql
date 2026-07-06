@@ -1,0 +1,420 @@
+-- Chimera Database Schema - SQLite
+-- Generated from database/schema_yaml/*.yaml
+-- Financial values stored as TEXT (Decimal strings) to avoid IEEE 754 precision loss
+
+-- =============================================================================
+-- Schema migration tracking (idempotent guard for migration files)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
+-- Primary record of all trading signals received
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT NOT NULL UNIQUE,
+    wallet_address TEXT NOT NULL,
+    token_address TEXT NOT NULL,
+    token_symbol TEXT,
+    strategy TEXT NOT NULL CHECK(strategy IN ('SHIELD', 'SPEAR', 'EXIT')),
+    side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
+    amount_sol TEXT NOT NULL,
+    price_at_signal TEXT,
+    tx_signature TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'QUEUED', 'EXECUTING', 'ACTIVE', 'EXITING', 'CLOSED', 'FAILED', 'RETRY', 'DEAD_LETTER')),
+    retry_count INTEGER DEFAULT 0,
+    error_message TEXT,
+    pnl_sol TEXT,
+    pnl_usd TEXT,
+    jito_tip_sol TEXT DEFAULT 0,
+    dex_fee_sol TEXT DEFAULT 0,
+    slippage_cost_sol TEXT DEFAULT 0,
+    total_cost_sol TEXT DEFAULT 0,
+    network_fee_sol TEXT DEFAULT 0,
+    net_pnl_sol TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_trades_status ON trades (status);
+CREATE INDEX IF NOT EXISTS idx_trades_status_queued ON trades (status) WHERE status = 'QUEUED';
+CREATE INDEX IF NOT EXISTS idx_trades_wallet ON trades (wallet_address);
+CREATE INDEX IF NOT EXISTS idx_trades_token ON trades (token_address);
+CREATE INDEX IF NOT EXISTS idx_trades_created ON trades (created_at DESC);
+
+-- =============================================================================
+-- Active positions being tracked
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT NOT NULL UNIQUE,
+    wallet_address TEXT NOT NULL,
+    token_address TEXT NOT NULL,
+    token_symbol TEXT,
+    strategy TEXT NOT NULL CHECK(strategy IN ('SHIELD', 'SPEAR')),
+    entry_amount_sol TEXT NOT NULL,
+    entry_price TEXT NOT NULL,
+    entry_tx_signature TEXT NOT NULL,
+    current_price TEXT,
+    unrealized_pnl_sol TEXT,
+    unrealized_pnl_percent TEXT,
+    state TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(state IN ('ACTIVE', 'EXITING', 'CLOSED')),
+    exit_price TEXT,
+    exit_tx_signature TEXT,
+    realized_pnl_sol TEXT,
+    realized_pnl_usd TEXT,
+    realized_net_pnl_sol TEXT,
+    entry_sol_price_usd TEXT,
+    token_amount TEXT,
+    opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    closed_at TIMESTAMP,
+    FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_positions_state ON positions (state);
+CREATE INDEX IF NOT EXISTS idx_positions_state_updated ON positions (state, last_updated);
+CREATE INDEX IF NOT EXISTS idx_positions_wallet ON positions (wallet_address);
+CREATE INDEX IF NOT EXISTS idx_positions_wallet_token ON positions (wallet_address, token_address);
+CREATE INDEX IF NOT EXISTS idx_positions_closed_at ON positions (closed_at) WHERE state = 'CLOSED';
+
+-- =============================================================================
+-- Tracked wallets with WQS scores (managed by Scout)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS wallets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    address TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL DEFAULT 'CANDIDATE' CHECK(status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')),
+    wqs_score REAL,
+    wqs_confidence REAL,
+    roi_7d TEXT,
+    roi_30d TEXT,
+    trade_count_30d INTEGER,
+    win_rate REAL,
+    max_drawdown_30d TEXT,
+    avg_trade_size_sol TEXT,
+    avg_win_sol TEXT,
+    avg_loss_sol TEXT,
+    profit_factor TEXT,
+    realized_pnl_30d_sol TEXT,
+    last_trade_at TIMESTAMP,
+    promoted_at TIMESTAMP,
+    ttl_expires_at TIMESTAMP,
+    notes TEXT,
+    archetype TEXT,
+    avg_entry_delay_seconds REAL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallets_status ON wallets (status);
+CREATE INDEX IF NOT EXISTS idx_wallets_wqs ON wallets (wqs_score DESC);
+
+-- =============================================================================
+-- Failed operations for analysis/retry
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS dead_letter_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT,
+    payload TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    error_details TEXT,
+    source_ip TEXT,
+    retry_count INTEGER DEFAULT 0,
+    can_retry INTEGER DEFAULT TRUE,
+    received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_dlq_reason ON dead_letter_queue (reason);
+CREATE INDEX IF NOT EXISTS idx_dlq_received ON dead_letter_queue (received_at DESC);
+
+-- =============================================================================
+-- Track all configuration changes
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS config_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    changed_by TEXT NOT NULL,
+    change_reason TEXT,
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_config_audit_key ON config_audit (key);
+CREATE INDEX IF NOT EXISTS idx_config_audit_changed ON config_audit (changed_at DESC);
+
+-- =============================================================================
+-- Single-row table written synchronously before returning from kill-switch API handler
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS kill_switch_state (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    state TEXT NOT NULL DEFAULT 'INACTIVE' CHECK(state IN ('ACTIVE', 'INACTIVE')),
+    changed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    changed_by TEXT NOT NULL DEFAULT 'SYSTEM',
+    reason TEXT
+);
+
+-- =============================================================================
+-- Single-row table read on startup to restore circuit breaker state
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+    id INTEGER PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'Active',
+    tripped_at TIMESTAMP,
+    trip_reason TEXT,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT OR IGNORE INTO circuit_breaker_state (id, state) VALUES (1, 'Active');
+
+-- =============================================================================
+-- Authorization for API access
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS admin_wallets (
+    wallet_address TEXT PRIMARY KEY,
+    role TEXT NOT NULL DEFAULT 'readonly' CHECK(role IN ('admin', 'operator', 'readonly')),
+    added_by TEXT NOT NULL,
+    notes TEXT,
+    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
+-- For dynamic tip calculation (cold start persistence)
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS jito_tip_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tip_amount_sol TEXT NOT NULL,
+    bundle_signature TEXT,
+    strategy TEXT CHECK(strategy IN ('SHIELD', 'SPEAR')),
+    success INTEGER DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_jito_tip_created ON jito_tip_history (created_at DESC);
+
+-- =============================================================================
+-- Compare DB state vs on-chain state
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS reconciliation_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT NOT NULL,
+    expected_state TEXT NOT NULL,
+    actual_on_chain TEXT,
+    discrepancy TEXT,
+    on_chain_tx_signature TEXT,
+    on_chain_amount_sol TEXT,
+    expected_amount_sol TEXT,
+    resolved_at TIMESTAMP,
+    resolved_by TEXT,
+    notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_reconciliation_unresolved ON reconciliation_log (resolved_at) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_reconciliation_trade ON reconciliation_log (trade_uuid);
+
+-- =============================================================================
+-- Backups tracking
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS backups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    size_bytes INTEGER,
+    checksum TEXT,
+    backup_type TEXT DEFAULT 'SCHEDULED',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
+-- Historical liquidity data for backtesting and validation
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS historical_liquidity (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    liquidity_usd TEXT NOT NULL,
+    price_usd TEXT,
+    volume_24h_usd TEXT,
+    timestamp TIMESTAMP NOT NULL,
+    source TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_historical_liquidity_token_time ON historical_liquidity (token_address, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_historical_liquidity_timestamp ON historical_liquidity (timestamp DESC);
+
+-- =============================================================================
+-- Track webhook subscriptions and polling state
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS wallet_monitoring (
+    wallet_address TEXT PRIMARY KEY,
+    helius_webhook_id TEXT,
+    rpc_polling_active INTEGER DEFAULT 0,
+    last_transaction_signature TEXT,
+    last_monitored_at TIMESTAMP,
+    monitoring_enabled INTEGER DEFAULT TRUE,
+    webhook_status TEXT DEFAULT 'active' CHECK(webhook_status IN ('active', 'paused', 'failed', 'orphaned')),
+    webhook_registered_at TIMESTAMP,
+    webhook_last_health_check TIMESTAMP,
+    webhook_health_status TEXT DEFAULT 'unknown' CHECK(webhook_health_status IN ('healthy', 'unhealthy', 'unknown', 'timeout', 'error')),
+    registration_attempts INTEGER DEFAULT 0,
+    last_registration_error TEXT,
+    last_updated_url TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_monitoring_enabled ON wallet_monitoring (monitoring_enabled) WHERE monitoring_enabled = true;
+CREATE INDEX IF NOT EXISTS idx_wallet_monitoring_webhook_status ON wallet_monitoring (webhook_status) WHERE webhook_status = 'active';
+CREATE INDEX IF NOT EXISTS idx_wallet_monitoring_health_check ON wallet_monitoring (webhook_last_health_check);
+CREATE INDEX IF NOT EXISTS idx_wallet_monitoring_helius_webhook_id ON wallet_monitoring (helius_webhook_id) WHERE helius_webhook_id IS NOT NULL;
+
+-- =============================================================================
+-- Position-level profit targets and stops
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS exit_targets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_uuid TEXT NOT NULL UNIQUE,
+    entry_price TEXT NOT NULL,
+    entry_amount_sol TEXT NOT NULL,
+    profit_targets TEXT,
+    targets_hit TEXT,
+    trailing_stop_active INTEGER DEFAULT 0,
+    trailing_stop_price TEXT,
+    peak_price TEXT,
+    peak_profit_percent TEXT,
+    stop_loss_price TEXT,
+    remaining_fraction TEXT NOT NULL DEFAULT '1.0',
+    entry_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (trade_uuid) REFERENCES trades(trade_uuid) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_exit_targets_trade ON exit_targets (trade_uuid);
+
+-- =============================================================================
+-- Multi-wallet signal tracking
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS signal_aggregation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_address TEXT NOT NULL,
+    wallet_address TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK(direction IN ('BUY', 'SELL')),
+    amount_sol TEXT NOT NULL,
+    signature TEXT,
+    is_consensus INTEGER DEFAULT 0,
+    consensus_wallet_count INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_aggregation_unique_with_sig ON signal_aggregation (token_address, wallet_address, signature) WHERE signature IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signal_aggregation_unique_no_sig ON signal_aggregation (token_address, wallet_address, direction, created_at) WHERE signature IS NULL;
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_token_time ON signal_aggregation (token_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus ON signal_aggregation (is_consensus) WHERE is_consensus = true;
+
+-- =============================================================================
+-- Per-wallet copy trading metrics
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS wallet_copy_performance (
+    wallet_address TEXT PRIMARY KEY,
+    copy_pnl_7d TEXT DEFAULT '0.0',
+    copy_pnl_30d TEXT DEFAULT '0.0',
+    signal_success_rate TEXT DEFAULT '0.0',
+    avg_return_per_trade TEXT DEFAULT '0.0',
+    total_trades INTEGER DEFAULT 0,
+    winning_trades INTEGER DEFAULT 0,
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_copy_performance_pnl ON wallet_copy_performance (copy_pnl_7d DESC);
+
+-- =============================================================================
+-- Credit usage and rate tracking
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS rate_limit_metrics (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    metric_type TEXT NOT NULL,
+    requests_per_second TEXT,
+    total_credits_used INTEGER,
+    rate_limit_hits INTEGER DEFAULT 0,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_rate_limit_metrics_time ON rate_limit_metrics (timestamp DESC);
+
+-- =============================================================================
+-- Track webhook registration and health
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS webhook_lifecycle_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    wallet_address TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('register', 'update', 'delete', 'toggle', 'health_check', 'reconcile')),
+    status TEXT NOT NULL CHECK(status IN ('success', 'failed', 'pending', 'retry')),
+    webhook_id TEXT,
+    details TEXT,
+    error_message TEXT,
+    duration_ms INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (wallet_address) REFERENCES wallets(address) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_lifecycle_audit_wallet ON webhook_lifecycle_audit (wallet_address, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_lifecycle_audit_action ON webhook_lifecycle_audit (action, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_lifecycle_audit_status ON webhook_lifecycle_audit (status, created_at DESC);
+
+-- =============================================================================
+-- Track configuration changes for URL change detection
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS webhook_configuration (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    config_key TEXT NOT NULL UNIQUE,
+    config_value TEXT NOT NULL,
+    last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_by TEXT DEFAULT 'system'
+);
+
+-- =============================================================================
+-- WQS-to-PnL correlation for predictive power analysis
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS wqs_pnl_correlation (
+    wallet_address TEXT PRIMARY KEY,
+    wqs_score_at_promotion TEXT NOT NULL,
+    actual_copy_pnl_7d_sol TEXT,
+    actual_copy_pnl_30d_sol TEXT,
+    actual_copy_pnl_all_sol TEXT,
+    copy_trade_count_7d INTEGER DEFAULT 0,
+    copy_trade_count_30d INTEGER DEFAULT 0,
+    copy_trade_count_all INTEGER DEFAULT 0,
+    strategy TEXT NOT NULL DEFAULT 'SHIELD' CHECK(strategy IN ('SHIELD', 'SPEAR')),
+    wqs_components_json TEXT,
+    promoted_at TIMESTAMP NOT NULL,
+    last_updated_at TIMESTAMP NOT NULL
+);

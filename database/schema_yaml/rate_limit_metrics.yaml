@@ -1,0 +1,13 @@
+table: rate_limit_metrics
+description: "Credit usage and rate tracking"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: metric_type, type: text, not_null: true}
+  - {name: requests_per_second, type: decimal(10,2)}
+  - {name: total_credits_used, type: bigint}
+  - {name: rate_limit_hits, type: bigint, default: 0}
+  - {name: timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_rate_limit_metrics_time, columns: [timestamp], desc: true}
+foreign_keys: []
+triggers: []

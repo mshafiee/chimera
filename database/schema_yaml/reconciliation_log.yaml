@@ -1,0 +1,20 @@
+table: reconciliation_log
+description: "Compare DB state vs on-chain state"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: trade_uuid, type: text, not_null: true}
+  - {name: expected_state, type: text, not_null: true}
+  - {name: actual_on_chain, type: text}
+  - {name: discrepancy, type: text}
+  - {name: on_chain_tx_signature, type: text}
+  - {name: on_chain_amount_sol, type: decimal(30,18)}
+  - {name: expected_amount_sol, type: decimal(30,18)}
+  - {name: resolved_at, type: timestamp}
+  - {name: resolved_by, type: text}
+  - {name: notes, type: text}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_reconciliation_unresolved, columns: [resolved_at], where: "resolved_at IS NULL"}
+  - {name: idx_reconciliation_trade, columns: [trade_uuid]}
+foreign_keys: []
+triggers: []

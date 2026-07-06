@@ -16,7 +16,7 @@ impl DatabaseBackend {
     /// Get database backend from environment variable
     /// Defaults to SQLite for development
     pub fn from_env() -> Self {
-        match std::env::var("CHIMERA_DB_BACKEND")
+        match std::env::var("CHIMERA_DB_MODE")
             .as_deref()
             .unwrap_or("sqlite")
             .to_lowercase()

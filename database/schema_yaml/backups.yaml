@@ -1,0 +1,12 @@
+table: backups
+description: "Backups tracking"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: path, type: text, not_null: true}
+  - {name: size_bytes, type: bigint}
+  - {name: checksum, type: text}
+  - {name: backup_type, type: text, default: "'SCHEDULED'"}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes: []
+foreign_keys: []
+triggers: []

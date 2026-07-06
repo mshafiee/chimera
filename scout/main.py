@@ -51,14 +51,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 # ruff: noqa: E402
 from core.utils import utcnow
 
-from core.db_writer import WalletRecord, write_roster_atomic
+from core.roster_writer_db import WalletRecord, write_wallets_to_db
 from core.wqs import calculate_wqs_with_confidence, \
     _calculate_raw_score, _interpret_trajectory, _compute_wmi
 from core.analyzer import WalletAnalyzer
 from core.models import BacktestConfig
 from core.validator import PrePromotionValidator, PromotionCriteria
 from core.liquidity import LiquidityProvider
-from core.auto_merge import auto_merge_roster
 from core.metrics import get_metrics
 from core.cost_estimator import CostEstimator
 from core.clustering import cluster_and_dedup
@@ -2278,38 +2277,18 @@ async def main_async():
     else:
         output_path = Path(args.output)
         
-        # Ensure parent directory exists
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        print(f"\n[Scout] Writing roster to {output_path}...")
+        print(f"\n[Scout] Writing {len(records)} wallets to database...")
         
         try:
-            write_roster_atomic(records, str(output_path))
-            print(f"[Scout] Successfully wrote {len(records)} wallets")
+            success_count = write_wallets_to_db(records)
+            print(f"[Scout] Successfully wrote {success_count}/{len(records)} wallets to database")
             
-            # Automatically merge roster into main database
-            print("\n[Scout] Automatically merging roster into main database...")
-            
-            # NEW CODE: Wrap in try/except to prevent crash if Operator is down
-            try:
-                merge_success, merge_message = await auto_merge_roster(
-                    roster_path=str(output_path),
-                    api_url=os.getenv("CHIMERA_API_URL", "http://localhost:8080"),
-                    operator_container=os.getenv("CHIMERA_OPERATOR_CONTAINER", "chimera-operator"),
-                    prefer_api=True,
-                    retries=3,
-                )
-                
-                if merge_success:
-                    print(f"[Scout] ✓ {merge_message}")
-                else:
-                    print(f"[Scout] ⚠ Automatic merge failed: {merge_message}")
-                    print("[Scout] Non-fatal error: Roster is saved on disk.")
-            except Exception as merge_err:
-                print(f"[Scout] ⚠ Exception during auto-merge: {merge_err}")
-                print("[Scout] Non-fatal error: Roster is saved on disk.")
+            if success_count < len(records):
+                print(f"[Scout] ⚠ Warning: {len(records) - success_count} wallets failed to write")
         except Exception as e:
-            print(f"[Scout] ERROR: Failed to write roster: {e}")
+            print(f"[Scout] ERROR: Failed to write wallets to database: {e}")
+            import traceback
+            traceback.print_exc()
             sys.exit(1)
 
     # Print optimization report if enabled

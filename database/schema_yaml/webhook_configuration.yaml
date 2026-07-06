@@ -1,0 +1,11 @@
+table: webhook_configuration
+description: "Track configuration changes for URL change detection"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: config_key, type: text, not_null: true, unique: true}
+  - {name: config_value, type: text, not_null: true}
+  - {name: last_updated_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: updated_by, type: text, default: "'system'"}
+indexes: []
+foreign_keys: []
+triggers: []

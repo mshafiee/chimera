@@ -1,0 +1,22 @@
+table: exit_recommendations
+description: "Exit recommendations for positions"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: trade_uuid, type: text, not_null: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: recommendation_type, type: text, not_null: true, check: "recommendation_type IN ('TAKE_PROFIT', 'STOP_LOSS', 'TRAILING_STOP', 'MANUAL')"}
+  - {name: target_price, type: decimal(30,18)}
+  - {name: target_percentage, type: decimal(10,4)}
+  - {name: reason, type: text}
+  - {name: confidence_score, type: real}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: executed_at, type: timestamp}
+  - {name: executed, type: bool, default: false}
+indexes:
+  - {name: idx_exit_recommendations_trade, columns: [trade_uuid, created_at], desc: true}
+  - {name: idx_exit_recommendations_wallet, columns: [wallet_address, created_at], desc: true}
+  - {name: idx_exit_recommendations_pending, columns: [created_at], where: "executed = false", desc: true}
+foreign_keys:
+  - {column: trade_uuid, ref_table: trades, ref_col: trade_uuid, on_delete: CASCADE}
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

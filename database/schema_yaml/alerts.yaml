@@ -1,0 +1,23 @@
+table: alerts
+description: "System alerts and notifications"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: alert_type, type: text, not_null: true, check: "alert_type IN ('WALLET_PERFORMANCE', 'POSITION_RISK', 'SYSTEM', 'WEBHOOK', 'RATE_LIMIT', 'LIQUIDITY')"}
+  - {name: severity, type: text, not_null: true, check: "severity IN ('INFO', 'WARNING', 'ERROR', 'CRITICAL')"}
+  - {name: title, type: text, not_null: true}
+  - {name: message, type: text, not_null: true}
+  - {name: wallet_address, type: text}
+  - {name: trade_uuid, type: text}
+  - {name: metadata_json, type: json}
+  - {name: acknowledged, type: bool, default: false}
+  - {name: acknowledged_at, type: timestamp}
+  - {name: acknowledged_by, type: text}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_alerts_type, columns: [alert_type, created_at], desc: true}
+  - {name: idx_alerts_severity, columns: [severity, created_at], desc: true}
+  - {name: idx_alerts_unacknowledged, columns: [created_at], desc: true, where: "acknowledged = false"}
+  - {name: idx_alerts_wallet, columns: [wallet_address, created_at], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

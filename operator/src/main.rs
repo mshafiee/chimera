@@ -70,8 +70,6 @@ use chimera_operator::handlers::{
     reset_circuit_breaker,
     retry_webhook_registration,
     retry_dead_letter_item,
-    roster_merge,
-    roster_validate,
     toggle_wallet_webhook,
     trigger_scout_run,
     trip_circuit_breaker,
@@ -85,7 +83,6 @@ use chimera_operator::handlers::{
     ApiState,
     AppState,
     OperationsState,
-    RosterState,
     WalletAuthState,
     WebhookState,
     WsState,
@@ -255,9 +252,9 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize database
     let db_config = db_abstraction::DatabaseConfig {
-        backend: db_abstraction::DatabaseBackend::SQLite,
+        backend: db_abstraction::DatabaseMode::from_env().into(),
         path: config.database.path.clone(),
-        url: None,
+        url: config.database.url.clone(),
         max_connections: config.database.max_connections,
         acquire_timeout_seconds: 30,
     };
@@ -927,52 +924,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
-
-    // Spawn SIGHUP handler for roster merge (Unix only)
-    #[cfg(unix)]
-    {
-        let db_pool_sighup = db_pool.clone();
-        let roster_path = config
-            .database
-            .path
-            .parent()
-            .map(|p| p.join("roster_new.db"))
-            .unwrap_or_else(|| PathBuf::from("roster_new.db"));
-
-        tokio::spawn(async move {
-            let mut sighup = match signal(SignalKind::hangup()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::error!(error = %e, "Failed to register SIGHUP handler");
-                    return;
-                }
-            };
-
-            tracing::info!(
-                roster_path = %roster_path.display(),
-                "SIGHUP handler registered for roster merge"
-            );
-
-            loop {
-                sighup.recv().await;
-                tracing::info!("Received SIGHUP, triggering roster merge");
-
-                match roster::merge_roster(&db_pool_sighup, &roster_path).await {
-                    Ok(result) => {
-                        tracing::info!(
-                            wallets_merged = result.wallets_merged,
-                            wallets_removed = result.wallets_removed,
-                            "Roster merge completed successfully"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "Roster merge failed");
-                    }
-                }
-            }
-        });
-        tracing::info!("SIGHUP roster merge handler started");
-    }
 
     // Spawn periodic RPC health check task
     let engine_handle_rpc = _engine_handle.clone();
@@ -2009,18 +1960,6 @@ async fn main() -> anyhow::Result<()> {
         min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
     });
 
-    // Create roster state
-    let roster_path = config
-        .database
-        .path
-        .parent()
-        .map(|p| p.join("roster_new.db"))
-        .unwrap_or_else(|| PathBuf::from("roster_new.db"));
-    let roster_state = Arc::new(RosterState {
-        db: db_pool.clone(),
-        default_roster_path: roster_path,
-    });
-
     // Build HMAC secrets for webhook verification
     let mut hmac_secrets = Vec::new();
     if !config.security.webhook_secret.is_empty() {
@@ -2071,30 +2010,6 @@ async fn main() -> anyhow::Result<()> {
             hmac_state.clone(),
             middleware::hmac_verify,
         ));
-
-    // Build roster routes
-    // In devnet, allow roster merge without auth for easier testing
-    let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
-    let is_devnet = chimera_env == "devnet"
-        || config.database.path.to_string_lossy().contains("devnet")
-        || config.trade_mode == TradeMode::Devnet;
-
-    let roster_routes = if is_devnet {
-        tracing::info!("Devnet mode: roster merge endpoint does not require authentication");
-        Router::new()
-            .route("/roster/merge", post(roster_merge))
-            .route("/roster/validate", get(roster_validate))
-            .with_state(roster_state.clone())
-    } else {
-        Router::new()
-            .route("/roster/merge", post(roster_merge))
-            .route("/roster/validate", get(roster_validate))
-            .with_state(roster_state.clone())
-            .layer(axum_middleware::from_fn_with_state(
-                auth_state.clone(),
-                bearer_auth,
-            ))
-    };
 
     // Build auth routes
     // jwt_secret already defined above
@@ -2226,7 +2141,6 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/v1", protected_api_routes)
         .nest("/api/v1", operations_routes)
         .nest("/api/v1", webhook_routes)
-        .nest("/api/v1", roster_routes)
         .nest("/api/v1", auth_routes)
         .nest("/api/v1", ws_routes)
         .nest("/api/v1", monitoring_routes)

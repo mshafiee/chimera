@@ -1,0 +1,11 @@
+table: admin_wallets
+description: "Authorization for API access"
+columns:
+  - {name: wallet_address, type: text, pk: true}
+  - {name: role, type: text, not_null: true, default: "'readonly'", check: "role IN ('admin', 'operator', 'readonly')"}
+  - {name: added_by, type: text, not_null: true}
+  - {name: notes, type: text}
+  - {name: added_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes: []
+foreign_keys: []
+triggers: []

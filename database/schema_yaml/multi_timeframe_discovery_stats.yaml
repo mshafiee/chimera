@@ -1,0 +1,18 @@
+table: multi_timeframe_discovery_stats
+description: "Multi-timeframe wallet discovery statistics"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: discovery_timeframe, type: text, not_null: true}
+  - {name: wqs_score, type: real}
+  - {name: sample_size, type: int}
+  - {name: confidence_interval, type: decimal(10,4)}
+  - {name: signal_count, type: int}
+  - {name: avg_signal_strength, type: decimal(10,4)}
+  - {name: discovered_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_multi_timeframe_discovery_wallet, columns: [wallet_address, discovery_timeframe]}
+  - {name: idx_multi_timeframe_discovery_wqs, columns: [wqs_score], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

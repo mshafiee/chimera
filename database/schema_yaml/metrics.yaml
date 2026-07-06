@@ -1,0 +1,14 @@
+table: metrics
+description: "System performance metrics"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: metric_name, type: text, not_null: true}
+  - {name: metric_value, type: decimal(30,18), not_null: true}
+  - {name: metric_unit, type: text}
+  - {name: labels_json, type: json}
+  - {name: timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_metrics_name, columns: [metric_name, timestamp], desc: true}
+  - {name: idx_metrics_timestamp, columns: [timestamp], desc: true}
+foreign_keys: []
+triggers: []

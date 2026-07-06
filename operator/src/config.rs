@@ -229,6 +229,9 @@ pub struct DatabaseConfig {
     /// Path to SQLite database file
     #[serde(default = "default_db_path")]
     pub path: PathBuf,
+    /// PostgreSQL connection URL (for production)
+    #[serde(default)]
+    pub url: Option<String>,
     /// Maximum connections in pool
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,

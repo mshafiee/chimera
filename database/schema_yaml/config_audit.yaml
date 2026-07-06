@@ -1,0 +1,15 @@
+table: config_audit
+description: "Track all configuration changes"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: key, type: text, not_null: true}
+  - {name: old_value, type: text}
+  - {name: new_value, type: text}
+  - {name: changed_by, type: text, not_null: true}
+  - {name: change_reason, type: text}
+  - {name: changed_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_config_audit_key, columns: [key]}
+  - {name: idx_config_audit_changed, columns: [changed_at], desc: true}
+foreign_keys: []
+triggers: []

@@ -1,0 +1,33 @@
+table: wallets
+description: "Tracked wallets with WQS scores (managed by Scout)"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: address, type: text, not_null: true, unique: true}
+  - {name: status, type: text, not_null: true, default: "'CANDIDATE'", check: "status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')"}
+  - {name: wqs_score, type: real}
+  - {name: wqs_confidence, type: real}
+  - {name: roi_7d, type: decimal(10,4)}
+  - {name: roi_30d, type: decimal(10,4)}
+  - {name: trade_count_30d, type: int}
+  - {name: win_rate, type: real}
+  - {name: max_drawdown_30d, type: decimal(10,4)}
+  - {name: avg_trade_size_sol, type: decimal(30,18)}
+  - {name: avg_win_sol, type: decimal(30,18)}
+  - {name: avg_loss_sol, type: decimal(30,18)}
+  - {name: profit_factor, type: decimal(10,4)}
+  - {name: realized_pnl_30d_sol, type: decimal(30,18)}
+  - {name: last_trade_at, type: timestamp}
+  - {name: promoted_at, type: timestamp}
+  - {name: ttl_expires_at, type: timestamp}
+  - {name: notes, type: text}
+  - {name: archetype, type: text}
+  - {name: avg_entry_delay_seconds, type: real}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: updated_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_wallets_status, columns: [status]}
+  - {name: idx_wallets_wqs, columns: [wqs_score], desc: true}
+  - {name: idx_wallets_address_gin, columns: [address], type: gin, pg_only: true}
+foreign_keys: []
+triggers:
+  - {name: wallets_updated_at, column: updated_at, pg_only: true}

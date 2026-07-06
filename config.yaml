@@ -19,6 +19,7 @@ rpc:
 
 database:
   path: "/Users/mohammad/Documents/GitHub/chimera/data/chimera.db"
+  # url: "postgresql://user:password@localhost:5432/chimera"  # For PostgreSQL (overrides CHIMERA_DB_MODE)
   max_connections: 5
 
 security:

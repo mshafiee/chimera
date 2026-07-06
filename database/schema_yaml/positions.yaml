@@ -1,0 +1,36 @@
+table: positions
+description: "Active positions being tracked"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: trade_uuid, type: text, not_null: true, unique: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: token_address, type: text, not_null: true}
+  - {name: token_symbol, type: text}
+  - {name: strategy, type: text, not_null: true, check: "strategy IN ('SHIELD', 'SPEAR')"}
+  - {name: entry_amount_sol, type: decimal(30,18), not_null: true}
+  - {name: entry_price, type: decimal(30,18), not_null: true}
+  - {name: entry_tx_signature, type: text, not_null: true}
+  - {name: current_price, type: decimal(30,18)}
+  - {name: unrealized_pnl_sol, type: decimal(30,18)}
+  - {name: unrealized_pnl_percent, type: decimal(10,4)}
+  - {name: state, type: text, not_null: true, default: "'ACTIVE'", check: "state IN ('ACTIVE', 'EXITING', 'CLOSED')"}
+  - {name: exit_price, type: decimal(30,18)}
+  - {name: exit_tx_signature, type: text}
+  - {name: realized_pnl_sol, type: decimal(30,18)}
+  - {name: realized_pnl_usd, type: decimal(30,18)}
+  - {name: realized_net_pnl_sol, type: decimal(30,18)}
+  - {name: entry_sol_price_usd, type: decimal(30,18)}
+  - {name: token_amount, type: decimal(30,18)}
+  - {name: opened_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: last_updated, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: closed_at, type: timestamp}
+indexes:
+  - {name: idx_positions_state, columns: [state]}
+  - {name: idx_positions_state_updated, columns: [state, last_updated]}
+  - {name: idx_positions_wallet, columns: [wallet_address]}
+  - {name: idx_positions_wallet_token, columns: [wallet_address, token_address]}
+  - {name: idx_positions_closed_at, columns: [closed_at], where: "state = 'CLOSED'"}
+foreign_keys:
+  - {column: trade_uuid, ref_table: trades, ref_col: trade_uuid, on_delete: CASCADE}
+triggers:
+  - {name: positions_updated_at, column: last_updated, pg_only: true}

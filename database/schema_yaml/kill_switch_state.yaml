@@ -1,0 +1,11 @@
+table: kill_switch_state
+description: "Single-row table written synchronously before returning from kill-switch API handler"
+columns:
+  - {name: id, type: int, pk: true, check: "id = 1"}
+  - {name: state, type: text, not_null: true, default: "'INACTIVE'", check: "state IN ('ACTIVE', 'INACTIVE')"}
+  - {name: changed_at, type: timestamp, not_null: true, default: "CURRENT_TIMESTAMP"}
+  - {name: changed_by, type: text, not_null: true, default: "'SYSTEM'"}
+  - {name: reason, type: text}
+indexes: []
+foreign_keys: []
+triggers: []

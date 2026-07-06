@@ -1,0 +1,19 @@
+table: ml_predictions
+description: "ML predictions for wallet performance"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: model_version, type: text, not_null: true}
+  - {name: prediction_type, type: text, not_null: true}
+  - {name: predicted_value, type: decimal(30,18), not_null: true}
+  - {name: confidence_score, type: real}
+  - {name: features_json, type: json}
+  - {name: prediction_timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: actual_value, type: decimal(30,18)}
+  - {name: actual_timestamp, type: timestamp}
+indexes:
+  - {name: idx_ml_predictions_wallet, columns: [wallet_address, prediction_timestamp], desc: true}
+  - {name: idx_ml_predictions_type, columns: [prediction_type, prediction_timestamp], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

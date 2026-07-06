@@ -1,0 +1,23 @@
+table: wallet_performance_history
+description: "Historical wallet performance metrics"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: timestamp, type: timestamp, not_null: true}
+  - {name: total_trades, type: int, default: 0}
+  - {name: winning_trades, type: int, default: 0}
+  - {name: losing_trades, type: int, default: 0}
+  - {name: win_rate, type: decimal(5,4)}
+  - {name: total_pnl_sol, type: decimal(30,18)}
+  - {name: total_pnl_usd, type: decimal(30,18)}
+  - {name: avg_win_sol, type: decimal(30,18)}
+  - {name: avg_loss_sol, type: decimal(30,18)}
+  - {name: profit_factor, type: decimal(10,4)}
+  - {name: max_drawdown_sol, type: decimal(30,18)}
+  - {name: max_drawdown_percent, type: decimal(10,4)}
+indexes:
+  - {name: idx_wallet_performance_history_wallet, columns: [wallet_address, timestamp], desc: true}
+  - {name: idx_wallet_performance_history_timestamp, columns: [timestamp], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

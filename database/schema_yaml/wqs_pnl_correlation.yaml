@@ -1,0 +1,19 @@
+table: wqs_pnl_correlation
+description: "WQS-to-PnL correlation for predictive power analysis"
+columns:
+  - {name: wallet_address, type: text, pk: true}
+  - {name: wqs_score_at_promotion, type: decimal(10,2), not_null: true}
+  - {name: actual_copy_pnl_7d_sol, type: decimal(30,18)}
+  - {name: actual_copy_pnl_30d_sol, type: decimal(30,18)}
+  - {name: actual_copy_pnl_all_sol, type: decimal(30,18)}
+  - {name: copy_trade_count_7d, type: int, default: 0}
+  - {name: copy_trade_count_30d, type: int, default: 0}
+  - {name: copy_trade_count_all, type: int, default: 0}
+  - {name: strategy, type: text, not_null: true, default: "'SHIELD'", check: "strategy IN ('SHIELD', 'SPEAR')"}
+  - {name: wqs_components_json, type: json}
+  - {name: promoted_at, type: timestamp, not_null: true}
+  - {name: last_updated_at, type: timestamp, not_null: true}
+indexes:
+  - {name: idx_wqs_pnl_components_gin, columns: [wqs_components_json], type: gin, pg_only: true}
+foreign_keys: []
+triggers: []

@@ -1,0 +1,20 @@
+table: growth_alerts
+description: "Growth-related alerts and notifications"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: alert_type, type: text, not_null: true, check: "alert_type IN ('NEW_HIGH', 'NEW_LOW', 'DRAWDOWN_WARNING', 'PROFIT_TARGET', 'LOSS_LIMIT')"}
+  - {name: current_balance_sol, type: decimal(30,18), not_null: true}
+  - {name: previous_balance_sol, type: decimal(30,18)}
+  - {name: percentage_change, type: decimal(10,4)}
+  - {name: threshold_value, type: decimal(10,4)}
+  - {name: acknowledged, type: bool, default: false}
+  - {name: acknowledged_at, type: timestamp}
+  - {name: timestamp, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_growth_alerts_wallet, columns: [wallet_address, timestamp], desc: true}
+  - {name: idx_growth_alerts_type, columns: [alert_type, timestamp], desc: true}
+  - {name: idx_growth_alerts_unacknowledged, columns: [wallet_address], where: "acknowledged = false"}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

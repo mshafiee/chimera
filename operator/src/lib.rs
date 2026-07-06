@@ -22,7 +22,6 @@ pub mod monitoring;
 pub mod notifications;
 pub mod price_cache;
 pub mod retry;
-pub mod roster;
 pub mod state;
 pub mod token;
 pub mod utils;

@@ -138,33 +138,11 @@ impl Database for PostgresBackend {
     // ========================================================================
 
     async fn run_migrations(&self) -> AppResult<()> {
-        // For PostgreSQL, we run the schema directly instead of migrations
-        // In production, you'd use sqlx::migrate!() with PostgreSQL migration files
-        let schema = std::fs::read_to_string("database/schema_postgres.sql")
-            .map_err(|e| AppError::Internal(format!("Failed to read schema: {}", e)))?;
-
-        // Strip whole-line SQL comments BEFORE splitting on `;`, otherwise a statement
-        // preceded by a `--` comment would collapse into a chunk that starts with `--`
-        // and be silently skipped (which previously swallowed the idempotent ALTERs and
-        // the partial index added below the schema header comments).
-        let schema: String = schema
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        // Split by semicolon and execute each statement
-        for statement in schema.split(';') {
-            let statement = statement.trim();
-            if !statement.is_empty() {
-                sqlx::query(statement)
-                    .execute(&self.pool)
-                    .await
-                    .map_err(AppError::Database)?;
-            }
-        }
-
-        info!("PostgreSQL schema applied successfully");
+        sqlx::migrate!("./migrations_postgres")
+            .run(&self.pool)
+            .await
+            .map_err(|e| AppError::Database(e.into()))?;
+        info!("PostgreSQL migrations applied");
         Ok(())
     }
 

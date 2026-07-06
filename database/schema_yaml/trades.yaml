@@ -1,0 +1,38 @@
+table: trades
+description: "Primary record of all trading signals received"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: trade_uuid, type: text, not_null: true, unique: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: token_address, type: text, not_null: true}
+  - {name: token_symbol, type: text}
+  - {name: strategy, type: text, not_null: true, check: "strategy IN ('SHIELD', 'SPEAR', 'EXIT')"}
+  - {name: side, type: text, not_null: true, check: "side IN ('BUY', 'SELL')"}
+  - {name: amount_sol, type: decimal(30,18), not_null: true}
+  - {name: price_at_signal, type: decimal(30,18)}
+  - {name: tx_signature, type: text}
+  - {name: status, type: text, not_null: true, default: 'PENDING', check: "status IN ('PENDING', 'QUEUED', 'EXECUTING', 'ACTIVE', 'EXITING', 'CLOSED', 'FAILED', 'RETRY', 'DEAD_LETTER')"}
+  - {name: retry_count, type: int, default: 0}
+  - {name: error_message, type: text}
+  - {name: pnl_sol, type: decimal(30,18)}
+  - {name: pnl_usd, type: decimal(30,18)}
+  - {name: jito_tip_sol, type: decimal(30,18), default: 0}
+  - {name: dex_fee_sol, type: decimal(30,18), default: 0}
+  - {name: slippage_cost_sol, type: decimal(30,18), default: 0}
+  - {name: total_cost_sol, type: decimal(30,18), default: 0}
+  - {name: network_fee_sol, type: decimal(30,18), default: 0}
+  - {name: net_pnl_sol, type: decimal(30,18)}
+  - {name: created_at, type: timestamp, default: CURRENT_TIMESTAMP}
+  - {name: updated_at, type: timestamp, default: CURRENT_TIMESTAMP}
+indexes:
+  - {name: idx_trades_status, columns: [status]}
+  - {name: idx_trades_status_queued, columns: [status], where: "status = 'QUEUED'"}
+  - {name: idx_trades_wallet, columns: [wallet_address]}
+  - {name: idx_trades_token, columns: [token_address]}
+  - {name: idx_trades_created, columns: [created_at], desc: true}
+  - {name: idx_trades_costs, columns: [total_cost_sol], where: "total_cost_sol > 0", pg_only: true}
+  - {name: idx_trades_net_pnl, columns: [net_pnl_sol], where: "net_pnl_sol IS NOT NULL", pg_only: true}
+  - {name: idx_trades_created_brin, columns: [created_at], type: brin, pg_only: true}
+foreign_keys: []
+triggers:
+  - {name: trades_updated_at, column: updated_at, pg_only: true}

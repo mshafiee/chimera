@@ -1,0 +1,14 @@
+table: jito_tip_history
+description: "For dynamic tip calculation (cold start persistence)"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: tip_amount_sol, type: decimal(30,18), not_null: true}
+  - {name: bundle_signature, type: text}
+  - {name: strategy, type: text, check: "strategy IN ('SHIELD', 'SPEAR')"}
+  - {name: success, type: bool, default: true}
+  - {name: created_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_jito_tip_created, columns: [created_at], desc: true}
+  - {name: idx_jito_tip_created_brin, columns: [created_at], type: brin, pg_only: true}
+foreign_keys: []
+triggers: []

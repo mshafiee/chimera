@@ -1,0 +1,22 @@
+table: roi_metrics
+description: "ROI calculations and metrics"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: wallet_address, type: text, not_null: true}
+  - {name: timeframe, type: text, not_null: true, check: "timeframe IN ('1h', '24h', '7d', '30d', '90d', 'all')"}
+  - {name: roi_percent, type: decimal(10,4)}
+  - {name: roi_sol, type: decimal(30,18)}
+  - {name: roi_usd, type: decimal(30,18)}
+  - {name: total_invested_sol, type: decimal(30,18)}
+  - {name: total_returned_sol, type: decimal(30,18)}
+  - {name: trade_count, type: int, default: 0}
+  - {name: sharpe_ratio, type: decimal(10,4)}
+  - {name: sortino_ratio, type: decimal(10,4)}
+  - {name: max_drawdown_percent, type: decimal(10,4)}
+  - {name: calculated_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+indexes:
+  - {name: idx_roi_metrics_wallet, columns: [wallet_address, timeframe]}
+  - {name: idx_roi_metrics_timeframe, columns: [timeframe, calculated_at], desc: true}
+foreign_keys:
+  - {column: wallet_address, ref_table: wallets, ref_col: address, on_delete: CASCADE}
+triggers: []

@@ -1,0 +1,18 @@
+table: dead_letter_queue
+description: "Failed operations for analysis/retry"
+columns:
+  - {name: id, type: bigserial, pk: true}
+  - {name: trade_uuid, type: text}
+  - {name: payload, type: text, not_null: true}
+  - {name: reason, type: text, not_null: true}
+  - {name: error_details, type: text}
+  - {name: source_ip, type: text}
+  - {name: retry_count, type: int, default: 0}
+  - {name: can_retry, type: bool, default: true}
+  - {name: received_at, type: timestamp, default: "CURRENT_TIMESTAMP"}
+  - {name: processed_at, type: timestamp}
+indexes:
+  - {name: idx_dlq_reason, columns: [reason]}
+  - {name: idx_dlq_received, columns: [received_at], desc: true}
+foreign_keys: []
+triggers: []
