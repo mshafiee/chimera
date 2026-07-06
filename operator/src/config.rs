@@ -1411,9 +1411,13 @@ pub struct PositionSizingConfig {
     /// Maximum position size in SOL (legacy; overridden per-strategy by shield/spear max)
     #[serde(default = "default_max_size_sol")]
     pub max_size_sol: Decimal,
-    /// Minimum position size in SOL
+    /// Minimum position size in SOL (paper trading only)
     #[serde(default = "default_min_size_sol")]
     pub min_size_sol: Decimal,
+    /// Minimum position size in SOL for live trading (distinct from paper min_size_sol)
+    /// Rejects trades below this threshold to avoid uneconomical execution due to fixed costs
+    #[serde(default = "default_min_live_position_sol")]
+    pub min_live_position_sol: Decimal,
     /// Maximum position size for Shield strategy (conservative, larger allocation)
     #[serde(default = "default_shield_max_size_sol")]
     pub shield_max_size_sol: Decimal,
@@ -1452,6 +1456,10 @@ fn default_max_size_sol() -> Decimal {
 
 fn default_min_size_sol() -> Decimal {
     dec!(0.05)
+}
+
+fn default_min_live_position_sol() -> Decimal {
+    dec!(0.05) // Same as min_size_sol by default (no behavior change unless configured)
 }
 
 fn default_atr_multiplier() -> Decimal {
@@ -1520,6 +1528,7 @@ impl Default for PositionSizingConfig {
             base_size_sol: default_base_size_sol(),
             max_size_sol: default_max_size_sol(),
             min_size_sol: default_min_size_sol(),
+            min_live_position_sol: default_min_live_position_sol(),
             shield_max_size_sol: default_shield_max_size_sol(),
             spear_max_size_sol: default_spear_max_size_sol(),
             consensus_multiplier: default_consensus_multiplier(),
@@ -2007,6 +2016,7 @@ impl Default for AppConfig {
             },
             database: DatabaseConfig {
                 path: "data/chimera.db".into(),
+                url: None,
                 max_connections: 5,
             },
             security: SecurityConfig {

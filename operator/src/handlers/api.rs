@@ -202,13 +202,6 @@ pub async fn update_wallet(
             "Requires operator role or higher".to_string(),
         ));
     }
-    // Refuse wallet writes while a roster merge transaction is in progress to avoid
-    // racing the atomic batch upsert and causing a SQLite busy-timeout.
-    if crate::roster::is_merging_roster() {
-        return Err(AppError::Internal(
-            "Roster merge in progress — retry in a moment".to_string(),
-        ));
-    }
     // Validate status
     let valid_statuses = ["ACTIVE", "CANDIDATE", "REJECTED"];
     if !valid_statuses.contains(&body.status.as_str()) {

@@ -92,7 +92,6 @@ use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
 use chimera_operator::monitoring::{rate_limiter, HeliusClient, MonitoringState, SignalAggregator};
 use chimera_operator::notifications::{self, NotificationEvent};
 use chimera_operator::price_cache::PriceCache;
-use chimera_operator::roster;
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
@@ -252,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize database
     let db_config = db_abstraction::DatabaseConfig {
-        backend: db_abstraction::DatabaseMode::from_env().into(),
+        backend: db_abstraction::DatabaseBackend::from_env(),
         path: config.database.path.clone(),
         url: config.database.url.clone(),
         max_connections: config.database.max_connections,
