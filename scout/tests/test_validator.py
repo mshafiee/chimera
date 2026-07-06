@@ -641,3 +641,189 @@ async def test_profit_factor_threshold_1_2_enforced():
         f"PF=1.2 must pass (check is `< 1.1`). "
         f"Got: {result_exact.status}: {result_exact.reason}"
     )
+
+
+# ─── Low-Churn Filter Tests ───────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_validator_rejects_sniper_archetype():
+    """SNIPER archetype must be rejected by low-churn filter."""
+    metrics = WalletMetrics(
+        address="sniper_001",
+        roi_7d=80.0,
+        roi_30d=45.0,
+        trade_count_30d=30,
+        win_rate=0.70,
+        max_drawdown_30d=8.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.6,
+        avg_entry_delay_seconds=180.0,
+        profit_factor=2.8,
+        archetype="SNIPER",
+        avg_hold_time_hours=1.5,
+    )
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=70.0,
+            enforce_low_churn=True,
+            forbidden_archetypes={"SNIPER", "SCALPER"},
+        ),
+    )
+    validator.rugcheck_client = None
+
+    result = await validator.validate_for_promotion(
+        "sniper_001", metrics, [], strategy="SHIELD"
+    )
+
+    assert not result.passed, "SNIPER must be rejected by low-churn filter"
+    assert "SNIPER" in result.reason
+    assert result.recommended_status == "CANDIDATE"
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_scalper_archetype():
+    """SCALPER archetype must be rejected by low-churn filter."""
+    metrics = WalletMetrics(
+        address="scalper_001",
+        roi_7d=80.0,
+        roi_30d=45.0,
+        trade_count_30d=30,
+        win_rate=0.70,
+        max_drawdown_30d=8.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.6,
+        avg_entry_delay_seconds=180.0,
+        profit_factor=2.8,
+        archetype="SCALPER",
+        avg_hold_time_hours=3.0,
+    )
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=70.0,
+            enforce_low_churn=True,
+            forbidden_archetypes={"SNIPER", "SCALPER"},
+        ),
+    )
+    validator.rugcheck_client = None
+
+    result = await validator.validate_for_promotion(
+        "scalper_001", metrics, [], strategy="SHIELD"
+    )
+
+    assert not result.passed, "SCALPER must be rejected by low-churn filter"
+    assert "SCALPER" in result.reason
+    assert result.recommended_status == "CANDIDATE"
+
+
+@pytest.mark.asyncio
+async def test_validator_rejects_short_hold_time():
+    """Wallet with avg_hold_time_hours < 2.0 must be rejected."""
+    metrics = WalletMetrics(
+        address="short_hold_001",
+        roi_7d=80.0,
+        roi_30d=45.0,
+        trade_count_30d=30,
+        win_rate=0.70,
+        max_drawdown_30d=8.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.6,
+        avg_entry_delay_seconds=180.0,
+        profit_factor=2.8,
+        archetype="SWING",
+        avg_hold_time_hours=1.0,
+    )
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=70.0,
+            enforce_low_churn=True,
+            min_avg_hold_time_hours=2.0,
+        ),
+    )
+    validator.rugcheck_client = None
+
+    result = await validator.validate_for_promotion(
+        "short_hold_001", metrics, [], strategy="SHIELD"
+    )
+
+    assert not result.passed, "Short hold time must be rejected by low-churn filter"
+    assert "Avg hold time" in result.reason
+    assert result.recommended_status == "CANDIDATE"
+
+
+@pytest.mark.asyncio
+async def test_validator_accepts_long_hold_swing():
+    """SWING archetype with sufficient hold time must pass low-churn filter."""
+    metrics = WalletMetrics(
+        address="swing_good_001",
+        roi_7d=80.0,
+        roi_30d=45.0,
+        trade_count_30d=30,
+        win_rate=0.70,
+        max_drawdown_30d=8.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.6,
+        avg_entry_delay_seconds=180.0,
+        profit_factor=2.8,
+        archetype="SWING",
+        avg_hold_time_hours=5.0,
+    )
+
+    trades = _make_round_trip_trades(
+        n_pairs=15,
+        buy_sol=2.0,
+        sell_sol=2.6,
+        token_prefix="swing_tok",
+    )
+
+    validator = PrePromotionValidator(
+        liquidity_provider=_MockLiqProvider(liquidity_usd=500_000.0),
+        backtest_config=BacktestConfig(
+            min_liquidity_shield_usd=10_000.0,
+            min_trades_required=5,
+        ),
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=70.0,
+            min_trades=5,
+            enforce_low_churn=True,
+            min_avg_hold_time_hours=2.0,
+            walk_forward_enabled=False,
+        ),
+    )
+    validator.rugcheck_client = None
+
+    result = await validator.validate_for_promotion(
+        "swing_good_001", metrics, trades, strategy="SHIELD"
+    )
+
+    assert result.passed, "SWING with long hold time must pass validation"
+
+
+def test_low_churn_filter_can_be_disabled():
+    """Low-churn filter can be disabled via enforce_low_churn=False."""
+    metrics = WalletMetrics(
+        address="sniper_disabled_001",
+        roi_7d=80.0,
+        roi_30d=45.0,
+        trade_count_30d=30,
+        win_rate=0.70,
+        max_drawdown_30d=8.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.6,
+        avg_entry_delay_seconds=180.0,
+        profit_factor=2.8,
+        archetype="SNIPER",
+        avg_hold_time_hours=0.5,
+    )
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=70.0,
+            enforce_low_churn=False,
+        ),
+    )
+
+    result = validator.quick_check(metrics, trade_count=30)
+    assert result, "quick_check must pass when low-churn filter is disabled"

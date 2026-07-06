@@ -1925,6 +1925,10 @@ async def main_async():
                 walk_forward_enabled=True,
                 walk_forward_holdout_fraction=0.3,
                 walk_forward_min_trades=args.walk_forward_min_trades,
+                # Low-churn filter (env overrides)
+                forbidden_archetypes=set(os.getenv("SCOUT_FORBIDDEN_ARCHETYPES", "SNIPER,SCALPER").split(",")),
+                min_avg_hold_time_hours=float(os.getenv("SCOUT_MIN_AVG_HOLD_HOURS", "2.0")),
+                enforce_low_churn=os.getenv("SCOUT_ENFORCE_LOW_CHURN", "true").lower() == "true",
             )
             validator = PrePromotionValidator(
                 liquidity_provider=liquidity_provider,

@@ -81,6 +81,15 @@ class PromotionCriteria:
     # recent trades.
     min_holdout_pnl_sol: float = 0.01
 
+    # Low-churn filter to prevent promotion of latency-impaired wallets
+    forbidden_archetypes: set[str] = None
+    min_avg_hold_time_hours: float = 2.0
+    enforce_low_churn: bool = True
+
+    def __post_init__(self):
+        if self.forbidden_archetypes is None:
+            self.forbidden_archetypes = {"SNIPER", "SCALPER"}
+
 
 class PrePromotionValidator:
     """
@@ -172,6 +181,57 @@ class PrePromotionValidator:
             return boosted
         return wqs_score
 
+    def validate_archetype_for_promotion(self, wallet_address: str, metrics: WalletMetrics) -> ValidationResult:
+        """
+        Validate that wallet meets low-churn criteria.
+
+        This gate prevents promotion of latency-impaired wallets (SNIPER/SCALPER)
+        and wallets with excessively short average hold times.
+
+        Args:
+            wallet_address: Wallet address to validate
+            metrics: Wallet performance metrics
+
+        Returns:
+            ValidationResult with pass/fail. Returns passed=True if enforcement is disabled,
+            or if wallet passes both checks.
+        """
+        if not self.criteria.enforce_low_churn:
+            return ValidationResult(
+                wallet_address=wallet_address,
+                passed=True,
+                status=ValidationStatus.PASSED,
+                reason="Low-churn enforcement disabled",
+                recommended_status="ACTIVE",
+            )
+
+        if metrics.archetype and metrics.archetype in self.criteria.forbidden_archetypes:
+            return ValidationResult(
+                wallet_address=wallet_address,
+                passed=False,
+                status=ValidationStatus.FAILED_WQS,
+                reason=f"Archetype {metrics.archetype} excluded (low-churn policy)",
+                recommended_status="CANDIDATE",
+            )
+
+        if metrics.avg_hold_time_hours is not None:
+            if metrics.avg_hold_time_hours < self.criteria.min_avg_hold_time_hours:
+                return ValidationResult(
+                    wallet_address=wallet_address,
+                    passed=False,
+                    status=ValidationStatus.FAILED_WQS,
+                    reason=f"Avg hold time {metrics.avg_hold_time_hours:.1f}h < {self.criteria.min_avg_hold_time_hours:.1f}h minimum",
+                    recommended_status="CANDIDATE",
+                )
+
+        return ValidationResult(
+            wallet_address=wallet_address,
+            passed=True,
+            status=ValidationStatus.PASSED,
+            reason="Passed low-churn criteria",
+            recommended_status="ACTIVE",
+        )
+
     async def validate_for_promotion(
         self,
         wallet_address: str,
@@ -192,6 +252,12 @@ class PrePromotionValidator:
             ValidationResult with pass/fail and details
         """
         logger.info(f"Validating wallet {wallet_address[:8]}... for promotion")
+
+        # Low-churn gate (before expensive WQS/backtest work)
+        archetype_result = self.validate_archetype_for_promotion(wallet_address, metrics)
+        if not archetype_result.passed:
+            logger.info(f"Wallet {wallet_address[:8]}... rejected by low-churn filter: {archetype_result.reason}")
+            return archetype_result
 
         # Step 1: Check WQS score (with archetype-aware thresholds and momentum boost)
         wqs_result = calculate_wqs_with_confidence(metrics, strategy=strategy)
@@ -582,21 +648,28 @@ class PrePromotionValidator:
     ) -> bool:
         """
         Quick eligibility check without full backtest.
-        
+
         Use this to filter wallets before running expensive backtest.
-        
+
         Args:
             metrics: Wallet metrics
             trade_count: Number of historical trades
-            
+
         Returns:
             True if wallet might be eligible for promotion
         """
+        if self.criteria.enforce_low_churn:
+            if metrics.archetype and metrics.archetype in self.criteria.forbidden_archetypes:
+                return False
+            if metrics.avg_hold_time_hours is not None:
+                if metrics.avg_hold_time_hours < self.criteria.min_avg_hold_time_hours:
+                    return False
+
         # Check WQS
         wqs = calculate_wqs(metrics)
         if wqs < self.criteria.min_wqs_score:
             return False
-        
+
         # Check trade count
         if trade_count < self.criteria.min_trades:
             return False
