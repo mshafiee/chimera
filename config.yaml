@@ -171,6 +171,7 @@ position_sizing:
   base_size_sol: 0.1
   max_size_sol: 2.0
   min_size_sol: 0.02
+  min_live_position_sol: 0.02  # Minimum position size for live trading (distinct from paper)
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
   max_concurrent_positions: 5
   use_kelly_sizing: true   # Kelly Criterion sizing enabled

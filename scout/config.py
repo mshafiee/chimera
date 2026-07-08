@@ -925,6 +925,34 @@ class ScoutConfig:
         """
         return os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
 
+    @staticmethod
+    def get_token_2022_allowlist() -> list[str]:
+        """Get list of Token-2022 mint addresses that are explicitly allowed despite risky extensions.
+
+        Comma-separated list of token mint addresses. Tokens in this allowlist are
+        not rejected for having risky Token-2022 extensions (transfer fees, transfer hooks,
+        interest-bearing, confidential transfers, etc.).
+
+        Example: "TokenA,TokenB,TokenC"
+
+        Default: empty list (all risky extensions cause rejection)
+        """
+        allowlist_str = os.getenv("SCOUT_TOKEN_2022_ALLOWLIST", "")
+        if not allowlist_str.strip():
+            return []
+        return [addr.strip() for addr in allowlist_str.split(",") if addr.strip()]
+
+    @staticmethod
+    def get_use_cpmm_slippage() -> bool:
+        """Get whether to use CPMM-based slippage estimation (default: true).
+
+        When True, uses Constant Product Market Maker formula: base_slippage = trade_value_usd / (token_reserve_usd + trade_value_usd)
+        where token_reserve_usd = liquidity_usd / 2.0. This is more accurate for AMM pools.
+
+        When False, uses legacy sqrt model: base_slippage = 0.1 * sqrt(trade_value_usd / liquidity_usd).
+        """
+        return os.getenv("SCOUT_USE_CPMM_SLIPPAGE", "true").lower() == "true"
+
     # ========================================================================
     # Redis Configuration
     # ========================================================================

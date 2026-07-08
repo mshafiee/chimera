@@ -221,3 +221,75 @@ def test_sol_price_cache_freshness_threshold_is_300_seconds():
         f"Stale cache (301s old) must return fallback $150.0, got ${stale_price}. "
         "Cache TTL boundary is 300s."
     )
+
+
+def test_cpmm_slippage_vs_legacy_model():
+    """
+    Regression test: CPMM model (default) should estimate higher slippage than
+    legacy sqrt model for realistic trade scenarios.
+
+    CPMM base formula: base_slippage = trade_value_usd / (token_reserve_usd + trade_value_usd)
+    Legacy sqrt formula: base_slippage = 0.1 * sqrt(trade_value_usd / liquidity_usd)
+
+    Test case: $150 trade in $10,000 pool (1.5% pool impact).
+    - With CPMM: token_reserve = $5,000 → base = 150 / (5000 + 150) = 2.91%
+    - With legacy: base = 0.1 * sqrt(150/10000) = 0.1 * 0.1225 = 1.23%
+
+    CPMM should be higher (more conservative) because the sqrt model underestimates.
+    """
+    import os
+
+    # Test with CPMM enabled (default)
+    os.environ["SCOUT_USE_CPMM_SLIPPAGE"] = "true"
+    provider = LiquidityProvider(mode="simulated")
+
+    # Trade parameters: 1.0 SOL at $150/SOL = $150 trade in $10k pool
+    amount_sol = 1.0
+    liquidity_usd = 10_000.0
+    sol_price = 150.0
+    volume_24h_usd = 5_000.0  # 0.5 turnover ratio → multiplier = 1.1 (CPMM) or 1.2 (legacy)
+    token_age_days = 365.0
+
+    slippage_cpmm = provider.estimate_slippage(
+        token_address="test_token",
+        amount_sol=amount_sol,
+        liquidity_usd=liquidity_usd,
+        sol_price_usd=sol_price,
+        volume_24h_usd=volume_24h_usd,
+        token_age_days=token_age_days,
+    )
+
+    # Test with legacy model
+    os.environ["SCOUT_USE_CPMM_SLIPPAGE"] = "false"
+    slippage_legacy = provider.estimate_slippage(
+        token_address="test_token",
+        amount_sol=amount_sol,
+        liquidity_usd=liquidity_usd,
+        sol_price_usd=sol_price,
+        volume_24h_usd=volume_24h_usd,
+        token_age_days=token_age_days,
+    )
+
+    # Reset to default (true)
+    os.environ["SCOUT_USE_CPMM_SLIPPAGE"] = "true"
+
+    # Verify CPMM > legacy (CPMM is more conservative/accurate)
+    assert slippage_cpmm > slippage_legacy, (
+        f"CPMM slippage ({slippage_cpmm:.4f}) must be higher than legacy ({slippage_legacy:.4f}). "
+        "The sqrt model underestimates; CPMM is more accurate for AMM pools."
+    )
+
+    # Verify both models produce reasonable values (0.01–0.05 for this scenario)
+    # CPMM with 0.5 turnover: base≈3.85% * 1.1 = ~4.23%
+    # Legacy with 0.5 turnover: base≈1.41% * 1.2 = ~1.70%
+    assert 0.03 < slippage_cpmm < 0.05, (
+        f"CPMM slippage should be ~4.23% for this scenario, got {slippage_cpmm:.4f}"
+    )
+    assert 0.01 < slippage_legacy < 0.02, (
+        f"Legacy slippage should be ~1.70% for this scenario, got {slippage_legacy:.4f}"
+    )
+
+    # Verify the toggle actually changes behavior
+    assert abs(slippage_cpmm - slippage_legacy) > 0.01, (
+        f"Toggle must produce materially different estimates; difference only {abs(slippage_cpmm - slippage_legacy):.4f}"
+    )

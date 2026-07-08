@@ -124,9 +124,11 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
         # Set row factory for dict-like access
         conn.row_factory = sqlite3.Row
         
-        # Enable WAL mode for better concurrency
+        # Enable WAL mode for better concurrency and set performance pragmas
         try:
             conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=10000;")  # Queue writes up to 10s
+            conn.execute("PRAGMA cache_size=-64000;")   # ~64MB read cache
         except sqlite3.OperationalError:
             # WAL mode may fail for :memory: or certain file systems
             pass

@@ -1779,9 +1779,19 @@ class WalletAnalyzer:
                                 # Token-2022 extension check: scan extension headers after
                                 # the base mint layout (offset 165) for risky extension types.
                                 # Extension type 1 = TransferFeeConfig (fee on every transfer)
-                                # Extension type 4 = TransferHook (arbitrary code on transfer)
-                                RISKY_EXTENSIONS = {1, 4}
-                                if len(raw) > 165:
+                                # Extension type 2 = TransferFeeAmount (fee on every transfer)
+                                # Extension type 4 = ConfidentialTransferMint (confidential transfer)
+                                # Extension type 5 = ConfidentialTransferAccount (confidential transfer)
+                                # Extension type 10 = InterestBearingConfig (value changes over time)
+                                # Extension type 14 = TransferHook (arbitrary code on transfer)
+                                RISKY_EXTENSIONS = {1, 2, 4, 5, 10, 14}
+                                
+                                # Check allowlist before rejecting for risky extensions
+                                from scout.config import ScoutConfig
+                                allowlist = ScoutConfig.get_token_2022_allowlist()
+                                if token_address in allowlist:
+                                    logger.info(f"Token-2022 token {token_address[:8]}... is in allowlist, skipping extension check")
+                                elif len(raw) > 165:
                                     offset = 165
                                     while offset + 4 <= len(raw):
                                         ext_type = int.from_bytes(raw[offset:offset+2], 'little')

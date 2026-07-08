@@ -753,8 +753,8 @@ class LiquidityProvider:
         """
         Estimate slippage for a trade based on trade size vs liquidity.
 
-        Uses a square root model: slippage increases with sqrt of trade size
-        relative to liquidity. Enhanced with:
+        Uses CPMM (Constant Product Market Maker) model by default, with legacy
+        sqrt model available via config. Enhanced with:
         - Volume/turnover volatility adjustment
         - Order-book depth proxy (bid/ask spread from volume/liquidity ratio)
         - Token age factor (newer tokens have wider spreads)
@@ -775,23 +775,42 @@ class LiquidityProvider:
 
         trade_value_usd = amount_sol * sol_price_usd
 
-        # Base Slippage (AMM Constant Product Approximation)
-        base_slippage = 0.1 * math.sqrt(trade_value_usd / liquidity_usd)
+        # Check config for slippage model
+        from config import ScoutConfig
+        use_cpmm = ScoutConfig.get_use_cpmm_slippage()
 
-        # Turnover factor: single multiplier from volume/liquidity ratio (saturating).
-        # Combines what was previously split into volatility + depth multipliers
-        # to avoid double-counting correlated inputs.
-        turnover_factor = 1.0
-        if liquidity_usd > 0 and volume_24h_usd > 0:
-            turnover_ratio = volume_24h_usd / liquidity_usd
-            if turnover_ratio > 20.0:
-                turnover_factor = 3.0
-            elif turnover_ratio > 10.0:
-                turnover_factor = 2.0
-            elif turnover_ratio > 3.0:
-                turnover_factor = 1.5
-            elif turnover_ratio > 1.0:
-                turnover_factor = 1.2
+        if use_cpmm:
+            # CPMM model: base_slippage = trade_value / (token_reserve + trade_value)
+            # where token_reserve = liquidity / 2 (assuming 50/50 pool)
+            token_reserve_usd = liquidity_usd / 2.0
+            base_slippage = trade_value_usd / (token_reserve_usd + trade_value_usd)
+
+            # Recalibrated turnover multipliers (lower because CPMM base is already higher)
+            turnover_factor = 1.0
+            if liquidity_usd > 0 and volume_24h_usd > 0:
+                turnover_ratio = volume_24h_usd / liquidity_usd
+                if turnover_ratio > 10.0:
+                    turnover_factor = 1.5
+                elif turnover_ratio > 3.0:
+                    turnover_factor = 1.25
+                elif turnover_ratio > 1.0:
+                    turnover_factor = 1.1
+        else:
+            # Legacy sqrt model
+            base_slippage = 0.1 * math.sqrt(trade_value_usd / liquidity_usd)
+
+            # Legacy turnover multipliers (higher because sqrt base underestimates)
+            turnover_factor = 1.0
+            if liquidity_usd > 0 and volume_24h_usd > 0:
+                turnover_ratio = volume_24h_usd / liquidity_usd
+                if turnover_ratio > 20.0:
+                    turnover_factor = 3.0
+                elif turnover_ratio > 10.0:
+                    turnover_factor = 2.0
+                elif turnover_ratio > 3.0:
+                    turnover_factor = 1.5
+                elif turnover_ratio > 1.0:
+                    turnover_factor = 1.2
 
         # Phase 5c: Token age factor — additive term, not multiplicative,
         # to avoid blowup when combined with high-turnover tokens.

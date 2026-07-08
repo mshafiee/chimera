@@ -2776,6 +2776,24 @@ impl Executor {
         tip: Decimal,
         route_fee_sol: Option<Decimal>,
     ) -> Result<(), ExecutorError> {
+        // Capital-aware gate: reject trades below minimum live position size
+        // Fixed Jito costs (0.001 SOL tip floor) are uneconomical for tiny positions
+        let min_live_position = self.config.position_sizing.min_live_position_sol;
+        if signal.payload.amount_sol < min_live_position {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                amount_sol = %signal.payload.amount_sol,
+                min_live_position_sol = %min_live_position,
+                "Trade rejected: position size below minimum live threshold"
+            );
+            return Err(ExecutorError::ExecutionCostTooHigh {
+                cost: tip,
+                cost_pct: (tip / signal.payload.amount_sol).to_f64().unwrap_or(0.0) * 100.0,
+                limit_pct: (min_live_position / signal.payload.amount_sol).to_f64().unwrap_or(100.0) * 100.0,
+                strategy: signal.payload.strategy,
+            });
+        }
+
         // P2-17/F22: real per-route fee when available, else flat config rate.
         let dex_fee = route_fee_sol.unwrap_or_else(|| {
             signal.payload.amount_sol * self.config.strategy.dex_fee_rate
