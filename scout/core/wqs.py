@@ -406,6 +406,8 @@ class WalletMetrics:
     trade_sizes: Optional[list] = None
     avg_hold_time_hours: Optional[float] = None
     advanced_risk_features: Optional[Dict[str, Any]] = None
+    replay_data_gap_ratio: Optional[float] = None  # Ratio of SELL events with data gaps to total SELL events
+    is_tg_bot_user: bool = False  # Flagged as Telegram bot user (≥50% of ≥10 swaps through bot router)
 
 
 @dataclass
@@ -476,6 +478,16 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
 
     if roi_7d > -5.0 and roi_30d > 20.0:
         tracker.add_pos("roi_score", 10.0)
+
+    # Apply confidence penalty for wallets with FIFO replay data gaps
+    # This reduces confidence in PnL-based scores when sell data is incomplete
+    if metrics.replay_data_gap_ratio is not None and metrics.replay_data_gap_ratio > 0:
+        gap_ratio = metrics.replay_data_gap_ratio
+        # Apply penalty proportionally to ROI-based scores
+        # Max penalty of 20 points when gap ratio is 100%
+        roi_penalty = gap_ratio * 20.0
+        if roi_penalty > 0:
+            tracker.add_neg("replay_data_gap", roi_penalty)
 
     win_rate = metrics.win_rate or 0.0
     profit_factor = metrics.profit_factor

@@ -8,6 +8,7 @@ including them in wallet analysis or copy trading.
 import logging
 import aiohttp
 from typing import Dict, Optional
+from datetime import datetime, timedelta
 
 # Import config module if available
 try:
@@ -16,6 +17,15 @@ try:
 except ImportError:
     CONFIG_AVAILABLE = False
     ScoutConfig = None
+
+# Import cache system
+try:
+    from advanced_cache import AdvancedCache, CacheCategory
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
+    AdvancedCache = None
+    CacheCategory = None
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +62,14 @@ class RugCheckClient:
             fail_mode = ScoutConfig.get_rugcheck_fail_mode()
         self.fail_mode = fail_mode or "closed"
         
-        self._cache: Dict[str, Dict] = {}  # Cache token risk assessments
+        self._l1_cache: Dict[str, Dict] = {}  # In-memory L1 cache with timestamps
         self._session = session
         self._own_session = False
+        
+        # Initialize advanced cache if available
+        self._cache: Optional[AdvancedCache] = None
+        if CACHE_AVAILABLE:
+            self._cache = AdvancedCache()
     
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -88,12 +103,35 @@ class RugCheckClient:
                 - risks: List[str] (List of risk flags found)
                 - cached: bool (True if result was from cache)
         """
-        # Check cache first
-        if token_mint in self._cache:
-            cached_result = self._cache[token_mint].copy()
-            cached_result["cached"] = True
-            return cached_result
+        # Check L2 (Redis) cache first if available
+        if CACHE_AVAILABLE and self._cache:
+            try:
+                cache_key = f"token_security:{token_mint}"
+                cached_data = self._cache.get(cache_key, category=CacheCategory.TOKEN_SECURITY)
+                if cached_data is not None:
+                    cached_result = cached_data.copy()
+                    cached_result["cached"] = True
+                    cached_result["cache_level"] = "L2"
+                    logger.debug(f"Token security cache L2 hit for {token_mint[:8]}...")
+                    return cached_result
+            except Exception as e:
+                logger.warning(f"L2 cache check failed for {token_mint[:8]}...: {e}")
         
+        # Check L1 (in-memory) cache next
+        if token_mint in self._l1_cache:
+            cached_entry = self._l1_cache[token_mint]
+            # Check if L1 entry is still valid (2 hours)
+            if datetime.now() - cached_entry["timestamp"] < timedelta(hours=2):
+                cached_result = cached_entry["data"].copy()
+                cached_result["cached"] = True
+                cached_result["cache_level"] = "L1"
+                logger.debug(f"Token security cache L1 hit for {token_mint[:8]}...")
+                return cached_result
+            else:
+                # Expired entry, remove it
+                del self._l1_cache[token_mint]
+        
+        # Cache miss - fetch from API
         try:
             url = f"{self.base_url}/tokens/{token_mint}/report"
             headers = {}
@@ -134,11 +172,24 @@ class RugCheckClient:
                         "is_safe": is_safe,
                         "score": score,
                         "risks": risk_names,
-                        "cached": False
+                        "cached": False,
+                        "cache_level": "none"
                     }
                     
-                    # Cache result
-                    self._cache[token_mint] = result
+                    # Cache in L1 (in-memory)
+                    self._l1_cache[token_mint] = {
+                        "data": result.copy(),
+                        "timestamp": datetime.now()
+                    }
+                    
+                    # Cache in L2 (Redis) if available
+                    if CACHE_AVAILABLE and self._cache:
+                        try:
+                            cache_key = f"token_security:{token_mint}"
+                            self._cache.set(cache_key, result, category=CacheCategory.TOKEN_SECURITY)
+                        except Exception as e:
+                            logger.warning(f"Failed to cache token security in L2 for {token_mint[:8]}...: {e}")
+                    
                     return result
                     
                 elif response.status == 404:
@@ -148,9 +199,21 @@ class RugCheckClient:
                         "is_safe": True,  # Fail open for unknown tokens
                         "score": 0,
                         "risks": [],
-                        "cached": False
+                        "cached": False,
+                        "cache_level": "none"
                     }
-                    self._cache[token_mint] = result
+                    # Cache in L1
+                    self._l1_cache[token_mint] = {
+                        "data": result.copy(),
+                        "timestamp": datetime.now()
+                    }
+                    # Cache in L2 if available
+                    if CACHE_AVAILABLE and self._cache:
+                        try:
+                            cache_key = f"token_security:{token_mint}"
+                            self._cache.set(cache_key, result, category=CacheCategory.TOKEN_SECURITY)
+                        except Exception:
+                            pass
                     return result
                 else:
                     logger.warning(f"RugCheck API returned status {response.status} for token {token_mint}")
@@ -161,7 +224,8 @@ class RugCheckClient:
                             "is_safe": False,
                             "score": 9999,  # High score indicates unknown risk
                             "risks": ["RugCheck API unavailable"],
-                            "cached": False
+                            "cached": False,
+                            "cache_level": "none"
                         }
                     else:
                         # Fail open: allow token if API fails
@@ -169,7 +233,8 @@ class RugCheckClient:
                             "is_safe": True,
                             "score": 0,
                             "risks": [],
-                            "cached": False
+                            "cached": False,
+                            "cache_level": "none"
                         }
                     
         except aiohttp.ClientError as e:
@@ -180,14 +245,16 @@ class RugCheckClient:
                     "is_safe": False,
                     "score": 9999,
                     "risks": ["RugCheck API error"],
-                    "cached": False
+                    "cached": False,
+                    "cache_level": "none"
                 }
             else:
                 return {
                     "is_safe": True,
                     "score": 0,
                     "risks": [],
-                    "cached": False
+                    "cached": False,
+                    "cache_level": "none"
                 }
         except Exception as e:
             logger.error(f"Unexpected error in RugCheck check for {token_mint}: {e}")
@@ -196,14 +263,16 @@ class RugCheckClient:
                     "is_safe": False,
                     "score": 9999,
                     "risks": ["RugCheck check error"],
-                    "cached": False
+                    "cached": False,
+                    "cache_level": "none"
                 }
             else:
                 return {
                     "is_safe": True,
                     "score": 0,
                     "risks": [],
-                    "cached": False
+                    "cached": False,
+                    "cache_level": "none"
                 }
     
     async def is_token_safe(self, token_mint: str) -> bool:
@@ -220,5 +289,16 @@ class RugCheckClient:
         return risk.get("is_safe", False)
     
     def clear_cache(self):
-        """Clear the risk assessment cache."""
-        self._cache.clear()
+        """Clear the L1 risk assessment cache."""
+        self._l1_cache.clear()
+    
+    async def clear_all_caches(self):
+        """Clear both L1 and L2 caches."""
+        self._l1_cache.clear()
+        if CACHE_AVAILABLE and self._cache:
+            try:
+                # Clear L2 cache by category
+                await self._cache.invalidate_by_category(CacheCategory.TOKEN_SECURITY)
+                logger.info("Cleared L2 Redis cache for TOKEN_SECURITY category")
+            except Exception as e:
+                logger.warning(f"Failed to clear L2 cache: {e}")

@@ -29,28 +29,37 @@ logger = logging.getLogger(__name__)
 
 
 class CreditCost(Enum):
-    """Helius API credit costs for different endpoints."""
+    """Helius API credit costs for different endpoints.
+    
+    Verified against official Helius documentation:
+    - https://www.helius.dev/docs/billing/llms.txt
+    - Standard RPC calls cost 1 credit
+    - DAS API methods cost 10 credits  
+    - getTransactionsForAddress costs 50 credits
+    - Wallet API costs 100 credits
+    - Enhanced Transactions cost 100 credits (deprecated)
+    """
 
     # Transaction fetching
-    GET_TRANSACTIONS = 1  # Per page of transactions
-    GET_TRANSACTION = 2   # Single transaction details
-    PARSE_TRANSACTION = 1 # Transaction parsing
+    GET_TRANSACTIONS = 50  # getTransactionsForAddress (enhanced history, per page <=100)
+    GET_TRANSACTION = 1    # Standard RPC - single transaction details
+    PARSE_TRANSACTION = 0  # Local parsing, covered by GET_TRANSACTIONS cost
 
     # Wallet discovery
-    DISCOVER_WALLETS = 5  # Per discovery batch
-    WALLET_BALANCES = 10  # Bulk balance check
+    DISCOVER_WALLETS = 50  # Discovery via getTransactionsForAddress (enhanced history)
+    WALLET_BALANCES = 1    # getBalance (standard RPC)
 
     # Token metadata
-    TOKEN_METADATA = 2    # Token metadata fetch
-    TOKEN_CREATION = 3     # Token creation time
+    TOKEN_METADATA = 10    # DAS API - getAsset (Digital Asset Standard)
+    TOKEN_CREATION = 1     # getSignaturesForAddress (standard RPC for wallet age)
 
     # Signature queries
-    SIGNATURES = 1         # Per signature page
-    WALLET_FIRST_TX = 2    # Wallet creation time
+    SIGNATURES = 1         # Per signature page (standard RPC)
+    WALLET_FIRST_TX = 1    # getSignaturesForAddress (standard RPC for wallet creation time)
 
-    # Analysis operations
-    SWAP_ANALYSIS = 1      # Per swap parsed
-    POSITION_TRACK = 2     # Position reconciliation
+    # Analysis operations (local operations, no API cost)
+    SWAP_ANALYSIS = 0      # Local swap parsing
+    POSITION_TRACK = 0     # Local position reconciliation
 
 
 class RequestPriority(Enum):

@@ -196,6 +196,17 @@ class PrePromotionValidator:
             ValidationResult with pass/fail. Returns passed=True if enforcement is disabled,
             or if wallet passes both checks.
         """
+        # Block Telegram bot users from ACTIVE promotion
+        if metrics.is_tg_bot_user:
+            logger.info(f"Blocking TG bot user {wallet_address[:8]} from ACTIVE promotion")
+            return ValidationResult(
+                wallet_address=wallet_address,
+                passed=False,
+                status=ValidationStatus.FAILED_WQS,
+                reason="Telegram bot user detected (≥50% of ≥10 swaps through bot router)",
+                recommended_status="CANDIDATE",
+            )
+
         if not self.criteria.enforce_low_churn:
             return ValidationResult(
                 wallet_address=wallet_address,

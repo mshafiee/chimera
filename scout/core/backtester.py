@@ -629,11 +629,29 @@ class BacktestSimulator:
 
         # Time-delay slippage: model the 100-500ms operator latency + block
         # inclusion delay. BUY leg = entry_delay_slippage_pct, SELL leg = exit.
+        # Apply regime-aware scaling based on liquidity turnover ratio.
         delay_slippage = Decimal('0')
-        if trade.action == TradeAction.BUY:
-            delay_slippage = cost_size_sol * self.config.entry_delay_slippage_pct
-        elif trade.action == TradeAction.SELL:
-            delay_slippage = cost_size_sol * self.config.exit_delay_slippage_pct
+        if trade.action in (TradeAction.BUY, TradeAction.SELL):
+            # Compute liquidity turnover ratio
+            turnover_ratio = 0.0
+            if historical_liquidity > Decimal('0'):
+                turnover_ratio = float(vol_24h) / float(historical_liquidity)
+
+            # Determine multiplier based on turnover ratio
+            multiplier = 1.0
+            if turnover_ratio > 10:
+                multiplier = 3.0
+            elif turnover_ratio > 3:
+                multiplier = 2.0
+            else:
+                multiplier = 1.0
+
+            # Cap multiplier at 10×
+            multiplier = min(10.0, multiplier)
+
+            # Calculate base delay slippage
+            base_pct = self.config.entry_delay_slippage_pct if trade.action == TradeAction.BUY else self.config.exit_delay_slippage_pct
+            delay_slippage = cost_size_sol * base_pct * float_to_decimal(multiplier)
 
         # MEV/sandwich penalty on SELL trades (modeling sandwich attacks on copied exits)
         mev_penalty = Decimal('0')

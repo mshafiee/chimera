@@ -44,6 +44,7 @@ class CacheCategory(Enum):
     TOKEN_METADATA = "token_metadata"       # 24 hours
     WALLET_TXS = "wallet_txs"              # 10 minutes
     SWAP_DATA = "swap_data"                # 10 minutes
+    TOKEN_SECURITY = "token_security"      # 2 hours (RugCheck results)
 
     # Low churn (long TTL)
     TOKEN_CREATION = "token_creation"      # 7 days
@@ -120,6 +121,7 @@ class TTLDefaults:
     TOKEN_METADATA = 86400    # 24 hours
     WALLET_TXS = 600          # 10 minutes
     SWAP_DATA = 600           # 10 minutes
+    TOKEN_SECURITY = 7200     # 2 hours (RugCheck results)
 
     # Low churn categories
     TOKEN_CREATION = 604800   # 7 days

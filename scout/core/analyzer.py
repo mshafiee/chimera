@@ -1241,6 +1241,29 @@ class WalletAnalyzer:
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
 
+        # Phase 5a: Telegram bot detection
+        # Count swaps routed through known bot routers (programId or feePayer)
+        bot_swap_count = 0
+        if self.helius_client.KNOWN_BOT_ROUTERS:
+            for tx in transactions:
+                if tx.get("type") == "SWAP":
+                    # Check if executing programId is a known bot router
+                    for ix in tx.get("instructions", []):
+                        if ix.get("programId") in self.helius_client.KNOWN_BOT_ROUTERS:
+                            bot_swap_count += 1
+                            break
+                    # Also check feePayer
+                    if tx.get("feePayer") in self.helius_client.KNOWN_BOT_ROUTERS:
+                        bot_swap_count += 1
+
+        # Calculate bot swap ratio
+        bot_swap_ratio = 0.0
+        total_swaps = len([tx for tx in transactions if tx.get("type") == "SWAP"])
+        if total_swaps >= 10:  # Only flag if wallet has at least 10 swaps
+            bot_swap_ratio = bot_swap_count / max(1, total_swaps)
+
+        print(f"  [{address[:8]}] Bot detection: {bot_swap_count}/{total_swaps} swaps ({bot_swap_ratio:.1%})")
+
         # Compute per-wallet parse rate
         total_fetched = len(transactions)
         total_parsed = len(trades)
@@ -1334,6 +1357,7 @@ class WalletAnalyzer:
             is_unproven_from_parse=is_unproven_from_parse,
             parse_rate=parse_rate,
             mev_risk_score=mev_risk_score,
+            is_tg_bot_user=(bot_swap_ratio >= 0.5 and total_swaps >= 10),
         )
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
@@ -1499,7 +1523,7 @@ class WalletAnalyzer:
     @staticmethod
     def _replay_positions(
         trades: List[HistoricalTrade],
-    ) -> Tuple[Decimal, Decimal, Dict[str, Dict[str, Decimal]], Dict[int, Decimal]]:
+    ) -> Tuple[Decimal, Decimal, Dict[str, Dict[str, Decimal]], Dict[int, Decimal], float]:
         """
         Replay trades chronologically with FIFO cost basis tracking.
 
@@ -1508,6 +1532,7 @@ class WalletAnalyzer:
             realized_pnl: Sum of realized PnL from SELL trades
             open_positions: Dict of token -> {qty, cost_sol}
             per_trade_pnl: Dict of sorted index -> pnl_sol for each SELL trade
+            replay_data_gap_ratio: Ratio of SELL events with data gaps to total SELL events
         """
         has_swap_fields = any(t.sol_amount is not None or t.token_amount is not None for t in trades)
 
@@ -1516,6 +1541,10 @@ class WalletAnalyzer:
         total_cost_sold = Decimal('0')
         realized_pnl_total = Decimal('0')
         per_trade_pnl: Dict[int, Decimal] = {}
+
+        # Track data gap metrics
+        sell_events_count = 0
+        mismatched_sell_events_count = 0
 
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
 
@@ -1548,13 +1577,21 @@ class WalletAnalyzer:
                     pos["cost_sol"] += qty * price
 
             elif t.action == TradeAction.SELL:
+                sell_events_count += 1
                 pos = positions.get(token)
                 if not pos or pos["qty"] < EPSILON:
                     continue
 
                 if has_swap_fields:
                     sell_qty = min(token_qty, pos["qty"])
-                    sell_val = sol_amt
+                    
+                    # Proportional scaling when data gap detected
+                    if token_qty > pos["qty"]:
+                        mismatched_sell_events_count += 1
+                        scale = safe_decimal_divide(pos["qty"], token_qty)
+                        sell_val = sol_amt * scale
+                    else:
+                        sell_val = sol_amt
                 else:
                     sell_qty = min(qty, pos["qty"])
                     sell_val = float_to_decimal(t.pnl_sol or Decimal('0'))
@@ -1582,7 +1619,12 @@ class WalletAnalyzer:
                 else:
                     pos["cost_sol"] = max(Decimal('0'), pos["cost_sol"])
 
-        return total_cost_sold, realized_pnl_total, positions, per_trade_pnl
+        # Calculate replay data gap ratio
+        replay_data_gap_ratio = 0.0
+        if sell_events_count > 0:
+            replay_data_gap_ratio = float(mismatched_sell_events_count) / float(sell_events_count)
+
+        return total_cost_sold, realized_pnl_total, positions, per_trade_pnl, replay_data_gap_ratio
 
     def _enrich_trades_with_realized_pnl(self, trades: List[HistoricalTrade]) -> List[HistoricalTrade]:
         """
@@ -1594,7 +1636,7 @@ class WalletAnalyzer:
         if all(t.token_amount is None and t.sol_amount is None and t.price_sol is None for t in trades):
             return trades
 
-        _, _, _, per_trade_pnl = self._replay_positions(trades)
+        _, _, _, per_trade_pnl, replay_data_gap_ratio = self._replay_positions(trades)
 
         sorted_trades = sorted(trades, key=lambda t: t.timestamp)
         for idx, pnl in per_trade_pnl.items():
@@ -2069,7 +2111,7 @@ class WalletAnalyzer:
             self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None, mev_risk_score: Optional[float] = None) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None, mev_risk_score: Optional[float] = None, is_tg_bot_user: bool = False) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -2335,7 +2377,12 @@ class WalletAnalyzer:
         except Exception as e:
             print(f"  [{address[:8]}] ERROR in insider detection: {e}")
             is_fresh_wallet = False
-        
+
+        # Calculate replay data gap ratio from FIFO replay
+        _, _, _, _, replay_data_gap_ratio = self._replay_positions(trades)
+        if replay_data_gap_ratio > 0:
+            print(f"  [{address[:8]}] FIFO replay data gap ratio: {replay_data_gap_ratio:.2%}")
+
         # 4. Smart Money Detection (DEX diversity, limit orders, MEV protection)
         # All three values are computed from raw Helius transactions upstream and passed in.
         # uses_limit_orders / uses_mev_protection default False for callers that don't supply them.
@@ -2519,6 +2566,8 @@ class WalletAnalyzer:
             mev_risk_score=mev_risk_score,
             archetype=archetype,
             trajectory=trajectory,
+            replay_data_gap_ratio=replay_data_gap_ratio,
+            is_tg_bot_user=is_tg_bot_user,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[Any]]:
@@ -2681,7 +2730,7 @@ class WalletAnalyzer:
         if not trades:
             return 0.0
 
-        total_cost_sold, realized_pnl, _, _ = self._replay_positions(trades)
+        total_cost_sold, realized_pnl, _, _, replay_data_gap_ratio = self._replay_positions(trades)
 
         if total_cost_sold <= Decimal('0'):
             return 0.0

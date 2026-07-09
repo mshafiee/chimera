@@ -32,6 +32,13 @@ try:
 except ImportError:
     ACTIVITY_CACHE_AVAILABLE = False
 
+# Import credit tracker
+try:
+    from .helius_credit_tracker import get_credit_tracker
+    CREDIT_TRACKER_AVAILABLE = True
+except ImportError:
+    CREDIT_TRACKER_AVAILABLE = False
+
 try:
     from ..config import ScoutConfig
 except ImportError:
@@ -502,6 +509,17 @@ class HeliusClient:
         "SysvarRent111111111111111111111111111111111",  # Sysvar Rent
         "SysvarC1ock11111111111111111111111111111111",  # Sysvar Clock
     }
+
+    # Known Telegram bot router program IDs
+    # These are used to identify wallets that predominantly use Telegram bots for trading
+    # IMPORTANT: Each address must be verified from official bot docs/on-chain before committing
+    # TODO: Verify and add addresses from official sources:
+    # - Maestro: https://docs.maestro.so/
+    # - Trojan: Check official documentation
+    # - BananaGun: https://docs.bananagun.com/
+    # - BonkBot: Check official documentation
+    # If addresses cannot be verified, leave this set empty to avoid misclassification
+    KNOWN_BOT_ROUTERS = set()
 
     # Known non-wallet addresses (program IDs, common mints) that can appear in tx payloads.
     # These are filtered out during discovery to avoid selecting programs/mints as "wallets".
@@ -2206,7 +2224,17 @@ class HeliusClient:
                         response.raise_for_status()
                         self._api_calls_made += 1
                         data = await response.json()
-                
+
+                    # Record credit cost for successful discovery fetch (50 credits per page)
+                    if CREDIT_TRACKER_AVAILABLE:
+                        tracker = get_credit_tracker()
+                        tracker.record_request(
+                            cost=50,
+                            category="discovery",
+                            endpoint="getTransactionsForAddress",
+                            success=True
+                        )
+
                     if "result" in data and "data" in data["result"]:
                         transactions = data["result"]["data"]
                     
@@ -2362,6 +2390,16 @@ class HeliusClient:
                     "No Helius API key configured. Set HELIUS_API_KEY or pass strict=False."
                 )
             return []
+
+        # Check monthly hard cap (safety valve)
+        if CREDIT_TRACKER_AVAILABLE:
+            tracker = get_credit_tracker()
+            snapshot = tracker.get_snapshot()
+            if snapshot.credits_remaining <= 0:
+                logger.warning(
+                    "[Helius] Monthly credit cap reached. Skipping wallet discovery..."
+                )
+                return []
 
         print("[Helius] Discovering wallets from recent swaps...")
         print(f"[Helius] Config: min_trades={min_trade_count}, max_wallets={max_wallets}, hours_back={hours_back}")
@@ -2580,6 +2618,17 @@ class HeliusClient:
         if not self.api_key:
             return []
 
+        # Check monthly hard cap (safety valve)
+        if CREDIT_TRACKER_AVAILABLE:
+            tracker = get_credit_tracker()
+            snapshot = tracker.get_snapshot()
+            if snapshot.credits_remaining <= 0:
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    f"[Helius] Monthly credit cap reached. Skipping wallet transaction fetch for {wallet_address[:8]}..."
+                )
+                return []
+
         # Check activity-based cache first (higher priority than basic cache)
         if self._activity_cache:
             cached_result = self._activity_cache.get_cached_transactions(
@@ -2642,6 +2691,16 @@ class HeliusClient:
                 batch = data if isinstance(data, list) else data.get("transactions", [])
                 if not batch:
                     break
+
+                # Record credit cost for successful page fetch (50 credits per page)
+                if CREDIT_TRACKER_AVAILABLE:
+                    tracker = get_credit_tracker()
+                    tracker.record_request(
+                        cost=50,
+                        category="analysis",
+                        endpoint="getTransactionsForAddress",
+                        success=True
+                    )
 
                 # Filter by time window
                 batch_filtered = []
