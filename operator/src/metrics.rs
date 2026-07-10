@@ -88,6 +88,59 @@ pub struct ExecutionLockMetrics {
     pub held_duration: Histogram,
 }
 
+/// Rent scavenger metrics for monitoring rent reclamation operations
+pub struct RentScavengerMetrics {
+    /// Total rent reclaimed (in lamports)
+    pub rent_reclaimed_total: prometheus::IntCounter,
+    /// Total accounts closed
+    pub accounts_closed_total: prometheus::IntCounter,
+    /// Rent scavenger errors total
+    pub errors_total: prometheus::IntCounter,
+    /// Rent scavenger run duration histogram (in seconds)
+    pub run_duration: Histogram,
+}
+
+impl RentScavengerMetrics {
+    /// Create new rent scavenger metrics
+    pub fn new() -> Self {
+        Self {
+            rent_reclaimed_total: IntCounter::with_opts(
+                Opts::new("chimera_rent_scavenger_reclaimed_lamports", "Total rent reclaimed in lamports")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            accounts_closed_total: IntCounter::with_opts(
+                Opts::new("chimera_rent_scavenger_accounts_closed", "Total token accounts closed")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            errors_total: IntCounter::with_opts(
+                Opts::new("chimera_rent_scavenger_errors", "Total rent scavenger errors")
+            ).unwrap_or_else(|_| IntCounter::with_opts(Opts::new("dummy", "dummy")).unwrap()),
+            run_duration: Histogram::with_opts(HistogramOpts::new(
+                "chimera_rent_scavenger_run_duration_seconds",
+                "Rent scavenger run duration in seconds"
+            )).unwrap_or_else(|_| Histogram::with_opts(HistogramOpts::new("dummy", "dummy")).unwrap()),
+        }
+    }
+
+    /// Increment rent reclaimed counter
+    pub fn increment_rent_reclaimed(&self, lamports: u64) {
+        self.rent_reclaimed_total.inc_by(lamports);
+    }
+
+    /// Increment accounts closed counter
+    pub fn increment_accounts_closed(&self, count: u64) {
+        self.accounts_closed_total.inc_by(count);
+    }
+
+    /// Increment errors counter
+    pub fn increment_errors(&self) {
+        self.errors_total.inc();
+    }
+
+    /// Record run duration
+    pub fn record_run_duration(&self, duration: std::time::Duration) {
+        self.run_duration.observe(duration.as_secs_f64());
+    }
+}
+
 impl ExecutionLockMetrics {
     /// Create new execution lock metrics (minimal stub for now)
     pub fn new() -> Self {

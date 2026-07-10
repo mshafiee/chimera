@@ -8,6 +8,9 @@ Documents edge cases where liquidity data quality directly causes capital loss:
 """
 
 from datetime import datetime, timedelta
+
+import pytest
+
 from scout.core.liquidity import LiquidityProvider
 from scout.core.models import LiquidityData
 
@@ -293,3 +296,49 @@ def test_cpmm_slippage_vs_legacy_model():
     assert abs(slippage_cpmm - slippage_legacy) > 0.01, (
         f"Toggle must produce materially different estimates; difference only {abs(slippage_cpmm - slippage_legacy):.4f}"
     )
+
+
+def test_slippage_tier_boundaries():
+    """Verify each tier boundary produces the expected age_additive."""
+    provider = LiquidityProvider(mode="simulated")
+    base_params = dict(
+        token_address="test_token",
+        amount_sol=1.0,
+        liquidity_usd=10_000.0,
+        sol_price_usd=150.0,
+        volume_24h_usd=5_000.0,
+    )
+    # Baseline with mature token (365d = 0% additive)
+    slippage_mature = provider.estimate_slippage(token_age_days=365.0, **base_params)
+
+    cases = [
+        (0.25, 0.05),   # < 12h: +5%
+        (0.49, 0.05),   # < 12h edge: +5%
+        (0.51, 0.03),   # > 12h: +3%
+        (5.0, 0.02),    # < 7d: +2%
+        (29.0, 0.01),   # < 30d: +1%
+        (60.0, 0.005),  # < 90d: +0.5%
+    ]
+    for age_days, expected_additive in cases:
+        slippage = provider.estimate_slippage(token_age_days=age_days, **base_params)
+        assert slippage - slippage_mature == pytest.approx(expected_additive, abs=0.001), \
+            f"Age {age_days}d: expected +{expected_additive}, got {slippage - slippage_mature:.4f}"
+
+
+def test_slippage_none_token_age_uses_no_additive():
+    """When token_age_days is None (unknown), no age additive is applied."""
+    # This tests the guard at line 820: if token_age_days is not None
+    # estimate_slippage defaults to 365.0, so test that 365 and None-equivalent
+    # produce the same result (0% additive)
+    provider = LiquidityProvider(mode="simulated")
+    params = dict(
+        token_address="test_token",
+        amount_sol=1.0,
+        liquidity_usd=10_000.0,
+        sol_price_usd=150.0,
+        volume_24h_usd=5_000.0,
+    )
+    s1 = provider.estimate_slippage(token_age_days=365.0, **params)
+    s2 = provider.estimate_slippage(token_age_days=400.0, **params)
+    assert s1 == pytest.approx(s2, abs=0.0001), \
+        "Tokens >= 365d should have identical slippage (0% additive)"

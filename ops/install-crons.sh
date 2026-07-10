@@ -123,7 +123,12 @@ MAILTO=""
 0 3 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 -m scout.scripts.run_validation --db-path $CHIMERA_HOME/data/chimera.db --time-window 7d >> /var/log/chimera/validation.log 2>&1
 
 # Weekly Scout run (update wallet roster) - Sundays at 2:00 AM
-0 2 * * 0 $CHIMERA_USER cd $CHIMERA_HOME/scout && python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1
+# Uses locking to prevent overlap with twice-daily runs
+0 2 * * 0 $CHIMERA_USER cd $CHIMERA_HOME/scout && flock -n /tmp/scout_weekly.lock -c "python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1" || echo "Scout weekly run skipped (already running)" >> /var/log/chimera/scout.log 2>&1
+
+# Scout run twice daily (every 12 hours) - 12:00 AM and 12:00 PM UTC
+# Uses locking to prevent overlap with weekly runs
+0 */12 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && flock -n /tmp/scout_daily.lock -c "python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1" || echo "Scout daily run skipped (already running)" >> /var/log/chimera/scout.log 2>&1
 
 # Prune old Jito tip history (keep 7 days) - daily at 3:30 AM
 30 3 * * * $CHIMERA_USER sqlite3 $CHIMERA_HOME/data/chimera.db "DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days');" 2>/dev/null

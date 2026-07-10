@@ -19,7 +19,7 @@ import os
 import logging
 import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import random
 
@@ -418,12 +418,14 @@ class LiquidityProvider:
         # Get token creation time if available
         token_age_days = None
         try:
-            from .analyzer import WalletAnalyzer
-            token_creation = WalletAnalyzer.get_token_creation_time(token_address)
-            if token_creation:
-                token_age = now - token_creation
+            from .advanced_cache import get_token_creation_time
+            ts = get_token_creation_time(token_address)
+            if ts:
+                creation_dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                token_age = now - creation_dt
                 token_age_days = token_age.days
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to get token creation time for {token_address[:8]}: {e}")
             pass
 
         # Get grace period configuration
@@ -815,8 +817,10 @@ class LiquidityProvider:
         # Phase 5c: Token age factor — additive term, not multiplicative,
         # to avoid blowup when combined with high-turnover tokens.
         age_additive = 0.0
-        if token_age_days < 365:
-            if token_age_days < 1:
+        if token_age_days is not None and token_age_days < 365:
+            if token_age_days < 0.5:
+                age_additive = 0.05   # Up to +5% additional slippage for hyper-fresh launches
+            elif token_age_days < 1:
                 age_additive = 0.03   # Up to +3% additional slippage for brand-new tokens
             elif token_age_days < 7:
                 age_additive = 0.02   # Up to +2% for <1 week
