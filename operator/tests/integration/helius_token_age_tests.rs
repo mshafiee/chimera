@@ -4,7 +4,11 @@
 //! and used in signal quality scoring.
 
 use chimera_operator::monitoring::HeliusClient;
+use chimera_operator::token::TokenMetadata;
+use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 #[tokio::test]
 #[ignore] // Requires Helius API key - run with: cargo test -- --ignored
@@ -12,7 +16,8 @@ async fn test_helius_token_age_fetching() {
     // Get API key from environment or use test key
     let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set for this test");
 
-    let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
+    let cache = Arc::new(RwLock::new(HashMap::<String, TokenMetadata>::new()));
+    let client = HeliusClient::new(api_key, cache).expect("Failed to create HeliusClient");
 
     // Test with USDC (known token, should exist)
     let usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -38,7 +43,8 @@ async fn test_helius_token_age_fetching() {
 async fn test_helius_token_age_caching() {
     let api_key = env::var("HELIUS_API_KEY").expect("HELIUS_API_KEY must be set for this test");
 
-    let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
+    let cache = Arc::new(RwLock::new(HashMap::<String, TokenMetadata>::new()));
+    let client = HeliusClient::new(api_key, cache).expect("Failed to create HeliusClient");
     let token_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
     // First call should query API
@@ -58,7 +64,8 @@ async fn test_helius_token_age_caching() {
 async fn test_helius_token_age_invalid_token() {
     // Test with invalid token address
     let api_key = "test-key".to_string();
-    let client = HeliusClient::new(api_key).expect("Failed to create HeliusClient");
+    let cache = Arc::new(RwLock::new(HashMap::<String, TokenMetadata>::new()));
+    let client = HeliusClient::new(api_key, cache).expect("Failed to create HeliusClient");
 
     let invalid_mint = "InvalidTokenAddress111111111111111111111111";
 

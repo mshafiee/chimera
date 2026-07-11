@@ -128,6 +128,8 @@ async fn make_processor(
         None,
         None,
         None,
+        None,
+        None,
     );
     (processor, db)
 }

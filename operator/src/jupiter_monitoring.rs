@@ -8,9 +8,7 @@
 //! - Performance indicators
 
 use prometheus::{
-    Counter, Gauge, Histogram, IntCounter, IntGauge, Registry,
-    core::Collector,
-    proto::MetricFamily,
+    Gauge, Histogram, IntCounter, IntGauge, Registry,
 };
 use std::sync::Arc;
 use parking_lot::RwLock;

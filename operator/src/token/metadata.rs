@@ -11,6 +11,7 @@ use crate::token::pools::PoolEnumerator;
 use parking_lot::RwLock;
 use reqwest;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::collections::HashMap;
@@ -53,7 +54,7 @@ impl FdvEntry {
 }
 
 /// Token metadata from on-chain
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenMetadata {
     /// Token mint address
     pub mint: String,
@@ -485,7 +486,7 @@ impl TokenMetadataFetcher {
                 // Fetch priority tokens first (actively traded), up to 8 per cycle
                 let priority_limit = std::cmp::min(priority_tokens.len(), 8);
                 for token_addr in priority_tokens.iter().take(priority_limit) {
-                    match helius_client.get_token_age_hours(&token_addr).await {
+                    match helius_client.get_token_age_hours(token_addr).await {
                         Ok(Some(age)) => {
                             fetched_count += 1;
                             priority_fetched += 1;
@@ -520,7 +521,7 @@ impl TokenMetadataFetcher {
                 // Fetch standard tokens (lower priority), up to 5 per cycle
                 let standard_limit = std::cmp::min(standard_tokens.len(), 5);
                 for token_addr in standard_tokens.iter().take(standard_limit) {
-                    match helius_client.get_token_age_hours(&token_addr).await {
+                    match helius_client.get_token_age_hours(token_addr).await {
                         Ok(Some(age)) => {
                             fetched_count += 1;
                             standard_fetched += 1;

@@ -186,7 +186,8 @@ async fn test_roster_merge_success() {
     create_test_roster(&roster_path, 3).await;
 
     // Perform merge
-    let result = merge_roster(&db, &roster_path).await.unwrap();
+    let pool = sqlite_pool(&db);
+    let result = merge_roster(&pool, &roster_path).await.unwrap();
 
     assert_eq!(result.wallets_merged, 3, "Should merge 3 wallets");
     assert!(result.integrity_ok, "Integrity check should pass");
@@ -210,7 +211,8 @@ async fn test_roster_merge_integrity_check_failure() {
     std::fs::write(&roster_path, b"").unwrap();
 
     // Attempt merge - should fail on integrity check or attachment
-    let result = merge_roster(&db, &roster_path).await;
+    let pool = sqlite_pool(&db);
+    let result = merge_roster(&pool, &roster_path).await;
 
     assert!(result.is_err(), "Merge should fail on corrupted roster");
     let error = result.unwrap_err();
@@ -232,7 +234,8 @@ async fn test_roster_merge_missing_file() {
     let roster_path = temp_dir.path().join("nonexistent.db");
 
     // Attempt merge with non-existent file
-    let result = merge_roster(&db, &roster_path).await;
+    let pool = sqlite_pool(&db);
+    let result = merge_roster(&pool, &roster_path).await;
 
     assert!(result.is_err(), "Merge should fail on missing file");
     let error_msg = result.unwrap_err().to_string();
@@ -261,20 +264,21 @@ async fn test_roster_merge_atomic_write() {
     create_test_roster(&roster_path, 2).await;
 
     // Perform merge
-    let _result = merge_roster(&db, &roster_path).await.unwrap();
+    let pool = sqlite_pool(&db);
+    let _result = merge_roster(&pool, &roster_path).await.unwrap();
 
-    // Upsert strategy: existing wallets are preserved, new ones are inserted
+    // REPLACE strategy: existing wallets are deleted, new wallets are inserted
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wallets")
         .fetch_one(&pool)
         .await
         .unwrap();
 
     assert_eq!(
-        count.0, 3,
-        "Should have 3 wallets after merge (1 existing + 2 new)"
+        count.0, 2,
+        "Should have 2 wallets after merge (all deleted, 2 new inserted)"
     );
 
-    // Verify old wallet still exists (upsert preserves existing wallets)
+    // Verify old wallet was deleted (REPLACE strategy removes existing)
     let old_wallet: Option<(String,)> =
         sqlx::query_as("SELECT address FROM wallets WHERE address = ?")
             .bind("existing_wallet")
@@ -282,10 +286,7 @@ async fn test_roster_merge_atomic_write() {
             .await
             .unwrap();
 
-    assert!(
-        old_wallet.is_some(),
-        "Existing wallet should be preserved by upsert strategy"
-    );
+    assert!(old_wallet.is_none(), "Old wallet should be deleted in REPLACE strategy");
 }
 
 #[tokio::test]
@@ -297,7 +298,8 @@ async fn test_roster_merge_empty_roster() {
     create_test_roster(&roster_path, 0).await;
 
     // Perform merge
-    let result = merge_roster(&db, &roster_path).await.unwrap();
+    let pool = sqlite_pool(&db);
+    let result = merge_roster(&pool, &roster_path).await.unwrap();
 
     assert_eq!(result.wallets_merged, 0, "Should merge 0 wallets");
     assert!(
@@ -316,7 +318,8 @@ async fn test_roster_validate_success() {
     create_test_roster(&roster_path, 5).await;
 
     // Validate
-    let is_valid = validate_roster(&db, &roster_path).await.unwrap();
+    let pool = sqlite_pool(&db);
+    let is_valid = validate_roster(&pool, &roster_path).await.unwrap();
 
     assert!(is_valid, "Valid roster should pass validation");
 }
@@ -326,8 +329,9 @@ async fn test_roster_validate_missing_file() {
     let (db, temp_dir) = create_test_db().await;
     let roster_path = temp_dir.path().join("nonexistent.db");
 
-    // Validate non-existent file
-    let is_valid = validate_roster(&db, &roster_path).await.unwrap();
+    // Validate missing file
+    let pool = sqlite_pool(&db);
+    let is_valid = validate_roster(&pool, &roster_path).await.unwrap();
 
     assert!(!is_valid, "Missing file should fail validation");
 }
@@ -364,18 +368,29 @@ async fn test_roster_merge_transaction_rollback() {
     assert_eq!(count_before.0, 1, "Should have 1 wallet before merge");
 
     // Perform merge (should succeed)
-    let result = merge_roster(&db, &roster_path).await.unwrap();
+    let pool = sqlite_pool(&db);
+    let result = merge_roster(&pool, &roster_path).await.unwrap();
     assert_eq!(result.wallets_merged, 1);
 
-    // Verify final state — upsert strategy: both wallets exist (no deletes)
+    // Verify final state — REPLACE strategy: old wallet deleted, new wallet inserted
     let count_after: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wallets")
         .fetch_one(&pool)
         .await
         .unwrap();
     assert_eq!(
-        count_after.0, 2,
-        "Should have 2 wallets after merge (existing + new from roster)"
+        count_after.0, 1,
+        "Should have 1 wallet after merge (old deleted, new inserted)"
     );
+
+    // Verify old wallet was deleted
+    let old_wallet: Option<(String,)> =
+        sqlx::query_as("SELECT address FROM wallets WHERE address = ?")
+            .bind("wallet_before_merge")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+
+    assert!(old_wallet.is_none(), "Old wallet should be deleted in REPLACE strategy");
 }
 
 // =============================================================================

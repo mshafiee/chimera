@@ -6,6 +6,7 @@
 
 use chimera_operator::config::AppConfig;
 use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 
 #[tokio::test]
 async fn test_unlisted_heuristic_rejected_in_strict_mode() {
@@ -60,13 +61,13 @@ async fn test_minimum_liquidity_thresholds() {
 
     // Shield should have higher threshold (conservative)
     assert!(
-        config.token_safety.min_liquidity_shield_usd >= 10_000.0,
+        config.token_safety.min_liquidity_shield_usd >= dec!(10_000.0),
         "Shield minimum liquidity should be at least $10,000 for safety"
     );
 
     // Spear should have lower threshold (aggressive but still safe)
     assert!(
-        config.token_safety.min_liquidity_spear_usd >= 5_000.0,
+        config.token_safety.min_liquidity_spear_usd >= dec!(5_000.0),
         "Spear minimum liquidity should be at least $5,000 for safety"
     );
 

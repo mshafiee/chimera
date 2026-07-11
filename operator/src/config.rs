@@ -353,6 +353,19 @@ pub struct CircuitBreakerConfig {
     pub max_jupiter_failures: u32,
 }
 
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            max_loss_24h_usd: default_max_loss(),
+            max_consecutive_losses: default_max_consecutive_losses(),
+            max_drawdown_percent: default_max_drawdown(),
+            portfolio_stop_loss_percent: default_portfolio_stop_loss_percent(),
+            cooldown_minutes: default_cooldown(),
+            max_jupiter_failures: default_max_jupiter_failures(),
+        }
+    }
+}
+
 fn default_max_loss() -> Decimal {
     dec!(500.0)
 }

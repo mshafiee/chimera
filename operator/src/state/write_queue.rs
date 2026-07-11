@@ -8,7 +8,7 @@ use crate::state::registry::{TradeState, TradeStatus};
 use rust_decimal::Decimal;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Notify};
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 /// Write operation with retry metadata
@@ -241,7 +241,7 @@ impl AsyncWriteQueue {
     ) {
         let mut batch_buffer: Vec<WriteOperation> = Vec::with_capacity(batch_config.max_batch_size);
         let mut last_batch_time = Instant::now();
-        let mut shutdown_rx = shutdown.notified();
+        let _shutdown_rx = shutdown.notified();
 
         info!("Worker {} started", worker_id);
 

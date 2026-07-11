@@ -108,6 +108,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
         TOKEN,
         Decimal::from_str("150.0").unwrap(),
         PriceSource::Jupiter,
+        None,
     );
 
     // hard_stop=−100 prevents the sign-convention bug from interfering

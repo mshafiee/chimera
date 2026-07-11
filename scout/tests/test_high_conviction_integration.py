@@ -8,17 +8,33 @@ with the wallet database writing and prioritizes WQS 70+ wallets appropriately.
 import pytest
 from unittest.mock import Mock, AsyncMock, MagicMock, patch
 from typing import List, Dict, Any
+from decimal import Decimal
 
 from core.high_conviction_allocator import (
     HighConvictionAllocator,
     ConvictionLevel,
     AllocationResult
 )
-from core.db_writer import WalletRecord
+from core.models import WalletRecord
 from integrations.high_conviction_integration import (
     HighConvictionIntegration,
     create_high_conviction_integration
 )
+
+
+def _wallet(address, wqs_score, status):
+    """Helper to create WalletRecord with required fields."""
+    return WalletRecord(
+        address=address,
+        status=status,
+        wqs_score=wqs_score,
+        roi_7d=0.0,
+        roi_30d=0.0,
+        trade_count_30d=10,
+        win_rate=0.5,
+        max_drawdown_30d=0.0,
+        avg_trade_size_sol=Decimal("1.0"),
+    )
 
 
 class TestHighConvictionAllocator:
@@ -210,10 +226,10 @@ class TestHighConvictionIntegration:
 
         # Create mock wallet records
         wallets = [
-            WalletRecord(address="wallet1", wqs_score=80.0, status="ACTIVE"),
-            WalletRecord(address="wallet2", wqs_score=60.0, status="ACTIVE"),
-            WalletRecord(address="wallet3", wqs_score=75.0, status="CANDIDATE"),
-            WalletRecord(address="wallet4", wqs_score=40.0, status="REJECTED"),
+            _wallet("wallet1", 80.0, "ACTIVE"),
+            _wallet("wallet2", 60.0, "ACTIVE"),
+            _wallet("wallet3", 75.0, "CANDIDATE"),
+            _wallet("wallet4", 40.0, "REJECTED"),
         ]
 
         # Filter roster (should prioritize high-conviction)

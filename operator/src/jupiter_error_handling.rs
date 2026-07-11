@@ -8,9 +8,7 @@ use crate::error::{AppError, AppResult};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use rand::Rng;
 use uuid::Uuid;
-use chrono::Utc;
 
 /// Jupiter API request context for tracing
 #[derive(Debug, Clone)]
@@ -231,8 +229,7 @@ pub fn calculate_retry_delay(attempt: u32, config: &RetryConfig) -> Duration {
 
     // Add jitter to avoid thundering herd
     let jitter = if config.jitter_factor > 0.0 {
-        let mut rng = rand::thread_rng();
-        (rng.gen::<f64>() - 0.5) * 2.0 * config.jitter_factor * capped_delay
+        (rand::random::<f64>() - 0.5) * 2.0 * config.jitter_factor * capped_delay
     } else {
         0.0
     };

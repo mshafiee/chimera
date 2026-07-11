@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod integration_tests {
     use chimera_operator::config::ConvictionTier;
-    use chimera_operator::db_abstraction::Database;
-    use chimera_operator::models::Wallet;
+    use chimera_operator::db_abstraction::{Database, Wallet};
     use rust_decimal::Decimal;
+    use rust_decimal::prelude::*;
+    use chrono::Utc;
 
     // Helper function to create a test wallet
     fn create_test_wallet(
@@ -16,25 +17,25 @@ mod integration_tests {
             address,
             status,
             wqs_score: Some(Decimal::from(wqs_score)),
-            wqs_confidence: Some(Decimal::from(0.8)),
-            roi_7d: Some(Decimal::from(10.5)),
-            roi_30d: Some(Decimal::from(25.3)),
+            wqs_confidence: Some(Decimal::from_f64(0.8).unwrap()),
+            roi_7d: Some(Decimal::from_f64(10.5).unwrap()),
+            roi_30d: Some(Decimal::from_f64(25.3).unwrap()),
             trade_count_30d: Some(50),
-            win_rate: Some(0.65),
-            max_drawdown_30d: Some(Decimal::from(-15.2)),
-            avg_trade_size_sol: Some(Decimal::from(0.5)),
-            avg_win_sol: Some(Decimal::from(0.3)),
-            avg_loss_sol: Some(Decimal::from(-0.2)),
-            profit_factor: Some(Decimal::from(2.1)),
-            realized_pnl_30d_sol: Some(Decimal::from(5.2)),
-            last_trade_at: Some("2025-01-01T00:00:00Z".to_string()),
-            promoted_at: Some("2025-01-01T00:00:00Z".to_string()),
+            win_rate: Some(Decimal::from_f64(0.65).unwrap()),
+            max_drawdown_30d: Some(Decimal::from_f64(-15.2).unwrap()),
+            avg_trade_size_sol: Some(Decimal::from_f64(0.5).unwrap()),
+            avg_win_sol: Some(Decimal::from_f64(0.3).unwrap()),
+            avg_loss_sol: Some(Decimal::from_f64(-0.2).unwrap()),
+            profit_factor: Some(Decimal::from_f64(2.1).unwrap()),
+            realized_pnl_30d_sol: Some(Decimal::from_f64(5.2).unwrap()),
+            last_trade_at: Some(Utc::now()),
+            promoted_at: Some(Utc::now()),
             ttl_expires_at: None,
             notes: None,
             archetype: None,
-            avg_entry_delay_seconds: Some(2.5),
-            created_at: "2025-01-01T00:00:00Z".to_string(),
-            updated_at: "2025-01-01T00:00:00Z".to_string(),
+            avg_entry_delay_seconds: Some(Decimal::from_f64(2.5).unwrap()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         }
     }
 

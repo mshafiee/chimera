@@ -16,6 +16,10 @@ pub mod mints {
 pub mod programs {
     /// Jupiter Aggregator Program ID
     pub const JUPITER: &str = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+    /// Token Program (legacy SPL Token)
+    pub const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+    /// Token-2022 Program
+    pub const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 }
 
 // Legacy constants for backward compatibility

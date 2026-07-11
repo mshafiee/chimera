@@ -34,7 +34,7 @@ lru = "0.13"
 # Stay on Solana 3.x for stable dependencies (Solana 4.0 has version conflicts)
 solana-sdk = "3"
 solana-client = "3"
-solana-transaction-status = { version = "3", features = ["agave-unstable-api"] }
+solana-transaction-status = "3"
 solana-account-decoder = "3"
 solana-system-interface = { version = "2.0", features = ["bincode"] }
 solana-program = "3"
@@ -101,7 +101,7 @@ rust_decimal_macros = "1"
 sysinfo = "0.38.4"
 
 # Distributed Caching (optional)
-redis = { version = "0.24", features = ["tokio-comp", "connection-manager"], optional = true }
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "aio", "connection-manager"], optional = true }
 
 [features]
 postgres = []

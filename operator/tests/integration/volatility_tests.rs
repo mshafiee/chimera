@@ -25,6 +25,7 @@ async fn test_volatility_calculation() {
             sol_mint,
             Decimal::from_f64(price).unwrap_or_default(),
             PriceSource::Jupiter,
+            None,
         );
         // Small delay to ensure different timestamps
         sleep(Duration::from_millis(10)).await;
@@ -48,7 +49,7 @@ async fn test_volatility_insufficient_data() {
     let sol_mint = "So11111111111111111111111111111111111111112";
 
     // Add only one price point
-    cache.set_price(sol_mint, Decimal::from(100u32), PriceSource::Jupiter);
+    cache.set_price(sol_mint, Decimal::from(100u32), PriceSource::Jupiter, None);
 
     // Should return None (insufficient data)
     let volatility = cache.calculate_volatility(sol_mint);
@@ -66,7 +67,7 @@ async fn test_volatility_24h_window() {
     // Add prices within 24h window
     for i in 0..10u32 {
         let price = Decimal::from(100u32) + Decimal::from(i) * Decimal::from_str("0.1").unwrap();
-        cache.set_price(sol_mint, price, PriceSource::Jupiter);
+        cache.set_price(sol_mint, price, PriceSource::Jupiter, None);
         sleep(Duration::from_millis(10)).await;
     }
 
@@ -89,6 +90,7 @@ async fn test_get_sol_volatility() {
             sol_mint,
             Decimal::from_f64(price).unwrap_or_default(),
             PriceSource::Jupiter,
+            None,
         );
         sleep(Duration::from_millis(10)).await;
     }
@@ -114,6 +116,7 @@ async fn test_volatility_high_volatility_detection() {
             sol_mint,
             Decimal::from_f64(price).unwrap_or_default(),
             PriceSource::Jupiter,
+            None,
         );
         sleep(Duration::from_millis(10)).await;
     }

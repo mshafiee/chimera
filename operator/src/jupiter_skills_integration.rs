@@ -7,7 +7,7 @@
 //! - jupiter-vrfd: Token verification integration
 
 use crate::config::JupiterConfig;
-use crate::error::{AppError, AppResult};
+use crate::error::AppResult;
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 

@@ -9,7 +9,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 use tokio::sync::Notify;
 use tracing::{debug, trace};
 
@@ -553,7 +553,7 @@ mod tests {
 
         registry.insert_position(position).unwrap();
 
-        let heat = registry.get_portfolio_heat();
+        let _heat = registry.get_portfolio_heat();
         // Heat should have been updated (in real implementation, this would update portfolio heat)
         assert_eq!(registry.position_count(), 1);
     }

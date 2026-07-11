@@ -10,7 +10,6 @@ use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
-use std::collections::HashMap;
 
 /// Cache entry with timestamp for TTL checking
 #[derive(Clone)]
@@ -215,7 +214,7 @@ pub enum MetadataCacheStore {
     Memory(std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>),
     /// Redis cache for multi-instance deployments
     #[cfg(feature = "redis-cache")]
-    Redis(redis::ConnectionManager),
+    Redis(std::sync::Arc<tokio::sync::Mutex<redis::aio::ConnectionManager>>),
 }
 
 impl MetadataCacheStore {
@@ -236,11 +235,11 @@ impl MetadataCacheStore {
             .map_err(|e| format!("Failed to create Redis client: {}", e))?;
 
         let conn_manager = client
-            .get_tokio_conn_manager()
+            .get_connection_manager()
             .await
             .map_err(|e| format!("Failed to create Redis connection manager: {}", e))?;
 
-        Ok(Self::Redis(conn_manager))
+        Ok(Self::Redis(std::sync::Arc::new(tokio::sync::Mutex::new(conn_manager))))
     }
 
     /// Get token metadata from cache
@@ -252,7 +251,8 @@ impl MetadataCacheStore {
             }
             #[cfg(feature = "redis-cache")]
             Self::Redis(conn) => {
-                self.get_from_redis(conn, key).await.ok().flatten()
+                let mut conn = conn.lock().await;
+                self.get_from_redis(&mut conn, key).await.ok().flatten()
             }
         }
     }
@@ -267,7 +267,8 @@ impl MetadataCacheStore {
             }
             #[cfg(feature = "redis-cache")]
             Self::Redis(conn) => {
-                let _ = self.insert_to_redis(conn, &key, &value, ttl_secs).await;
+                let mut conn = conn.lock().await;
+                let _ = self.insert_to_redis(&mut conn, &key, &value, ttl_secs).await;
             }
         }
     }
@@ -281,7 +282,8 @@ impl MetadataCacheStore {
             }
             #[cfg(feature = "redis-cache")]
             Self::Redis(conn) => {
-                let _ = self.clear_redis(conn).await;
+                let mut conn = conn.lock().await;
+                let _ = self.clear_redis(&mut conn).await;
             }
         }
     }
@@ -310,29 +312,35 @@ impl MetadataCacheStore {
     #[cfg(feature = "redis-cache")]
     async fn get_from_redis(
         &self,
-        conn: &redis::ConnectionManager,
+        conn: &mut redis::aio::ConnectionManager,
         key: &str,
     ) -> Result<Option<super::metadata::TokenMetadata>, String> {
         let key_str = format!("metadata:{}", key);
-        let data: Option<String> = conn
-            .get(key_str)
+        let mut redis_cmd = redis::cmd("GET");
+        redis_cmd.arg(&key_str);
+
+        let data: redis::Value = conn
+            .send_packed_command(&redis_cmd)
             .await
             .map_err(|e| format!("Redis GET error: {}", e))?;
 
         match data {
-            Some(json_str) => {
+            redis::Value::Data(bytes) => {
+                let json_str = String::from_utf8(bytes)
+                    .map_err(|e| format!("Invalid UTF-8 in Redis response: {}", e))?;
                 let metadata = serde_json::from_str::<super::metadata::TokenMetadata>(&json_str)
                     .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
                 Ok(Some(metadata))
             }
-            None => Ok(None),
+            redis::Value::Nil => Ok(None),
+            _ => Err(format!("Unexpected Redis response type: {:?}", data)),
         }
     }
 
     #[cfg(feature = "redis-cache")]
     async fn insert_to_redis(
         &self,
-        conn: &redis::ConnectionManager,
+        conn: &mut redis::aio::ConnectionManager,
         key: &str,
         value: &super::metadata::TokenMetadata,
         ttl_secs: u64,
@@ -341,7 +349,12 @@ impl MetadataCacheStore {
         let json_str = serde_json::to_string(value)
             .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
 
-        conn.setex(key_str, ttl_secs, json_str)
+        let mut redis_cmd = redis::cmd("SETEX");
+        redis_cmd.arg(&key_str);
+        redis_cmd.arg(ttl_secs);
+        redis_cmd.arg(&json_str);
+
+        conn.send_packed_command(&redis_cmd)
             .await
             .map_err(|e| format!("Redis SETEX error: {}", e))?;
 
@@ -349,16 +362,35 @@ impl MetadataCacheStore {
     }
 
     #[cfg(feature = "redis-cache")]
-    async fn clear_redis(&self, conn: &redis::ConnectionManager) -> Result<(), String> {
+    async fn clear_redis(&self, conn: &mut redis::aio::ConnectionManager) -> Result<(), String> {
         // Clear all keys with metadata: prefix
         let pattern = "metadata:*";
-        let keys: Vec<String> = conn
-            .keys(pattern)
+        let mut redis_cmd = redis::cmd("KEYS");
+        redis_cmd.arg(pattern);
+
+        let keys_data: redis::Value = conn
+            .send_packed_command(&redis_cmd)
             .await
             .map_err(|e| format!("Redis KEYS error: {}", e))?;
 
+        let keys = match keys_data {
+            redis::Value::Bulk(values) => {
+                values.into_iter()
+                    .filter_map(|v| match v {
+                        redis::Value::Data(bytes) => String::from_utf8(bytes).ok(),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            }
+            _ => vec![],
+        };
+
         if !keys.is_empty() {
-            conn.del(keys)
+            let mut delete_cmd = redis::cmd("DEL");
+            for key in &keys {
+                delete_cmd.arg(key);
+            }
+            conn.send_packed_command(&delete_cmd)
                 .await
                 .map_err(|e| format!("Redis DEL error: {}", e))?;
         }

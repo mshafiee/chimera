@@ -543,8 +543,8 @@ impl MetricsState {
 
                         // Count slow queries (> 100ms) from histogram buckets
                         for bucket in histogram.bucket.iter() {
-                            if bucket.get_upper_bound() >= SLOW_QUERY_THRESHOLD_MS {
-                                slow_queries_count += bucket.get_cumulative_count() as u32;
+                            if bucket.upper_bound() >= SLOW_QUERY_THRESHOLD_MS {
+                                slow_queries_count += bucket.cumulative_count() as u32;
                                 break; // This gives us count of queries >= threshold
                             }
                         }

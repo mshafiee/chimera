@@ -14,7 +14,7 @@ high-WQS wallets that are most likely to be profitable.
 import logging
 from typing import List, Dict, Any, Optional
 from core.high_conviction_allocator import HighConvictionAllocator, ConvictionLevel, AllocationResult
-from core.db_writer import WalletRecord
+from core.models import WalletRecord
 
 logger = logging.getLogger(__name__)
 

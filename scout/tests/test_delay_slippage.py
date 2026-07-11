@@ -9,8 +9,8 @@ import pytest
 from decimal import Decimal
 from unittest.mock import Mock
 
-from core.backtester import Backtester, BacktestConfig
-from core.wqs import Trade, TradeAction
+from core.backtester import BacktestSimulator
+from core.models import BacktestConfig, TradeAction
 
 
 class TestTurnoverRatioCalculation:
@@ -278,8 +278,8 @@ class TestDelaySlippageIntegration:
 
 
 @pytest.mark.asyncio
-class TestBacktesterDelaySlippage:
-    """Test delay slippage in Backtester class."""
+class TestBacktestSimulatorDelaySlippage:
+    """Test delay slippage in BacktestSimulator class."""
 
     async def test_backtester_uses_regime_aware_multiplier(self, backtester):
         """Test that backtester calculates regime-aware multiplier."""
@@ -333,7 +333,7 @@ class TestBacktesterDelaySlippage:
 
 @pytest.fixture
 def backtester():
-    """Create a Backtester instance for testing."""
+    """Create a BacktestSimulator instance for testing."""
     from core.liquidity import LiquidityEstimator
     
     config = BacktestConfig(
@@ -349,4 +349,4 @@ def backtester():
     liquidity_estimator = Mock(spec=LiquidityEstimator)
     liquidity_estimator.estimate_slippage = Mock(return_value=0.01)
     
-    return Backtester(config=config, liquidity=liquidity_estimator)
+    return BacktestSimulator(liquidity=liquidity_estimator, config=config)

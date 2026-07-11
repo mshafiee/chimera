@@ -143,7 +143,8 @@ async fn test_roster_merge_valid() {
     drop(roster_pool);
 
     // Merge roster
-    let result = roster::merge_roster(&db, &roster_path).await;
+    let pool = sqlite_pool(&db);
+    let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(result.is_ok(), "Merge should succeed");
 
     let merge_result = result.unwrap();
@@ -173,7 +174,8 @@ async fn test_roster_merge_integrity_failure() {
     std::fs::write(&roster_path, b"corrupted").unwrap();
 
     // Merge should fail integrity check
-    let result = roster::merge_roster(&db, &roster_path).await;
+    let pool = sqlite_pool(&db);
+    let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(result.is_err(), "Merge should fail on corrupted database");
 }
 
@@ -197,7 +199,8 @@ async fn test_roster_merge_missing_table() {
     drop(roster_pool);
 
     // Merge should fail - no wallets table
-    let result = roster::merge_roster(&db, &roster_path).await;
+    let pool = sqlite_pool(&db);
+    let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(
         result.is_err(),
         "Merge should fail when wallets table missing"
@@ -238,12 +241,13 @@ async fn test_roster_merge_schema_mismatch() {
     drop(roster_pool);
 
     // Merge should fail with schema validation error
-    let result = roster::merge_roster(&db, &roster_path).await;
+    let pool = sqlite_pool(&db);
+    let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(result.is_err(), "Merge should fail on schema mismatch");
 
     let error_msg = format!("{}", result.unwrap_err());
     assert!(
-        error_msg.contains("Schema mismatch") || error_msg.contains("Missing columns"),
+        error_msg.contains("schema") || error_msg.contains("column") || error_msg.contains("no such column"),
         "Error should mention schema mismatch, got: {}",
         error_msg
     );

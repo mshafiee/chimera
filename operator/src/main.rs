@@ -1456,6 +1456,89 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Spawn rent scavenger background task (every 6 hours)
+    if config.trade_mode != chimera_operator::config::TradeMode::Paper {
+        if let Ok(scavenger_enabled) = std::env::var("RENT_SCAVENGER_ENABLED") {
+            if scavenger_enabled == "true" || scavenger_enabled == "1" {
+                use chimera_operator::engine::transaction_builder::load_wallet_keypair;
+                use solana_client::nonblocking::rpc_client::RpcClient as NonblockingRpcClient;
+                
+                let rpc_url = config.rpc.primary_url.clone();
+                
+                match vault::load_secrets_with_fallback()
+                    .ok()
+                    .and_then(|s| load_wallet_keypair(&s).ok())
+                {
+                    Some(wallet_keypair) => {
+                        let rent_scavenger_config = chimera_operator::engine::RentScavengerConfig {
+                            enabled: true,
+                            interval_secs: std::env::var("RENT_SCAVENGER_INTERVAL_SECS")
+                                .unwrap_or_else(|_| "21600".to_string())
+                                .parse()
+                                .unwrap_or(6 * 3600), // 6 hours default
+                            max_batch_size: std::env::var("RENT_SCAVENGER_BATCH_SIZE")
+                                .unwrap_or_else(|_| "10".to_string())
+                                .parse()
+                                .unwrap_or(10),
+                            max_rent_lamports: std::env::var("RENT_SCAVENGER_MAX_RENT_LAMPORTS")
+                                .unwrap_or_else(|_| "1000000000".to_string())
+                                .parse()
+                                .unwrap_or(1_000_000_000), // 1 SOL default
+                        };
+
+                        let rent_metrics = Arc::new(chimera_operator::metrics::RentScavengerMetrics::new());
+                        let rpc_url_clone = rpc_url.clone();
+                        let rent_scavenger = chimera_operator::engine::RentScavenger::new(
+                            rpc_url_clone,
+                            Arc::new(wallet_keypair),
+                            rent_scavenger_config,
+                            Some(rent_metrics),
+                        );
+
+                        let rent_scavenger = Arc::new(rent_scavenger);
+                        let rent_token = cancel_token.clone();
+                        let circuit_breaker_clone = circuit_breaker.clone();
+
+                        tokio::spawn(async move {
+                            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(6 * 3600));
+
+                            loop {
+                                tokio::select! {
+                                    _ = rent_token.cancelled() => break,
+                                    _ = ticker.tick() => {
+                                        // Only run if circuit breaker is healthy
+                                        match circuit_breaker_clone.current_state() {
+                                            chimera_operator::circuit_breaker::CircuitBreakerState::Active => {
+                                                tracing::info!("Rent scavenger: circuit breaker healthy, running reclaim cycle");
+                                                if let Err(e) = rent_scavenger.reclaim_empty_accounts().await {
+                                                    tracing::error!(error = %e, "Rent scavenger run failed");
+                                                }
+                                            }
+                                            state => {
+                                                tracing::debug!(state = %state, "Rent scavenger: circuit breaker not healthy, skipping run");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+
+                        tracing::info!("✓ Rent scavenger started (6-hour interval, gated on circuit breaker health)");
+                    }
+                    None => {
+                        tracing::warn!("Rent scavenger disabled: failed to load wallet keypair");
+                    }
+                }
+            } else {
+                tracing::info!("Rent scavenger disabled via RENT_SCAVENGER_ENABLED=false");
+            }
+        } else {
+            tracing::info!("Rent scavenger disabled (RENT_SCAVENGER_ENABLED not set)");
+        }
+    } else {
+        tracing::info!("Rent scavenger disabled in paper mode");
+    }
+
     tracing::info!("All background tasks spawned");
 
     // Now create the FULL router with all routes

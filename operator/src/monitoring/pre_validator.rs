@@ -259,7 +259,7 @@ impl PreValidator {
             let trade_usd = amount_sol * sol_price;
 
             // Square-root market impact estimation
-            let impact = ((trade_usd * Decimal::from(2)) / liquidity_usd);
+            let impact = (trade_usd * Decimal::from(2)) / liquidity_usd;
             return impact.min(max_slippage);
         }
 

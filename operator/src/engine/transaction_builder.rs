@@ -34,6 +34,7 @@ pub struct TransactionBuilder {
 }
 
 /// Built transaction ready for signing and submission
+#[derive(Debug)]
 pub enum BuiltTransaction {
     /// Legacy transaction
     Legacy {
