@@ -579,11 +579,11 @@ impl TransactionBuilder {
         ];
 
         // Add optional routing parameters
-        if self.config.jupiter.exclude_routers.is_some() {
-            request_params.push(("excludeRouters", self.config.jupiter.exclude_routers.clone().unwrap()));
+        if let Some(exclude_routers) = self.config.jupiter.exclude_routers.as_ref() {
+            request_params.push(("excludeRouters", exclude_routers.clone()));
         }
-        if self.config.jupiter.exclude_dexes.is_some() {
-            request_params.push(("excludeDexes", self.config.jupiter.exclude_dexes.clone().unwrap()));
+        if let Some(exclude_dexes) = self.config.jupiter.exclude_dexes.as_ref() {
+            request_params.push(("excludeDexes", exclude_dexes.clone()));
         }
 
         tracing::debug!(

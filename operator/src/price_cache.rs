@@ -718,32 +718,6 @@ impl<'a> std::ops::Deref for PriceHistoryReadGuard<'a> {
     }
 }
 
-impl Default for PriceCache {
-    fn default() -> Self {
-        // For Default trait (used in tests and config defaults), we panic on failure
-        // to maintain the trait contract. Production code should use new() or with_ttl()
-        // and handle the Result properly.
-        // Note: This creates an instance with empty decimals cache
-        Self {
-            inner: Arc::new(RwLock::new(PriceCacheInner {
-                prices: HashMap::new(),
-                price_history: HashMap::new(),
-                decimals: HashMap::new(),
-                cache_hits: 0,
-                cache_misses: 0,
-                decimals_cache_hits: 0,
-                decimals_cache_misses: 0,
-            })),
-            ttl: Duration::seconds(DEFAULT_CACHE_TTL_SECS),
-            active_tokens: Arc::new(RwLock::new(Vec::new())),
-            updater_running: Arc::new(RwLock::new(false)),
-            sol_mint: "So11111111111111111111111111111111111111112".to_string(),
-            http_client: Self::build_http_client().expect("Failed to build HTTP client"),
-            jupiter_price_api_url: "https://api.jup.ag/price".to_string(),
-        }
-    }
-}
-
 /// Unrealized PnL calculation result
 #[derive(Debug, Clone)]
 pub struct UnrealizedPnL {
