@@ -107,6 +107,10 @@ redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "aio
 postgres = []
 redis-cache = ["redis"]
 
+[[bin]]
+name = "generate_jwt_secret"
+path = "src/tools/generate_jwt_secret.rs"
+
 [dev-dependencies]
 # Testing utilities
 axum-test = "18.4.1"
