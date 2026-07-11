@@ -1431,15 +1431,24 @@ class ScoutConfig:
                 warnings.append(msg)
 
         # Warn if fail modes are open in production (capital protection reduced)
+        # In production with strict=True, escalate to errors to fail-fast
+        is_prod = os.getenv("SCOUT_ENV", "development").lower() == "production"
+        
         rugcheck_fail_mode = os.getenv("RUGCHECK_FAIL_MODE", "closed").lower()
         if rugcheck_fail_mode == "open":
             msg = "RUGCHECK_FAIL_MODE is OPEN - RugCheck outages will assume-safe (CAPITAL PROTECTION REDUCED)"
-            warnings.append(msg)
+            if is_prod and strict:
+                errors.append(msg)
+            else:
+                warnings.append(msg)
 
         safety_fail_mode = os.getenv("SCOUT_SAFETY_FAIL_MODE", "closed").lower()
         if safety_fail_mode == "open":
             msg = "SCOUT_SAFETY_FAIL_MODE is OPEN - token safety failures will assume-safe (CAPITAL PROTECTION REDUCED)"
-            warnings.append(msg)
+            if is_prod and strict:
+                errors.append(msg)
+            else:
+                warnings.append(msg)
 
         # Database path validation
         db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")

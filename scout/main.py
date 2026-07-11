@@ -1594,6 +1594,7 @@ async def main_async():
     # Print configuration summary if config module available
     if CONFIG_AVAILABLE and ScoutConfig:
         ScoutConfig.print_config_summary()
+        ScoutConfig.validate_production_config(strict=True)
         print()
     
     # Initialize components
@@ -1889,6 +1890,8 @@ async def main_async():
                 jito_tip_sol_per_trade=args.jito_tip_sol,
                 enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",  # Default True for promotion safety
                 simulate_at_size_sol=Decimal(os.getenv("SCOUT_COPIER_SIZE_SOL", "0.5")),
+                entry_delay_slippage_pct=Decimal(os.getenv("SCOUT_ENTRY_DELAY_SLIPPAGE_PCT", "0.015")),
+                exit_delay_slippage_pct=Decimal(os.getenv("SCOUT_EXIT_DELAY_SLIPPAGE_PCT", "0.010")),
             )
 
             # Fetch dynamic fees from Helius if available (overrides static values)

@@ -258,8 +258,9 @@ class BacktestConfig:
     # Time-delay slippage: the 100-500ms operator latency + block inclusion delay
     # causes price movement between signal observation and trade execution.
     # These percentages model the expected adverse price movement per leg.
-    entry_delay_slippage_pct: Decimal = field(default_factory=lambda: Decimal('0.005'))  # 0.5% Shield default
-    exit_delay_slippage_pct: Decimal = field(default_factory=lambda: Decimal('0.003'))   # 0.3% Shield default
+    # NOTE: These are base values; backtester.py applies 1x-10x turnover multiplier.
+    entry_delay_slippage_pct: Decimal = field(default_factory=lambda: Decimal('0.015'))  # 1.5% base Shield default
+    exit_delay_slippage_pct: Decimal = field(default_factory=lambda: Decimal('0.010'))   # 1.0% base Shield default
 
     # MEV/sandwich penalty applied to SELL trades to model sandwich attacks
     # on copied exits. Derived from empirical sandwich attack rates on Solana.
