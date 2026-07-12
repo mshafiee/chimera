@@ -1359,7 +1359,9 @@ impl Executor {
                     "Jito tip capped at 1 SOL to prevent u64 overflow"
                 );
             }
-            let tip_lamports = utils::sol_to_lamports(capped_tip);
+                        let tip_lamports = utils::sol_to_lamports(capped_tip).map_err(|e| {
+                            ExecutorError::TransactionFailed(format!("Failed to convert tip to lamports: {}", e))
+                        })?;
 
             // D3: legacy transactions inline the tip as the last instruction and
             // ship as a single-tx bundle (one signature, atomic at tx level). V0
@@ -1491,7 +1493,9 @@ impl Executor {
                         // D3: inline the tip into the legacy swap tx and ship a
                         // single-tx bundle via Helius (one signature, atomic).
                         let capped_tip = tip.min(Decimal::ONE);
-                        let tip_lamports = utils::sol_to_lamports(capped_tip);
+            let tip_lamports = utils::sol_to_lamports(capped_tip).map_err(|e| {
+                ExecutorError::TransactionFailed(format!("Failed to convert tip to lamports: {}", e))
+            })?;
                         match self.inline_and_serialize_tip(
                             transaction,
                             &wallet_keypair,
@@ -3078,7 +3082,9 @@ impl Executor {
 
         match signal.payload.action {
             Action::Buy => {
-                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol).map_err(|e| {
+                    ExecutorError::TransactionFailed(format!("Failed to convert SOL amount to lamports: {}", e))
+                })?;
                 let result = tx_builder
                     .get_quote_prices(sol_mint, signal.token_address(), amount_lamports)
                     .await

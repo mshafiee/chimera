@@ -88,7 +88,7 @@ async fn test_helius_websocket_connection() -> Result<()> {
             }
         }
 
-        Ok::<(), anyhow::Error>(message_count)
+        Ok::<u32, anyhow::Error>(message_count)
     }).await;
 
     match message_timeout {

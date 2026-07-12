@@ -815,7 +815,7 @@ fn default_token_cache_capacity() -> usize {
     1000
 }
 
-fn default_token_cache_ttl() -> i64 {
+pub fn default_token_cache_ttl() -> i64 {
     86400 // 24 hours (immutable token metadata)
 }
 

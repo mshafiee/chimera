@@ -145,6 +145,50 @@ async fn run_preflight(config: &AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Validates JWT secret cryptographic strength
+/// Returns error if secret doesn't meet minimum entropy requirements
+pub(crate) fn validate_jwt_secret(secret: &str) -> Result<(), anyhow::Error> {
+    // Minimum length: 64 characters for hex encoding
+    if secret.len() < 64 {
+        return Err(anyhow::anyhow!("JWT secret too short (minimum 64 characters)"));
+    }
+
+    // Check for hex format (0-9, a-f, A-F)
+    if !secret.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(anyhow::anyhow!(
+            "JWT secret must be hexadecimal (0-9, a-f, A-F)"
+        ));
+    }
+
+    // Calculate entropy: 4 bits per hex character
+    let entropy_bits = secret.len() * 4;
+    if entropy_bits < 256 {
+        return Err(anyhow::anyhow!("JWT secret entropy too low (minimum 256 bits)"));
+    }
+
+    // Check for common dictionary words and patterns
+    let common_patterns = vec![
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "1234567890123456789012345678901234567890123456789012345678901234",
+        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+    ];
+
+    if common_patterns.contains(&secret.to_lowercase().as_str()) {
+        return Err(anyhow::anyhow!(
+            "JWT secret matches a common weak pattern"
+        ));
+    }
+
+    // Check for repeated character patterns (e.g., "aaaaa...")
+    if secret.chars().all(|c| c == secret.chars().next().unwrap()) {
+        return Err(anyhow::anyhow!(
+            "JWT secret contains repeated characters only"
+        ));
+    }
+    Ok(())
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -227,55 +271,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    /// Validates JWT secret cryptographic strength
-    /// Returns error if secret doesn't meet minimum entropy requirements
-    fn validate_jwt_secret(secret: &str) -> Result<(), anyhow::Error> {
-        // Minimum length: 64 characters for hex encoding
-        if secret.len() < 64 {
-            return Err(anyhow::anyhow!("JWT secret too short (minimum 64 characters)"));
-        }
-
-        // Check for hex format (0-9, a-f, A-F)
-        if !secret.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(anyhow::anyhow!(
-                "JWT secret must be hexadecimal (0-9, a-f, A-F)"
-            ));
-        }
-
-        // Calculate entropy: 4 bits per hex character
-        let entropy_bits = secret.len() * 4;
-        if entropy_bits < 256 {
-            return Err(anyhow::anyhow!("JWT secret entropy too low (minimum 256 bits)"));
-        }
-
-        // Check for common dictionary words and patterns
-        let common_patterns = vec![
-            "0000000000000000000000000000000000000000000000000000000000000000",
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            "1234567890123456789012345678901234567890123456789012345678901234",
-            "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
-        ];
-
-        if common_patterns.contains(&secret.to_lowercase().as_str()) {
-            return Err(anyhow::anyhow!(
-                "JWT secret matches a common weak pattern"
-            ));
-        }
-
-        // Check for repeated character patterns (e.g., "aaaaa...")
-        if secret.chars().all(|c| c == secret.chars().next().unwrap()) {
-            return Err(anyhow::anyhow!(
-                "JWT secret contains repeated characters only"
-            ));
-        }
-        Ok(())
-    }
-
     let chimera_env = std::env::var("CHIMERA_ENV").unwrap_or_default();
     let jwt_secret = match std::env::var("JWT_SECRET") {
         Ok(secret) => {
             if chimera_env == "production" {
-                validate_jwt_secret(&secret)?;
+                crate::validate_jwt_secret(&secret)?;
                 tracing::info!("JWT secret validated successfully");
             }
             secret
@@ -2558,7 +2558,7 @@ mod tests {
 
     #[test]
     fn test_validate_jwt_secret_non_hex() {
-        let result = validate_jwt_secret("g".repeat(64));
+        let result = validate_jwt_secret(&"g".repeat(64));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("hexadecimal"));
     }

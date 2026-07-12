@@ -78,6 +78,10 @@ pub enum AppError {
     /// Service unavailable error
     #[error("Service unavailable: {0}")]
     ServiceUnavailable(String),
+
+    /// Invalid input error
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 /// Error response structure for API
@@ -225,6 +229,14 @@ impl IntoResponse for AppError {
                 ErrorResponse {
                     status: "error",
                     reason: "service_unavailable".to_string(),
+                    details: Some(msg.clone()),
+                },
+            ),
+            AppError::InvalidInput(msg) => (
+                StatusCode::BAD_REQUEST,
+                ErrorResponse {
+                    status: "rejected",
+                    reason: "invalid_input".to_string(),
                     details: Some(msg.clone()),
                 },
             ),

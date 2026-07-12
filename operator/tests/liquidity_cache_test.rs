@@ -137,7 +137,7 @@ async fn test_background_updater_starts() {
     println!("Test: Starting background updater...");
     let fetcher_clone = Arc::clone(&fetcher);
     tokio::spawn(async move {
-        fetcher_clone.start_liquidity_updater().await;
+        fetcher_clone.start_cache_updater().await;
     });
 
     // Wait a bit to ensure updater starts

@@ -5,7 +5,7 @@
 //! - Slow Path (Executor): Honeypot detection via transaction simulation
 
 mod cache;
-mod metadata;
+pub mod metadata;
 mod parser;
 mod pools;
 

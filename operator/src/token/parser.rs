@@ -845,18 +845,16 @@ mod tests {
         let invalid_base58 = vec!["0OIL", "abc123def0", "invalid0chars"];
 
         for address in invalid_base58 {
-            let has_invalid_chars = !address
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5');
+            let has_invalid_chars = address.chars().any(|c| c == '0' || c == 'O' || c == 'I' || c == 'l');
             assert!(has_invalid_chars, "Should detect invalid base58 chars");
         }
 
         // Valid base58 characters (subset we check for)
         let valid_base58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
         assert!(
-            valid_base58
+            !valid_base58
                 .chars()
-                .all(|c| c.is_alphanumeric() || c == '1' || c == '3' || c == '5'),
+                .any(|c| c == '0' || c == 'O' || c == 'I' || c == 'l'),
             "All valid base58 chars should pass"
         );
     }

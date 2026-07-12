@@ -247,7 +247,8 @@ impl PriceCache {
         let is_tracked = self
             .active_tokens
             .read()
-            .contains(&token_address.to_string());
+            .iter()
+            .any(|t| t == token_address);
         if !is_tracked {
             return false;
         }

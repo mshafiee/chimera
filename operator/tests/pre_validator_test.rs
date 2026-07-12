@@ -38,6 +38,8 @@ async fn test_validate_local_cache_miss() {
         liquidity_cache_ttl_secs: 60,
         fdv_cache_ttl_secs: 300,
         liquidity_update_interval_secs: 30,
+        cache_backend: "memory".to_string(),
+        redis_url: None,
     };
 
     let config = AppConfig {
@@ -101,6 +103,8 @@ async fn test_pre_validator_initialization() {
         liquidity_cache_ttl_secs: 60,
         fdv_cache_ttl_secs: 300,
         liquidity_update_interval_secs: 30,
+        cache_backend: "memory".to_string(),
+        redis_url: None,
     };
 
     let config = AppConfig {
@@ -140,6 +144,8 @@ async fn test_validate_local_returns_immediately() {
         liquidity_cache_ttl_secs: 60,
         fdv_cache_ttl_secs: 300,
         liquidity_update_interval_secs: 30,
+        cache_backend: "memory".to_string(),
+        redis_url: None,
     };
 
     let config = AppConfig {

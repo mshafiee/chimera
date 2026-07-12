@@ -412,10 +412,12 @@ def test_wqs_bounds():
 def test_classify_wallet():
     """Test wallet classification based on WQS score"""
     assert classify_wallet(75.0) == "ACTIVE"
-    assert classify_wallet(65.0) == "ACTIVE"
+    assert classify_wallet(65.0) == "CANDIDATE"
     assert classify_wallet(64.9) == "CANDIDATE"
-    assert classify_wallet(30.0) == "CANDIDATE"
-    assert classify_wallet(20.0) == "CANDIDATE"
+    assert classify_wallet(50.0) == "CANDIDATE"
+    assert classify_wallet(49.9) == "REJECTED"
+    assert classify_wallet(30.0) == "REJECTED"
+    assert classify_wallet(20.0) == "REJECTED"
     assert classify_wallet(19.9) == "REJECTED"
     assert classify_wallet(0.0) == "REJECTED"
 

@@ -78,6 +78,7 @@ fn create_load_config() -> AppConfig {
             max_consecutive_failures: 10,
             functional_health_check: true,
             timeout_ms: 5000,
+            rate_limit_config: None,
         },
 
         jito: JitoConfig {

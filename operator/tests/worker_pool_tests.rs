@@ -125,6 +125,8 @@ async fn create_signal_processor(
         None,
         None,
         None,
+        None,
+        None,
     );
     (processor, db)
 }

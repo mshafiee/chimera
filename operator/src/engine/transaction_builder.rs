@@ -189,7 +189,9 @@ impl TransactionBuilder {
                 })?;
 
                 // Convert SOL amount to lamports
-                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol);
+                let amount_lamports = crate::utils::sol_to_lamports(signal.payload.amount_sol).map_err(|e| {
+                    crate::error::AppError::Validation(format!("Invalid SOL amount: {}", e))
+                })?;
                 (sol_mint, token_mint, amount_lamports)
             }
             Action::Sell => {

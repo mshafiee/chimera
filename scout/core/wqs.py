@@ -772,8 +772,12 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         if hasattr(metrics, 'advanced_risk_features') and metrics.advanced_risk_features:
             arf = metrics.advanced_risk_features
 
-            # Only apply if extraction was successful
-            if arf.get('extraction_success') and arf.get('sample_count', 0) >= 5:
+            # Only apply if extraction was successful with complete data
+            # Require: extraction_success=True, sample_count>=5, all required fields present, no extraction errors
+            if (arf.get('extraction_success') and
+                arf.get('sample_count', 0) >= 5 and
+                all(key in arf for key in ['cvar_95', 'max_drawdown_duration_trades', 'ulcer_index']) and
+                not arf.get('extraction_errors')):
 
                 # Apply CVaR penalty (95th percentile conditional value at risk)
                 # CVaR measures average loss in the worst 5% of trades

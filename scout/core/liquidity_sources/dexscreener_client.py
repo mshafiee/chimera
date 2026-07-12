@@ -1,9 +1,11 @@
 """DexScreener API client for liquidity and price data."""
 
 import os
+import re
 import time
 from datetime import datetime
 from typing import Optional
+from urllib.parse import quote
 import requests
 from ..models import LiquidityData
 
@@ -31,6 +33,17 @@ class DexScreenerClient:
             time.sleep(self.rate_limit_delay - time_since_last)
         self.last_request_time = time.time()
 
+    def _validate_solana_address(self, address: str) -> bool:
+        """Validate Solana address format (base58, 32-44 chars)."""
+        if not address:
+            return False
+        # Base58 pattern: 32-44 chars, alphanumeric except 0OIl
+        return bool(re.match(r'^[1-9A-HJ-NP-Za-km-z]{32,44}$', address))
+
+    def _safe_url_encode(self, address: str) -> str:
+        """Safely encode Solana address for URL."""
+        return quote(address, safe='')
+
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
         Get current liquidity for a token.
@@ -43,8 +56,14 @@ class DexScreenerClient:
         """
         self._rate_limit()
 
-        # DexScreener uses token address directly
-        url = f"{self.base_url}/tokens/{token_address}"
+        if not self._validate_solana_address(token_address):
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Invalid Solana address format: {token_address}")
+            return None
+
+        safe_address = self._safe_url_encode(token_address)
+        url = f"{self.base_url}/tokens/{safe_address}"
 
         try:
             response = requests.get(url, timeout=10)

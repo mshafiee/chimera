@@ -466,7 +466,28 @@ impl SignalProcessor {
                 }
                 Ok(true) => {}
                 Err(e) => {
-                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Strategy allocation check failed at execution time");
+                    let reason = format!(
+                        "Strategy allocation check failed — rejecting signal (fail-safe): {}",
+                        e
+                    );
+                    tracing::error!(trade_uuid = %trade_uuid, error = %e, "Strategy allocation check failed");
+                    let _ = self
+                        .db
+                        .mark_trade_dead_letter(
+                            &trade_uuid,
+                            &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                            &reason,
+                        )
+                        .await;
+                    if let Some(ref ws) = self.ws_state {
+                        ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "DEAD_LETTER".to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                        }));
+                    }
+                    return;
                 }
             }
 

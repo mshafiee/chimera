@@ -46,6 +46,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'cvar_95': -0.15,  # -15% average loss in worst 5% trades
+                'max_drawdown_duration_trades': 10,
+                'ulcer_index': 3.0,
             }
         )
 
@@ -64,6 +66,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'cvar_95': 0.10,  # +10% average profit in worst 5% trades
+                'max_drawdown_duration_trades': 5,
+                'ulcer_index': 2.0,
             }
         )
 
@@ -79,6 +83,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'max_drawdown_duration_trades': 25,  # 25 trades to recover
+                'cvar_95': 0.05,
+                'ulcer_index': 3.0,
             }
         )
 
@@ -96,6 +102,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'max_drawdown_duration_trades': 5,  # Only 5 trades to recover
+                'cvar_95': 0.10,
+                'ulcer_index': 2.0,
             }
         )
 
@@ -111,6 +119,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'ulcer_index': 8.0,  # Severe, prolonged drawdown
+                'cvar_95': -0.05,
+                'max_drawdown_duration_trades': 10,
             }
         )
 
@@ -128,6 +138,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'ulcer_index': 50.0,  # Extremely high ulcer index
+                'cvar_95': -0.10,
+                'max_drawdown_duration_trades': 15,
             }
         )
 
@@ -143,6 +155,8 @@ class TestAdvancedRiskFeaturesIntegration:
                 'extraction_success': True,
                 'sample_count': 30,
                 'ulcer_index': 3.0,  # Mild drawdown
+                'cvar_95': 0.05,
+                'max_drawdown_duration_trades': 5,
             }
         )
 
@@ -180,6 +194,9 @@ class TestAdvancedRiskFeaturesIntegration:
             advanced_risk_features={
                 'extraction_success': False,  # Extraction failed
                 'sample_count': 0,
+                'cvar_95': 0.0,
+                'max_drawdown_duration_trades': 0,
+                'ulcer_index': 0.0,
             }
         )
 
@@ -227,6 +244,7 @@ class TestAdvancedRiskFeaturesIntegration:
                 'sample_count': 30,
                 'cvar_95': -0.15,
                 'max_drawdown_duration_trades': 20,
+                'ulcer_index': 5.0,
             }
         )
 

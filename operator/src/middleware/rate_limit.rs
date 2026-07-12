@@ -15,6 +15,7 @@
 //! to prevent attackers from spoofing their IP address and bypassing rate limits.
 
 use axum::http::Request;
+use axum::http::StatusCode;
 use std::net::{IpAddr, SocketAddr};
 use tower_governor::{key_extractor::KeyExtractor, GovernorError};
 
@@ -86,9 +87,23 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
             }
         }
 
-        // Use peer address for direct (non-proxied) connections or when forwarded header is absent.
+        // Security: Do NOT fall back to peer address for rate limiting
+        // Peer addresses are easily spoofed by attackers, allowing rate limit bypass
+        // Require authentication-based limiting (API key, JWT token, etc.) for non-proxied requests
+        // For now, return error to force proper authentication implementation
+        if peer_ip.is_some() && !from_trusted_proxy {
+            tracing::warn!(
+                peer_ip = ?peer_ip,
+                "Rate limiting requires authentication for direct connections. Peer address blocked for security."
+            );
+            return Err(GovernorError::UnableToExtractKey);
+        }
+
+        // Use peer address ONLY for trusted proxies (already handled above)
         if let Some(ip) = peer_ip {
-            return Ok(ip.to_string());
+            if from_trusted_proxy {
+                return Ok(ip.to_string());
+            }
         }
 
         Err(GovernorError::UnableToExtractKey)

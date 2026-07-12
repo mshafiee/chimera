@@ -10,11 +10,14 @@ use chrono::{DateTime, Duration, Utc};
 use lru::LruCache;
 use parking_lot::Mutex;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
+
+// Pre-computed Redis key prefix constant
+const METADATA_KEY_PREFIX: &str = "metadata:";
 
 /// Cache entry with timestamp for TTL checking
-#[derive(Clone)]
 struct CacheEntry {
-    result: TokenSafetyResult,
+    result: Arc<TokenSafetyResult>,
     cached_at: DateTime<Utc>,
 }
 
@@ -58,7 +61,7 @@ impl TokenCache {
             let age = Utc::now() - entry.cached_at;
             if age < self.ttl {
                 tracing::trace!(key = key, age_secs = age.num_seconds(), "Cache hit");
-                return Some(entry.result.clone());
+                return Some((entry.result).as_ref().clone());
             } else {
                 // Entry expired, remove it
                 tracing::trace!(key = key, "Cache entry expired");
@@ -72,7 +75,7 @@ impl TokenCache {
     /// Insert a result into the cache
     pub fn insert(&self, key: String, result: TokenSafetyResult) {
         let entry = CacheEntry {
-            result,
+            result: Arc::new(result),
             cached_at: Utc::now(),
         };
 
@@ -224,6 +227,11 @@ impl MetadataCacheStore {
     }
 
     /// Create a memory store from an existing Arc<RwLock<HashMap>>
+    pub fn from_arc(cache: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>) -> Self {
+        Self::Memory(cache)
+    }
+
+    /// Create a memory store from an existing Arc<RwLock<HashMap>>
     pub fn from_memory_cache(cache: std::sync::Arc<parking_lot::RwLock<std::collections::HashMap<String, super::metadata::TokenMetadata>>>) -> Self {
         Self::Memory(cache)
     }
@@ -315,7 +323,7 @@ impl MetadataCacheStore {
         conn: &mut redis::aio::ConnectionManager,
         key: &str,
     ) -> Result<Option<super::metadata::TokenMetadata>, String> {
-        let key_str = format!("metadata:{}", key);
+        let key_str = format!("{}{}", METADATA_KEY_PREFIX, key);
         let mut redis_cmd = redis::cmd("GET");
         redis_cmd.arg(&key_str);
 
