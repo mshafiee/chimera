@@ -734,14 +734,14 @@ impl Database for SqliteBackend {
 
         let mut conditions = Vec::new();
 
-        if let Some(s) = status {
-            conditions.push(format!("status = '{}'", s));
+        if status.is_some() {
+            conditions.push("status = ?".to_string());
         }
-        if let Some(min) = min_wqs {
-            conditions.push(format!("wqs_score >= {}", min));
+        if min_wqs.is_some() {
+            conditions.push("wqs_score >= ?".to_string());
         }
-        if let Some(max) = max_wqs {
-            conditions.push(format!("wqs_score <= {}", max));
+        if max_wqs.is_some() {
+            conditions.push("wqs_score <= ?".to_string());
         }
 
         if !conditions.is_empty() {
@@ -751,7 +751,19 @@ impl Database for SqliteBackend {
 
         query.push_str(" ORDER BY wqs_score DESC");
 
-        let rows = sqlx::query(&query)
+        let mut query_builder = sqlx::query(&query);
+
+        if let Some(s) = status {
+            query_builder = query_builder.bind(s);
+        }
+        if let Some(min) = min_wqs {
+            query_builder = query_builder.bind(min);
+        }
+        if let Some(max) = max_wqs {
+            query_builder = query_builder.bind(max);
+        }
+
+        let rows = query_builder
             .fetch_all(&self.pool)
             .await
             .map_err(AppError::Database)?;
@@ -1224,13 +1236,12 @@ impl Database for SqliteBackend {
 
     async fn get_max_drawdown_percent(&self, total_capital_sol: Decimal) -> AppResult<Decimal> {
         // Fetch closed positions' realized PnL in order (TEXT → Decimal)
-        // Only query closed positions from the last 24 hours to find the session peak
+        // Query all closed positions to find the all-time peak
         let closed_rows: Vec<(String,)> = sqlx::query_as(
             r#"
             SELECT COALESCE(realized_pnl_sol, '0')
             FROM positions
             WHERE state = 'CLOSED'
-              AND closed_at >= datetime('now', '-24 hours')
             ORDER BY closed_at ASC
             "#,
         )

@@ -62,7 +62,7 @@ struct LockEntry {
 /// Trade execution lock using DashMap for thread-safe, low-latency locking
 pub struct ExecutionLock {
     /// Active locks keyed by trade_uuid
-    locks: DashMap<String, LockEntry>,
+    locks: Arc<DashMap<String, LockEntry>>,
     /// Lock configuration
     config: ExecutionLockConfig,
     /// Metrics for monitoring (optional)
@@ -79,7 +79,7 @@ impl ExecutionLock {
         );
 
         Self {
-            locks: DashMap::new(),
+            locks: Arc::new(DashMap::new()),
             config,
             metrics,
         }
@@ -157,7 +157,7 @@ impl ExecutionLock {
                 return Some(LockGuard {
                     lock: Arc::new(ActiveLock {
                         trade_uuid: trade_uuid_owned,
-                        locks: self.locks.clone(),
+                        locks: Arc::clone(&self.locks),
                         acquired_at: now,
                         metrics: self.metrics.clone(),
                     }),
@@ -183,7 +183,7 @@ impl ExecutionLock {
         Some(LockGuard {
             lock: Arc::new(ActiveLock {
                 trade_uuid: trade_uuid_owned,
-                locks: self.locks.clone(),
+                locks: Arc::clone(&self.locks),
                 acquired_at: now,
                 metrics: self.metrics.clone(),
             }),
@@ -325,16 +325,25 @@ impl LockGuard {
     }
 }
 
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        self.lock.release();
+    }
+}
+
 /// Trait for lock implementations (active vs disabled)
 trait LockImpl: Send + Sync {
     /// Get the trade_uuid for this lock (for debugging)
     fn trade_uuid(&self) -> &str;
+
+    /// Release the lock
+    fn release(&self) -> bool;
 }
 
 /// Active lock implementation that releases on drop
 struct ActiveLock {
     trade_uuid: String,
-    locks: DashMap<String, LockEntry>,
+    locks: Arc<DashMap<String, LockEntry>>,
     acquired_at: Instant,
     metrics: Option<Arc<crate::metrics::ExecutionLockMetrics>>,
 }
@@ -343,10 +352,8 @@ impl LockImpl for ActiveLock {
     fn trade_uuid(&self) -> &str {
         &self.trade_uuid
     }
-}
 
-impl Drop for ActiveLock {
-    fn drop(&mut self) {
+    fn release(&self) -> bool {
         let held_duration = self.acquired_at.elapsed();
 
         // Remove from map (this is safe even if another thread acquired it in the meantime)
@@ -355,14 +362,24 @@ impl Drop for ActiveLock {
             trace!(
                 trade_uuid = %self.trade_uuid,
                 held_duration_secs = held_duration.as_secs_f64(),
-                "Lock released automatically"
+                "Lock released"
             );
 
             if let Some(ref metrics) = self.metrics {
                 metrics.increment_lock_released();
                 metrics.record_lock_held_duration(held_duration);
             }
+            true
+        } else {
+            false
         }
+    }
+}
+
+impl Drop for ActiveLock {
+    fn drop(&mut self) {
+        // This is a no-op since release() is called via LockGuard::drop()
+        // Keeping this for safety in case LockGuard is not used correctly
     }
 }
 
@@ -372,6 +389,11 @@ struct DisabledLock;
 impl LockImpl for DisabledLock {
     fn trade_uuid(&self) -> &str {
         "disabled"
+    }
+
+    fn release(&self) -> bool {
+        // No-op for disabled locks
+        true
     }
 }
 
@@ -409,10 +431,11 @@ mod tests {
         let config = ExecutionLockConfig::default();
         let lock = ExecutionLock::new(config, None);
 
-        {
-            let _guard = lock.try_acquire("trade-123", "worker-1");
-            assert!(lock.is_locked("trade-123"), "Should be locked while guard is active");
-        }
+        let guard = lock.try_acquire("trade-123", "worker-1");
+        assert!(lock.is_locked("trade-123"), "Should be locked while guard is active");
+
+        // Explicitly drop the guard
+        drop(guard);
 
         // Lock should be released after guard is dropped
         assert!(!lock.is_locked("trade-123"), "Lock should be released after guard drop");

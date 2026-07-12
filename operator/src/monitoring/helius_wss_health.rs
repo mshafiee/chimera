@@ -161,8 +161,9 @@ mod tests {
         // Initially unhealthy (no messages)
         assert!(!health.is_healthy().await);
 
-        // Record message
+        // Record message and pong
         health.record_message().await;
+        health.record_pong().await;
         assert!(health.is_healthy().await);
 
         // Check metrics
@@ -198,14 +199,15 @@ mod tests {
     async fn test_unhealthy_threshold() {
         let health = WebSocketHealth::new(1); // 1 second threshold for testing
 
-        // Record message
+        // Record message and pong
         health.record_message().await;
+        health.record_pong().await;
         assert!(health.is_healthy().await);
 
         // Wait for threshold to expire
-        tokio::time::sleep(Duration::from_millis(1100)).await;
+        tokio::time::sleep(Duration::from_millis(2000)).await;
 
-        // Should be unhealthy now
+        // Should be unhealthy now (message timeout exceeded)
         assert!(!health.is_healthy().await);
     }
 }

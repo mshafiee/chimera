@@ -179,7 +179,10 @@ mod tests {
         let wallet = "expected_profit_test_wallet";
         let token = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
 
-        // Insert 12 winning trades (+0.1 SOL each) and 8 losing trades (-0.05 SOL each)
+        // Insert 12 winning trades (+0.1 SOL profit each) and 8 losing trades (-0.05 SOL loss each)
+        // Use amount=1.0 SOL for all trades to get proper percentages:
+        // - Wins: pnl_pct = 0.1 / 1.0 = 0.1 (10%)
+        // - Losses: pnl_pct = |-0.05| / 1.0 = 0.05 (5%)
         for i in 0..12u32 {
             let uuid = format!("ep-win-{}", i);
             db.insert_trade(&InsertTrade {
@@ -189,7 +192,7 @@ mod tests {
                 token_symbol: Some("TEST".to_string()),
                 strategy: "SHIELD".to_string(),
                 side: "BUY".to_string(),
-                amount_sol: Decimal::from_str("0.1").unwrap(),
+                amount_sol: Decimal::from_str("1.0").unwrap(),
                 status: "CLOSED".to_string(),
             })
             .await
@@ -207,7 +210,7 @@ mod tests {
                 token_symbol: Some("TEST".to_string()),
                 strategy: "SHIELD".to_string(),
                 side: "BUY".to_string(),
-                amount_sol: Decimal::from_str("0.05").unwrap(),
+                amount_sol: Decimal::from_str("1.0").unwrap(),
                 status: "CLOSED".to_string(),
             })
             .await

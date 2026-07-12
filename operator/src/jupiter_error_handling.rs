@@ -5,6 +5,7 @@
 
 use crate::circuit_breaker::CircuitBreaker;
 use crate::error::{AppError, AppResult};
+use config::ConfigError;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -176,7 +177,7 @@ impl JupiterError {
                 AppError::ServiceUnavailable(format!("Jupiter rate limit: {}", self.message))
             }
             JupiterErrorType::Authentication => {
-                AppError::Internal(format!("Jupiter authentication failed: {}", self.message))
+                AppError::Config(ConfigError::Message(format!("Jupiter authentication failed: {}", self.message)))
             }
             JupiterErrorType::BadRequest => {
                 AppError::Validation(format!("Jupiter bad request: {}", self.message))

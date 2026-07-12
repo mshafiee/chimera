@@ -714,15 +714,15 @@ impl Database for PostgresBackend {
         let mut conditions = Vec::new();
         let mut bind_count = 0;
 
-        if let Some(s) = status {
+        if status.is_some() {
             bind_count += 1;
             conditions.push(format!("status = ${}", bind_count));
         }
-        if let Some(min) = min_wqs {
+        if min_wqs.is_some() {
             bind_count += 1;
             conditions.push(format!("wqs_score >= ${}", bind_count));
         }
-        if let Some(max) = max_wqs {
+        if max_wqs.is_some() {
             bind_count += 1;
             conditions.push(format!("wqs_score <= ${}", bind_count));
         }
@@ -1186,13 +1186,12 @@ impl Database for PostgresBackend {
     }
 
     async fn get_max_drawdown_percent(&self, cap: Decimal) -> AppResult<Decimal> {
-        // Only query closed positions from the last 24 hours to find the session peak
+        // Query all closed positions to find the all-time peak
         let closed_rows: Vec<Decimal> = sqlx::query_scalar::<_, Decimal>(
             r#"
             SELECT COALESCE(realized_pnl_sol, 0.0)
             FROM positions
             WHERE state = 'CLOSED'
-              AND closed_at >= NOW() - INTERVAL '24 hours'
             ORDER BY closed_at ASC
             "#,
         )
