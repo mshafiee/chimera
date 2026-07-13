@@ -1,0 +1,422 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "gnetId": null,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [
+            {"options": {"0": {"color": "red", "index": 0, "text": "Stopped"}}, "type": "value"},
+            {"options": {"1": {"color": "green", "index": 1, "text": "Running"}}, "type": "value"},
+            {"options": {"2": {"color": "blue", "index": 2, "text": "Completed"}}, "type": "value"},
+            {"options": {"3": {"color": "orange", "index": 3, "text": "Aborted"}}, "type": "value"}
+          ],
+          "thresholds": {"steps": [{"color": "red", "value": null}]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""},
+        "textMode": "auto"
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_status",
+          "refId": "A",
+          "legendFormat": "Experiment Status"
+        }
+      ],
+      "title": "Experiment Status",
+      "type": "stat"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0},
+      "id": 2,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_paper_trades_total",
+          "refId": "A",
+          "legendFormat": "Paper Trades"
+        },
+        {
+          "expr": "chimera_experiment_tracer_trades_total",
+          "refId": "B",
+          "legendFormat": "Tracer Trades"
+        },
+        {
+          "expr": "chimera_experiment_control_random_trades_total",
+          "refId": "C",
+          "legendFormat": "Random Control Trades"
+        },
+        {
+          "expr": "chimera_experiment_control_sol_trades_total",
+          "refId": "D",
+          "legendFormat": "SOL Control Trades"
+        }
+      ],
+      "title": "Trade Counts Over Time",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 50}, {"color": "red", "value": 70}]},
+          "unit": "percent"
+        }
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8},
+      "id": 3,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_tracer_sample_rate * 100",
+          "refId": "A",
+          "legendFormat": "Sample Rate"
+        }
+      ],
+      "title": "Tracer Sample Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0}]},
+          "unit": "sol"
+        }
+      },
+      "gridPos": {"h": 8, "w": 18, "x": 6, "y": 8},
+      "id": 4,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "min", "max"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_total_paper_pnl",
+          "refId": "A",
+          "legendFormat": "Paper PnL"
+        },
+        {
+          "expr": "chimera_experiment_total_tracer_pnl",
+          "refId": "B",
+          "legendFormat": "Tracer PnL"
+        },
+        {
+          "expr": "chimera_experiment_control_random_pnl",
+          "refId": "C",
+          "legendFormat": "Random Control PnL"
+        },
+        {
+          "expr": "chimera_experiment_control_sol_pnl",
+          "refId": "D",
+          "legendFormat": "SOL Control PnL"
+        }
+      ],
+      "title": "Cumulative PnL by Strategy",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "red", "value": 20}]},
+          "unit": "percent"
+        }
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 16},
+      "id": 5,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_max_drawdown_pct",
+          "refId": "A",
+          "legendFormat": "Max Drawdown"
+        }
+      ],
+      "title": "Maximum Drawdown",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "percent"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 6, "y": 16},
+      "id": 6,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_expectancy_mean",
+          "refId": "A",
+          "legendFormat": "Expectancy Mean"
+        },
+        {
+          "expr": "chimera_experiment_profit_factor",
+          "refId": "B",
+          "legendFormat": "Profit Factor"
+        }
+      ],
+      "title": "Financial Metrics",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 0.3}]},
+          "unit": "percentunit"
+        }
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 16},
+      "id": 7,
+      "options": {
+        "orientation": "auto",
+        "reduceOptions": {"values": false, "calcs": ["lastNotNull"], "fields": ""},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_toxic_wallet_rate",
+          "refId": "A",
+          "legendFormat": "Toxic Wallet Rate"
+        }
+      ],
+      "title": "Toxic Wallet Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "sol"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 8,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_execution_gap_avg",
+          "refId": "A",
+          "legendFormat": "Average Gap"
+        },
+        {
+          "expr": "chimera_experiment_execution_gap_p95",
+          "refId": "B",
+          "legendFormat": "P95 Gap"
+        }
+      ],
+      "title": "Execution Gaps",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "credits"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 9,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_credits_remaining",
+          "refId": "A",
+          "legendFormat": "Credits Remaining"
+        },
+        {
+          "expr": "chimera_experiment_credits_projected_total",
+          "refId": "B",
+          "legendFormat": "Credits Projected"
+        }
+      ],
+      "title": "Credit Budget",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "ms"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "id": 10,
+      "options": {
+        "legend": {"calcs": ["mean", "lastNotNull", "p95"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(chimera_experiment_trade_execution_latency_ms_bucket[5m]))",
+          "refId": "A",
+          "legendFormat": "Trade Execution P95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(chimera_experiment_signal_to_entry_latency_ms_bucket[5m]))",
+          "refId": "B",
+          "legendFormat": "Signal to Entry P95"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(chimera_experiment_tracer_firing_latency_ms_bucket[5m]))",
+          "refId": "C",
+          "legendFormat": "Tracer Firing P95"
+        }
+      ],
+      "title": "Performance Latencies",
+      "type": "timeseries"
+    },
+    {
+      "datasource": "Prometheus",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {"axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": {"tooltip": false, "viz": false, "legend": false}, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": {"type": "linear"}, "showPoints": "never", "spanNulls": true},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]},
+          "unit": "short"
+        }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "id": 11,
+      "options": {
+        "legend": {"calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "pluginVersion": "8.0.0",
+      "targets": [
+        {
+          "expr": "chimera_experiment_abort_credit_exhaustion",
+          "refId": "A",
+          "legendFormat": "Credit Exhaustion"
+        },
+        {
+          "expr": "chimera_experiment_abort_toxic_rate_exceeded",
+          "refId": "B",
+          "legendFormat": "Toxic Rate Exceeded"
+        },
+        {
+          "expr": "chimera_experiment_abort_drawdown_exceeded",
+          "refId": "C",
+          "legendFormat": "Drawdown Exceeded"
+        },
+        {
+          "expr": "chimera_experiment_abort_breakers_tripped",
+          "refId": "D",
+          "legendFormat": "Circuit Breakers Tripped"
+        }
+      ],
+      "title": "Abort Events",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 27,
+  "style": "dark",
+  "tags": ["chimera", "experiment", "forward-test"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "timepicker": {"refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]},
+  "timezone": "UTC",
+  "title": "Chimera Forward Test Dashboard",
+  "uid": "chimera-experiment-dashboard",
+  "version": 1
+}

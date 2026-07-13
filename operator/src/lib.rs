@@ -9,6 +9,7 @@ pub mod constants;
 pub mod db_abstraction;
 pub mod engine;
 pub mod error;
+pub mod experiment;
 pub mod handlers;
 pub mod jupiter;
 pub mod jupiter_error_handling;

@@ -1,0 +1,57 @@
+# Experiment Configuration for 21-Day Forward Test
+
+experiment:
+  # Tracer Configuration
+  tracer_enabled: true
+  tracer_sample_rate: 1.0  # Start with 100% sampling
+  tracer_cap: 60          # Maximum number of tracer trades
+  
+  # Experiment Duration and Trade Requirements
+  experiment_days: 21     # Minimum experiment window
+  min_trades: 50          # Minimum number of trades for verdict
+  
+  # Control Arms Configuration
+  controls_enabled: true
+  
+  # Toxic Flow Detection
+  toxic_threshold_percent: 30  # Toxic if ROI drops by 30%
+  
+  # Abort Conditions
+  abort_on:
+    credit_exhaustion: true     # Abort if credit budget exhausted
+    toxic_rate_exceeded: true   # Abort if >30% wallets are toxic
+    tracer_cap_reached: false   # Don't abort on tracer cap (just taper)
+    drawdown_exceeded: true     # Abort if max drawdown >20%
+    breakers_tripped: true      # Abort if any circuit breaker trips
+  
+  # Budget Configuration (Helius Developer Plan)
+  credit_budget:
+    monthly: 10000000      # 10M credits per month
+    daily: 333333         # ~333K credits per day
+    safety_margin: 0.1    # 10% safety margin
+  
+  # Tracer Trade Configuration
+  tracer_config:
+    min_position_sol: 0.02  # 0.02 SOL per tracer trade
+    max_concurrent: 5       # Maximum concurrent tracer positions
+    jito_tip_sol: 0.001     # 1/1000 SOL tip for priority
+    max_slippage_bps: 300   # 3% max slippage
+  
+  # T0 and Roster Configuration
+  t0_config:
+    t0_time: null  # Will be set on experiment start
+    roster_frozen: true  # Freeze roster at experiment start
+    anti_lookahead: true  # Chronological split to prevent lookahead bias
+  
+  # Verdict Configuration
+  verdict_config:
+    bootstrap_resamples: 2000
+    confidence_level: 0.95
+    min_profit_factor: 1.2
+    max_drawdown_pct: 20.0
+    max_toxic_rate: 0.3
+    must_beat_controls: true
+
+# Operator Configuration Override (for experiment mode)
+mode: paper  # Run in paper mode by default
+experiment_mode: true  # Enable experiment mode

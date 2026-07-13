@@ -103,6 +103,9 @@ pub struct AppConfig {
     /// Execution lock configuration for idempotency
     #[serde(default)]
     pub execution_lock: crate::engine::ExecutionLockConfig,
+    /// Forward test experiment configuration
+    #[serde(default)]
+    pub experiment: ExperimentConfig,
 }
 
 /// HTTP server configuration
@@ -1571,6 +1574,38 @@ pub struct MevProtectionConfig {
     pub standard_tip_sol: Decimal,
 }
 
+/// Forward test experiment configuration
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExperimentConfig {
+    /// Enable live tracer trades alongside paper mode
+    #[serde(default)]
+    pub tracer_enabled: bool,
+    /// Fraction of paper trades to also execute as live tracers (0.0-1.0)
+    #[serde(default = "default_tracer_sample_rate")]
+    pub tracer_sample_rate: f64,
+    /// Maximum number of tracer trades to execute (capped to limit live capital exposure)
+    #[serde(default = "default_tracer_cap")]
+    pub tracer_cap: u32,
+    /// Number of days to run the experiment
+    #[serde(default = "default_experiment_days")]
+    pub experiment_days: u32,
+    /// Minimum number of trades required for verdict
+    #[serde(default = "default_min_trades")]
+    pub min_trades: u32,
+    /// Enable control arms (random-token + SOL benchmark)
+    #[serde(default = "default_true")]
+    pub controls_enabled: bool,
+    /// Toxic-flow detection: percentage threshold for wallet kill (default: 30%)
+    #[serde(default = "default_toxic_threshold_percent")]
+    pub toxic_threshold_percent: u32,
+    /// Toxic-flow detection: local-top decline percentage (default: 8%)
+    #[serde(default = "default_local_top_decline_pct")]
+    pub local_top_decline_pct: Decimal,
+    /// Enable 24h shake-down mode (no verdict, just verification)
+    #[serde(default)]
+    pub shakedown_mode: bool,
+}
+
 fn default_always_use_jito() -> bool {
     true
 }
@@ -1594,6 +1629,46 @@ impl Default for MevProtectionConfig {
             exit_tip_sol: default_exit_tip_sol(),
             consensus_tip_sol: default_consensus_tip_sol(),
             standard_tip_sol: default_standard_tip_sol(),
+        }
+    }
+}
+
+fn default_tracer_sample_rate() -> f64 {
+    1.0 // 100% of paper trades initially
+}
+
+fn default_tracer_cap() -> u32 {
+    60 // Maximum live tracer trades
+}
+
+fn default_experiment_days() -> u32 {
+    21 // Verdict window in days
+}
+
+fn default_min_trades() -> u32 {
+    50 // Minimum trades for verdict
+}
+
+fn default_toxic_threshold_percent() -> u32 {
+    30 // Kill if >30% of roster toxic
+}
+
+fn default_local_top_decline_pct() -> Decimal {
+    dec!(8.0) // 8% decline for local-top detection
+}
+
+impl Default for ExperimentConfig {
+    fn default() -> Self {
+        Self {
+            tracer_enabled: false,
+            tracer_sample_rate: default_tracer_sample_rate(),
+            tracer_cap: default_tracer_cap(),
+            experiment_days: default_experiment_days(),
+            min_trades: default_min_trades(),
+            controls_enabled: true,
+            toxic_threshold_percent: default_toxic_threshold_percent(),
+            local_top_decline_pct: default_local_top_decline_pct(),
+            shakedown_mode: false,
         }
     }
 }
@@ -2094,6 +2169,7 @@ impl Default for AppConfig {
             mev_protection: MevProtectionConfig::default(),
             degradation: DegradationConfig::default(),
             execution_lock: crate::engine::ExecutionLockConfig::default(),
+            experiment: ExperimentConfig::default(),
         }
     }
 }

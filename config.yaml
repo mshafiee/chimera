@@ -184,3 +184,15 @@ mev_protection:
   exit_tip_sol: 0.0055  # Reduced by 20% from 0.007
   consensus_tip_sol: 0.0024  # Reduced by 20% from 0.003
   standard_tip_sol: 0.0012  # Reduced by 20% from 0.0015
+
+# Forward test experiment configuration
+experiment:
+  tracer_enabled: true          # Enable live tracer trades
+  tracer_sample_rate: 1.0       # 100% of paper trades initially
+  tracer_cap: 60                # Max 60 live tracer trades
+  experiment_days: 21           # Verdict window in days
+  min_trades: 50                # Minimum trades for verdict
+  controls_enabled: true        # Enable control arms
+  toxic_threshold_percent: 30   # Kill if >30% of roster toxic
+  local_top_decline_pct: 8.0    # 8% decline for local-top detection
+  shakedown_mode: false         # Set to true for 24h shake-down test

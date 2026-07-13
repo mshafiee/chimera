@@ -90,7 +90,7 @@ prometheus = "0.14.0"
 printpdf = "0.8.2"
 
 # Random number generation
-rand = "0.9"
+rand = { version = "0.9", features = ["small_rng"] }
 
 # Memory Security
 zeroize = { version = "1.7", features = ["derive"] }
