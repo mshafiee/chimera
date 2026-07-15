@@ -2618,6 +2618,13 @@ class HeliusClient:
         if not self.api_key:
             return []
 
+        # Normalize cache parameters to canonical buckets to ensure cache hits
+        # across discovery/analysis/validation phases which use different days/limit values.
+        # Canonical window: 30 days (dominant analysis window)
+        # Canonical limit: round up to nearest 100
+        canonical_days = 30  # Standardized time window for all phases
+        canonical_limit = ((limit + 99) // 100) * 100  # Round up to nearest 100
+
         # Check monthly hard cap (safety valve)
         if CREDIT_TRACKER_AVAILABLE:
             tracker = get_credit_tracker()
@@ -2630,18 +2637,20 @@ class HeliusClient:
                 return []
 
         # Check activity-based cache first (higher priority than basic cache)
+        # Use canonical parameters for cache key consistency across phases
         if self._activity_cache:
             cached_result = self._activity_cache.get_cached_transactions(
-                wallet_address, days, limit
+                wallet_address, canonical_days, canonical_limit
             )
             if cached_result is not None:
                 return cached_result
 
         # Fallback to basic cache (if activity cache not available)
-        # Check cache first (using wallet transactions category with 10-minute TTL)
+        # Check cache first using canonical parameters with shortest-phase TTL
+        # Use wallet metrics TTL (300s = 5 minutes) as the shortest-phase freshness requirement
         if CACHE_AVAILABLE:
             cache = get_cache()
-            cache_key = f"{wallet_address}:{days}:{limit}"
+            cache_key = f"{wallet_address}:{canonical_days}:{canonical_limit}"
             cached_result = cache.get("wallet_txs", wallet_address, cache_key,
                                     category=CacheCategory.WALLET_TXS)
             if cached_result is not None:
@@ -2649,8 +2658,8 @@ class HeliusClient:
 
         endpoint = f"/addresses/{wallet_address}/transactions"
 
-        # Target total transactions to fetch
-        target = int(limit) if limit is not None else 100
+        # Use canonical parameters for pagination to ensure consistency
+        target = int(canonical_limit) if canonical_limit is not None else 100
         
         # Helius v0 standard page size is 100. requesting more often results in truncation.
         BATCH_SIZE = 100
@@ -2658,10 +2667,10 @@ class HeliusClient:
         # Safety break for pagination
         MAX_PAGES = int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", "50"))
 
-        # Calculate cutoff timestamp once
+        # Calculate cutoff timestamp once using canonical days
         cutoff_timestamp = 0
-        if days > 0:
-            cutoff = utcnow() - timedelta(days=days)
+        if canonical_days > 0:
+            cutoff = utcnow() - timedelta(days=canonical_days)
             cutoff_timestamp = int(cutoff.timestamp())
 
         async def _paginate_with_type(tx_type: Optional[str]) -> List[Dict[str, Any]]:
@@ -2730,25 +2739,39 @@ class HeliusClient:
 
         all_txs = await _paginate_with_type("SWAP")
 
-        # Fallback: if SWAP type returned nothing, retry without type filter.
+        # Fallback: if SWAP type returned nothing, do a single unfiltered fetch
+        # and filter client-side to avoid double-pagination.
         # Some wallets have token trades recorded under non-SWAP types or in
         # Helius API versions that omit the type field.
         if not all_txs:
             all_txs = await _paginate_with_type(None)
+            # Client-side filter: prioritize SWAP-type transactions but include
+            # other transaction types that might represent trades (TRANSFER, etc.)
+            # to ensure we don't miss legitimate trading activity.
+            if all_txs:
+                swap_txs = [tx for tx in all_txs if tx.get("type") == "SWAP"]
+                # If we found SWAP transactions, use those; otherwise use all transactions
+                # to capture wallets that only have non-SWAP trade types
+                all_txs = swap_txs if swap_txs else all_txs
 
         result = all_txs[:target]
 
         # Store result in activity-based cache (higher priority)
+        # Use canonical parameters for cache key consistency
         if self._activity_cache and result:
             self._activity_cache.cache_transactions(
-                wallet_address, result, days, limit, wqs_score
+                wallet_address, result, canonical_days, canonical_limit, wqs_score
             )
 
         # Store result in basic cache for fallback (if activity cache not available)
+        # Use canonical parameters and shortest-phase TTL (300s = wallet metrics TTL)
         if CACHE_AVAILABLE and result:
             cache = get_cache()
-            cache_key = f"{wallet_address}:{days}:{limit}"
+            cache_key = f"{wallet_address}:{canonical_days}:{canonical_limit}"
+            # Use shortest-phase TTL (300s) to avoid stale data across phases
+            shortest_phase_ttl = ScoutConfig.get_cache_ttl_wallet_metrics()  # 300 seconds
             cache.set("wallet_txs", wallet_address, result, cache_key,
+                     ttl=shortest_phase_ttl,
                      category=CacheCategory.WALLET_TXS)
 
         return result

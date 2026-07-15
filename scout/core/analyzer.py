@@ -3136,31 +3136,55 @@ class WalletAnalyzer:
         trades = []
         liquidity_snapshots = []
         
+        # Collect unique token addresses for batch liquidity fetching
+        # This avoids redundant API calls for the same token across multiple trades
+        unique_tokens = set()
+        
         for tx in transactions:
             swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
             if swap:
                 trade = await self._parse_swap_to_trade(swap, address)
                 if trade:
                     trades.append(trade)
+                    unique_tokens.add(trade.token_address)
+        
+        # Offload liquidity collection to background thread pool to avoid blocking event loop
+        # Collect current liquidity snapshots for unique tokens only (deduplication)
+        if unique_tokens:
+            try:
+                # Use asyncio.to_thread to run blocking liquidity calls in thread pool
+                # This prevents the synchronous get_current_liquidity calls from blocking the async loop
+                liquidity_results = await asyncio.gather(
+                    *[
+                        asyncio.to_thread(
+                            self.liquidity_provider.get_current_liquidity,
+                            token_address
+                        )
+                        for token_address in unique_tokens
+                    ],
+                    return_exceptions=True  # Don't fail all if one token fetch fails
+                )
+                
+                # Process liquidity results
+                for token_address, result in zip(unique_tokens, liquidity_results):
+                    if isinstance(result, Exception):
+                        print(f"[Analyzer] Warning: Failed to collect liquidity for {token_address[:8]}...: {result}")
+                        continue
                     
-                    # Collect a CURRENT liquidity snapshot (at collection time).
-                    # This builds a time-series liquidity database going forward.
-                    try:
-                        current_liq = self.liquidity_provider.get_current_liquidity(trade.token_address)
-                        if current_liq:
-                            # Store snapshot at "now" (not at the trade's past timestamp).
-                            historical_snapshot = LiquidityData(
-                                token_address=current_liq.token_address,
-                                liquidity_usd=current_liq.liquidity_usd,
-                                price_usd=current_liq.price_usd,
-                                volume_24h_usd=current_liq.volume_24h_usd,
-                                timestamp=utcnow(),
-                                source="analyzer_collection_current",
-                            )
-                            liquidity_snapshots.append(historical_snapshot)
-                    except Exception as e:
-                        # Log but don't fail on liquidity collection errors
-                        print(f"[Analyzer] Warning: Failed to collect liquidity for {trade.token_address[:8]}...: {e}")
+                    current_liq = result
+                    if current_liq:
+                        # Store snapshot at "now" (not at the trade's past timestamp).
+                        historical_snapshot = LiquidityData(
+                            token_address=current_liq.token_address,
+                            liquidity_usd=current_liq.liquidity_usd,
+                            price_usd=current_liq.price_usd,
+                            volume_24h_usd=current_liq.volume_24h_usd,
+                            timestamp=utcnow(),
+                            source="analyzer_collection_current",
+                        )
+                        liquidity_snapshots.append(historical_snapshot)
+            except Exception as e:
+                print(f"[Analyzer] Warning: Failed to collect liquidity snapshots: {e}")
         
         # Batch store liquidity snapshots for efficiency
         if liquidity_snapshots:

@@ -55,3 +55,10 @@ experiment:
 # Operator Configuration Override (for experiment mode)
 mode: paper  # Run in paper mode by default
 experiment_mode: true  # Enable experiment mode
+
+# Scout Performance Configuration (for 21-day forward test)
+scout_config:
+  # Pagination cap for wallet transaction fetching
+  # 10 pages = 1,000 txs ≈ 500 credits/wallet ceiling (50 credits/page)
+  # Trade-off: Lower values reduce credits but may miss historical trades for high-activity wallets
+  wallet_tx_max_pages: 10  # Reduced from default 50 to optimize credit usage

@@ -1,0 +1,6 @@
+# Development dependencies for profiling and benchmarking
+# These are not installed in production environments
+
+# Profiling
+pyinstrument>=4.0
+memory_profiler>=0.61

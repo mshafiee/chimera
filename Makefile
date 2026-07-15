@@ -72,7 +72,7 @@ test-operator: ## Run Rust operator tests
 
 test-scout: ## Run Python scout tests
 	@echo "$(YELLOW)Running scout tests...$(NC)"
-	cd $(SCOUT_DIR) && $(PYTHON) -m pytest tests/ -v || echo "$(YELLOW)No tests found$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) -m pip install -q -r requirements-dev.txt && $(PYTHON) -m pytest tests/ -v || echo "$(YELLOW)No tests found$(NC)"
 
 validate-wqs: ## Validate WQS predictiveness against actual copy PnL
 	@echo "$(YELLOW)Validating WQS predictiveness...$(NC)"
@@ -118,7 +118,7 @@ lint-operator: ## Run Rust linter (clippy)
 
 lint-scout: ## Run Python linter (ruff)
 	@echo "$(YELLOW)Running Python linter...$(NC)"
-	cd $(SCOUT_DIR) && $(PYTHON) -m ruff check . || $(PYTHON) -m flake8 . || echo "$(YELLOW)No linter installed$(NC)"
+	cd $(SCOUT_DIR) && $(PYTHON) -m pip install -q -r requirements-dev.txt && $(PYTHON) -m ruff check . || $(PYTHON) -m flake8 . || echo "$(YELLOW)No linter installed$(NC)"
 
 lint-web: ## Run TypeScript linter
 	@echo "$(YELLOW)Running TypeScript linter...$(NC)"
