@@ -15,27 +15,27 @@ mod tests {
     use chimera_operator::models::{Action, Signal, SignalPayload, Strategy};
     use rust_decimal::Decimal;
 
-    use sqlx::{Pool, Sqlite};
+    use sqlx::{Pool, Postgres};
     use std::str::FromStr;
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+    fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
         match db.pool() {
-            DbPool::SQLite(pool) => pool,
-            _ => panic!("test requires SQLite backend"),
+            DbPool::PostgreSQL(pool) => pool,
+            _ => panic!("test requires PostgreSQL backend"),
         }
     }
 
     async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+        let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
         let db = create_database(&config).await.unwrap();
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         // Create minimal schema
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS trades (id INTEGER PRIMARY KEY, trade_uuid TEXT UNIQUE)",
+            "CREATE TABLE IF NOT EXISTS trades (id SERIAL PRIMARY KEY, trade_uuid VARCHAR UNIQUE)",
         )
         .execute(&pool)
         .await
@@ -218,13 +218,13 @@ mod tests {
         use chimera_operator::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
         let config = create_test_config();
 
         // manual_trip() calls log_config_change which writes to config_audit
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS config_audit (\
-             id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             id SERIAL PRIMARY KEY AUTOINCREMENT, \
              key TEXT NOT NULL, \
              old_value TEXT, \
              new_value TEXT NOT NULL, \
@@ -318,10 +318,10 @@ mod tests {
         // by testing that SQLite operations handle locks gracefully
 
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         // Create table
-        sqlx::query("CREATE TABLE IF NOT EXISTS test_lock (id INTEGER PRIMARY KEY, value TEXT)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS test_lock (id SERIAL PRIMARY KEY, value TEXT)")
             .execute(&pool)
             .await
             .unwrap();
@@ -361,9 +361,9 @@ mod tests {
     async fn test_database_lock_max_retries() {
         // Test that database handles high contention
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
-        sqlx::query("CREATE TABLE IF NOT EXISTS test_contention (id INTEGER PRIMARY KEY)")
+        sqlx::query("CREATE TABLE IF NOT EXISTS test_contention (id SERIAL PRIMARY KEY)")
             .execute(&pool)
             .await
             .unwrap();
@@ -402,7 +402,7 @@ mod tests {
     async fn test_database_lock_non_lock_error() {
         // Test that non-lock errors (like syntax errors) fail immediately
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         // Invalid SQL should fail immediately, not retry
         let result = sqlx::query("INVALID SQL SYNTAX").execute(&pool).await;
@@ -414,12 +414,12 @@ mod tests {
     async fn test_sqlite_concurrent_writes() {
         // Test concurrent database writes don't deadlock
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         // Create table for concurrent writes
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS test_concurrent (
-                id INTEGER PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 value TEXT
             )",
         )
@@ -461,12 +461,12 @@ mod tests {
     async fn test_sqlite_vacuum_operation() {
         // Test that VACUUM operations don't block other queries
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         // Create table and insert data
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS test_vacuum (
-                id INTEGER PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 data TEXT
             )",
         )
@@ -518,12 +518,12 @@ mod tests {
         // verify on-chain state, so we test the detection layer here.
 
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         // Schema required by get_stuck_positions() query
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS positions (\
-             id INTEGER PRIMARY KEY AUTOINCREMENT, \
+             id SERIAL PRIMARY KEY AUTOINCREMENT, \
              trade_uuid TEXT NOT NULL, \
              wallet_address TEXT NOT NULL DEFAULT 'wallet1', \
              token_address TEXT NOT NULL, \
@@ -539,7 +539,7 @@ mod tests {
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS trades (\
-             id INTEGER PRIMARY KEY, trade_uuid TEXT UNIQUE, status TEXT DEFAULT 'ACTIVE')",
+             id SERIAL PRIMARY KEY, trade_uuid VARCHAR UNIQUE, status TEXT DEFAULT 'ACTIVE')",
         )
         .execute(&pool)
         .await
@@ -610,7 +610,7 @@ mod tests {
     async fn test_concurrent_webhook_processing() {
         // Insert 100 unique trade rows concurrently and verify no duplicates or deadlocks.
         let (db, _temp) = create_test_db().await;
-        let pool = sqlite_pool(&db);
+        let pool = pg_pool(&db);
 
         let n: usize = 100;
         let mut handles = vec![];

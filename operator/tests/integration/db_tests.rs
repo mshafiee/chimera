@@ -9,15 +9,15 @@
 use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use chimera_operator::roster::{merge_roster, validate_roster};
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -26,7 +26,7 @@ async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let config = DatabaseConfig::sqlite(db_path);
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 
@@ -35,16 +35,16 @@ async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
 
 /// Create a test roster database
 async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+    use sqlx::postgres::PgPoolOptions;
     use std::str::FromStr;
 
     let db_url = format!("sqlite:{}?mode=rwc", roster_path.display());
-    let connect_options = SqliteConnectOptions::from_str(&db_url)
+    let connect_options = PgConnectOptions::from_str(&db_url)
         .unwrap()
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+        .journal_mode(sqlx::postgres::SqliteJournalMode::Wal)
         .create_if_missing(true);
 
-    let pool = SqlitePoolOptions::new()
+    let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(connect_options)
         .await
@@ -54,7 +54,7 @@ async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS wallets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY AUTOINCREMENT,
             address TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'CANDIDATE',
             wqs_score REAL,
@@ -105,7 +105,7 @@ async fn create_test_roster(roster_path: &Path, wallet_count: u32) {
 #[tokio::test]
 async fn test_wal_mode_enabled() {
     let (db, _temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Check journal mode
     let result: (String,) = sqlx::query_as("PRAGMA journal_mode")
@@ -123,7 +123,7 @@ async fn test_wal_mode_enabled() {
 #[tokio::test]
 async fn test_concurrent_reads() {
     let (db, _temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Insert test data
     sqlx::query("INSERT INTO wallets (address, status, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -157,7 +157,7 @@ async fn test_concurrent_reads() {
 #[tokio::test]
 async fn test_busy_timeout_configured() {
     let (db, _temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Check busy timeout (should be 5000ms = 5000000 microseconds)
     let result: (i64,) = sqlx::query_as("PRAGMA busy_timeout")
@@ -179,14 +179,14 @@ async fn test_busy_timeout_configured() {
 #[tokio::test]
 async fn test_roster_merge_success() {
     let (db, temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let roster_path = temp_dir.path().join("roster_new.db");
 
     // Create test roster with 3 wallets
     create_test_roster(&roster_path, 3).await;
 
     // Perform merge
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = merge_roster(&pool, &roster_path).await.unwrap();
 
     assert_eq!(result.wallets_merged, 3, "Should merge 3 wallets");
@@ -211,7 +211,7 @@ async fn test_roster_merge_integrity_check_failure() {
     std::fs::write(&roster_path, b"").unwrap();
 
     // Attempt merge - should fail on integrity check or attachment
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = merge_roster(&pool, &roster_path).await;
 
     assert!(result.is_err(), "Merge should fail on corrupted roster");
@@ -234,7 +234,7 @@ async fn test_roster_merge_missing_file() {
     let roster_path = temp_dir.path().join("nonexistent.db");
 
     // Attempt merge with non-existent file
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = merge_roster(&pool, &roster_path).await;
 
     assert!(result.is_err(), "Merge should fail on missing file");
@@ -248,7 +248,7 @@ async fn test_roster_merge_missing_file() {
 #[tokio::test]
 async fn test_roster_merge_atomic_write() {
     let (db, temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Insert initial wallet
     sqlx::query("INSERT INTO wallets (address, status, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -264,7 +264,7 @@ async fn test_roster_merge_atomic_write() {
     create_test_roster(&roster_path, 2).await;
 
     // Perform merge
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let _result = merge_roster(&pool, &roster_path).await.unwrap();
 
     // REPLACE strategy: existing wallets are deleted, new wallets are inserted
@@ -298,7 +298,7 @@ async fn test_roster_merge_empty_roster() {
     create_test_roster(&roster_path, 0).await;
 
     // Perform merge
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = merge_roster(&pool, &roster_path).await.unwrap();
 
     assert_eq!(result.wallets_merged, 0, "Should merge 0 wallets");
@@ -318,7 +318,7 @@ async fn test_roster_validate_success() {
     create_test_roster(&roster_path, 5).await;
 
     // Validate
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let is_valid = validate_roster(&pool, &roster_path).await.unwrap();
 
     assert!(is_valid, "Valid roster should pass validation");
@@ -330,7 +330,7 @@ async fn test_roster_validate_missing_file() {
     let roster_path = temp_dir.path().join("nonexistent.db");
 
     // Validate missing file
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let is_valid = validate_roster(&pool, &roster_path).await.unwrap();
 
     assert!(!is_valid, "Missing file should fail validation");
@@ -339,7 +339,7 @@ async fn test_roster_validate_missing_file() {
 #[tokio::test]
 async fn test_roster_merge_transaction_rollback() {
     let (db, temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Insert initial wallet
     sqlx::query("INSERT INTO wallets (address, status, created_at, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
@@ -368,7 +368,7 @@ async fn test_roster_merge_transaction_rollback() {
     assert_eq!(count_before.0, 1, "Should have 1 wallet before merge");
 
     // Perform merge (should succeed)
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = merge_roster(&pool, &roster_path).await.unwrap();
     assert_eq!(result.wallets_merged, 1);
 
@@ -400,7 +400,7 @@ async fn test_roster_merge_transaction_rollback() {
 #[tokio::test]
 async fn test_concurrent_writes_with_timeout() {
     let (db, _temp_dir) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Spawn multiple writers that will contend for locks
     let mut handles = vec![];

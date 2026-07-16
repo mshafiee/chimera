@@ -107,7 +107,7 @@ async fn runner_flags_missing_entry_transaction() {
     seed_position(&db, "uuid-missing", "entry-sig-missing").await;
 
     // Age past the entry-finalization grace window so a missing entry is actionable.
-    let pool = common::sqlite_pool(&db);
+    let pool = common::pg_pool(&db);
     let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
     sqlx::query("UPDATE positions SET opened_at = ? WHERE trade_uuid = ?")
         .bind(old)
@@ -172,7 +172,7 @@ async fn runner_auto_resolves_confirmed_exit() {
     .unwrap();
 
     // Age the position past the confirmation grace window so the exit is checked.
-    let pool = common::sqlite_pool(&db);
+    let pool = common::pg_pool(&db);
     let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
     sqlx::query("UPDATE positions SET opened_at = ? WHERE trade_uuid = ?")
         .bind(old)
@@ -241,23 +241,19 @@ async fn runner_treats_missing_exit_as_pending() {
 
 #[cfg(test)]
 mod tests {
-    use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-    use sqlx::Sqlite;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::Postgres;
     use std::str::FromStr;
     use tempfile::TempDir;
 
-    async fn create_test_db() -> (sqlx::Pool<Sqlite>, TempDir) {
+    async fn create_test_db() -> (sqlx::Pool<Postgres>, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let db_path = temp_dir.path().join("test_reconcile.db");
-        let db_url = format!("sqlite:{}", db_path.display());
+        let db_url = std::env::var("TEST_DATABASE_URL")
+            .expect("TEST_DATABASE_URL must be set for reconciliation tests");
 
-        let options = SqliteConnectOptions::from_str(&db_url)
-            .unwrap()
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect_with(options)
+            .connect(&db_url)
             .await
             .unwrap();
 
@@ -265,8 +261,8 @@ mod tests {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS positions (
-                id INTEGER PRIMARY KEY,
-                trade_uuid TEXT UNIQUE,
+                id SERIAL PRIMARY KEY,
+                trade_uuid VARCHAR UNIQUE,
                 entry_tx_signature TEXT,
                 exit_tx_signature TEXT,
                 entry_amount_sol REAL,
@@ -281,7 +277,7 @@ mod tests {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS reconciliation_log (
-                id INTEGER PRIMARY KEY,
+                id SERIAL PRIMARY KEY,
                 trade_uuid TEXT,
                 discrepancy_type TEXT,
                 db_value TEXT,

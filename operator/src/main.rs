@@ -304,7 +304,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize database
     let db_config = db_abstraction::DatabaseConfig {
         backend: db_abstraction::DatabaseBackend::from_env(),
-        path: config.database.path.clone(),
         url: config.database.url.clone(),
         max_connections: config.database.max_connections,
         acquire_timeout_seconds: 30,
@@ -2147,14 +2146,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Build auth routes
     // jwt_secret already defined above
-    let sqlite_pool = match db_pool.pool() {
-        db_abstraction::DbPool::SQLite(pool) => pool,
-        _ => return Err(anyhow::anyhow!("SQLite pool required for wallet auth")),
-    };
     let auth_routes = Router::new()
         .route("/auth/wallet", post(wallet_auth))
         .with_state(Arc::new(WalletAuthState {
-            db: sqlite_pool,
+            db: db_pool.clone(),
             jwt_secret,
             // FIX 11: Initialize auth nonce store for replay protection
             seen_auth_nonces: std::sync::Arc::new(parking_lot::Mutex::new(

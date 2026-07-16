@@ -44,12 +44,8 @@ solana-transaction = "3"
 solana-message = "3"
 solana-address-lookup-table-interface = "3" 
 
-# Database (SQLite + PostgreSQL) - upgraded to 0.8 to fix security advisories
-# Supports both SQLite (dev/staging) and PostgreSQL (production) via CHIMERA_DB_BACKEND env var
-# Note: sqlx-macros pulls in sqlx-mysql which has rsa 0.9.10 (RUSTSEC-2023-0071)
-# This is acceptable because we ONLY use SQLite and PostgreSQL, not MySQL. The vulnerable code path
-# is never executed. No fixed upgrade is available from sqlx upstream yet.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "chrono", "macros", "migrate", "rust_decimal"] }
+# Database (PostgreSQL only)
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "macros", "migrate", "rust_decimal"] }
 
 # Configuration
 config = "0.15"
@@ -111,17 +107,17 @@ redis-cache = ["redis"]
 name = "generate_jwt_secret"
 path = "src/tools/generate_jwt_secret.rs"
 
-[[bench]]
-name = "metadata"
-harness = false
+# [[bench]]
+# name = "metadata"
+# harness = false
 
-[[bench]]
-name = "worker_pool"
-harness = false
+# [[bench]]
+# name = "worker_pool"
+# harness = false
 
-[[bench]]
-name = "write_queue"
-harness = false
+# [[bench]]
+# name = "write_queue"
+# harness = false
 
 [dev-dependencies]
 # Testing utilities

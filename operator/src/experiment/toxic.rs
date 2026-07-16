@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use sqlx::SqlitePool;
+use sqlx::Postgres;
 
 use crate::config::ExperimentConfig;
 use crate::error::AppResult;
@@ -148,7 +148,7 @@ impl ToxicFlowDetector {
         toxic as f64 / total as f64
     }
 
-    pub async fn persist_to_database(&self, pool: &SqlitePool, run_id: &str) -> AppResult<()> {
+    pub async fn persist_to_database(&self, pool: &sqlx::Pool<sqlx::Postgres>, run_id: &str) -> AppResult<()> {
         let wallets = self.wallets.read().await;
         
         for wallet in wallets.values() {

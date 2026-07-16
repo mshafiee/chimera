@@ -7,10 +7,10 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD as BASE64, Engine};
 use chrono::{TimeDelta, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::db_abstraction::Database;
 use crate::error::AppError;
 
 /// Key type for the auth nonce store: (wallet_address, timestamp)
@@ -18,7 +18,7 @@ type AuthNonceKey = (String, i64);
 
 /// Auth state for wallet authentication
 pub struct WalletAuthState {
-    pub db: SqlitePool,
+    pub db: Arc<dyn Database>,
     /// JWT secret for signing tokens (in production, use proper secret management)
     pub jwt_secret: String,
     /// FIX 11: Nonce store to detect replayed wallet auth requests
@@ -134,25 +134,17 @@ pub async fn wallet_auth(
 }
 
 /// Check if wallet is registered as admin
-async fn check_wallet_role(db: &SqlitePool, wallet_address: &str) -> Result<String, AppError> {
+async fn check_wallet_role(db: &Arc<dyn Database>, wallet_address: &str) -> Result<String, AppError> {
     // Check admin_wallets table
-    let result =
-        sqlx::query_scalar::<_, String>("SELECT role FROM admin_wallets WHERE wallet_address = ?")
-            .bind(wallet_address)
-            .fetch_optional(db)
-            .await?;
+    let result = db.get_admin_wallet_role(wallet_address).await?;
 
     match result {
         Some(role) => Ok(role),
         None => {
             // Check if wallet is in wallets table (readonly access for tracked wallets)
-            let in_roster =
-                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM wallets WHERE address = ?")
-                    .bind(wallet_address)
-                    .fetch_one(db)
-                    .await?;
+            let wallet = db.get_wallet(wallet_address).await?;
 
-            if in_roster > 0 {
+            if wallet.is_some() {
                 Ok("readonly".to_string())
             } else {
                 // Unknown wallet - deny access

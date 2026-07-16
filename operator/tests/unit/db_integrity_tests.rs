@@ -14,15 +14,15 @@ use chimera_operator::db_abstraction::{
 };
 use rust_decimal::Decimal;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -30,7 +30,7 @@ fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("db_integrity_test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
     (db, temp_dir)
@@ -78,7 +78,7 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
     );
 
     // Confirm nothing was actually inserted
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = ?")
         .bind("nonexistent-uuid-xyz")
         .fetch_one(&pool)
@@ -96,7 +96,7 @@ async fn test_update_trade_status_real_trade_affects_exactly_one_row() {
     // independently verify row count by re-querying.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-real-trade";
     setup_trade(&db, uuid).await;
 
@@ -131,7 +131,7 @@ async fn test_close_position_closes_only_specified_position() {
     // prices, closing one leaves the other ACTIVE — no double-close bug.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Insert two trades for the same wallet but different tokens
     // (activate_trade_and_open_position enforces one ACTIVE position per token)
@@ -240,7 +240,7 @@ async fn test_close_position_zero_exit_price_is_rejected() {
     // This prevents recording invalid PnL with exit_price=0.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-zero-exit";
 
     db.insert_trade(&InsertTrade {
@@ -310,7 +310,7 @@ async fn test_open_position_zero_entry_price_is_rejected() {
     // This prevents creating untrackable positions that bypass stop-loss.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-zero-entry";
 
     db.insert_trade(&InsertTrade {
@@ -368,7 +368,7 @@ async fn test_trade_costs_accumulate_on_retry() {
     // first call's costs. Net effect: costs from all calls are summed.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-costs";
     setup_trade(&db, uuid).await;
 
@@ -429,7 +429,7 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
     // This test confirms: normal application DELETE is blocked (FK works as designed).
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-orphan";
 
     db.insert_trade(&InsertTrade {
@@ -496,7 +496,7 @@ async fn test_pnl_precision_f64_roundtrip() {
     // The acceptable precision floor is ~1e-7 SOL per position.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-precision";
 
     db.insert_trade(&InsertTrade {
@@ -581,7 +581,7 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
 #[tokio::test]
 async fn test_close_position_unconfirmed_sets_exiting_state() {
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-unconfirmed-exit";
 
     db.insert_trade(&InsertTrade {
@@ -643,7 +643,7 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
 #[tokio::test]
 async fn test_revert_position_exit_restores_state_and_amount() {
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let entry_uuid = "uuid-revert-entry";
     let exit_uuid = "uuid-revert-exit";
 

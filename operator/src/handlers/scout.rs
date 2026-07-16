@@ -309,7 +309,7 @@ pub async fn trigger_scout_run(
 pub async fn get_budget_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<BudgetStatusResponse>, AppError> {
-    let pool = sqlite_pool(&state.db)?;
+    let pool = pg_pool(&state.db)?;
 
     // Get total wallet count for budget estimation
     let total_wallets: i64 = sqlx::query_scalar(
@@ -385,39 +385,39 @@ pub async fn get_budget_status(
 pub async fn get_cache_stats(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<CacheStatsResponse>, AppError> {
-    let pool = sqlite_pool(&state.db)?;
+    let pool = pg_pool(&state.db)?;
 
     // Get wallet activity distribution (proxy for cache activity)
     let very_high: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > datetime('now', '-1 hour')",
+        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > NOW() - INTERVAL '1 hour'",
     )
     .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
     let high: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > datetime('now', '-24 hours')",
+        "SELECT COUNT(*) FROM wallets WHERE status = 'ACTIVE' AND updated_at > NOW() - INTERVAL '24 hours'",
     )
     .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
     let medium: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at > datetime('now', '-7 days')",
+        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at > NOW() - INTERVAL '7 days'",
     )
     .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
     let low: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at <= datetime('now', '-7 days')",
+        "SELECT COUNT(*) FROM wallets WHERE status = 'CANDIDATE' AND updated_at <= NOW() - INTERVAL '7 days'",
     )
     .fetch_one(&pool)
     .await
     .map_err(AppError::Database)?;
 
     let inactive: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED' OR updated_at <= datetime('now', '-30 days')",
+        "SELECT COUNT(*) FROM wallets WHERE status = 'REJECTED' OR updated_at <= NOW() - INTERVAL '30 days'",
     )
     .fetch_one(&pool)
     .await
@@ -468,7 +468,7 @@ pub async fn get_cache_stats(
 pub async fn get_conviction_allocation(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ConvictionAllocationResponse>, AppError> {
-    let pool = sqlite_pool(&state.db)?;
+    let pool = pg_pool(&state.db)?;
 
     // Get total wallets analyzed
     let total_wallets_analyzed: i64 = sqlx::query_scalar(
@@ -627,11 +627,11 @@ pub async fn get_conviction_allocation(
 // HELPER FUNCTIONS
 // =============================================================================
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
+fn pg_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Postgres>> {
     match db.pool() {
-        DbPool::SQLite(p) => Ok(p),
+        DbPool::PostgreSQL(p) => Ok(p),
         _ => Err(AppError::Internal(
-            "Only SQLite backend is supported".to_string(),
+            "PostgreSQL backend required".to_string(),
         )),
     }
 }
@@ -643,7 +643,7 @@ struct WalletStatistics {
 }
 
 async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistics, AppError> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
 
     let total_wallets: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')",
@@ -667,7 +667,7 @@ async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistic
 }
 
 async fn calculate_wqs_distribution(db: &Arc<dyn Database>) -> Result<Vec<WQSBucket>, AppError> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
 
     let ranges = vec![
         ("0-20", 0.0, 20.0),
@@ -717,7 +717,7 @@ struct WQSStatistics {
 }
 
 async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistics, AppError> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
 
     let total_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM wallets WHERE wqs_score IS NOT NULL")
@@ -779,7 +779,7 @@ async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistic
 }
 
 async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsResponse, AppError> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
 
     let total_analyzed: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM wallets WHERE status IN ('ACTIVE', 'CANDIDATE', 'REJECTED')",
@@ -833,7 +833,7 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
 }
 
 async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem>, AppError> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
 
     let rows = sqlx::query_as::<_, (String, f64, String, String)>(
         "SELECT address, wqs_score, notes, promoted_at FROM wallets
@@ -863,7 +863,7 @@ async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem
 }
 
 async fn get_rejection_queue(db: &Arc<dyn Database>) -> Result<Vec<RejectionItem>, AppError> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
 
     let rows = sqlx::query_as::<_, (String, f64, String, String)>(
         "SELECT address, wqs_score, notes, updated_at FROM wallets

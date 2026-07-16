@@ -17,15 +17,15 @@ use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -33,14 +33,14 @@ fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("execution_proof.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
     (db, temp_dir)
 }
 
 async fn insert_wallet(db: &Arc<dyn Database>, address: &str, wqs: f64) {
-    let pool = sqlite_pool(db);
+    let pool = pg_pool(db);
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
          VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -150,7 +150,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
     .unwrap();
 
     // Step 3: Verify realized PnL = (150−200)/200 × 1.0 = −0.25 SOL
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let (state, pnl_str): (String, String) =
         sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(UUID)
@@ -230,7 +230,7 @@ async fn test_profit_capture_positive_pnl_recorded() {
     .await
     .unwrap();
 
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let (state, pnl_str): (String, String) =
         sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
             .bind(UUID)

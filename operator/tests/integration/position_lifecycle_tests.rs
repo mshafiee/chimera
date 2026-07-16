@@ -12,15 +12,15 @@ use chimera_operator::db_abstraction::{
 };
 use rust_decimal::Decimal;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -28,7 +28,7 @@ fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("lifecycle_test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
     (db, temp_dir)
@@ -42,7 +42,7 @@ async fn test_duplicate_buy_uuid_idempotency() {
     // (UNIQUE constraint on trades.trade_uuid) and one position.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-dup-buy";
 
     // First insert succeeds
@@ -130,7 +130,7 @@ async fn test_close_position_no_active_position_is_noop() {
         "Closing non-existent position should not error"
     );
 
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions")
         .fetch_one(&pool)
         .await
@@ -154,7 +154,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     // Fee deduction is done separately via update_trade_costs + update_trade_net_pnl.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-pnl-fees";
 
     db.insert_trade(&InsertTrade {
@@ -277,7 +277,7 @@ async fn test_full_trade_status_progression() {
     // A successful trade should flow: PENDING → QUEUED → EXECUTING → ACTIVE → CLOSED.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-full-flow";
 
     db.insert_trade(&InsertTrade {
@@ -379,7 +379,7 @@ async fn test_failed_trade_can_retry() {
     // A FAILED trade should be retryable: FAILED → RETRY → EXECUTING.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let uuid = "uuid-retry";
 
     db.insert_trade(&InsertTrade {

@@ -13,15 +13,15 @@ use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig
 use chimera_operator::engine::position_sizer::{PositionSizer, SizingFactors};
 use rust_decimal::Decimal;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -29,7 +29,7 @@ fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("position_sizer_test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
     (db, temp_dir)
@@ -72,7 +72,7 @@ fn neutral_factors() -> SizingFactors {
 }
 
 /// Insert N active positions into DB.
-async fn insert_active_positions(pool: &Pool<Sqlite>, count: usize) {
+async fn insert_active_positions(pool: &Pool<Postgres>, count: usize) {
     for i in 0..count {
         let uuid = format!("uuid-pos-{}", i);
         sqlx::query(
@@ -106,7 +106,7 @@ async fn test_concurrent_position_limit_blocked_on_db_error() {
     // are opened until connectivity is restored.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Drop the positions table to force a query error
     sqlx::query("DROP TABLE IF EXISTS positions")
@@ -130,7 +130,7 @@ async fn test_max_concurrent_positions_enforced() {
     // At exactly max_concurrent_positions ACTIVE positions, can_open_position() = false.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let max = 5_usize;
     let cfg = sizing_config_with_max("1.0", "10.0", "0.1", max);
 
@@ -152,7 +152,7 @@ async fn test_one_below_max_allows_new_position() {
     // At max-1 active positions, one more should be allowed.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let max = 5_usize;
     let cfg = sizing_config_with_max("1.0", "10.0", "0.1", max);
 
@@ -170,7 +170,7 @@ async fn test_one_below_max_allows_new_position() {
 }
 
 /// Insert N closed trades for a specific wallet (used for confidence seeding).
-async fn insert_closed_trades(pool: &Pool<Sqlite>, wallet: &str, count: usize) {
+async fn insert_closed_trades(pool: &Pool<Postgres>, wallet: &str, count: usize) {
     for i in 0..count {
         let uuid = format!("closed-{}-{}", wallet, i);
         sqlx::query(
@@ -200,7 +200,7 @@ async fn test_new_token_age_penalty_halves_size() {
     // the min floor and no difference is visible).
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     // Seed 5 closed trades → confidence ≈ 0.70. size = 2.0 * 0.5 * 0.70 = 0.70 > 0.1 (min).
     // With hybrid sizing: penalty_multiplier ≈ 0.833x for new token
     insert_closed_trades(&pool, "test_wallet", 5).await;
@@ -242,7 +242,7 @@ async fn test_consensus_multiplier_increases_size() {
     // multiplier's effect is visible (0 trades = confidence 0.05).
 
     let (db, _tmp) = create_test_db().await;
-    let _pool = sqlite_pool(&db);
+    let _pool = pg_pool(sqlite_pool(&db)db);
     let config = sizing_config_with_max("2.0", "5.0", "0.01", 5);
     let sizer = PositionSizer::new(db, config);
 
@@ -270,7 +270,7 @@ async fn test_position_size_capped_at_max() {
     // Even with maximum multipliers (consensus + high WQS + high quality), size ≤ max.
 
     let (db, _tmp) = create_test_db().await;
-    let _pool = sqlite_pool(&db);
+    let _pool = pg_pool(sqlite_pool(&db)db);
     let cfg = sizing_config_with_max("5.0", "6.0", "0.5", 20); // max=6 SOL, base=5
     let sizer = PositionSizer::new(db, cfg);
 
@@ -307,7 +307,7 @@ async fn test_position_size_floor_at_minimum() {
     // Size must not go below min_size_sol.
 
     let (db, _tmp) = create_test_db().await;
-    let _pool = sqlite_pool(&db);
+    let _pool = pg_pool(sqlite_pool(&db)db);
     let cfg = sizing_config_with_max("2.0", "20.0", "0.5", 10); // min=0.5 SOL
     let sizer = PositionSizer::new(db, cfg);
 
@@ -346,7 +346,7 @@ async fn test_high_wqs_multiplier_applied() {
     // Use a large base_size so the WQS factor pushes both values above min_size_sol
     // (with 0 closed trades, confidence=0.05: 10.0 * 0.85 * 0.05 = 0.425 vs 0.25).
     let (db, _tmp) = create_test_db().await;
-    let _pool = sqlite_pool(&db);
+    let _pool = pg_pool(sqlite_pool(&db)db);
     let sizer = PositionSizer::new(
         db,
         Arc::new(chimera_operator::config::PositionSizingConfig {
@@ -395,7 +395,7 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
     // - regime: neutral (1.0x)
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Insert 5 closed trades → confidence ≈ 0.33, size = 10.0 * 0.5 * 0.33 = 1.65
     // This ensures Kelly fallback doesn't dominate the test
@@ -462,7 +462,7 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
     // Even with maximum boost multipliers, size should not exceed full Kelly cap.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Setup Kelly sizer with enabled sizing
     let cfg = sizing_config_with_max("1.0", "5.0", "0.1", 10);

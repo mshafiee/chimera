@@ -254,9 +254,9 @@ impl StopLossManager {
             } else {
                 // Fallback: DB query when in-memory aggregator is not wired
                 let count = match self.db.pool() {
-                    crate::db_abstraction::DbPool::SQLite(ref pool) => {
+                    crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
                         let c: i64 = sqlx::query_scalar(
-                            "SELECT COUNT(DISTINCT wallet_address) FROM signal_aggregation WHERE token_address = ? AND created_at >= datetime('now', '-5 minutes')",
+                            "SELECT COUNT(DISTINCT wallet_address) FROM signal_aggregation WHERE token_address = $1 AND created_at >= NOW() - INTERVAL '5 minutes'",
                         )
                         .bind(token_address)
                         .fetch_one(pool)

@@ -113,7 +113,7 @@ async fn make_processor(
     SignalProcessor,
     Arc<dyn chimera_operator::db_abstraction::Database>,
 ) {
-    let db_cfg = DatabaseConfig::sqlite(std::path::PathBuf::from(":memory:"));
+    let db_cfg = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&db_cfg)
         .await
         .expect("Failed to create test DB");

@@ -419,10 +419,10 @@ pub async fn webhook_handler(
         if let Some(ref token_address) = signal.payload.token_address {
             let amount_f64 = signal.payload.amount_sol.to_f64().unwrap_or(0.0);
             let pool = match state.db.pool() {
-                DbPool::SQLite(p) => p,
+                DbPool::PostgreSQL(p) => p,
                 _ => {
                     return Err(AppError::Internal(
-                        "Only SQLite backend supported".to_string(),
+                        "PostgreSQL backend required".to_string(),
                     ))
                 }
             };
@@ -430,7 +430,7 @@ pub async fn webhook_handler(
                 r#"
                 INSERT INTO signal_aggregation
                     (token_address, wallet_address, direction, amount_sol, is_consensus)
-                VALUES (?, ?, 'BUY', ?, ?)
+                VALUES ($1, $2, 'BUY', $3, $4)
                 "#,
             )
             .bind(token_address)

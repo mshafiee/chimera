@@ -317,7 +317,7 @@ async fn test_circuit_breaker_jupiter_integration() {
 
     // Create a real temp SQLite database
     let temp = TempDir::new().unwrap();
-    let db = create_database(&DatabaseConfig::sqlite(temp.path().join("cb_test.db")))
+    let db = create_database(&DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"))
         .await
         .unwrap();
     db.run_migrations().await.unwrap();

@@ -18,15 +18,15 @@ use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -38,7 +38,7 @@ fn past_entry() -> chrono::DateTime<chrono::Utc> {
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("fix_verification_test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
     (db, temp_dir)
@@ -53,7 +53,7 @@ fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
 }
 
 /// Insert a wallet row so stop_loss WQS lookup succeeds (returns WQS 70 → -20% threshold).
-async fn insert_wallet(pool: &Pool<Sqlite>, address: &str, wqs: f64) {
+async fn insert_wallet(pool: &Pool<Postgres>, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
          VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -95,7 +95,7 @@ async fn should_not_fire_hard_stop_at_2pct_loss_with_default_config() {
     // It FAILS while the bug exists, and PASSES after the fix.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_hard_stop_fix";
     const WALLET: &str = "wallet_hard_stop_fix";
@@ -152,7 +152,7 @@ async fn should_fire_dynamic_stop_at_21pct_loss_for_high_wqs_wallet() {
     // Scenario B: -21% loss → -21% <= -20% → Exit   (dynamic stop fires correctly)
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
     const TOKEN: &str = "token_dynamic_stop_21";
     const WALLET: &str = "wallet_dynamic_stop_21";
@@ -343,7 +343,7 @@ async fn should_succeed_on_status_update_for_existing_trade() {
     );
 
     // Verify status was actually changed
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE trade_uuid = ?")
         .bind(uuid)
         .fetch_one(&pool)

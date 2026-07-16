@@ -4,15 +4,15 @@
 
 use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use chimera_operator::roster;
-use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Pool, Sqlite};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{Pool, Postgres};
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -21,15 +21,15 @@ async fn create_test_pool() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let config = DatabaseConfig::sqlite(db_path);
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Create wallets table (must match database/schema/wallets.sql)
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS wallets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY AUTOINCREMENT,
             address TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'CANDIDATE',
             wqs_score REAL,
@@ -63,7 +63,7 @@ async fn create_test_pool() -> (Arc<dyn Database>, TempDir) {
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS config_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY AUTOINCREMENT,
             key TEXT NOT NULL,
             old_value TEXT,
             new_value TEXT,
@@ -87,10 +87,10 @@ async fn test_roster_merge_valid() {
 
     // Create a test roster_new.db file
     let roster_path = temp_dir.path().join("roster_new.db");
-    let roster_pool = SqlitePoolOptions::new()
+    let roster_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
+            sqlx::postgres::PgConnectOptions::new()
                 .filename(&roster_path)
                 .create_if_missing(true),
         )
@@ -101,7 +101,7 @@ async fn test_roster_merge_valid() {
     sqlx::query(
         r#"
         CREATE TABLE wallets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY AUTOINCREMENT,
             address TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'CANDIDATE',
             wqs_score REAL,
@@ -143,7 +143,7 @@ async fn test_roster_merge_valid() {
     drop(roster_pool);
 
     // Merge roster
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(result.is_ok(), "Merge should succeed");
 
@@ -151,7 +151,7 @@ async fn test_roster_merge_valid() {
     assert_eq!(merge_result.wallets_merged, 1);
 
     // Verify wallet was merged
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let wallet: (String, String, Option<f64>) =
         sqlx::query_as("SELECT address, status, wqs_score FROM wallets WHERE address = ?")
             .bind("test_wallet_123")
@@ -174,7 +174,7 @@ async fn test_roster_merge_integrity_failure() {
     std::fs::write(&roster_path, b"corrupted").unwrap();
 
     // Merge should fail integrity check
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(result.is_err(), "Merge should fail on corrupted database");
 }
@@ -186,10 +186,10 @@ async fn test_roster_merge_missing_table() {
 
     // Create empty database (no wallets table)
     let roster_path = temp_dir.path().join("roster_new.db");
-    let roster_pool = SqlitePoolOptions::new()
+    let roster_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
+            sqlx::postgres::PgConnectOptions::new()
                 .filename(&roster_path)
                 .create_if_missing(true),
         )
@@ -199,7 +199,7 @@ async fn test_roster_merge_missing_table() {
     drop(roster_pool);
 
     // Merge should fail - no wallets table
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(
         result.is_err(),
@@ -214,10 +214,10 @@ async fn test_roster_merge_schema_mismatch() {
 
     // Create roster with missing column
     let roster_path = temp_dir.path().join("roster_new.db");
-    let roster_pool = SqlitePoolOptions::new()
+    let roster_pool = PgPoolOptions::new()
         .max_connections(1)
         .connect_with(
-            sqlx::sqlite::SqliteConnectOptions::new()
+            sqlx::postgres::PgConnectOptions::new()
                 .filename(&roster_path)
                 .create_if_missing(true),
         )
@@ -228,7 +228,7 @@ async fn test_roster_merge_schema_mismatch() {
     sqlx::query(
         r#"
         CREATE TABLE wallets (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY AUTOINCREMENT,
             address TEXT NOT NULL UNIQUE,
             status TEXT NOT NULL DEFAULT 'CANDIDATE'
         )
@@ -241,7 +241,7 @@ async fn test_roster_merge_schema_mismatch() {
     drop(roster_pool);
 
     // Merge should fail with schema validation error
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let result = roster::merge_roster(&pool, &roster_path).await;
     assert!(result.is_err(), "Merge should fail on schema mismatch");
 

@@ -13,15 +13,15 @@ use chrono::{Duration, Utc};
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -30,16 +30,16 @@ async fn create_test_circuit_breaker(config: CircuitBreakerConfig) -> (CircuitBr
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.db");
 
-    let db_config = DatabaseConfig::sqlite(db_path);
+    let db_config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&db_config).await.unwrap();
 
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     // Create config_audit table for circuit breaker
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS config_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY AUTOINCREMENT,
             key TEXT NOT NULL,
             old_value TEXT,
             new_value TEXT,

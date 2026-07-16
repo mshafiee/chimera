@@ -5,13 +5,13 @@
 use chimera_operator::db_abstraction::{Database, InsertTrade, UpdateTradeStatus};
 use rust_decimal::prelude::*;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::sync::Arc;
 
 mod common;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
-    common::sqlite_pool(db)
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
+    common::pg_pool(db)
 }
 
 /// Setup test database
@@ -23,7 +23,7 @@ async fn setup_test_db() -> (Arc<dyn Database>, tempfile::TempDir) {
 async fn test_health_check_db_connectivity() {
     // Verifies that the test DB can be set up and migrations applied successfully.
     let (db, _dir) = setup_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     // A simple query that should always succeed on a healthy DB
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades")
         .fetch_one(&pool)
@@ -37,7 +37,7 @@ async fn test_trade_idempotency() {
     // Inserting two rows with the same trade_uuid should fail on the second insert
     // because the DB schema enforces UNIQUE on trade_uuid.
     let (db, _dir) = setup_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     let uuid = "idempotency-test-uuid-1234";
     let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
@@ -88,7 +88,7 @@ async fn test_trade_idempotency() {
 async fn test_circuit_breaker_loss_tracking() {
     // Inserting a CLOSED trade with a large negative PnL and querying for it works correctly.
     let (db, _dir) = setup_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     let uuid = "circuit-test-uuid-5678";
     let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
@@ -128,7 +128,7 @@ async fn test_circuit_breaker_loss_tracking() {
 async fn test_trade_status_update() {
     // Verify that a trade's status can be updated from PENDING to CLOSED.
     let (db, _dir) = setup_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     let uuid = "status-update-uuid-9012";
     let wallet = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
@@ -169,7 +169,7 @@ async fn test_trade_status_update() {
 async fn test_wallet_insert_and_query() {
     // Insert a wallet record and verify it can be retrieved.
     let (db, _dir) = setup_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
 
     let address = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
 

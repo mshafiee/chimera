@@ -251,11 +251,11 @@ pub fn determine_heat_status(exposure: f64, threshold: f64) -> &'static str {
 // DATABASE QUERY FUNCTIONS
 // =============================================================================
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
+fn pg_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Postgres>> {
     match db.pool() {
-        DbPool::SQLite(p) => Ok(p),
+        DbPool::PostgreSQL(p) => Ok(p),
         _ => Err(AppError::Internal(
-            "Only SQLite backend supported".to_string(),
+            "PostgreSQL backend required".to_string(),
         )),
     }
 }
@@ -264,7 +264,7 @@ fn sqlite_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Sqlite>> {
 async fn get_position_concentrations(
     db: &Arc<dyn Database>,
 ) -> AppResult<(Vec<TokenConcentration>, Vec<SectorConcentration>, f64)> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
     let rows = sqlx::query_as::<_, (String, Option<String>, i64, f64)>(
         r#"
         SELECT token_address, token_symbol, COUNT(*) as position_count,
@@ -329,7 +329,7 @@ async fn get_position_concentrations(
 
 /// Get portfolio exposure data
 async fn get_portfolio_exposure(db: &Arc<dyn Database>) -> AppResult<ExposureData> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
     let total: (Option<f64>,) = sqlx::query_as(
         r#"
         SELECT COALESCE(SUM(entry_amount_sol), 0.0)
@@ -362,12 +362,13 @@ async fn get_stop_loss_metrics_db(
     db: &Arc<dyn Database>,
     days: u32,
 ) -> AppResult<StopLossMetricsResponse> {
-    let pool = sqlite_pool(db)?;
-    let days_str = format!("-{} days", days);
+    let pool = pg_pool(db)?;
+    let interval = format!("{} days", days);
 
     // Get total activations and loss prevented
     let total_result: (Option<i64>, Option<f64>) = sqlx::query_as(
-        r#"
+        &format!(
+            r#"
         SELECT COUNT(*) as total_activations,
                COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0) as loss_prevented_sol
         FROM positions p
@@ -377,10 +378,11 @@ async fn get_stop_loss_metrics_db(
           AND p.entry_price > 0
           AND et.stop_loss_price IS NOT NULL
           AND p.exit_price <= et.stop_loss_price * 1.01
-          AND p.closed_at >= datetime('now', ?)
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_one(&pool)
     .await?;
 
@@ -394,7 +396,8 @@ async fn get_stop_loss_metrics_db(
 
     // Get activations by strategy
     let by_strategy_rows = sqlx::query_as::<_, (String, i64, Option<f64>)>(
-        r#"
+        &format!(
+            r#"
         SELECT p.strategy,
                COUNT(*) as activations,
                COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0) as loss_prevented
@@ -405,11 +408,12 @@ async fn get_stop_loss_metrics_db(
           AND p.entry_price > 0
           AND et.stop_loss_price IS NOT NULL
           AND p.exit_price <= et.stop_loss_price * 1.01
-          AND p.closed_at >= datetime('now', ?)
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         GROUP BY p.strategy
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_all(&pool)
     .await?;
 
@@ -435,7 +439,8 @@ async fn get_stop_loss_metrics_db(
             String,
         ),
     >(
-        r#"
+        &format!(
+            r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
                p.entry_price, et.stop_loss_price, p.exit_price, p.strategy
         FROM positions p
@@ -445,12 +450,13 @@ async fn get_stop_loss_metrics_db(
           AND p.entry_price > 0
           AND et.stop_loss_price IS NOT NULL
           AND p.exit_price <= et.stop_loss_price * 1.01
-          AND p.closed_at >= datetime('now', ?)
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         ORDER BY p.closed_at DESC
         LIMIT 10
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_all(&pool)
     .await?;
 
@@ -472,14 +478,16 @@ async fn get_stop_loss_metrics_db(
 
     // Calculate activation rate (activations per total closed positions in period)
     let total_closed: (Option<i64>,) = sqlx::query_as(
-        r#"
+        &format!(
+            r#"
         SELECT COUNT(*)
         FROM positions
         WHERE state = 'CLOSED'
-          AND closed_at >= datetime('now', ?)
+          AND closed_at >= NOW() - INTERVAL '{}'
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_one(&pool)
     .await?;
 
@@ -505,12 +513,13 @@ async fn get_profit_target_metrics_db(
     db: &Arc<dyn Database>,
     days: u32,
 ) -> AppResult<ProfitTargetMetricsResponse> {
-    let pool = sqlite_pool(db)?;
-    let days_str = format!("-{} days", days);
+    let pool = pg_pool(db)?;
+    let interval = format!("{} days", days);
 
     // Get total hits (positions with targets_hit > 0)
     let total_hits_result: (Option<i64>, Option<f64>) = sqlx::query_as(
-        r#"
+        &format!(
+            r#"
         SELECT COUNT(*) as total_hits,
                COALESCE(SUM(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0) as total_gain_sol
         FROM positions p
@@ -518,10 +527,11 @@ async fn get_profit_target_metrics_db(
         WHERE p.state = 'CLOSED'
           AND et.targets_hit IS NOT NULL
           AND json_array_length(et.targets_hit) > 0
-          AND p.closed_at >= datetime('now', ?)
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_one(&pool)
     .await?;
 
@@ -535,16 +545,18 @@ async fn get_profit_target_metrics_db(
 
     // Count trailing stop activations (where trailing_stop_active = true)
     let trailing_result: (Option<i64>,) = sqlx::query_as(
-        r#"
+        &format!(
+            r#"
         SELECT COUNT(*)
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
-          AND et.trailing_stop_active = 1
-          AND p.closed_at >= datetime('now', ?)
+          AND et.trailing_stop_active = true
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_one(&pool)
     .await?;
 
@@ -552,7 +564,8 @@ async fn get_profit_target_metrics_db(
 
     // Get by strategy
     let by_strategy_rows = sqlx::query_as::<_, (String, i64, Option<f64>, Option<i64>)>(
-        r#"
+        &format!(
+            r#"
         SELECT p.strategy,
                COUNT(*) as hits,
                COALESCE(AVG(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0) as avg_gain_sol,
@@ -562,11 +575,12 @@ async fn get_profit_target_metrics_db(
         WHERE p.state = 'CLOSED'
           AND et.targets_hit IS NOT NULL
           AND json_array_length(et.targets_hit) > 0
-          AND p.closed_at >= datetime('now', ?)
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         GROUP BY p.strategy
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_all(&pool)
     .await?;
 
@@ -592,7 +606,8 @@ async fn get_profit_target_metrics_db(
             String,
         ),
     >(
-        r#"
+        &format!(
+            r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
                json_array_length(et.targets_hit) as targets_count,
                et.peak_profit_percent * p.entry_amount_sol / 100.0 as gain_sol,
@@ -602,12 +617,13 @@ async fn get_profit_target_metrics_db(
         WHERE p.state = 'CLOSED'
           AND et.targets_hit IS NOT NULL
           AND json_array_length(et.targets_hit) > 0
-          AND p.closed_at >= datetime('now', ?)
+          AND p.closed_at >= NOW() - INTERVAL '{}'
         ORDER BY p.closed_at DESC
         LIMIT 10
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_all(&pool)
     .await?;
 
@@ -627,14 +643,16 @@ async fn get_profit_target_metrics_db(
 
     // Calculate hit rate (hits with targets / total closed)
     let total_closed: (Option<i64>,) = sqlx::query_as(
-        r#"
+        &format!(
+            r#"
         SELECT COUNT(*)
         FROM positions
         WHERE state = 'CLOSED'
-          AND closed_at >= datetime('now', ?)
+          AND closed_at >= NOW() - INTERVAL '{}'
         "#,
+            interval
+        ),
     )
-    .bind(&days_str)
     .fetch_one(&pool)
     .await?;
 
@@ -660,7 +678,7 @@ async fn get_profit_target_metrics_db(
 async fn get_position_size_analysis_db(
     db: &Arc<dyn Database>,
 ) -> AppResult<PositionSizeAnalysisResponse> {
-    let pool = sqlite_pool(db)?;
+    let pool = pg_pool(db)?;
     // Get statistics
     let stats: (Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
         r#"

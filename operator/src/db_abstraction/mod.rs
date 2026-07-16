@@ -5,7 +5,6 @@
 
 pub mod export;
 pub mod postgres;
-pub mod sqlite;
 pub mod types;
 
 pub use export::{trades_to_csv, trades_to_pdf};
@@ -939,41 +938,28 @@ pub struct WalletPerformance {
 /// Database mode selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseMode {
-    /// SQLite only (development/staging)
-    SQLiteOnly,
     /// PostgreSQL only (production)
     PostgreSQLOnly,
 }
 
 impl DatabaseMode {
-    /// Get mode from environment variable
     pub fn from_env() -> Self {
         match std::env::var("CHIMERA_DB_MODE")
             .as_deref()
-            .unwrap_or("sqlite")
+            .unwrap_or("postgres")
             .to_lowercase()
             .as_str()
         {
             "postgres" | "postgresql" | "postgres-only" => DatabaseMode::PostgreSQLOnly,
-            _ => DatabaseMode::SQLiteOnly,
+            _ => DatabaseMode::PostgreSQLOnly,
         }
     }
 }
 
 /// Create database instance based on configuration
 pub async fn create_database(config: &DatabaseConfig) -> AppResult<Arc<dyn Database>> {
-    let mode = DatabaseMode::from_env();
-
-    match mode {
-        DatabaseMode::SQLiteOnly => {
-            tracing::info!("Using SQLite-only mode");
-            Ok(Arc::new(sqlite::SqliteBackend::new(config).await?))
-        }
-        DatabaseMode::PostgreSQLOnly => {
-            tracing::info!("Using PostgreSQL-only mode");
-            Ok(Arc::new(postgres::PostgresBackend::new(config).await?))
-        }
-    }
+    tracing::info!("Using PostgreSQL-only mode");
+    Ok(Arc::new(postgres::PostgresBackend::new(config).await?))
 }
 
 // ========================================================================

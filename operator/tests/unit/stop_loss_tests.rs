@@ -16,15 +16,15 @@ use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
 use sqlx::Pool;
-use sqlx::Sqlite;
+use sqlx::Postgres;
 use std::str::FromStr;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-fn sqlite_pool(db: &Arc<dyn Database>) -> Pool<Sqlite> {
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
     match db.pool() {
-        DbPool::SQLite(pool) => pool,
-        _ => panic!("test requires SQLite backend"),
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
     }
 }
 
@@ -38,7 +38,7 @@ fn past_entry() -> chrono::DateTime<chrono::Utc> {
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("stop_loss_test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
     (db, temp_dir)
@@ -56,7 +56,7 @@ fn config_with_hard_stop(hard_stop_positive: &str) -> Arc<ProfitManagementConfig
 }
 
 /// Insert a wallet with a specific WQS score.
-async fn insert_wallet(pool: &Pool<Sqlite>, address: &str, wqs: f64) {
+async fn insert_wallet(pool: &Pool<Postgres>, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
          VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
@@ -69,7 +69,7 @@ async fn insert_wallet(pool: &Pool<Sqlite>, address: &str, wqs: f64) {
 }
 
 /// Insert a consensus BUY signal into signal_aggregation within the last 5 minutes.
-async fn insert_consensus_signal(pool: &Pool<Sqlite>, token: &str, wallet: &str) {
+async fn insert_consensus_signal(pool: &Pool<Postgres>, token: &str, wallet: &str) {
     sqlx::query(
         "INSERT INTO signal_aggregation \
          (token_address, wallet_address, direction, amount_sol, created_at) \
@@ -87,7 +87,7 @@ async fn insert_consensus_signal(pool: &Pool<Sqlite>, token: &str, wallet: &str)
 /// (which reads trades.net_pnl_sol for accuracy) returns the correct value.
 #[allow(dead_code)]
 async fn insert_closed_position(
-    pool: &Pool<Sqlite>,
+    pool: &Pool<Postgres>,
     trade_uuid: &str,
     wallet: &str,
     token: &str,
@@ -142,7 +142,7 @@ async fn insert_closed_position(
 /// Insert an active position so exposure is > 0.
 #[allow(dead_code)]
 async fn insert_active_position(
-    pool: &Pool<Sqlite>,
+    pool: &Pool<Postgres>,
     trade_uuid: &str,
     wallet: &str,
     token: &str,
@@ -184,7 +184,7 @@ async fn test_zero_entry_price_forces_immediate_exit() {
     // an immediate exit to recover capital rather than hold indefinitely.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
     insert_wallet(&pool, "wallet_a", 50.0).await;
 
@@ -220,7 +220,7 @@ async fn test_consensus_query_failure_no_stop_widening() {
     // hard-stop sign-convention bug (where hard_stop_loss=15.0 would fire on ALL losses).
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // Insert wallet with WQS 80 → dynamic stop = -20%
@@ -267,7 +267,7 @@ async fn test_consensus_widens_stop_for_high_wqs_wallet() {
     // bug in hard_stop_loss would otherwise fire for every negative loss_percent).
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     insert_wallet(&pool, "wallet_c", 80.0).await;
@@ -313,7 +313,7 @@ async fn test_high_wqs_high_volatility_widens_to_40pct() {
     // -34% loss → None. -36% loss → Exit.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     insert_wallet(&pool, "wallet_vol", 75.0).await;
 
     const TOKEN: &str = "token_high_vol";
@@ -401,7 +401,7 @@ async fn test_low_wqs_low_volatility_tightens_to_9pct() {
     // A -10% loss MUST exit (exceeds -9% threshold).
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     insert_wallet(&pool, "wallet_tight", 30.0).await;
 
     const TOKEN: &str = "token_low_vol";
@@ -480,7 +480,7 @@ async fn test_consensus_plus_high_volatility_widens_further() {
     // -34% loss → None. -36% loss → Exit.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     insert_wallet(&pool, "wallet_cv", 75.0).await;
 
     const TOKEN: &str = "token_cv";
@@ -562,7 +562,7 @@ async fn test_hard_stop_overrides_wider_dynamic_threshold() {
     // This confirms the hard stop fires before the dynamic -20% threshold is reached.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     insert_wallet(&pool, "wallet_hardstop", 75.0).await;
 
     const TOKEN: &str = "token_hardstop";
@@ -603,7 +603,7 @@ async fn test_stop_loss_price_cache_unavailable_returns_none() {
     // Documents that capital is unprotected when price data is unavailable.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     let price_cache = Arc::new(PriceCache::new().unwrap());
 
     // No price is set for the token
@@ -635,7 +635,7 @@ async fn test_medium_wqs_standard_stop_at_15pct() {
     // -14% → None. -15% → Exit.
 
     let (db, _tmp) = create_test_db().await;
-    let pool = sqlite_pool(&db);
+    let pool = pg_pool(&db);
     insert_wallet(&pool, "wallet_med", 55.0).await;
 
     const TOKEN: &str = "token_med_wqs";

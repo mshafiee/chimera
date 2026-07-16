@@ -13,7 +13,7 @@ use tempfile::TempDir;
 async fn test_consensus_detection_two_wallets() {
     // Setup test database
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 
@@ -64,7 +64,7 @@ async fn test_consensus_detection_two_wallets() {
 #[tokio::test]
 async fn test_consensus_detection_three_wallets() {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 
@@ -111,7 +111,7 @@ async fn test_consensus_detection_three_wallets() {
 #[tokio::test]
 async fn test_consensus_expires_after_5_minutes() {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 
@@ -149,7 +149,7 @@ async fn test_consensus_expires_after_5_minutes() {
 #[tokio::test]
 async fn test_no_consensus_for_sell_signals() {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 
@@ -184,7 +184,7 @@ async fn test_no_consensus_for_sell_signals() {
 #[tokio::test]
 async fn test_consensus_different_tokens() {
     let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::sqlite(temp_dir.path().join("test.db"));
+    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 

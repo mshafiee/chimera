@@ -1,36 +1,31 @@
 //! Shared types for database abstraction layer
 
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Postgres, Sqlite};
+use sqlx::{Pool, Postgres};
 use std::fmt::{self, Display, Formatter};
 
-/// Database backend selection
+/// Database backend selection (PostgreSQL only)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseBackend {
-    SQLite,
     PostgreSQL,
 }
 
 impl DatabaseBackend {
-    /// Get database backend from environment variable
-    /// Defaults to SQLite for development
     pub fn from_env() -> Self {
         match std::env::var("CHIMERA_DB_MODE")
             .as_deref()
-            .unwrap_or("sqlite")
+            .unwrap_or("postgres")
             .to_lowercase()
             .as_str()
         {
             "postgres" | "postgresql" => DatabaseBackend::PostgreSQL,
-            _ => DatabaseBackend::SQLite,
+            _ => DatabaseBackend::PostgreSQL,
         }
     }
 
-    /// Get the default port for this database backend
     pub fn default_port(&self) -> u16 {
         match self {
-            DatabaseBackend::SQLite => 0, // File-based, no port
             DatabaseBackend::PostgreSQL => 5432,
         }
     }
@@ -39,14 +34,10 @@ impl DatabaseBackend {
 impl Display for DatabaseBackend {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            DatabaseBackend::SQLite => write!(f, "sqlite"),
             DatabaseBackend::PostgreSQL => write!(f, "postgresql"),
         }
     }
 }
-
-/// Type alias for SQLite connection pool
-pub type SqlitePool = Pool<Sqlite>;
 
 /// Type alias for PostgreSQL connection pool
 pub type PostgresPool = Pool<Postgres>;
@@ -55,8 +46,7 @@ pub type PostgresPool = Pool<Postgres>;
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
     pub backend: DatabaseBackend,
-    pub path: std::path::PathBuf, // For SQLite
-    pub url: Option<String>,      // For PostgreSQL
+    pub url: Option<String>,
     pub max_connections: u32,
     pub acquire_timeout_seconds: u64,
 }
@@ -65,7 +55,6 @@ impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
             backend: DatabaseBackend::from_env(),
-            path: std::path::PathBuf::from("data/chimera.db"),
             url: std::env::var("DATABASE_URL").ok(),
             max_connections: 10,
             acquire_timeout_seconds: 30,
@@ -74,58 +63,39 @@ impl Default for DatabaseConfig {
 }
 
 impl DatabaseConfig {
-    /// Create SQLite config with custom path
-    pub fn sqlite(path: std::path::PathBuf) -> Self {
-        Self {
-            backend: DatabaseBackend::SQLite,
-            path,
-            ..Default::default()
-        }
-    }
-
-    /// Create PostgreSQL config with URL
     pub fn postgres(url: String) -> Self {
         Self {
             backend: DatabaseBackend::PostgreSQL,
             url: Some(url),
-            path: std::path::PathBuf::new(), // Not used for PostgreSQL
             ..Default::default()
         }
     }
 }
 
-/// Database pool enum (for type erasure)
+/// Database pool (PostgreSQL only)
 pub enum DbPool {
-    SQLite(SqlitePool),
     PostgreSQL(PostgresPool),
 }
 
 impl DbPool {
-    /// Close the database pool
     pub async fn close(self) {
         match self {
-            DbPool::SQLite(pool) => pool.close().await,
             DbPool::PostgreSQL(pool) => pool.close().await,
         }
     }
 
-    /// Get pool size (total connections)
     pub fn size(&self) -> u32 {
         match self {
-            DbPool::SQLite(pool) => pool.size(),
             DbPool::PostgreSQL(pool) => pool.size(),
         }
     }
 
-    /// Get number of idle connections
     pub fn num_idle(&self) -> u32 {
         match self {
-            DbPool::SQLite(pool) => pool.num_idle() as u32,
             DbPool::PostgreSQL(pool) => pool.num_idle() as u32,
         }
     }
 
-    /// Get pool utilization as percentage (0.0-1.0)
     pub fn utilization(&self) -> f64 {
         let size = self.size() as f64;
         let idle = self.num_idle() as f64;
