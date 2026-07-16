@@ -111,7 +111,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
-     environment:
+    environment:
        - CHIMERA_SERVER__HOST=0.0.0.0
        - CHIMERA_SERVER__PORT=8080
        - CHIMERA_DATABASE__PATH=/app/data/chimera.db
@@ -124,9 +124,9 @@ services:
        # Jupiter API (required for production)
        - CHIMERA_JUPITER__API_KEY=${CHIMERA_JUPITER__API_KEY:-692a643119f20ea44db64c1ca95b7af62b6d7cab09dd189f40adfecb3dab4bec}
        # Paper trading mode
-       - CHIMERA_TRADE_MODE=${CHIMERA_TRADE_MODE:-paper}
-     env_file:
-       - .env
+        - CHIMERA_TRADE_MODE=${CHIMERA_TRADE_MODE:-paper}
+    env_file:
+      - .env
      depends_on:
       - prometheus
       - postgres
@@ -176,8 +176,8 @@ services:
       - SCOUT_MIN_WQS_ACTIVE=75.0                                # Aggressive downsizing: only elite traders
       - SCOUT_MIN_WQS_CANDIDATE=50.0                             # Raised from 15.0 to maintain gap
       # Clean token list (removed invalid addresses: GCS89xYV, Ac7m5c4t, G0AT7B4R, M00DENG)
-      - SCOUT_ACTIVE_TOKENS=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263,EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm,7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr,Grass7B4RdKfBCjTKgSqnXkqjwiG6DuGc62rSdZ9mtm,So11111111111111111111111111111111111111112
-      # API Keys for validation (Loaded from env_file)
+       - SCOUT_ACTIVE_TOKENS=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263,EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm,7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr,Grass7B4RdKfBCjTKgSqnXkqjwiG6DuGc62rSdZ9mtm,So11111111111111111111111111111111111111112
+       # API Keys for validation (Loaded from env_file)
        # Database configuration
        - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
        - DATABASE_URL=${DATABASE_URL:-postgresql://chimera:changeme_asap@postgres:5432/chimera}
@@ -193,9 +193,9 @@ services:
     env_file:
       - .env
     depends_on:
-       - operator
-       - postgres
-       - redis
+      - operator
+      - postgres
+      - redis
     networks:
         - chimera-network
     # Run scout on a schedule (daily at 2 AM UTC)
