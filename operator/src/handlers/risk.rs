@@ -729,7 +729,7 @@ async fn get_position_size_analysis_db(
             END as size_bucket
             FROM positions
             WHERE state IN ('ACTIVE', 'EXITING')
-        ) GROUP BY size_bucket
+        ) AS buckets GROUP BY size_bucket
         "#,
     )
     .fetch_all(&pool)
