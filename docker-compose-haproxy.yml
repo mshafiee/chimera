@@ -29,7 +29,7 @@ services:
       - grafana
       - alertmanager
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "443"]
+      test: ["CMD", "nc", "-z", "127.0.0.1", "443"]
       interval: 10s
       timeout: 5s
       retries: 3
