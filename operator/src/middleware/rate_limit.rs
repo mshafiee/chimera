@@ -14,8 +14,8 @@
 //! Security Fix: Changed from using leftmost IP to rightmost IP in X-Forwarded-For
 //! to prevent attackers from spoofing their IP address and bypassing rate limits.
 
+use axum::extract::ConnectInfo;
 use axum::http::Request;
-use axum::http::StatusCode;
 use std::net::{IpAddr, SocketAddr};
 use tower_governor::{key_extractor::KeyExtractor, GovernorError};
 
@@ -37,7 +37,10 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
 
     fn extract<T>(&self, req: &Request<T>) -> Result<Self::Key, GovernorError> {
         // Determine peer address first.
-        let peer_addr = req.extensions().get::<SocketAddr>().copied();
+        let peer_addr = req
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0);
         let peer_ip = peer_addr.map(|a| a.ip());
 
         // Only trust forwarded headers when the direct connection is from a trusted proxy.
@@ -127,7 +130,10 @@ mod tests {
             .method(Method::GET)
             .uri(Uri::from_static("/"))
             .version(Version::HTTP_11)
-            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+            .extension(ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))))
             .body(())
             .unwrap();
         *req.headers_mut() = headers;
@@ -147,7 +153,10 @@ mod tests {
         let mut req = Request::builder()
             .method(Method::GET)
             .uri(Uri::from_static("/"))
-            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+            .extension(ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))))
             .body(())
             .unwrap();
         *req.headers_mut() = headers;
@@ -169,7 +178,10 @@ mod tests {
         let mut req = Request::builder()
             .method(Method::GET)
             .uri(Uri::from_static("/"))
-            .extension(std::net::SocketAddr::from(([127, 0, 0, 1], 8080)))
+            .extension(ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))))
             .body(())
             .unwrap();
         *req.headers_mut() = headers;
