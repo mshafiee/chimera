@@ -268,7 +268,7 @@ async fn get_position_concentrations(
     let rows = sqlx::query_as::<_, (String, Option<String>, i64, f64)>(
         r#"
         SELECT token_address, token_symbol, COUNT(*) as position_count,
-               SUM(entry_amount_sol) as total_value_sol
+               SUM(entry_amount_sol)::float8 as total_value_sol
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
         GROUP BY token_address, token_symbol
@@ -332,7 +332,7 @@ async fn get_portfolio_exposure(db: &Arc<dyn Database>) -> AppResult<ExposureDat
     let pool = pg_pool(db)?;
     let total: (Option<f64>,) = sqlx::query_as(
         r#"
-        SELECT COALESCE(SUM(entry_amount_sol), 0.0)
+        SELECT COALESCE(SUM(entry_amount_sol), 0.0)::float8
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
         "#,
@@ -370,7 +370,7 @@ async fn get_stop_loss_metrics_db(
         &format!(
             r#"
         SELECT COUNT(*) as total_activations,
-               COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0) as loss_prevented_sol
+               COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0)::float8 as loss_prevented_sol
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -400,7 +400,7 @@ async fn get_stop_loss_metrics_db(
             r#"
         SELECT p.strategy,
                COUNT(*) as activations,
-               COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0) as loss_prevented
+               COALESCE(SUM((et.stop_loss_price - p.exit_price) * p.entry_amount_sol / p.entry_price), 0.0)::float8 as loss_prevented
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -442,7 +442,7 @@ async fn get_stop_loss_metrics_db(
         &format!(
             r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
-               p.entry_price, et.stop_loss_price, p.exit_price, p.strategy
+               p.entry_price::float8, et.stop_loss_price::float8, p.exit_price::float8, p.strategy
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -521,7 +521,7 @@ async fn get_profit_target_metrics_db(
         &format!(
             r#"
         SELECT COUNT(*) as total_hits,
-               COALESCE(SUM(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0) as total_gain_sol
+               COALESCE(SUM(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0)::float8 as total_gain_sol
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
@@ -568,7 +568,7 @@ async fn get_profit_target_metrics_db(
             r#"
         SELECT p.strategy,
                COUNT(*) as hits,
-               COALESCE(AVG(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0) as avg_gain_sol,
+               COALESCE(AVG(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0)::float8 as avg_gain_sol,
                json_array_length(et.targets_hit) as targets_count
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
@@ -610,7 +610,7 @@ async fn get_profit_target_metrics_db(
             r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
                json_array_length(et.targets_hit) as targets_count,
-               et.peak_profit_percent * p.entry_amount_sol / 100.0 as gain_sol,
+               (et.peak_profit_percent * p.entry_amount_sol / 100.0)::float8 as gain_sol,
                p.strategy
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
@@ -683,9 +683,9 @@ async fn get_position_size_analysis_db(
     let stats: (Option<f64>, Option<f64>, Option<f64>) = sqlx::query_as(
         r#"
         SELECT
-            AVG(entry_amount_sol) as avg_position,
-            MAX(entry_amount_sol) as max_position,
-            MIN(entry_amount_sol) as min_position
+            AVG(entry_amount_sol)::float8 as avg_position,
+            MAX(entry_amount_sol)::float8 as max_position,
+            MIN(entry_amount_sol)::float8 as min_position
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
         "#,
@@ -700,7 +700,7 @@ async fn get_position_size_analysis_db(
     // Get median using OFFSET (handle empty case)
     let median_result: (Option<f64>,) = sqlx::query_as(
         r#"
-        SELECT entry_amount_sol
+        SELECT entry_amount_sol::float8
         FROM positions
         WHERE state IN ('ACTIVE', 'EXITING')
         ORDER BY entry_amount_sol

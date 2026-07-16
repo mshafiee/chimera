@@ -3066,10 +3066,14 @@ impl Database for PostgresBackend {
             append_trade_filter_clauses(&mut query, from_date, to_date, status_filter, strategy_filter, wallet_address_filter);
 
         let limit_n = next;
-        let offset_n = next + 1;
-        query.push_str(&format!(
-            " ORDER BY created_at DESC LIMIT ${limit_n} OFFSET ${offset_n}"
-        ));
+        let offset_n = if limit < 0 { next } else { next + 1 };
+        if limit < 0 {
+            query.push_str(&format!(" ORDER BY created_at DESC LIMIT ALL OFFSET ${offset_n}"));
+        } else {
+            query.push_str(&format!(
+                " ORDER BY created_at DESC LIMIT ${limit_n} OFFSET ${offset_n}"
+            ));
+        }
 
         let mut q = sqlx::query(&query);
         if let Some(from) = from_date {
@@ -3087,7 +3091,10 @@ impl Database for PostgresBackend {
         if let Some(wallet) = wallet_address_filter {
             q = q.bind(wallet);
         }
-        q = q.bind(limit).bind(offset);
+        if limit >= 0 {
+            q = q.bind(limit);
+        }
+        q = q.bind(offset);
 
         let rows = q.fetch_all(&self.pool).await?;
         let trades: Vec<TradeDetail> = rows
