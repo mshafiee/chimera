@@ -4,7 +4,7 @@
 services:
   # HAProxy Reverse Proxy
   haproxy:
-    image: haproxy:2.8-alpine
+    image: chimera-haproxy:latest
     container_name: chimera-haproxy
     restart: unless-stopped
     ports:
@@ -13,20 +13,13 @@ services:
       - "8404:8404"  # HAProxy statistics dashboard
     volumes:
       - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ./docker/haproxy/geoip.lua:/usr/local/etc/haproxy/geoip.lua:ro
       - ./ssl/certbot/letsencrypt:/etc/haproxy/certs:ro
       - ./docker/haproxy/errors:/usr/local/etc/haproxy/errors:ro
       - ./docker/haproxy/policies:/usr/local/etc/haproxy/policies:ro
-      - ./docker/haproxy/geoip:/geoip:ro
-      - ./docker/haproxy/monitoring-auth.cfg:/usr/local/etc/haproxy/monitoring-auth.cfg:ro
-      - ./docker/haproxy/monitoring-routing.conf:/usr/local/etc/haproxy/monitoring-routing.conf:ro
     environment:
-      # Monitoring authentication environment variables
-      - MONITORING_ADMIN_PASSWORD=${MONITORING_ADMIN_PASSWORD:-changeme_asap}
-      - MONITORING_OPERATOR_PASSWORD=${MONITORING_OPERATOR_PASSWORD:-changeme_asap}
-      - MONITORING_VIEWER_PASSWORD=${MONITORING_VIEWER_PASSWORD:-changeme_asap}
-      # Grafana integration
-      - GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme_asap}
-      - GRAFANA_ANON_KEY=${GRAFANA_ANON_KEY:-changeme_asap}
+      # HAProxy stats
+      - HAPROXY_STATS_PASSWORD=${HAPROXY_STATS_PASSWORD:-changeme_asap}
     networks:
       - chimera-network
     depends_on:
@@ -45,6 +38,29 @@ services:
       - mainnet-prod
 
   # Certificate Manager (Certbot)
+  certbot:
+    image: certbot/certbot:latest
+    container_name: chimera-certbot
+    restart: unless-stopped
+    volumes:
+      - ./ssl/certbot/letsencrypt:/etc/letsencrypt
+      - ./ssl/certbot/www:/var/www/html
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    entrypoint: >
+      /bin/sh -c '
+        trap exit TERM;
+        while :; do
+          certbot renew --webroot -w /var/www/html
+                 --deploy-hook "cat /etc/letsencrypt/live/chimera-01.moez.tech/fullchain.pem /etc/letsencrypt/live/chimera-01.moez.tech/privkey.pem > /etc/letsencrypt/live/chimera-01.moez.tech/haproxy.pem && docker kill -s HUP chimera-haproxy || true";
+          sleep 12h & wait $${!};
+        done
+      '
+    networks:
+      - chimera-network
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+
   # HAProxy Prometheus Exporter - Security Metrics
   haproxy-exporter:
     image: prom/haproxy-exporter:latest
@@ -53,8 +69,7 @@ services:
     ports:
       - "9101:9101"
     command:
-      - "--haproxy.scrape-uri=http://stats:8404/"
-      - "--haproxy.stats_AUTH=admin:CHANGE_ME_PASSWORD"
+      - "--haproxy.scrape-uri=http://admin:${HAPROXY_STATS_PASSWORD:-changeme_asap}@stats:8404/stats"
       - "--web.listen-address=:9101"
     networks:
       - chimera-network
@@ -94,24 +109,13 @@ services:
       - mainnet-paper
       - mainnet-prod
 
-  # Redis Cache for GeoIP Lookups
-  redis:
-    image: redis:7-alpine
-    container_name: chimera-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    networks:
-      - chimera-network
-    profiles:
-      - mainnet-paper
-      - mainnet-prod
-
   # GeoIP Lookup Service
   geoip-lookup:
     build:
       context: .
       dockerfile: tools/Dockerfile.geoip
+      args:
+        - GEOIP_DB_REFRESH=0
     container_name: chimera-geoip-lookup
     restart: unless-stopped
     ports:
@@ -120,14 +124,10 @@ services:
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - METRICS_PORT=8001
-      - GEOIP_CITY_DB_PATH=/geoip/GeoLite2-City.mmdb
       - GEOIP_COUNTRY_DB_PATH=/geoip/GeoLite2-Country.mmdb
       - GEOIP_ASN_DB_PATH=/geoip/GeoLite2-ASN.mmdb
-      - MAXMIND_LICENSE_KEY=${MAXMIND_LICENSE_KEY}
       - CACHE_TTL=3600
       - POLICY_CACHE_TTL=300
-    volumes:
-      - ./docker/haproxy/geoip:/geoip:ro
     networks:
       - chimera-network
     depends_on:
@@ -137,25 +137,6 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-    profiles:
-      - mainnet-paper
-      - mainnet-prod
-
-  # GeoIP Database Updater (Scheduled)
-  geoip-updater:
-    build:
-      context: .
-      dockerfile: tools/Dockerfile.geoip-updater
-    container_name: chimera-geoip-updater
-    restart: unless-stopped
-    environment:
-      - MAXMIND_LICENSE_KEY=${MAXMIND_LICENSE_KEY}
-      - GEOIP_DB_DIR=/geoip
-      - UPDATE_SCHEDULE=0 3 * * 0  # Weekly: Sundays at 3 AM
-    volumes:
-      - ./docker/haproxy/geoip:/geoip
-    networks:
-      - chimera-network
     profiles:
       - mainnet-paper
       - mainnet-prod
@@ -202,7 +183,7 @@ services:
       - METRICS_PORT=8003
       - POLICY_DIR=/policies
       - HAPROXY_CONFIG=/usr/local/etc/haproxy/haproxy.cfg
-      - HAPROXY_RELOAD_COMMAND=docker-compose restart haproxy
+      - HAPROXY_RELOAD_COMMAND=docker restart chimera-haproxy
     volumes:
       - ./docker/haproxy/policies:/policies:ro
       - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
@@ -219,5 +200,4 @@ services:
 
 networks:
   chimera-network:
-    driver: bridge
     external: true

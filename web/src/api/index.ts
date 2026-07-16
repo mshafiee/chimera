@@ -4,7 +4,7 @@ export { usePositions, usePosition } from './positions'
 export { useWallets, useWallet, useUpdateWallet } from './wallets'
 export { useTrades, exportTrades } from './trades'
 export { useConfig, useUpdateConfig, useResetCircuitBreaker, useTripCircuitBreaker } from './config'
-export { useDeadLetterQueue, useConfigAudit } from './incidents'
+export { useDeadLetterQueue, useConfigAudit, retryDeadLetterItem } from './incidents'
 export { usePerformanceMetrics, useStrategyPerformance } from './metrics'
 export { useBalanceAndNAV } from './balance'
 

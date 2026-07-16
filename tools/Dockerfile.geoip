@@ -1,7 +1,14 @@
+# syntax=docker/dockerfile:1.6
+
 FROM python:3.11-slim
 
 LABEL maintainer="Chimera Team"
 LABEL description="GeoIP lookup service with MaxMind GeoLite2 integration"
+
+# Build arguments for GeoIP database download
+ARG GEOIP_DB_REFRESH=0
+ARG GEOIP_COUNTRY_URL=https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-Country.mmdb
+ARG GEOIP_ASN_URL=https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-ASN.mmdb
 
 # Set working directory
 WORKDIR /app
@@ -23,6 +30,25 @@ COPY tools/geoip-lookup.py .
 
 # Create directory for GeoIP databases
 RUN mkdir -p /geoip
+
+# Download GeoIP databases with BuildKit cache mount
+RUN --mount=type=cache,target=/geoip-cache,id=geolite2-db,sharing=locked \
+    set -eux; \
+    fetch_db() { \
+      url="$1"; out="$2"; cached="/geoip-cache/$out"; \
+      if [ "${GEOIP_DB_REFRESH}" = "1" ] || [ ! -s "$cached" ]; then \
+        echo "Fetching $out from mirror..."; \
+        if curl -fsSL --retry 3 --retry-delay 2 "$url" -o "$cached.new"; then \
+          if [ "$(stat -c%s "$cached.new")" -gt 1048576 ]; then mv "$cached.new" "$cached"; \
+          else echo "WARN: $out too small, discarding"; rm -f "$cached.new"; fi; \
+        else echo "WARN: download failed for $out"; rm -f "$cached.new"; fi; \
+      fi; \
+      if [ -s "$cached" ]; then cp "$cached" "/geoip/$out"; \
+      else echo "ERROR: no valid $out available"; exit 1; fi; \
+    }; \
+    fetch_db "${GEOIP_COUNTRY_URL}" "GeoLite2-Country.mmdb"; \
+    fetch_db "${GEOIP_ASN_URL}" "GeoLite2-ASN.mmdb"; \
+    ls -la /geoip
 
 # Expose metrics port
 EXPOSE 8001

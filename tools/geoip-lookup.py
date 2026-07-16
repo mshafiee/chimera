@@ -11,7 +11,7 @@ This service:
 5. Provides policy evaluation for access control
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
@@ -100,8 +100,8 @@ except Exception as e:
 # Prometheus Metrics
 geoip_lookups_total = Counter(
     "chimera_geoip_lookups_total",
-    ["cache_status", "db_type"],
-    "Total GeoIP lookup requests"
+    "Total GeoIP lookup requests",
+    labelnames=["cache_status", "db_type"]
 )
 
 geoip_lookup_duration = Histogram(
@@ -116,14 +116,14 @@ geoip_cache_hits = Gauge(
 
 geoip_database_age = Gauge(
     "chimera_geoip_database_age_hours",
-    ["database_type"],
-    "Age of GeoIP database in hours"
+    "Age of GeoIP database in hours",
+    labelnames=["database_type"]
 )
 
 geoip_policy_evaluations_total = Counter(
     "chimera_geoip_policy_evaluations_total",
-    ["decision", "policy_type"],
-    "Total policy evaluations for access control"
+    "Total policy evaluations for access control",
+    labelnames=["decision", "policy_type"]
 )
 
 # Pydantic models
@@ -551,7 +551,7 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "geoip_lookup:app",
+        app,
         host="0.0.0.0",
         port=METRICS_PORT,
         log_level="info"

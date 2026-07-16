@@ -1,5 +1,5 @@
 # Multi-stage build for Chimera Web Dashboard
-FROM node:18-alpine as builder
+FROM node:20-alpine AS builder
 
 # Install build dependencies for native modules
 RUN apk add --no-cache python3 make g++ libusb-dev linux-headers
@@ -33,7 +33,7 @@ EXPOSE 80
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --quiet --tries=1 --spider http://localhost/ || exit 1
+    CMD curl -f http://localhost/health || exit 1
 
 # Start nginx
 CMD ["nginx", "-g", "daemon off;"]

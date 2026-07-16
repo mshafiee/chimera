@@ -11,7 +11,7 @@ This service:
 5. Generates alerts for critical threats
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Response
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
@@ -75,40 +75,40 @@ except Exception as e:
 # Attack detection counters
 attacks_detected_total = Counter(
     "chimera_attacks_detected_total",
-    ["attack_type", "severity", "source_ip"],
-    "Total attacks detected by pattern type"
+    "Total attacks detected by pattern type",
+    labelnames=["attack_type", "severity", "source_ip"]
 )
 
 # Specific attack type metrics
 brute_force_attempts_total = Counter(
     "chimera_brute_force_attempts_total",
-    ["source_ip", "target"],
-    "Brute force authentication attempts detected"
+    "Brute force authentication attempts detected",
+    labelnames=["source_ip", "target"]
 )
 
 ddos_attacks_total = Counter(
     "chimera_ddos_attacks_total",
-    ["attack_vector", "severity"],
-    "DDoS attacks detected"
+    "DDoS attacks detected",
+    labelnames=["attack_vector", "severity"]
 )
 
 webhook_attacks_total = Counter(
     "chimera_webhook_attacks_total",
-    ["attack_type", "severity"],
-    "Webhook-specific attacks detected"
+    "Webhook-specific attacks detected",
+    labelnames=["attack_type", "severity"]
 )
 
 injection_attempts_total = Counter(
     "chimera_injection_attempts_total",
-    ["injection_type", "severity", "source_ip"],
-    "SQL injection and path traversal attempts"
+    "SQL injection and path traversal attempts",
+    labelnames=["injection_type", "severity", "source_ip"]
 )
 
 # Active threat tracking
 active_threats = Gauge(
     "chimera_active_threats",
-    ["threat_type", "severity"],
-    "Number of currently active security threats"
+    "Number of currently active security threats",
+    labelnames=["threat_type", "severity"]
 )
 
 # Detection performance
@@ -577,7 +577,7 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "attack_detection:app",
+        app,
         host="0.0.0.0",
         port=METRICS_PORT,
         log_level="info"

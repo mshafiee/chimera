@@ -23,4 +23,9 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      external: ['bs58'],
+    },
+  },
 })

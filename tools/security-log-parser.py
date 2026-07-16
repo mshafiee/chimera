@@ -57,7 +57,6 @@ try:
         port=REDIS_PORT,
         decode_responses=True,
         socket_connect_timeout=5,
-        socket_connect_timeout=5,
         health_check_interval=30
     )
     redis_client.ping()
@@ -70,32 +69,32 @@ except Exception as e:
 # Security event counters
 security_events_total = Counter(
     "chimera_haproxy_security_events_total",
-    ["event_type", "severity", "geo_country", "source_ip"],
-    "Total security events processed from HAProxy"
+    "Total security events processed from HAProxy",
+    ["event_type", "severity", "geo_country", "source_ip"]
 )
 
 rate_limit_violations_total = Counter(
     "chimera_haproxy_rate_limit_violations_total",
-    ["endpoint", "source_ip"],
-    "Rate limit violations detected by HAProxy"
+    "Rate limit violations detected by HAProxy",
+    ["endpoint", "source_ip"]
 )
 
 auth_failures_total = Counter(
     "chimera_haproxy_auth_failures_total",
-    ["auth_type", "source_ip", "reason"],
-    "Authentication failures detected"
+    "Authentication failures detected",
+    ["auth_type", "source_ip", "reason"]
 )
 
 attack_detected_total = Counter(
     "chimera_haproxy_attack_detected_total",
-    ["attack_type", "severity", "source_ip"],
-    "Attack patterns detected by security analysis"
+    "Attack patterns detected by security analysis",
+    ["attack_type", "severity", "source_ip"]
 )
 
 geo_anomalies_total = Counter(
     "chimera_haproxy_geo_anomalies_total",
-    ["anomaly_type", "geo_country"],
-    "Geographic access anomalies detected"
+    "Geographic access anomalies detected",
+    ["anomaly_type", "geo_country"]
 )
 
 # Performance metrics
@@ -106,8 +105,8 @@ log_processing_duration = Histogram(
 
 active_threats = Gauge(
     "chimera_haproxy_active_threats",
-    ["threat_type", "severity"],
-    "Number of currently active security threats"
+    "Number of currently active security threats",
+    ["threat_type", "severity"]
 )
 
 # In-memory threat tracking (for 24h retention)
@@ -153,25 +152,27 @@ class LogProcessor:
                 return
 
             async with asyncio.Lock():
-                with open(HA_PROXY_LOG_PATH, 'r') as f:
-                    # Seek to last position
-                    f.seek(self.last_position)
+                try:
+                    with open(HA_PROXY_LOG_PATH, 'r') as f:
+                        # Seek to last position
+                        f.seek(self.last_position)
 
-                    # Read new lines
-                    new_lines = []
-                    for line in f:
-                        new_lines.append(line.strip())
+                        # Read new lines
+                        new_lines = []
+                        for line in f:
+                            new_lines.append(line.strip())
 
-                    if new_lines:
-                        self.last_position = f.tell()
+                        if new_lines:
+                            self.last_position = f.tell()
 
-                        # Process each log line
-                        for line in new_lines:
-                            if line:
-                                await self._process_log_line(line)
-
-            except IOError as e:
-                logger.error(f"Error reading log file: {e}")
+                            # Process each log line
+                            for line in new_lines:
+                                if line:
+                                    await self._process_log_line(line)
+                except IOError as e:
+                    logger.error(f"Error reading log file: {e}")
+        except Exception as e:
+            logger.error(f"Error processing logs: {e}")
 
     async def _process_log_line(self, line: str):
         """Process a single security log line"""
@@ -470,7 +471,7 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "security_log_parser:app",
+        app,
         host="0.0.0.0",
         port=METRICS_PORT,
         log_level="info"

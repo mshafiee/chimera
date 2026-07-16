@@ -21,6 +21,7 @@ import subprocess
 import logging
 import os
 import json
+import uvicorn
 from datetime import datetime
 import asyncio
 import ipaddress
@@ -542,7 +543,7 @@ async def shutdown_event():
 
 if __name__ == "__main__":
     uvicorn.run(
-        "policy_manager:app",
+        app,
         host="0.0.0.0",
         port=METRICS_PORT,
         log_level="info"
