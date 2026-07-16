@@ -213,5 +213,3 @@ execution_lock:
   enabled: true                    # Enable execution-level locking (prevents duplicate processing)
   lock_timeout_seconds: 120        # Lock timeout in seconds (auto-expiration for crash safety)
   cleanup_interval_seconds: 30    # Background cleanup interval in seconds
-database:
-  url: postgresql://chimera:1d25d87cd2d22f9383bd6918600d1c9a0427ca8d6927b4c2@postgres:5432/chimera
