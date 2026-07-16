@@ -79,11 +79,11 @@ fn append_trade_filter_clauses(
 ) -> usize {
     let mut n = 1usize;
     if from_date.is_some() {
-        sql.push_str(&format!(" AND created_at >= ${n}"));
+        sql.push_str(&format!(" AND created_at >= ${n}::timestamptz"));
         n += 1;
     }
     if to_date.is_some() {
-        sql.push_str(&format!(" AND created_at <= ${n}"));
+        sql.push_str(&format!(" AND created_at <= ${n}::timestamptz"));
         n += 1;
     }
     if status_filter.is_some() {
