@@ -124,7 +124,7 @@ services:
        # Jupiter API (required for production)
        - CHIMERA_JUPITER__API_KEY=692a643119f20ea44db64c1ca95b7af62b6d7cab09dd189f40adfecb3dab4bec
        # Paper trading mode
-       - CHIMERA_TRADE_MODE=${CHIMERA_TRADE_MODE:-paper}
+       - CHIMERA_TRADE_MODE=paper
     env_file:
       - .env
     depends_on:
