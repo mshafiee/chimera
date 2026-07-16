@@ -114,9 +114,7 @@ services:
     environment:
        - CHIMERA_SERVER__HOST=0.0.0.0
        - CHIMERA_SERVER__PORT=8080
-       - CHIMERA_DATABASE__PATH=/app/data/chimera.db
-       - CHIMERA_DATABASE__URL=${DATABASE_URL}
-       # Database backend selection
+       # Database backend selection (PostgreSQL-only)
        - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
        - DATABASE_URL=${DATABASE_URL:-postgresql://chimera:changeme_asap@postgres:5432/chimera}
        # Redis configuration
