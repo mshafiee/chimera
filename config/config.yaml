@@ -19,6 +19,7 @@ rpc:
 
 database:
   path: "data/chimera.db"
+  url: "${DATABASE_URL}"
   max_connections: 5
 
 security:
