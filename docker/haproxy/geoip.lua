@@ -9,7 +9,7 @@ core.register_action("geoip_lookup", {"http-req"}, function(txn)
     txn:set_var("txn.geo_country", "")
     txn:set_var("txn.geo_asn", "")
 
-    local geoip_url = "http://geoip-lookup:8001/geoip/evaluate/" .. src_ip .. "?mode=default"
+    local geoip_url = "http://geoip-lookup:8001/geoip/" .. src_ip
 
     local response, status, headers = http.request(geoip_url)
 
