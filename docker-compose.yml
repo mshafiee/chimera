@@ -111,20 +111,23 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config:ro
-    environment:
-      - CHIMERA_SERVER__HOST=0.0.0.0
-      - CHIMERA_SERVER__PORT=8080
-      - CHIMERA_DATABASE__PATH=/app/data/chimera.db
-      # Database backend selection
-      - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-sqlite}
-      - DATABASE_URL=${DATABASE_URL}
-      # Redis configuration
-      - REDIS_ENABLED=${REDIS_ENABLED:-true}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-    env_file:
-      - docker/env.${COMPOSE_PROFILE:-devnet}
-      - docker/env.${COMPOSE_PROFILE:-devnet}.local
-    depends_on:
+     environment:
+       - CHIMERA_SERVER__HOST=0.0.0.0
+       - CHIMERA_SERVER__PORT=8080
+       - CHIMERA_DATABASE__PATH=/app/data/chimera.db
+       # Database backend selection
+       - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
+       - DATABASE_URL=${DATABASE_URL:-postgresql://chimera:changeme_asap@postgres:5432/chimera}
+       # Redis configuration
+       - REDIS_ENABLED=${REDIS_ENABLED:-true}
+       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+       # Jupiter API (required for production)
+       - CHIMERA_JUPITER__API_KEY=${CHIMERA_JUPITER__API_KEY:-692a643119f20ea44db64c1ca95b7af62b6d7cab09dd189f40adfecb3dab4bec}
+       # Paper trading mode
+       - CHIMERA_TRADE_MODE=${CHIMERA_TRADE_MODE:-paper}
+     env_file:
+       - .env
+     depends_on:
       - prometheus
       - postgres
       - redis
@@ -175,19 +178,20 @@ services:
       # Clean token list (removed invalid addresses: GCS89xYV, Ac7m5c4t, G0AT7B4R, M00DENG)
       - SCOUT_ACTIVE_TOKENS=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263,EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm,7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr,Grass7B4RdKfBCjTKgSqnXkqjwiG6DuGc62rSdZ9mtm,So11111111111111111111111111111111111111112
       # API Keys for validation (Loaded from env_file)
-      # Database configuration
-      - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-sqlite}
-      - DATABASE_URL=${DATABASE_URL}
-      # Redis configuration
-      - REDIS_ENABLED=${REDIS_ENABLED:-true}
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
-      # Scout-specific Redis caching
-      - SCOUT_CACHE_ENABLED=true
-      - SCOUT_CACHE_TTL=3600
-      - SCOUT_LIQUIDITY_CACHE_TTL=60
+       # Database configuration
+       - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
+       - DATABASE_URL=${DATABASE_URL:-postgresql://chimera:changeme_asap@postgres:5432/chimera}
+       # Redis configuration
+       - REDIS_ENABLED=${REDIS_ENABLED:-true}
+       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+       # Scout-specific Redis caching
+       - SCOUT_CACHE_ENABLED=true
+       - SCOUT_CACHE_TTL=3600
+       - SCOUT_LIQUIDITY_CACHE_TTL=60
+       # Paper trading mode
+       - CHIMERA_TRADE_MODE=${CHIMERA_TRADE_MODE:-paper}
     env_file:
-      - docker/env.${COMPOSE_PROFILE:-devnet}
-      - docker/env.${COMPOSE_PROFILE:-devnet}.local
+      - .env
     depends_on:
        - operator
        - postgres
