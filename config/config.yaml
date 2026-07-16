@@ -18,7 +18,7 @@ rpc:
   functional_health_check: true   # Also probe getLatestBlockhash after getHealth to catch providers that return ok unconditionally
 
 database:
-  url: "postgresql://chimera:postgres123@postgres:5432/chimera"
+  url: "postgresql://chimera:changeme_asap@postgres:5432/chimera"
   max_connections: 5
 
 security:
