@@ -16,7 +16,7 @@ interface UseWebSocketOptions {
 
 export function useWebSocket(options: UseWebSocketOptions) {
   const {
-    url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.hostname}:8080/api/v1/ws`,
+    url = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`,
     reconnectInterval = 3000,
     maxReconnectAttempts = 10,
     apiKey: customApiKey,
