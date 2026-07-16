@@ -21,7 +21,6 @@ WORKDIR /build
 # Copy Cargo files first for better caching
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-COPY migrations ./migrations
 COPY migrations_postgres ./migrations_postgres
 
 # Build release binary (online mode for sqlx, as we don't have prepared data)
