@@ -263,18 +263,18 @@ class PredictionLogger:
             query = """
                 SELECT * FROM ml_predictions
                 WHERE status = 'PENDING'
-                AND prediction_timestamp >= ?
+                AND prediction_timestamp >= %s
             """
             params = [threshold]
 
             if model_type:
-                query += " AND model_type = ?"
+                query += " AND model_type = %s"
                 params.append(model_type)
 
             query += " ORDER BY prediction_timestamp DESC"
 
             if limit:
-                query += " LIMIT ?"
+                query += " LIMIT %s"
                 params.append(limit)
 
             cursor.execute(query, params)

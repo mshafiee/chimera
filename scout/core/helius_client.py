@@ -1164,7 +1164,7 @@ class HeliusClient:
                 if os.path.exists(db_path):
                     conn = get_connection(db_path)
                     cursor = conn.cursor()
-                    cursor.execute("SELECT 1 FROM wallets WHERE address = ? LIMIT 1", (wallet_address,))
+                    cursor.execute("SELECT 1 FROM wallets WHERE address = %s LIMIT 1", (wallet_address,))
                     exists = cursor.fetchone() is not None
                     conn.close()
 

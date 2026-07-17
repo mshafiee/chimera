@@ -719,6 +719,7 @@ class ProductionMonitor:
     def get_recent_alerts(self, limit: int = 50) -> List[Alert]:
         """Get recent alerts."""
         # Get from database
+        conn = None
         try:
             conn = get_connection(self._db_path)
             cursor = conn.cursor()
@@ -727,7 +728,7 @@ class ProductionMonitor:
                 SELECT id, severity, title, message, timestamp, source, resolved, resolution_timestamp, details
                 FROM alerts
                 ORDER BY timestamp DESC
-                LIMIT ?
+                LIMIT %s
             """, (limit,))
 
             alerts = []
@@ -745,12 +746,14 @@ class ProductionMonitor:
                 )
                 alerts.append(alert)
 
-            conn.close()
             return alerts
 
         except Exception as e:
             logger.error(f"Failed to get recent alerts: {e}")
             return []
+        finally:
+            if conn:
+                conn.close()
 
     def print_status_report(self):
         """Print comprehensive status report."""
