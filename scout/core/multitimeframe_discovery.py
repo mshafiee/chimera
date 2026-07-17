@@ -102,6 +102,10 @@ class MultiTimeframeResult:
     total_execution_time_seconds: float
     timestamp: float = field(default_factory=time.time)
 
+    @property
+    def total_unique_wallets(self) -> int:
+        return len(self.combined_wallets)
+
     def get_top_wallets(self, top_n: int = 100) -> List[str]:
         """Get top N wallets by combined quality score."""
         return [wallet for wallet, _ in self.cross_timeframe_ranking[:top_n]]
