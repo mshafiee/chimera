@@ -2297,9 +2297,12 @@ impl Database for PostgresBackend {
             SELECT wallet_address
             FROM wallet_monitoring
             WHERE webhook_status = 'active'
-              AND (webhook_last_health_check IS NULL
-                   OR webhook_last_health_check < NOW() - make_interval(days => $1))
               AND helius_webhook_id IS NOT NULL
+              AND (
+                  webhook_last_health_check IS NULL
+                  OR webhook_last_health_check < NOW() - make_interval(days => $1)
+                  OR webhook_health_status IN ('error', 'unhealthy', 'unknown')
+              )
             "#,
         )
         .bind(threshold_days)
