@@ -670,16 +670,16 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
 
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
         if metrics.total_realized_profit_sol > Decimal(0):
-            loss_ratio = metrics.total_unrealized_loss_sol / metrics.total_realized_profit_sol
-            tracker.add_neg(PenaltyCategory.MARTINGALE, min(30.0, float(loss_ratio) * 60.0))
+            loss_ratio = float(metrics.total_unrealized_loss_sol) / float(metrics.total_realized_profit_sol)
+            tracker.add_neg(PenaltyCategory.MARTINGALE, min(30.0, loss_ratio * 60.0))
         elif metrics.total_unrealized_loss_sol > Decimal(0):
             tracker.add_neg(PenaltyCategory.MARTINGALE, 20.0)
     
-    if metrics.total_unrealized_gain_sol is not None and metrics.total_unrealized_gain_sol > Decimal(0):
-        total_gains = (metrics.total_realized_profit_sol or Decimal(0)) + metrics.total_unrealized_gain_sol
-        if total_gains > Decimal(0):
-            paper_ratio = metrics.total_unrealized_gain_sol / total_gains
-            if float(paper_ratio) > 0.60:
+    if metrics.total_unrealized_gain_sol is not None and float(metrics.total_unrealized_gain_sol) > 0:
+        total_gains = float(metrics.total_realized_profit_sol or 0) + float(metrics.total_unrealized_gain_sol)
+        if total_gains > 0:
+            paper_ratio = float(metrics.total_unrealized_gain_sol) / total_gains
+            if paper_ratio > 0.60:
                 tracker.add_neg(PenaltyCategory.MARTINGALE, 15.0)
     
     if metrics.last_trade_at:
