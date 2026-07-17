@@ -135,7 +135,7 @@ notifications:
 monitoring:
   enabled: true
   helius_api_key: "${HELIUS_API_KEY}"
-  helius_webhook_url: "https://captivity-grunge-curtsy.ngrok-free.dev/api/v1/monitoring/helius-webhook"
+  helius_webhook_url: "https://chimera-01.moez.tech/api/v1/monitoring/helius-webhook"
   webhook_registration_batch_size: 10
   webhook_registration_delay_ms: 200
   webhook_processing_rate_limit: 45

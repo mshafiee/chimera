@@ -162,11 +162,13 @@ services:
       - CHIMERA_OPERATOR_CONTAINER=chimera-operator
       # Helius API Key for wallet discovery
       - HELIUS_API_KEY=${HELIUS_API_KEY}
+      # Birdeye API Key for historical liquidity (optional; set SCOUT_LIQUIDITY_MODE=real when provided)
+      - BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
       - SCOUT_MAX_WALLETS=10                                     # Testing with 10 wallets
       - SCOUT_DISCOVERY_HOURS=24
-      - SCOUT_LIQUIDITY_MODE=real
+      - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
       # Performance Optimization
       - SCOUT_WALLET_TX_LIMIT=50                                 # Reduced to 50 for faster testing
       - SCOUT_WALLET_TX_MAX_PAGES=10                             # Reduced from 20 (50% reduction)
