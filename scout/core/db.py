@@ -57,6 +57,8 @@ def translate_ddl(sql: str) -> str:
         return sql
     sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
     sql = sql.replace("strftime('%s', 'now')", "EXTRACT(EPOCH FROM NOW())")
+    sql = sql.replace("BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT false")
+    sql = sql.replace("BOOLEAN DEFAULT 1", "BOOLEAN DEFAULT true")
     return sql
 
 
