@@ -28,6 +28,8 @@ services:
        # Initialization scripts (using generated schema)
        - ./operator/migrations_postgres/0001_full_schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
        - ./scout/schema_scout_tables.sql:/docker-entrypoint-initdb.d/02-scout-tables.sql:ro
+       # Custom pg_hba.conf (trust auth within Docker network)
+       - ./docker/postgres/pg_hba.conf:/var/lib/postgresql/pg_hba.conf:ro
        # Backup scripts
        - ./ops/backup-postgres.sh:/usr/local/bin/backup-postgres.sh:ro
     command:
@@ -50,6 +52,8 @@ services:
       - "wal_keep_size=256MB"
       - "-c"
       - "log_statement=all"
+      - "-c"
+      - "hba_file=/var/lib/postgresql/pg_hba.conf"
       - "-c"
       - "log_destination=stderr"
       - "-c"
