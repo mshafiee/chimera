@@ -2,6 +2,25 @@
 
 This file provides build, test, and coding conventions for AI agents working on this codebase.
 
+## Deployment Workflow
+
+**Git is the source of truth.** The production server pulls from git, builds images, and runs them with docker compose.
+
+```bash
+# 1. Make changes locally and commit
+git add -A
+git commit -m "fix: description of changes"
+git push origin main
+
+# 2. On the production server (root@chimera-01.moez.tech)
+cd /opt/chimera
+git pull origin main
+COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml build <service>
+COMPOSE_PROFILE=mainnet-prod docker compose -f docker-compose.yml -f docker-compose-haproxy.yml up -d --force-recreate <service>
+```
+
+**Never scp binaries or files directly to the server.** Always commit to git and pull on the server.
+
 ## Build Commands
 
 ```bash
@@ -139,9 +158,9 @@ export function TradeCard({ walletAddress, onTrade }: Props) {
 
 ## Conventions
 
-- **Financial precision:** Never use float/double for money. Use `rust_decimal::Decimal` (Rust) or `Decimal` (Python).
+ - **Financial precision:** Never use float/double for money. Use `rust_decimal::Decimal` (Rust) or `Decimal` (Python).
 - **Async patterns:** Use `tokio::spawn` for background tasks (Rust), `asyncio.create_task` (Python).
-- **Database:** SQLite with WAL mode. Use `sqlx` (Rust) or `sqlite3` (Python) with prepared statements.
+- **Database:** PostgreSQL in production, SQLite in development. Use `sqlx` (Rust) or `psycopg3` (Python) with `%s` placeholders. Never use `?` placeholders (SQLite only).
 - **Logging:** Structured logging with `tracing` (Rust) or `print` with prefixes (Python).
 - **Tests:** Write unit tests inline, integration tests in `tests/` directory. Use property-based testing (Hypothesis) for Python.
 - **Security:** Never commit secrets. Use encrypted vault (`vault.rs`) for keypairs. Validate all inputs.
