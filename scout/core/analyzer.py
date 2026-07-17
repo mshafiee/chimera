@@ -1071,7 +1071,7 @@ class WalletAnalyzer:
                         SELECT wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate,
                                max_drawdown_30d, avg_trade_size_sol, last_trade_at
                         FROM wallets
-                        WHERE address = ?
+                        WHERE address = %s
                         LIMIT 1
                     """, (address,))
                     row = cursor.fetchone()
