@@ -686,7 +686,7 @@ async fn calculate_wqs_distribution(db: &Arc<dyn Database>) -> Result<Vec<WQSBuc
 
     for (range_name, min, max) in ranges {
         let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM wallets WHERE wqs_score >= ? AND wqs_score < ?",
+            "SELECT COUNT(*) FROM wallets WHERE wqs_score >= $1 AND wqs_score < $2",
         )
         .bind(min)
         .bind(max)
@@ -744,7 +744,7 @@ async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistic
     let median = if total_count % 2 == 0 {
         // Even number of rows - average of two middle values
         let mid1: f64 = sqlx::query_scalar(
-            "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
+            "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET $1"
         )
         .bind(total_count / 2 - 1)
         .fetch_one(&pool)
@@ -752,7 +752,7 @@ async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistic
         .map_err(AppError::Database)?;
 
         let mid2: f64 = sqlx::query_scalar(
-            "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
+            "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET $1"
         )
         .bind(total_count / 2)
         .fetch_one(&pool)
@@ -763,7 +763,7 @@ async fn calculate_wqs_statistics(db: &Arc<dyn Database>) -> Result<WQSStatistic
     } else {
         // Odd number of rows - middle value
         sqlx::query_scalar(
-            "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET ?"
+            "SELECT wqs_score FROM wallets WHERE wqs_score IS NOT NULL ORDER BY wqs_score LIMIT 1 OFFSET $1"
         )
         .bind(total_count / 2)
         .fetch_one(&pool)

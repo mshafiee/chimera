@@ -526,7 +526,7 @@ async fn get_profit_target_metrics_db(
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
           AND et.targets_hit IS NOT NULL
-          AND json_array_length(et.targets_hit) > 0
+          AND jsonb_array_length(et.targets_hit) > 0
           AND p.closed_at >= NOW() - INTERVAL '{}'
         "#,
             interval
@@ -569,12 +569,12 @@ async fn get_profit_target_metrics_db(
         SELECT p.strategy,
                COUNT(*) as hits,
                COALESCE(AVG(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0)::float8 as avg_gain_sol,
-               json_array_length(et.targets_hit) as targets_count
+               jsonb_array_length(et.targets_hit) as targets_count
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
           AND et.targets_hit IS NOT NULL
-          AND json_array_length(et.targets_hit) > 0
+          AND jsonb_array_length(et.targets_hit) > 0
           AND p.closed_at >= NOW() - INTERVAL '{}'
         GROUP BY p.strategy
         "#,
@@ -609,14 +609,14 @@ async fn get_profit_target_metrics_db(
         &format!(
             r#"
         SELECT p.trade_uuid, p.token_symbol, p.closed_at,
-               json_array_length(et.targets_hit) as targets_count,
+               jsonb_array_length(et.targets_hit) as targets_count,
                (et.peak_profit_percent * p.entry_amount_sol / 100.0)::float8 as gain_sol,
                p.strategy
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
           AND et.targets_hit IS NOT NULL
-          AND json_array_length(et.targets_hit) > 0
+          AND jsonb_array_length(et.targets_hit) > 0
           AND p.closed_at >= NOW() - INTERVAL '{}'
         ORDER BY p.closed_at DESC
         LIMIT 10
