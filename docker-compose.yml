@@ -127,6 +127,8 @@ services:
        - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
        # Jupiter API (required for production)
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-jup_7e095c7e729dadb3070b15417faaeed98464afde972184fdd93e0b24247fc857}
+       # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
+       - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
        # Paper trading mode
        - CHIMERA_TRADE_MODE=paper
     env_file:
