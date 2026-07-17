@@ -116,6 +116,7 @@ services:
       - ./data:/app/data
       - ./config:/app/config:ro
     environment:
+       - RUST_LOG=info,chimera_operator=debug
        - CHIMERA_SERVER__HOST=0.0.0.0
        - CHIMERA_SERVER__PORT=8080
        # Database backend selection (PostgreSQL-only)
