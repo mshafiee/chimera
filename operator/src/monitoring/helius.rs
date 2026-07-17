@@ -133,7 +133,7 @@ pub struct HeliusWebhook {
     pub webhook_id: String,
     #[serde(rename = "webhookURL")]
     pub webhook_url: String,
-    #[serde(rename = "accountAddresses")]
+    #[serde(rename = "accountAddresses", default)]
     pub wallet_addresses: Vec<String>,
     #[serde(rename = "transactionTypes")]
     pub transaction_types: Vec<String>,
