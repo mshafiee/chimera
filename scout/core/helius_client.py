@@ -2792,7 +2792,6 @@ class HeliusClient:
             # Use shortest-phase TTL (300s) to avoid stale data across phases
             shortest_phase_ttl = ScoutConfig.get_cache_ttl_wallet_metrics()  # 300 seconds
             cache.set("wallet_txs", wallet_address, result, cache_key,
-                     ttl=shortest_phase_ttl,
                      category=CacheCategory.WALLET_TXS)
 
         return result

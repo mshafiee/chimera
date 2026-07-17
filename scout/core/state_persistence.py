@@ -28,7 +28,7 @@ import threading
 from pathlib import Path
 from contextlib import contextmanager
 
-from .db import get_connection
+from .db import get_connection, translate_ddl
 
 # Import for multi-timeframe discovery tracking (avoid circular import)
 try:
@@ -145,7 +145,7 @@ class StatePersistence:
         """Initialize database schema."""
         with self._get_connection() as conn:
             # Credit history table
-            conn.execute("""
+            conn.execute(translate_ddl("""
                 CREATE TABLE IF NOT EXISTS credit_history (
                     date TEXT PRIMARY KEY,
                     total_credits INTEGER NOT NULL,
@@ -159,10 +159,10 @@ class StatePersistence:
                     day_of_month INTEGER NOT NULL,
                     timestamp REAL NOT NULL
                 )
-            """)
+            """))
 
             # Wallet performance history table
-            conn.execute("""
+            conn.execute(translate_ddl("""
                 CREATE TABLE IF NOT EXISTS wallet_performance_history (
                     wallet_address TEXT PRIMARY KEY,
                     wqs_score REAL NOT NULL,
@@ -175,10 +175,10 @@ class StatePersistence:
                     first_seen REAL NOT NULL,
                     last_updated REAL NOT NULL
                 )
-            """)
+            """))
 
             # ROI metrics table
-            conn.execute("""
+            conn.execute(translate_ddl("""
                 CREATE TABLE IF NOT EXISTS roi_metrics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     category TEXT NOT NULL,
@@ -190,10 +190,10 @@ class StatePersistence:
                     period_end REAL NOT NULL,
                     timestamp REAL DEFAULT (strftime('%s', 'now'))
                 )
-            """)
+            """))
 
             # Multi-timeframe discovery statistics table (Sprint 4)
-            conn.execute("""
+            conn.execute(translate_ddl("""
                 CREATE TABLE IF NOT EXISTS multi_timeframe_discovery_stats (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     discovery_timestamp REAL NOT NULL,
@@ -217,7 +217,7 @@ class StatePersistence:
                     discovery_goal TEXT DEFAULT 'balanced',
                     created_at REAL DEFAULT (strftime('%s', 'now'))
                 )
-            """)
+            """))
 
             # Create indexes
             conn.execute("CREATE INDEX IF NOT EXISTS idx_credit_history_timestamp ON credit_history(timestamp)")

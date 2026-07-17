@@ -46,6 +46,20 @@ def _is_postgres() -> bool:
     return _get_backend() in ('postgres', 'postgresql')
 
 
+def translate_ddl(sql: str) -> str:
+    """Translate SQLite DDL to PostgreSQL-compatible syntax when on PostgreSQL.
+
+    Handles common incompatibilities:
+    - ``INTEGER PRIMARY KEY AUTOINCREMENT`` → ``SERIAL PRIMARY KEY``
+    - ``strftime('%s', 'now')`` → ``EXTRACT(EPOCH FROM NOW())``
+    """
+    if not _is_postgres():
+        return sql
+    sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+    sql = sql.replace("strftime('%s', 'now')", "EXTRACT(EPOCH FROM NOW())")
+    return sql
+
+
 def _translate_pg_to_sqlite(query: str) -> str:
     """
     Translate PostgreSQL dialect queries to SQLite dialect.
