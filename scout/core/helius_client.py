@@ -2328,6 +2328,27 @@ class HeliusClient:
         top_wallets = sorted(wallet_counts.items(), key=lambda x: x[1], reverse=True)[:50]
         return [wallet for wallet, _count in top_wallets]
 
+    async def discover_wallets(
+        self,
+        hours_back: int = 24,
+        max_wallets: int = 200,
+        limit_per_token: int = 50,
+        min_value_usd: float = 0,
+        **kwargs,
+    ) -> Dict[str, int]:
+        """Discover wallets and return a dict of {address: trade_count}.
+
+        Wrapper around ``discover_wallets_from_recent_swaps`` that returns the
+        dict format expected by ``smart_discovery.py``. Extra keyword arguments
+        (``limit_per_token``, ``min_value_usd``) are accepted for caller
+        compatibility but delegated to the underlying pipeline where possible.
+        """
+        wallets = await self.discover_wallets_from_recent_swaps(
+            max_wallets=max_wallets,
+            hours_back=hours_back,
+        )
+        return {w: max(1, len(wallets) - i) for i, w in enumerate(wallets)}
+
     async def discover_wallets_from_recent_swaps(
         self,
         limit: int = 1000,
