@@ -569,7 +569,7 @@ async fn get_profit_target_metrics_db(
         SELECT p.strategy,
                COUNT(*) as hits,
                COALESCE(AVG(et.peak_profit_percent * p.entry_amount_sol / 100.0), 0.0)::float8 as avg_gain_sol,
-               jsonb_array_length(et.targets_hit) as targets_count
+               MAX(jsonb_array_length(et.targets_hit)) as targets_count
         FROM positions p
         JOIN exit_targets et ON p.trade_uuid = et.trade_uuid
         WHERE p.state = 'CLOSED'
