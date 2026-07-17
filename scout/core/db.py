@@ -104,6 +104,39 @@ def _translate_pg_to_sqlite(query: str) -> str:
     return query
 
 
+class _PooledConnection:
+    """Wrapper that returns the connection to the pool on close/__exit__.
+
+    psycopg3's own __exit__ only commits/rolls back — it does NOT return the
+    connection to the pool. Without this wrapper every get_connection() call
+    permanently removes a slot from the pool, causing exhaustion after max_size
+    calls.
+    """
+
+    def __init__(self, conn, pool):
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_pool", pool)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __setattr__(self, name, value):
+        setattr(self._conn, name, value)
+
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        try:
+            self._conn.__exit__(*args)
+        finally:
+            self._pool.putconn(self._conn)
+
+    def close(self):
+        self._pool.putconn(self._conn)
+
+
 def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
     """
     Get a database connection based on the backend configuration.
@@ -193,11 +226,12 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
         
         # Get connection from pool
         conn = _postgres_pool.getconn()
-        
+
         # Use dict row factory for compatibility with SQLite
         conn.row_factory = psycopg.rows.dict_row
-        
-        return conn
+
+        # Wrap so the connection is returned to the pool on close/__exit__
+        return _PooledConnection(conn, _postgres_pool)
     
     else:
         raise ValueError(
