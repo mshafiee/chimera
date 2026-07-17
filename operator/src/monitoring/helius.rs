@@ -485,7 +485,6 @@ impl HeliusClient {
     /// List all webhooks
     pub async fn list_webhooks(&self) -> Result<Vec<serde_json::Value>> {
         let url = format!("{}/webhooks?api-key={}", self.base_url, self.api_key);
-        tracing::warn!(url = %url, api_key_len = self.api_key.len(), api_key_prefix = &self.api_key[..self.api_key.len().min(20)], "list_webhooks URL debug");
         let client = self.client.clone();
 
         // Use retry logic with Helius best practices

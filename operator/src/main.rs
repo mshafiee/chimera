@@ -490,12 +490,21 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Create HeliusClient early (needed by token_fetcher_with_helius later)
-    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
-        config
+    // Resolve API key: prefer raw env var (config crate doesn't interpolate ${VAR} in YAML)
+    let helius_api_key_resolved = {
+        let from_config = config
             .monitoring
             .as_ref()
             .and_then(|m| m.helius_api_key.clone())
-            .unwrap_or_default(),
+            .unwrap_or_default();
+        if from_config.starts_with("${") {
+            std::env::var("HELIUS_API_KEY").unwrap_or_default()
+        } else {
+            from_config
+        }
+    };
+    let helius_client: Option<Arc<HeliusClient>> = HeliusClient::new(
+        helius_api_key_resolved,
         token_fetcher.get_metadata_cache(),
     )
     .map(Arc::new)
@@ -1421,12 +1430,22 @@ async fn main() -> anyhow::Result<()> {
     {
         tracing::info!("LaserStream WebSocket enabled in config, starting client...");
 
-        // Get Helius API key with proper error handling
-        let helius_api_key = config
-            .monitoring
-            .as_ref()
-            .and_then(|m| m.helius_api_key.as_ref())
-            .ok_or_else(|| anyhow::anyhow!("HELIUS_API_KEY not set in monitoring config"))?;
+        // Get Helius API key with proper error handling (resolve ${VAR} from env)
+        let helius_api_key = {
+            let from_config = config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.helius_api_key.clone())
+                .unwrap_or_default();
+            if from_config.starts_with("${") {
+                std::env::var("HELIUS_API_KEY")
+                    .map_err(|_| anyhow::anyhow!("HELIUS_API_KEY env var not set"))?
+            } else if from_config.is_empty() {
+                anyhow::bail!("HELIUS_API_KEY not set in monitoring config")
+            } else {
+                from_config
+            }
+        };
 
         let helius_client = chimera_operator::monitoring::helius::HeliusClient::new(
             helius_api_key.clone(),
