@@ -1770,7 +1770,7 @@ async fn main() -> anyhow::Result<()> {
                                     );
                                 }
                                 Err(e) => {
-                                    tracing::warn!(error = %e, "Helius webhook reconciliation task failed");
+                                    tracing::warn!(error = %e, error_chain = ?e, "Helius webhook reconciliation task failed");
                                 }
                             }
                         });
