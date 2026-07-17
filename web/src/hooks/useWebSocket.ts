@@ -200,13 +200,17 @@ export function useWebSocket(options: UseWebSocketOptions) {
     }
   }, [])
 
-  // Connect on mount
+  // Connect on mount (skip if no API key available)
   useEffect(() => {
+    if (!customApiKey) {
+      console.log('[WebSocket] No API key available, skipping connection')
+      return
+    }
     connect()
     return () => {
       disconnect()
     }
-  }, [connect, disconnect])
+  }, [connect, disconnect, customApiKey])
 
   return {
     isConnected,

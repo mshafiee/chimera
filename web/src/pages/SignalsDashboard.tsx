@@ -5,6 +5,7 @@ import { SignalConsensusChart } from '@/components/charts/SignalConsensusChart'
 import { RealTimeAlerts, ConnectionStatus } from '@/components/dashboard'
 import { useDashboardWebSocket } from '@/hooks/useDashboardWebSocket'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import { useAuthStore } from '../stores/authStore'
 import {
   useSignalQuality,
   useSignalSources,
@@ -18,7 +19,7 @@ export function SignalsDashboard() {
   const [timeRange, setTimeRange] = useState<TimeRange>('24h')
 
   // WebSocket integration
-  const userToken = 'demo-token' // In production, get from auth store
+  const userToken = useAuthStore(state => state.user?.token) ?? ''
   const { isConnected, isConnecting, connectionError } = useWebSocket({ apiKey: userToken })
   const { refreshSignalData } = useDashboardWebSocket({
     onSignalUpdate: (data) => {

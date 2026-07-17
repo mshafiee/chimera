@@ -3,6 +3,7 @@ import { RefreshCw, AlertTriangle, CheckCircle, XCircle, TrendingUp, Database, Z
 import { toast } from 'sonner'
 import { RealTimeAlerts, ConnectionStatus } from '@/components/dashboard'
 import { useWebSocket } from '@/hooks/useWebSocket'
+import { useAuthStore } from '../stores/authStore'
 import {
   useBudgetStatus,
   useCacheStats,
@@ -14,7 +15,7 @@ export function ScoutDashboard() {
   const [isRunningScout, setIsRunningScout] = useState(false)
 
   // WebSocket integration
-  const userToken = 'demo-token' // In production, get from auth store
+  const userToken = useAuthStore(state => state.user?.token) ?? ''
   const { isConnected, isConnecting, connectionError } = useWebSocket({ apiKey: userToken })
 
   // Fetch Scout integration data
