@@ -177,7 +177,7 @@ class LogProcessor:
     async def _process_log_line(self, line: str):
         """Process a single security log line"""
         try:
-            with log_processing_duration.seconds():
+            with log_processing_duration.time():
                 event = json.loads(line)
                 await self._categorize_event(event)
         except json.JSONDecodeError as e:

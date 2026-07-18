@@ -237,7 +237,7 @@ def audit_log(action: str, policy_type: str, changes: Dict[str, Any], validation
 async def reload_haproxy() -> bool:
     """Reload HAProxy configuration"""
     try:
-        with policy_reload_duration.seconds():
+        with policy_reload_duration.time():
             # Execute HAProxy reload command
             result = subprocess.run(
                 HAPROXY_RELOAD_COMMAND.split(),

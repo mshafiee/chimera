@@ -404,7 +404,7 @@ class AttackDetector:
         detected_threats = []
 
         try:
-            with detection_duration.seconds():
+            with detection_duration.time():
                 # Run all detection methods
                 brute_force = await self.detect_brute_force(event)
                 if brute_force:
