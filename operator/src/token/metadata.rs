@@ -790,8 +790,10 @@ impl TokenMetadataFetcher {
         // Get token metadata (includes supply and decimals)
         let metadata = self.get_metadata(token_address).await?;
 
-        // Get current price from Jupiter (v2 API) — use pre-built client (FIX 5)
-        let price_url = format!("https://lite-api.jup.ag/price/v2?ids={}", token_address);
+        // Get current price from Jupiter (v3 API) — use pre-built client (FIX 5)
+        // NOTE: v2 endpoint was deprecated/removed by Jupiter (returns HTTP 404). v3 returns
+        // {<token>: {usdPrice, liquidity, decimals, priceChange24h, ...}} at the top level.
+        let price_url = format!("https://lite-api.jup.ag/price/v3?ids={}", token_address);
         let response = crate::jupiter::with_api_key(self.http_client.get(&price_url))
             .send()
             .await
@@ -809,25 +811,22 @@ impl TokenMetadataFetcher {
             .await
             .map_err(|e| AppError::Parse(format!("Failed to parse Jupiter response: {}", e)))?;
 
-        // Extract price and convert to Decimal immediately
-        let price_usd_f64 =
-            if let Some(token_data) = data.get("data").and_then(|d| d.get(token_address)) {
-                if let Some(price) = token_data.get("price").and_then(|p| p.as_f64()) {
-                    price
-                } else {
-                    // Try alternative field names
-                    token_data
-                        .get("priceUsd")
-                        .and_then(|p| p.as_f64())
-                        .ok_or_else(|| {
-                            AppError::Parse("No price found in Jupiter response".to_string())
-                        })?
-                }
-            } else {
-                return Err(AppError::Parse(
-                    "Token not found in Jupiter response".to_string(),
-                ));
-            };
+        // Extract price and convert to Decimal immediately.
+        // v3 shape: {<token_address>: {"usdPrice": <f64>, "liquidity": ..., "decimals": ...}}
+        // (v2 wrapped under data.<token>.price; v1 used priceUsd — kept as fallbacks.)
+        let price_usd_f64 = {
+            let token_data = data.get(token_address).or_else(|| {
+                data.get("data").and_then(|d| d.get(token_address))
+            }).ok_or_else(|| {
+                AppError::Parse("Token not found in Jupiter response".to_string())
+            })?;
+            token_data
+                .get("usdPrice")
+                .and_then(|p| p.as_f64())
+                .or_else(|| token_data.get("price").and_then(|p| p.as_f64()))
+                .or_else(|| token_data.get("priceUsd").and_then(|p| p.as_f64()))
+                .ok_or_else(|| AppError::Parse("No price found in Jupiter response".to_string()))?
+        };
 
         // Convert price to Decimal immediately to avoid precision loss
         let price_usd = Decimal::from_f64_retain(price_usd_f64).unwrap_or(Decimal::ZERO);
