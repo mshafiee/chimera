@@ -200,4 +200,3 @@ services:
 
 networks:
   chimera-network:
-    external: true
