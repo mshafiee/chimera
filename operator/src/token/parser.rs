@@ -356,62 +356,25 @@ impl TokenParser {
             });
         }
 
-        // Check liquidity/market cap ratio (Liquidity vs FDV)
-        // High FDV with low liquidity = "Ghost Chain" scenario - high slippage on exit
-        // Reject tokens with Liq/FDV < 0.05 (5%)
-        // Use Decimal for all calculations to maintain precision
-        if let Ok(fdv_usd) = self.fetcher.get_market_cap_fdv(token_address).await {
-            if fdv_usd > Decimal::ZERO {
-                let liquidity_ratio = liquidity_usd / fdv_usd;
-                let min_liquidity_ratio = Decimal::from_str("0.05").unwrap_or(Decimal::ZERO); // 5% minimum
-
-                if liquidity_ratio < min_liquidity_ratio {
-                    tracing::warn!(
-                        token = token_address,
-                        liquidity_usd = %liquidity_usd,
-                        fdv_usd = %fdv_usd,
-                        liquidity_ratio = %liquidity_ratio,
-                        "Token rejected: Liquidity/FDV ratio too low (Ghost Chain scenario)"
-                    );
-                    return Ok(TokenSafetyResult {
-                        safe: false,
-                        rejection_reason: Some(format!(
-                            "Liquidity/FDV ratio too low: {:.2}% < {:.0}% (liquidity: ${:.2}, FDV: ${:.2})",
-                            liquidity_ratio * Decimal::from(100),
-                            min_liquidity_ratio * Decimal::from(100),
-                            liquidity_usd,
-                            fdv_usd
-                        )),
-                        honeypot_checked: false,
-                        liquidity_checked: true,
-                        liquidity_usd: Some(liquidity_usd),
-                    });
-                }
-
-                tracing::debug!(
-                    token = token_address,
-                    liquidity_usd = %liquidity_usd,
-                    fdv_usd = %fdv_usd,
-                    liquidity_ratio = %liquidity_ratio,
-                    "Liquidity/FDV ratio check passed"
-                );
-            }
-        } else {
-            // Fail closed: FDV unavailable means we cannot verify Ghost Chain safety.
-            tracing::warn!(
+        // Ghost-Chain / exit-risk gating.
+        //
+        // The previous Liq/FDV ratio check (max-pool-liquidity / FDV >= 5%) is
+        // removed: it is impossible for any established token (FDV dwarfs a single
+        // pool's liquidity — e.g. BONK $119K / $245M = 0.05%) and thus blocked the
+        // safest, highest-volume copy targets while only admitting tiny illiquid
+        // tokens where exit slippage is actually worst.
+        //
+        // Exit/slippage risk is now gated by the executor's Jupiter price-impact
+        // check (MAX_PRICE_IMPACT_PCT), which measures the ACTUAL trade's market
+        // impact — a direct, accurate signal of "can I exit at a reasonable price".
+        // Verified-major tokens (deep, multi-pool liquidity) are trusted past this
+        // class of heuristic entirely.
+        if self.is_verified_major(token_address) {
+            tracing::debug!(
                 token = token_address,
-                "Failed to fetch market cap (FDV) — rejecting (fail-closed)"
+                liquidity_usd = %liquidity_usd,
+                "Verified-major token: skipping Ghost-Chain heuristic (price-impact gate applies at execution)"
             );
-            return Ok(TokenSafetyResult {
-                safe: false,
-                rejection_reason: Some(
-                    "FDV unavailable — cannot verify liquidity/FDV ratio (Ghost Chain risk)"
-                        .to_string(),
-                ),
-                honeypot_checked: false,
-                liquidity_checked: true,
-                liquidity_usd: Some(liquidity_usd),
-            });
         }
 
         // Honeypot detection via sell simulation
@@ -492,6 +455,15 @@ impl TokenParser {
         token_address == known_tokens::USDC
             || token_address == known_tokens::USDT
             || token_address == known_tokens::WSOL
+    }
+
+    /// Check if a token is a verified major (established, high-liquidity).
+    ///
+    /// Verified majors bypass the Liq/FDV Ghost-Chain heuristic — that ratio is
+    /// impossible for large caps (FDV dwarfs single-pool liquidity). Exit/slippage
+    /// risk for these is instead gated by the executor's Jupiter price-impact check.
+    fn is_verified_major(&self, token_address: &str) -> bool {
+        crate::constants::verified_majors::ALL.contains(&token_address)
     }
 }
 

@@ -35,6 +35,20 @@ const MAX_TX_SIZE_RAW: usize = 1232;
 #[allow(dead_code)]
 const MAX_TX_SIZE_ENCODED: usize = 1644;
 
+/// Maximum acceptable Jupiter price impact (in percent) for a BUY entry.
+///
+/// Replaces the broken Liq/FDV Ghost-Chain heuristic in `slow_check`. Price
+/// impact is the direct, accurate measure of "how much does this trade move the
+/// market" — high impact means thin liquidity (the real ghost-chain / rug-exit
+/// risk). A 5% cap permits normal copy-trade sizes into healthy pools while
+/// rejecting entries that would dump the price on fill. Applied to BUY entries
+/// only; EXIT/SELL signals are exempt so stop-losses can always close positions.
+///
+/// Defined as a fn because `rust_decimal::Decimal` is not `const`-constructible.
+fn max_price_impact_pct() -> Decimal {
+    Decimal::from_str("5").unwrap_or(Decimal::ZERO)
+}
+
 /// RPC mode for trade execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcMode {
@@ -503,6 +517,32 @@ impl Executor {
                     RpcMode::Standard => self.execute_standard(signal).await,
                 },
             };
+
+            // Price-impact gate (replaces the removed Liq/FDV Ghost-Chain ratio).
+            // Reject BUY entries whose Jupiter-quoted price impact exceeds the cap —
+            // high impact signals thin liquidity, the real rug-exit risk. EXIT/SELL
+            // signals are exempt so stop-losses can always close positions. Verified
+            // majors also pass through here; their deep liquidity keeps impact low.
+            if signal.payload.action == Action::Buy {
+                let max_impact = max_price_impact_pct();
+                if let Ok(ref outcome) = result {
+                    if let Some(impact) = outcome.price_impact_pct {
+                        if impact > max_impact {
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                token = %signal.payload.token,
+                                price_impact_pct = %impact,
+                                max_pct = %max_impact,
+                                "Trade rejected: price impact exceeds cap (thin liquidity)"
+                            );
+                            return Err(ExecutorError::TransactionFailed(format!(
+                                "Price impact {:.2}% exceeds max {:.0}% — thin liquidity",
+                                impact, max_impact
+                            )));
+                        }
+                    }
+                }
+            }
 
             // Handle retry for expired blockhash
             match &result {
