@@ -449,8 +449,30 @@ pub async fn webhook_handler(
             }
         }
 
-        // FIX 9: Reuse liquidity_usd captured from the first fast_check above (no second call)
-        let liquidity_usd = fast_check_liquidity_usd.unwrap_or(rust_decimal::Decimal::ZERO);
+        // FIX 9 (revised): fast_check does NOT populate liquidity_usd (only slow_check
+        // does), so for any token that passed the metadata safety checks the value
+        // above is None. Fetch it explicitly here — otherwise every safe token read
+        // $0 liquidity and was rejected by the floor gate below.
+        let liquidity_usd = match fast_check_liquidity_usd {
+            Some(liq) => liq,
+            None => match signal.payload.token_address.as_deref() {
+                Some(token_address) => {
+                    match state.token_parser.get_liquidity(token_address).await {
+                        Ok(liq) => liq,
+                        Err(e) => {
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                token_address = %token_address,
+                                error = %e,
+                                "Liquidity fetch failed for floor check; defaulting to $0 (will reject, fail-closed)"
+                            );
+                            rust_decimal::Decimal::ZERO
+                        }
+                    }
+                }
+                None => rust_decimal::Decimal::ZERO,
+            },
+        };
 
         // Attach liquidity to the signal so the executor can compute a liquidity-aware
         // slippage estimate when Jupiter price impact data is unavailable.

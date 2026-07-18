@@ -132,6 +132,13 @@ impl TokenParser {
         }
     }
 
+    /// Fetch a token's current liquidity in USD (delegates to the metadata fetcher's
+    /// DexScreener lookup, with caching). Used by the webhook handler's liquidity
+    /// floor gate, since `fast_check` does not populate liquidity.
+    pub async fn get_liquidity(&self, token_address: &str) -> AppResult<Decimal> {
+        self.fetcher.get_liquidity(token_address).await
+    }
+
     /// Fast path check - validates token metadata only (sub-millisecond)
     ///
     /// Checks:
