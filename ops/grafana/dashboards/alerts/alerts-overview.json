@@ -1,0 +1,246 @@
+{
+  "uid": "chimera-alerts-overview",
+  "title": "Alerts Overview",
+  "tags": ["chimera", "alerts"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "editable": true,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Alerts (firing)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "count(ALERTS{alertstate=\"firing\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Circuit Breaker State",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_circuit_breaker_state",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "TRIPPED", "color": "red"}}, "value": "0"},
+            {"type": "value", "options": {"1": {"text": "ACTIVE", "color": "green"}}, "value": "1"}
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "red"},
+              {"value": 1, "color": "green"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Circuit Breaker Trips (1h)",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "increase(chimera_circuit_breaker_trips_total[1h])",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 3, "color": "yellow"},
+              {"value": 5, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active Alerts by Severity",
+      "type": "piechart",
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "legendFormat": "{{severity}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Alerts Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "changes(ALERTS_FOR_STATE[1h])",
+          "legendFormat": "Alert Changes",
+          "refId": "A"
+        },
+        {
+          "expr": "ALERTS",
+          "legendFormat": "Total Alerts",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Circuit Breaker Trips (1h)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "increase(chimera_circuit_breaker_trips_total[1h])",
+          "legendFormat": "Trips/hour",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "All Firing Alerts",
+      "type": "table",
+      "gridPos": {"h": 10, "w": 12, "x": 0, "y": 12},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "ALERTS{alertstate=\"firing\"}",
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "__name__": true,
+              "alertstate": true
+            },
+            "indexByName": {},
+            "renameByName": {
+              "alertname": "Alert Name",
+              "severity": "Severity",
+              "instance": "Instance",
+              "job": "Job",
+              "cluster": "Cluster",
+              "environment": "Environment"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Kill Switch State",
+      "type": "table",
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 12},
+      "datasource": {
+        "type": "postgres",
+        "uid": "P4F7F8D3768E4C7A1"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT * FROM kill_switch_state ORDER BY updated_at DESC LIMIT 1",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "is_enabled": "Kill Switch Enabled",
+              "reason": "Reason",
+              "enabled_by": "Enabled By",
+              "updated_at": "Updated At"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 0, "color": "green"},
+              {"value": 1, "color": "red"}
+            ]
+          },
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "OFF", "color": "green"}}, "value": "0"},
+            {"type": "value", "options": {"1": {"text": "ON", "color": "red"}}, "value": "1"}
+          ]
+        }
+      }
+    }
+  ]
+}

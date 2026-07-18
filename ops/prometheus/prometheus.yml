@@ -69,3 +69,10 @@ scrape_configs:
       - targets: ['chimera-attack-detection:8002']
     metrics_path: '/metrics'
     scrape_interval: 30s
+
+  # PostgreSQL exporter metrics
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['chimera-postgres-exporter:9187']
+    metrics_path: '/metrics'
+    scrape_interval: 15s

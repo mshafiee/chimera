@@ -1,0 +1,256 @@
+{
+  "uid": "chimera-trade-exec",
+  "title": "Trade Execution",
+  "tags": ["chimera", "trading"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "editable": true,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Trades",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_total_trades",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Trade Latency p99",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, rate(chimera_trade_latency_ms_bucket[5m]))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Queue Depth",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_queue_depth",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "max": 1000,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 800, "color": "yellow"},
+              {"value": 900, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active Positions",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_active_positions",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Portfolio Heat %",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_portfolio_heat_percent",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 50, "color": "green"},
+              {"value": 75, "color": "yellow"},
+              {"value": 100, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Jito Health",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_jito_health",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}}, "value": "0"},
+            {"type": "value", "options": {"1": {"text": "HEALTHY", "color": "green"}}, "value": "1"}
+          ]
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Trade Latency p50/p95/p99",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(chimera_trade_latency_ms_bucket[5m]))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(chimera_trade_latency_ms_bucket[5m]))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(chimera_trade_latency_ms_bucket[5m]))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Trades Over Time",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "rate(chimera_total_trades[5m])",
+          "legendFormat": "Trades/sec",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "Queue Depth Trend",
+      "type": "timeseries",
+      "gridPos": {"h": 6, "w": 12, "x": 0, "y": 12},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_queue_depth",
+          "legendFormat": "Queue Depth",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "title": "Recent Trades",
+      "type": "table",
+      "gridPos": {"h": 10, "w": 12, "x": 12, "y": 12},
+      "datasource": {
+        "type": "postgres",
+        "uid": "P4F7F8D3768E4C7A1"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT trade_uuid, wallet_address, side, amount_sol, status, created_at FROM trades ORDER BY created_at DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "trade_uuid": "Trade UUID",
+              "wallet_address": "Wallet",
+              "side": "Side",
+              "amount_sol": "Amount (SOL)",
+              "status": "Status",
+              "created_at": "Time"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

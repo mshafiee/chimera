@@ -158,6 +158,8 @@ services:
       dockerfile: scout/Dockerfile
     container_name: chimera-scout
     restart: unless-stopped
+    expose:
+      - "8081"
     volumes:
       - ./data:/app/data
       - scout-data:/app/scout-data
@@ -337,6 +339,26 @@ services:
     profiles:
       - mainnet-paper
       - mainnet-prod
+
+  # Node Exporter - System metrics for Prometheus
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: chimera-node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+    networks:
+      - chimera-network
+    profiles:
+      - mainnet-paper
+      - mainnet-prod
+      - evaluation
 
 volumes:
   alertmanager-data:

@@ -10,3 +10,18 @@ datasources:
     jsonData:
       timeInterval: "5s"
       httpMethod: POST
+
+  - name: PostgreSQL
+    type: postgres
+    access: proxy
+    url: postgres:5432
+    database: chimera
+    user: chimera
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD:-chimera}
+    jsonData:
+      sslmode: disable
+      maxOpenConns: 10
+      maxIdleConns: 5
+      postgresVersion: 1500
+      timescaledb: false

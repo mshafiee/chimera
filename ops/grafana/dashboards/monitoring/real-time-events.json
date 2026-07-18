@@ -1,0 +1,229 @@
+{
+  "uid": "chimera-realtime-events",
+  "title": "Real-time Events",
+  "tags": ["chimera", "monitoring", "realtime"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "editable": true,
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h", "2h", "1d"]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "RPC Health",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_rpc_health",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}}, "value": "0"},
+            {"type": "value", "options": {"1": {"text": "HEALTHY", "color": "green"}}, "value": "1"}
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Rate Limiter Health",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_webhook_rate_limiter_health",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "UNHEALTHY", "color": "red"}}, "value": "0"},
+            {"type": "value", "options": {"1": {"text": "HEALTHY", "color": "green"}}, "value": "1"}
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Rate Limiter Usage %",
+      "type": "gauge",
+      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_webhook_rate_limiter_usage",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 80, "color": "yellow"},
+              {"value": 95, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Reconciliation Checked",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_reconciliation_checked_total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Reconciliation Discrepancies",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_reconciliation_discrepancies_total",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Unresolved Discrepancies",
+      "type": "stat",
+      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "chimera_reconciliation_unresolved_total",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "red"}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "RPC Errors (rate)",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "rate(chimera_rpc_errors_total[5m])",
+          "legendFormat": "RPC Errors/sec",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "RPC Latency p95 by Endpoint",
+      "type": "timeseries",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "PBFA97CFB590B2093"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(chimera_rpc_latency_ms_bucket[5m]))",
+          "legendFormat": "{{endpoint}} p95",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Dead Letter Queue",
+      "type": "table",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 12},
+      "datasource": {
+        "type": "postgres",
+        "uid": "P4F7F8D3768E4C7A1"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT trade_uuid, wallet_address, error_type, error_message, attempts, created_at FROM dead_letter_queue ORDER BY created_at DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "trade_uuid": "Trade UUID",
+              "wallet_address": "Wallet",
+              "error_type": "Error Type",
+              "error_message": "Error Message",
+              "attempts": "Attempts",
+              "created_at": "Created At"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

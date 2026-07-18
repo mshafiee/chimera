@@ -28,6 +28,9 @@ COPY database/schema/wallets.sql /app/database/schema/wallets.sql
 # Copy scout code
 COPY scout/ .
 
+# Expose metrics port
+EXPOSE 8081
+
 # Create app user
 RUN useradd -m -u 1000 chimera && \
     chown -R chimera:chimera /app
