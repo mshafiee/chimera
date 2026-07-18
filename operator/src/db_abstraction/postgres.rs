@@ -2235,12 +2235,23 @@ impl Database for PostgresBackend {
         sqlx::query(
             r#"
             INSERT INTO wallet_monitoring (
-                wallet_address, helius_webhook_id, monitoring_enabled, last_monitored_at
+                wallet_address, helius_webhook_id, monitoring_enabled, last_monitored_at,
+                webhook_status, webhook_registered_at
             )
-            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP,
+                    CASE WHEN $2 IS NOT NULL THEN 'active' ELSE 'orphaned' END,
+                    CASE WHEN $2 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(wallet_address) DO UPDATE SET
                 helius_webhook_id = COALESCE($4, wallet_monitoring.helius_webhook_id),
                 monitoring_enabled = $5,
+                webhook_status = CASE
+                    WHEN $4 IS NOT NULL THEN 'active'
+                    ELSE wallet_monitoring.webhook_status
+                END,
+                webhook_registered_at = CASE
+                    WHEN $4 IS NOT NULL THEN CURRENT_TIMESTAMP
+                    ELSE wallet_monitoring.webhook_registered_at
+                END,
                 last_monitored_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
             "#,
