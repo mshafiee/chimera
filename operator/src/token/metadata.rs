@@ -163,7 +163,9 @@ impl TokenMetadataFetcher {
             rate_limiter,
             jupiter_api_url,
             http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(8))
+                .user_agent("Chimera/1.0")
+                .http1_only()
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
@@ -210,7 +212,9 @@ impl TokenMetadataFetcher {
             rate_limiter,
             jupiter_api_url,
             http_client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(8))
+                .user_agent("Chimera/1.0")
+                .http1_only()
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             dexscreener_base_url: "https://api.dexscreener.com/latest/dex/tokens".to_string(),
@@ -874,10 +878,17 @@ impl TokenMetadataFetcher {
         );
 
         // Slow path: Fetch from API
-        let dex_liquidity = self
-            .fetch_dexscreener_liquidity(token_address)
-            .await
-            .unwrap_or(Decimal::ZERO); // network failure → treat as unlisted
+        let dex_liquidity = match self.fetch_dexscreener_liquidity(token_address).await {
+            Ok(liq) => liq,
+            Err(e) => {
+                tracing::warn!(
+                    token = token_address,
+                    error = %e,
+                    "DexScreener liquidity fetch failed; treating as unlisted ($0)"
+                );
+                Decimal::ZERO
+            }
+        };
 
         // Update cache
         self.update_liquidity_cache(token_address, dex_liquidity).await;
