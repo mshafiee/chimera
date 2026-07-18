@@ -4,6 +4,6 @@ set -e
 
 mkdir -p /var/log/haproxy
 
-rsyslogd
+rsyslogd -i /run/rsyslogd.pid
 
 exec haproxy -f /usr/local/etc/haproxy/haproxy.cfg -db "$@"
