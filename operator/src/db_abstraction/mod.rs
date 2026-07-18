@@ -133,6 +133,18 @@ pub trait Database: Send + Sync {
     /// Get position by trade UUID
     async fn get_position_by_trade_uuid(&self, trade_uuid: &str) -> AppResult<Option<Position>>;
 
+    /// Get the active (or EXITING) position for a (wallet, token) pair.
+    ///
+    /// BUY and SELL signals generate different trade UUIDs, so a SELL/EXIT cannot
+    /// look up its position by the SELL signal's UUID. Positions are uniquely held
+    /// one-per-token-per-wallet (enforced by the registry), so (wallet, token) is
+    /// the correct key for matching an exit to its opening position.
+    async fn get_active_position_by_wallet_token(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+    ) -> AppResult<Option<Position>>;
+
     /// Close position
     async fn close_position(
         &self,

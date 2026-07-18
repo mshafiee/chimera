@@ -3104,15 +3104,23 @@ impl Executor {
                 ))
             }
             Action::Sell => {
+                // BUY and SELL produce different trade UUIDs, so a SELL cannot be
+                // matched to its opening position by the SELL signal's UUID. Look up
+                // the active position by (wallet, token) — positions are held
+                // one-per-token-per-wallet.
                 let position = self
                     .db
-                    .get_position_by_trade_uuid(&signal.trade_uuid)
+                    .get_active_position_by_wallet_token(
+                        &signal.payload.wallet_address,
+                        signal.token_address(),
+                    )
                     .await
                     .map_err(|e| ExecutorError::TransactionFailed(format!("DB lookup: {}", e)))?
                     .ok_or_else(|| {
                         ExecutorError::TransactionFailed(format!(
-                            "No position found for SELL: {}",
-                            signal.trade_uuid
+                            "No active position for SELL: wallet={}, token={}",
+                            signal.payload.wallet_address,
+                            signal.token_address()
                         ))
                     })?;
 

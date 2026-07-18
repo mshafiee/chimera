@@ -552,6 +552,38 @@ impl Database for PostgresBackend {
         }
     }
 
+    async fn get_active_position_by_wallet_token(
+        &self,
+        wallet_address: &str,
+        token_address: &str,
+    ) -> AppResult<Option<Position>> {
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id, trade_uuid, wallet_address, token_address, token_symbol,
+                strategy, entry_amount_sol, entry_price, entry_tx_signature,
+                current_price, unrealized_pnl_sol, unrealized_pnl_percent,
+                state, exit_price, exit_tx_signature, realized_pnl_sol,
+                realized_pnl_usd, entry_sol_price_usd, opened_at, last_updated, closed_at,
+                token_amount
+            FROM positions
+            WHERE wallet_address = $1 AND token_address = $2 AND state IN ('ACTIVE', 'EXITING')
+            ORDER BY opened_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(token_address)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        match row {
+            Some(r) => Ok(Some(self.row_to_position(r)?)),
+            None => Ok(None),
+        }
+    }
+
     async fn close_position(
         &self,
         trade_uuid: &str,
@@ -1417,12 +1449,11 @@ impl Database for PostgresBackend {
                 r#"
                 SELECT id, entry_price, entry_amount_sol, trade_uuid, entry_sol_price_usd
                 FROM positions
-                WHERE wallet_address = $1 AND token_address = $2 AND trade_uuid = $3 AND state IN ('ACTIVE', 'EXITING')
+                WHERE wallet_address = $1 AND token_address = $2 AND state IN ('ACTIVE', 'EXITING')
                 "#,
             )
             .bind(wallet_address)
             .bind(token_address)
-            .bind(trade_uuid)
             .fetch_all(&mut *tx)
             .await?;
 
