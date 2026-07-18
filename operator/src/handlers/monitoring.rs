@@ -35,7 +35,8 @@ pub async fn helius_webhook_handler(
         );
 
         // Parse webhook to extract swap information
-        if let Ok(Some(swap)) = parse_helius_webhook(&event) {
+        let parsed = parse_helius_webhook(&event);
+        if let Ok(Some(swap)) = parsed {
             // Find wallet address from account data
             let wallet_address = event
                 .account_data
@@ -50,6 +51,13 @@ pub async fn helius_webhook_handler(
                 .unwrap_or_default();
 
             if !wallet_address.is_empty() {
+                tracing::debug!(
+                    wallet = %wallet_address,
+                    direction = ?swap.direction,
+                    token_out = %swap.token_out,
+                    amount_in = %swap.amount_in,
+                    "Parsed swap from webhook"
+                );
                 // Check if wallet exists in database
                 let wallet_opt = state.db.get_wallet(&wallet_address).await;
 
@@ -94,6 +102,10 @@ pub async fn helius_webhook_handler(
 
                 // Only process signals from ACTIVE wallets
                 if wallet.status == "ACTIVE" {
+                    tracing::debug!(
+                        wallet = %wallet_address,
+                        "ACTIVE wallet signal accepted for processing"
+                    );
                     // FIX 1: Check circuit breaker before queuing
                     if let Some(ref cb) = state.circuit_breaker {
                         if !cb.is_trading_allowed() {
@@ -227,6 +239,36 @@ pub async fn helius_webhook_handler(
                         "Wallet detected but not ACTIVE, skipping signal"
                     );
                 }
+            } else {
+                tracing::debug!(
+                    signature = %event.signature,
+                    "Webhook swap skipped: could not extract wallet address from account_data"
+                );
+            }
+        } else {
+            // Diagnose why parse returned None/Err so silent signal drops are visible.
+            let account_count = event.account_data.len();
+            let token_change_count: usize = event
+                .account_data
+                .iter()
+                .map(|a| a.token_balance_changes.as_ref().map(|c| c.len()).unwrap_or(0))
+                .sum();
+            let native_transfer_count = event.native_transfers.len();
+            match parsed {
+                Ok(None) => tracing::debug!(
+                    signature = %event.signature,
+                    transaction_type = %event.transaction_type,
+                    account_count,
+                    token_change_count,
+                    native_transfer_count,
+                    "Webhook event parsed to no swap (Ok(None)) — likely no significant non-SOL token delta"
+                ),
+                Err(e) => tracing::warn!(
+                    signature = %event.signature,
+                    error = %e,
+                    "Webhook event failed to parse"
+                ),
+                _ => {}
             }
         }
     }

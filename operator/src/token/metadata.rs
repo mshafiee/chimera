@@ -324,28 +324,31 @@ impl TokenMetadataFetcher {
     /// 4. Updates cache with fresh data
     /// 5. Logs any failures and continues (resilient)
     pub async fn start_cache_updater(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(60));
-            loop {
-                interval.tick().await;
+        // Run the refresh loop inline so callers awaiting this future block until
+        // the updater genuinely stops. Previously this spawned an inner task and
+        // returned immediately, which made main.rs log a spurious
+        // "Unified cache updater exited" ERROR on every startup even though the
+        // background loop was still running.
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            interval.tick().await;
 
-                // Update liquidity cache
-                if let Err(e) = self.update_all_liquidity().await {
-                    tracing::error!(
-                        error = %e,
-                        "Background liquidity update failed"
-                    );
-                }
-
-                // Update metadata cache for tokens without age information
-                if let Err(e) = self.update_metadata_ages().await {
-                    tracing::error!(
-                        error = %e,
-                        "Background metadata age update failed"
-                    );
-                }
+            // Update liquidity cache
+            if let Err(e) = self.update_all_liquidity().await {
+                tracing::error!(
+                    error = %e,
+                    "Background liquidity update failed"
+                );
             }
-        });
+
+            // Update metadata cache for tokens without age information
+            if let Err(e) = self.update_metadata_ages().await {
+                tracing::error!(
+                    error = %e,
+                    "Background metadata age update failed"
+                );
+            }
+        }
     }
 
     /// Update liquidity for all recently traded tokens (internal method).
