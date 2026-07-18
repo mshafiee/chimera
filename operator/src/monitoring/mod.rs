@@ -94,12 +94,25 @@ impl MonitoringState {
             .map(|tf| tf.get_metadata_cache())
             .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new())));
 
-        let helius_client = Arc::new(HeliusClient::new(
-            config
+        // Resolve Helius API key: the config crate does NOT interpolate ${VAR}
+        // placeholders in YAML, so a literal like "${HELIUS_API_KEY}" would be
+        // sent to Helius as the API key and rejected ("invalid api key provided").
+        // Mirror the resolution done in main.rs for the token-metadata HeliusClient.
+        let helius_api_key_resolved = {
+            let from_config = config
                 .monitoring
                 .as_ref()
                 .and_then(|m| m.helius_api_key.clone())
-                .unwrap_or_default(),
+                .unwrap_or_default();
+            if from_config.starts_with("${") {
+                std::env::var("HELIUS_API_KEY").unwrap_or_default()
+            } else {
+                from_config
+            }
+        };
+
+        let helius_client = Arc::new(HeliusClient::new(
+            helius_api_key_resolved,
             metadata_cache,
         )?);
 
