@@ -1766,8 +1766,11 @@ impl Database for PostgresBackend {
     }
 
     async fn update_position_token_amount(&self, uuid: &str, token_amount: u64) -> AppResult<()> {
+        // Bind as i64, not string: sqlx encodes i64 as INT8 which Postgres casts
+        // cleanly to NUMERIC. Binding the u64's string form against a NUMERIC column
+        // was silently failing to persist (no error, zero rows affected).
         sqlx::query("UPDATE positions SET token_amount = $1 WHERE trade_uuid = $2")
-            .bind(token_amount.to_string())
+            .bind(token_amount as i64)
             .bind(uuid)
             .execute(&self.pool)
             .await
