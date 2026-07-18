@@ -2239,7 +2239,7 @@ impl Database for PostgresBackend {
             )
             VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
             ON CONFLICT(wallet_address) DO UPDATE SET
-                helius_webhook_id = COALESCE($4, helius_webhook_id),
+                helius_webhook_id = COALESCE($4, wallet_monitoring.helius_webhook_id),
                 monitoring_enabled = $5,
                 last_monitored_at = CURRENT_TIMESTAMP,
                 updated_at = CURRENT_TIMESTAMP
