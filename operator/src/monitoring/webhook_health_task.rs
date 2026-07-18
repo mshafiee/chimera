@@ -293,8 +293,16 @@ pub async fn run_startup_webhook_check(
                             stored_webhook_id = %stored_id,
                             "Webhook ID in DB not found in Helius — clearing for re-registration"
                         );
-                        let _ = db.clear_webhook_id(wallet_address).await;
-                        stale_count += 1;
+                        match db.clear_webhook_id(wallet_address).await {
+                            Ok(_) => stale_count += 1,
+                            Err(e) => {
+                                error!(
+                                    wallet = %wallet_address,
+                                    error = %e,
+                                    "Failed to clear stale webhook_id from database"
+                                );
+                            }
+                        }
                     }
                 }
                 if stale_count > 0 {

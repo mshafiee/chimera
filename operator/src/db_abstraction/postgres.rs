@@ -2324,7 +2324,7 @@ impl Database for PostgresBackend {
             UPDATE wallet_monitoring
             SET helius_webhook_id = NULL,
                 webhook_status = 'orphaned',
-                webhook_health_status = 'stale',
+                webhook_health_status = 'unknown',
                 updated_at = NOW()
             WHERE wallet_address = $1
             "#,
