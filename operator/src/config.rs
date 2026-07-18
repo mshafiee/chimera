@@ -1827,7 +1827,34 @@ impl AppConfig {
             )
             .build()?;
 
-        config.try_deserialize()
+        let mut config: AppConfig = config.try_deserialize()?;
+
+        // The config crate does NOT interpolate ${VAR} placeholders in YAML/JSON
+        // files. Resolve security secrets against their env vars now, BEFORE
+        // validation, so a missing env var fails closed (empty -> rejected by
+        // validate) instead of silently using the literal placeholder string as a
+        // forge-able HMAC secret. (Same class of bug as the Helius key: a literal
+        // "${CHIMERA_SECURITY__WEBHOOK_SECRET}" reached consumers verbatim.)
+        config.security.webhook_secret = Self::resolve_env_placeholder(
+            &config.security.webhook_secret,
+            "CHIMERA_SECURITY__WEBHOOK_SECRET",
+        );
+        if let Some(prev) = config.security.webhook_secret_previous.as_mut() {
+            *prev = Self::resolve_env_placeholder(prev, "CHIMERA_SECURITY__WEBHOOK_SECRET_PREVIOUS");
+        }
+
+        Ok(config)
+    }
+
+    /// If `value` is a `${VAR}` placeholder, resolve it from the environment;
+    /// otherwise return it unchanged. The config crate does not expand `${VAR}` in
+    /// loaded files, so YAML placeholders reach consumers verbatim without this.
+    fn resolve_env_placeholder(value: &str, env_var: &str) -> String {
+        if value.starts_with("${") {
+            std::env::var(env_var).unwrap_or_default()
+        } else {
+            value.to_string()
+        }
     }
 
     /// Validate configuration values
@@ -1843,6 +1870,16 @@ impl AppConfig {
         if self.security.webhook_secret.is_empty() {
             return Err(ConfigError::Message(
                 "Webhook secret must be set via CHIMERA_SECURITY__WEBHOOK_SECRET".to_string(),
+            ));
+        }
+        // Reject unresolved ${VAR} placeholders — means env-var resolution was
+        // bypassed or misconfigured. A literal placeholder is forge-able (it
+        // appears verbatim in the committed config.yaml), so fail closed rather
+        // than accept it as the HMAC secret.
+        if self.security.webhook_secret.contains("${") {
+            return Err(ConfigError::Message(
+                "webhook_secret is an unresolved ${...} placeholder — set \
+                 CHIMERA_SECURITY__WEBHOOK_SECRET in the environment".to_string(),
             ));
         }
         if self.security.webhook_secret.len() < 32 {
