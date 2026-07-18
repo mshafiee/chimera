@@ -329,10 +329,14 @@ impl CircuitBreaker {
         if total_capital > dec!(1.0) {
             let total_loss_sol = realized_pnl_sol + unrealized_sol;
             let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            let loss_threshold = -self.config.portfolio_stop_loss_percent;
+            // portfolio_stop_loss_percent is negative by convention (default -5.0,
+            // validated < 0 in config). Use it directly as the comparison threshold
+            // so we trip only when the loss is worse than it (e.g. -6% < -5%).
+            // Previously this negated the value (-(-5.0) = +5.0), inverting the
+            // comparison and false-tripping on ANY pnl below +5% — including 0%.
+            let loss_threshold = self.config.portfolio_stop_loss_percent;
 
-            // Only trip if we have actual losses (not just zero/no capital)
-            if daily_loss_percent < loss_threshold && daily_loss_percent != Decimal::ZERO {
+            if daily_loss_percent < loss_threshold {
                 return Ok(Some(TripReason::PortfolioStop24h {
                     loss_pct: daily_loss_percent.abs(),
                     threshold: self.config.portfolio_stop_loss_percent,
