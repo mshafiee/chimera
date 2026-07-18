@@ -828,9 +828,10 @@ class WalletAnalyzer:
                         """)
                         if cursor.fetchone():
                             cursor.execute("""
-                                SELECT DISTINCT address
+                                SELECT DISTINCT address, archetype, last_arb_check_at
                                 FROM wallets
                                 WHERE status IN ('ACTIVE', 'CANDIDATE')
+                                AND (archetype != 'ARBITRAGE' OR last_arb_check_at IS NULL OR last_arb_check_at < NOW() - INTERVAL '24 hours')
                                 ORDER BY wqs_score DESC NULLS LAST
                                 LIMIT ?
                             """, (self._max_wallets,))
@@ -1194,11 +1195,6 @@ class WalletAnalyzer:
                 self._parse_cache_misses += 1
                 # Attempt standard parsing
                 swap = self.helius_client.parse_swap_transaction(tx, wallet_address=address)
-
-                # Aggressive fallback: if standard parsing failed, try without wallet filter
-                if not swap and tx:
-                    # Try parsing without wallet address filter (more permissive)
-                    swap = self.helius_client.parse_swap_transaction(tx, wallet_address=None)
 
                 # Cache the result (even if None) to avoid re-parsing
                 async with self._parse_cache_lock:
@@ -1921,6 +1917,14 @@ class WalletAnalyzer:
         """
         Determine trader archetype based on trading behavior.
         
+        Priority order:
+        1. ARBITRAGE: Round-trip ratio >= threshold (bot behavior)
+        2. INSIDER: Fresh wallet (created < 24h before trading)
+        3. WHALE: Average trade size > 50 SOL
+        4. SNIPER: Buys < 2 mins after launch on average
+        5. SWING: Holds positions > 4 hours on average
+        6. Default: SCALPER (many trades, small timeframe)
+        
         Args:
             metrics: Wallet performance metrics
             trades: Historical trades
@@ -1928,25 +1932,41 @@ class WalletAnalyzer:
         Returns:
             TraderArchetype enum value
         """
-        # 1. INSIDER: Fresh wallet (created < 24h before trading)
+        # Check for round-trip ratio (ARBITRAGE) if available in metrics
+        # This should be computed before calling determine_archetype
+        if hasattr(metrics, 'round_trip_ratio') and metrics.round_trip_ratio is not None:
+            threshold = 0.60  # Default threshold
+            try:
+                from ..config import ScoutConfig
+                CONFIG_AVAILABLE = True
+            except ImportError:
+                CONFIG_AVAILABLE = False
+            
+            if CONFIG_AVAILABLE:
+                threshold = ScoutConfig.get_arb_round_trip_threshold_pct()
+            
+            if metrics.round_trip_ratio >= threshold:
+                return TraderArchetype.ARBITRAGE
+        
+        # 2. INSIDER: Fresh wallet (created < 24h before trading)
         if metrics.is_fresh_wallet:
             return TraderArchetype.INSIDER
         
-        # 2. WHALE: Average trade size > 50 SOL
+        # 3. WHALE: Average trade size > 50 SOL
         if metrics.avg_trade_size_sol and metrics.avg_trade_size_sol > Decimal(50):
             return TraderArchetype.WHALE
         
-        # 3. SNIPER: Buys < 2 mins after launch on average
+        # 4. SNIPER: Buys < 2 mins after launch on average
         if metrics.avg_entry_delay_seconds is not None:
             if metrics.avg_entry_delay_seconds < 120:  # < 2 minutes
                 return TraderArchetype.SNIPER
         
-        # 4. SWING: Holds positions > 4 hours on average
+        # 5. SWING: Holds positions > 4 hours on average
         avg_hold_time = self._calculate_avg_hold_time(trades)
         if avg_hold_time and avg_hold_time > 14400:  # > 4 hours (14400 seconds)
             return TraderArchetype.SWING
         
-        # 5. Default: SCALPER (many trades, small timeframe)
+        # 6. Default: SCALPER (many trades, small timeframe)
         return TraderArchetype.SCALPER
     
     def _calculate_avg_hold_time(self, trades: List[HistoricalTrade]) -> Optional[float]:
@@ -2010,6 +2030,88 @@ class WalletAnalyzer:
             return None
         
         return sum(hold_times) / len(hold_times)
+    
+    def _detect_round_trip_ratio_from_transactions(
+        self, 
+        transactions: List[Dict[str, Any]],
+        wallet_address: str
+    ) -> float:
+        """
+        Detect round-trip ratio from raw Helius transactions.
+        
+        A round-trip is defined as a transaction where the same token is both
+        bought and sold in the same transaction (typical of arbitrage bots).
+        
+        Args:
+            transactions: List of raw Helius transaction objects
+            wallet_address: Wallet address to analyze
+            
+        Returns:
+            Round-trip ratio as a float (0.0 to 1.0)
+        """
+        if not transactions or len(transactions) < 3:
+            return 0.0
+        
+        round_trip_count = 0
+        analyzed_count = 0
+        
+        for tx in transactions:
+            # Only analyze SWAP transactions
+            if tx.get("type") != "SWAP":
+                continue
+            
+            # Extract token deltas from the transaction
+            token_deltas: Dict[str, float] = {}
+            
+            # Process tokenTransfers
+            for tt in tx.get("tokenTransfers", []):
+                mint = tt.get("mint", "")
+                if not mint:
+                    continue
+                
+                # Handle different tokenAmount formats
+                amount = tt.get("tokenAmount", 0)
+                if isinstance(amount, str):
+                    try:
+                        amount = float(amount)
+                    except ValueError:
+                        continue
+                elif isinstance(amount, (int, float)):
+                    amount = float(amount)
+                else:
+                    continue
+                
+                # Track wallet-relative deltas
+                if tt.get("fromUserAccount") == wallet_address:
+                    token_deltas[mint] = token_deltas.get(mint, 0.0) - amount
+                if tt.get("toUserAccount") == wallet_address:
+                    token_deltas[mint] = token_deltas.get(mint, 0.0) + amount
+            
+            # Check if any token has both positive and negative deltas
+            # (i.e., both bought and sold in the same transaction)
+            has_round_trip = False
+            for mint, delta in token_deltas.items():
+                # Skip SOL/wSOL (it's the quote asset)
+                if mint == "So11111111111111111111111111111111111111112":
+                    continue
+                
+                # If delta is close to zero, it means we both bought and sold this token
+                # Use a small threshold to account for rounding errors and slippage
+                if abs(delta) < 0.01:  # Allow for small amounts from fees/slippage
+                    has_round_trip = True
+                    print(f"  [DEBUG] Round-trip detected for token {mint[:8]}... (delta={delta})")
+                    break
+            
+            if has_round_trip:
+                round_trip_count += 1
+            analyzed_count += 1
+        
+        print(f"  [DEBUG] Round-trip detection: {round_trip_count}/{analyzed_count} swaps")
+        
+        if analyzed_count == 0:
+            return 0.0
+        
+        return round_trip_count / analyzed_count
     
     async def _detect_insider_patterns(self, address: str, trades: List[HistoricalTrade]) -> Dict[str, Any]:
         """
@@ -2511,6 +2613,30 @@ class WalletAnalyzer:
                 token_categories.add(cat)
         unique_token_categories = len(token_categories) if token_categories else None
 
+        # Round-trip detection for arbitrage classification
+        print(f"  [{address[:8]}] Detecting round-trip ratio...")
+        round_trip_ratio = None
+        try:
+            # Get config for arb detection
+            try:
+                from ..config import ScoutConfig
+                CONFIG_AVAILABLE = True
+            except ImportError:
+                CONFIG_AVAILABLE = False
+            
+            min_trades_for_arb = 10
+            if CONFIG_AVAILABLE:
+                min_trades_for_arb = ScoutConfig.get_arb_min_trades_for_detection()
+            
+            # Only compute round-trip ratio if we have enough trades
+            if len(transactions) >= min_trades_for_arb:
+                round_trip_ratio = self._detect_round_trip_ratio_from_transactions(transactions, address)
+                print(f"  [{address[:8]}] Round-trip ratio: {round_trip_ratio:.2%}")
+            else:
+                print(f"  [{address[:8]}] Skipping round-trip detection (insufficient trades: {len(transactions)} < {min_trades_for_arb})")
+        except Exception as e:
+            print(f"  [{address[:8]}] Warning: Could not detect round-trip ratio: {e}")
+
         # Determine trader archetype
         archetype = None
         try:
@@ -2522,6 +2648,7 @@ class WalletAnalyzer:
                 avg_trade_size_sol=avg_trade_size if avg_trade_size else None,
                 avg_entry_delay_seconds=avg_entry_delay,
                 is_fresh_wallet=is_fresh_wallet,
+                round_trip_ratio=round_trip_ratio,
             )
             archetype_result = self.determine_archetype(temp_metrics, trades)
             archetype = archetype_result.value if hasattr(archetype_result, 'value') else str(archetype_result)
@@ -2568,6 +2695,7 @@ class WalletAnalyzer:
             trajectory=trajectory,
             replay_data_gap_ratio=replay_data_gap_ratio,
             is_tg_bot_user=is_tg_bot_user,
+            round_trip_ratio=round_trip_ratio,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[Any]]:

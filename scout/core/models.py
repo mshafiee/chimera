@@ -28,6 +28,7 @@ class TraderArchetype(Enum):
     SCALPER = "SCALPER"     # Many trades, small timeframe (default)
     INSIDER = "INSIDER"     # Fresh wallet, buys right before pumps
     WHALE = "WHALE"         # Trade size > 50 SOL
+    ARBITRAGE = "ARBITRAGE" # Round-trips > 60% of trades (bot behavior)
 
 
 @dataclass

@@ -2900,31 +2900,12 @@ class HeliusClient:
         signature = tx.get("signature", "")
         timestamp = tx.get("timestamp", int(utcnow().timestamp()))
 
-        # Legacy behavior: return "first two transfers" (kept for compatibility)
+        # REQUIRE wallet address for accurate parsing
         if not wallet_address:
-            swap_info = None
-            if "tokenTransfers" in tx and tx["tokenTransfers"]:
-                transfers = tx["tokenTransfers"]
-                if len(transfers) >= 2:
-                    in_transfer = transfers[0]
-                    out_transfer = transfers[1] if len(transfers) > 1 else None
-                    if out_transfer:
-                        swap_info = {
-                            "token_in": in_transfer.get("mint", ""),
-                            "token_out": out_transfer.get("mint", ""),
-                            "amount_in": in_transfer.get("tokenAmount", 0),
-                            "amount_out": out_transfer.get("tokenAmount", 0),
-                            "timestamp": timestamp,
-                            "signature": signature,
-                            "direction": "BUY"
-                            if out_transfer.get("mint")
-                            != "So11111111111111111111111111111111111111112"
-                            else "SELL",
-                        }
-            return swap_info
+            return None
 
         # Check wallet involvement (shared across all strategies)
-        if wallet_address and not self._is_wallet_involved(tx, wallet_address):
+        if not self._is_wallet_involved(tx, wallet_address):
             return None
 
         # Strategy 1: wallet-relative deltas (primary)
@@ -3303,7 +3284,7 @@ class HeliusClient:
 
         price_sol = (sol_amount / token_amount) if token_amount > 0 else 0.0
 
-        return {
+        result = {
             "signature": signature,
             "timestamp": timestamp,
             "wallet": wallet_address,
@@ -3318,6 +3299,13 @@ class HeliusClient:
             "net_sol_delta": sol_delta,
             "net_token_delta": primary_delta,
         }
+
+        # PUMP_FUN edge case: Reject pure SOL-in/SOL-out transactions (no token movement)
+        # This can happen with fee-only transactions or wrapping/unwrapping
+        if abs(result["net_sol_delta"]) < SIGNIFICANT_SOL and abs(result["net_token_delta"]) < 1e-9:
+            return None
+
+        return result
 
     def _parse_from_instruction_level(
         self,

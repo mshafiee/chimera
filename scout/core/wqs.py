@@ -372,7 +372,6 @@ class WqsResult:
 
 
 @dataclass
-@dataclass
 class WalletMetrics:
     """Wallet performance metrics for WQS calculation."""
     address: str
@@ -408,6 +407,7 @@ class WalletMetrics:
     advanced_risk_features: Optional[Dict[str, Any]] = None
     replay_data_gap_ratio: Optional[float] = None  # Ratio of SELL events with data gaps to total SELL events
     is_tg_bot_user: bool = False  # Flagged as Telegram bot user (≥50% of ≥10 swaps through bot router)
+    round_trip_ratio: Optional[float] = None  # Ratio of round-trip swaps to total swaps (arbitrage detection)
 
 
 @dataclass
@@ -818,6 +818,10 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
 
 
 def calculate_wqs(metrics: WalletMetrics, strategy: str = "SHIELD") -> float:
+    # Short-circuit ARBITRAGE wallets (bot behavior, not directional traders)
+    if metrics.archetype == "ARBITRAGE":
+        return 0.0
+
     components = _calculate_raw_score(metrics, strategy=strategy)
     if components.is_instant_reject:
         return 0.0
@@ -856,6 +860,10 @@ def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None,
 
 
 def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIELD") -> WqsResult:
+    # Short-circuit ARBITRAGE wallets (bot behavior, not directional traders)
+    if metrics.archetype == "ARBITRAGE":
+        return WqsResult(score=0.0, confidence=0.0, adjusted_score=0.0)
+
     components = _calculate_raw_score(metrics, strategy=strategy)
     if components.is_instant_reject:
         return WqsResult(score=0.0, confidence=0.0, adjusted_score=0.0)

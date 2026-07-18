@@ -1264,6 +1264,46 @@ class ScoutConfig:
         return float(os.getenv("SCOUT_CACHE_BELOW_AVERAGE_WQS_MULTIPLIER", "1.0"))
 
     # ========================================================================
+    # Arbitrage Detection Configuration
+    # ========================================================================
+
+    @staticmethod
+    def get_arb_round_trip_threshold_pct() -> float:
+        """
+        Get the round-trip ratio threshold for ARBITRAGE classification.
+        
+        Round-trip ratio = (number of round-trip trades) / (total trades)
+        A round-trip trade is one where the same token is both bought and sold
+        in the same transaction (or within a very short time window).
+        
+        Default: 0.60 (60%)
+        """
+        return float(os.getenv("SCOUT_ARB_ROUND_TRIP_THRESHOLD_PCT", "0.60"))
+
+    @staticmethod
+    def get_arb_min_trades_for_detection() -> int:
+        """
+        Get minimum trades required before arb detection can trigger.
+        
+        Prevents false positives on wallets with insufficient trade history.
+        
+        Default: 10
+        """
+        return int(os.getenv("SCOUT_ARB_MIN_TRADES_FOR_DETECTION", "10"))
+
+    @staticmethod
+    def get_arb_cooldown_hours() -> int:
+        """
+        Get cooldown period for re-analyzing ARBITRAGE wallets.
+        
+        Once classified as ARBITRAGE, wallets are skipped for re-analysis
+        until this many hours have passed.
+        
+        Default: 24 hours
+        """
+        return int(os.getenv("SCOUT_ARB_COOLDOWN_HOURS", "24"))
+
+    # ========================================================================
     # Stop-Loss Optimizer Configuration
     # ========================================================================
 
