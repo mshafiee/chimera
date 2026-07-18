@@ -662,6 +662,11 @@ impl SignalProcessor {
                             }
 
                             if let Some(token_amount) = outcome.token_amount {
+                                tracing::info!(
+                                    trade_uuid = %trade_uuid,
+                                    token_amount = token_amount,
+                                    "Persisting token_amount to position"
+                                );
                                 if let Err(e) = self
                                     .db
                                     .update_position_token_amount(&trade_uuid, token_amount)
@@ -669,6 +674,11 @@ impl SignalProcessor {
                                 {
                                     tracing::warn!(error = %e, "Failed to set token_amount on position");
                                 }
+                            } else {
+                                tracing::warn!(
+                                    trade_uuid = %trade_uuid,
+                                    "outcome.token_amount is None — position will lack token_amount (blocks SELL)"
+                                );
                             }
 
                             if let Some(ref ws) = self.ws_state {
