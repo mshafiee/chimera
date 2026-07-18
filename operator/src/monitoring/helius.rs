@@ -473,8 +473,12 @@ impl HeliusClient {
                         .await
                         .context("Failed to delete webhook")?;
 
+                    let status = response.status().as_u16();
+                    if status == 404 {
+                        return Ok(());
+                    }
+
                     if !response.status().is_success() {
-                        let status = response.status().as_u16();
                         let error_text = response.text().await.unwrap_or_default();
                         return Err(anyhow!("HTTP error: {}", status)
                             .context(format!("Failed to delete webhook: {}", error_text)));

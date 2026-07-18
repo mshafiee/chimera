@@ -1,16 +1,1 @@
-# City Whitelist Configuration
-# Add city names, one per line
-# This is used for city-level access restrictions
-# Example: New York, London, Tokyo, etc.
-
-# Major financial centers (examples)
-# New York
-# London
-# Tokyo
-# Singapore
-# Hong Kong
-# Frankfurt
-# Paris
-# Zurich
-# Sydney
-# Toronto
+# (empty — add entries to enable)

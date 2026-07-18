@@ -1,0 +1,11 @@
+# Scanner User-Agent Blacklist
+# Deny known security scanners and bots
+
+zgrab
+nikto
+masscan
+nmap
+ZmEu
+sqlmap
+sslvpn
+python-requests/.*scan

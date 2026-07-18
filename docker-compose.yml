@@ -276,7 +276,9 @@ services:
 
   # Grafana - Metrics visualization
   grafana:
-    image: grafana/grafana:latest
+    build:
+      context: .
+      dockerfile: docker/grafana/Dockerfile
     container_name: chimera-grafana
     restart: unless-stopped
     volumes:

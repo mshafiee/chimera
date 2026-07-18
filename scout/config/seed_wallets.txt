@@ -5,8 +5,6 @@
 # High-activity wallets (examples - replace with verified active traders)
 5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1
 9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM
-7TYb32qkwYgrkUZfCbzRFRw7PWcqXX5kNYyFW8m3NpzR
-GNDWm9fG8KZ4FZ9VHhyXM3qEcBmhm8BN8q4Z9Z9Z9Z9Z
-4MangoMjqJ2firMokCjjGgoK8d4MXcrgL7XJaL3w6fVg
+ 7TYb32qkwYgrkUZfCbzRFRw7PWcqXX5kNYyFW8m3NpzR
 
 

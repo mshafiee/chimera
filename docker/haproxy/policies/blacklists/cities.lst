@@ -1,12 +1,1 @@
-# City Blacklist Configuration
-# Add city names, one per line
-# These cities will be blocked from accessing the system
-
-# High-risk cities (examples)
-# Moscow
-# Beijing
-# Shanghai
-# Tianjin
-# Shenzhen
-
-# Add other cities as needed for access control
+# (empty — add entries to enable)

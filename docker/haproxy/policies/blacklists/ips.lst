@@ -1,10 +1,1 @@
-# IP Blacklist Configuration
-# Add one IP address or CIDR range per line
-# Example: 192.168.1.0/24 or 10.0.0.1
-
-# Known malicious IPs or ranges (examples)
-# 192.0.2.0/24     # TEST-NET-1 (documentation)
-# 198.51.100.0/24  # TEST-NET-2 (documentation)
-# 203.0.113.0/24   # TEST-NET-3 (documentation)
-
-# Add actual problematic IPs here as needed
+# (empty — add entries to enable)

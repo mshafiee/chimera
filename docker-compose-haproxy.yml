@@ -4,7 +4,9 @@
 services:
   # HAProxy Reverse Proxy
   haproxy:
-    image: chimera-haproxy:latest
+    build:
+      context: .
+      dockerfile: docker/haproxy/Dockerfile
     container_name: chimera-haproxy
     restart: unless-stopped
     ports:
@@ -17,6 +19,7 @@ services:
       - ./ssl/certbot/letsencrypt:/etc/haproxy/certs:ro
       - ./docker/haproxy/errors:/usr/local/etc/haproxy/errors:ro
       - ./docker/haproxy/policies:/usr/local/etc/haproxy/policies:ro
+      - haproxy-logs:/var/log/haproxy
     environment:
       # HAProxy stats
       - HAPROXY_STATS_PASSWORD=${HAPROXY_STATS_PASSWORD:-changeme_asap}
@@ -93,9 +96,9 @@ services:
       - REDIS_PORT=6379
       - METRICS_PORT=8000
       - LOG_CHECK_INTERVAL=5
-      - HAPROXY_LOG_PATH=/var/log/haproxy/security.log
+      - HAPROXY_LOG_PATH=/var/log/haproxy/haproxy.log
     volumes:
-      - /var/log/haproxy:/var/log/haproxy:ro
+      - haproxy-logs:/var/log/haproxy:ro
     networks:
       - chimera-network
     depends_on:
@@ -200,3 +203,6 @@ services:
 
 networks:
   chimera-network:
+
+volumes:
+  haproxy-logs:
