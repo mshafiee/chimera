@@ -354,4 +354,5 @@ volumes:
 
 networks:
   chimera-network:
+    name: chimera-network
     driver: bridge
