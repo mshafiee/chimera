@@ -58,7 +58,9 @@ pub struct AccountData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NativeTransfer {
     pub amount: u64,
+    #[serde(rename = "fromUserAccount", alias = "from_user_account")]
     pub from_user_account: String,
+    #[serde(rename = "toUserAccount", alias = "to_user_account")]
     pub to_user_account: String,
 }
 
@@ -75,7 +77,10 @@ pub struct TokenBalanceChange {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawTokenAmount {
+    #[serde(rename = "tokenAmount", alias = "token_amount")]
     pub token_amount: String,
+    #[serde(default)]
+    pub decimals: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

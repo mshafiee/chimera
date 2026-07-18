@@ -682,6 +682,7 @@ mod tests {
             mint: mint.to_string(),
             raw_token_amount: RawTokenAmount {
                 token_amount: amount.to_string(),
+                decimals: None,
             },
             token_account: format!("{}acct", account),
             user_account: account.to_string(),
