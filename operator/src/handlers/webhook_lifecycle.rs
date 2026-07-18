@@ -22,7 +22,6 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tracing::{error, info, warn};
 
 /// Helper to get webhook URL from monitoring config
 fn get_webhook_url(state: &MonitoringState) -> String {
@@ -31,7 +30,18 @@ fn get_webhook_url(state: &MonitoringState) -> String {
         .monitoring
         .as_ref()
         .and_then(|m| m.helius_webhook_url.clone())
-        .unwrap_or_else(|| String::from(""))
+        .unwrap_or_default()
+}
+
+/// Helper to get helius_dry_run flag from monitoring config
+fn get_helius_dry_run(state: &MonitoringState) -> bool {
+    state
+        .config
+        .monitoring
+        .as_ref()
+        .and_then(|m| m.webhook_lifecycle.as_ref())
+        .map(|wl| wl.helius_dry_run)
+        .unwrap_or(true) // Default to dry-run for safety
 }
 
 /// Webhook statistics response
@@ -135,6 +145,7 @@ pub async fn bulk_register_webhooks(
     }
 
     let webhook_url = get_webhook_url(&state);
+    let helius_dry_run = get_helius_dry_run(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -142,6 +153,7 @@ pub async fn bulk_register_webhooks(
         stale_threshold_days: 7,
         max_registration_retries: 3,
         webhook_url,
+        helius_dry_run,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -188,6 +200,7 @@ pub async fn bulk_cleanup_webhooks(
     }
 
     let webhook_url = get_webhook_url(&state);
+    let helius_dry_run = get_helius_dry_run(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -195,6 +208,7 @@ pub async fn bulk_cleanup_webhooks(
         stale_threshold_days: 7,
         max_registration_retries: 3,
         webhook_url,
+        helius_dry_run,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -249,7 +263,7 @@ pub async fn manual_reconcile_webhooks(
     let orphaned = result.orphaned;
     let updated = result.updated;
 
-    info!(
+    tracing::info!(
         registered = registered,
         orphaned = orphaned,
         updated = updated,
@@ -301,7 +315,7 @@ pub async fn manual_health_check(
     let unhealthy = result.unhealthy;
     let cleaned_up = result.cleaned_up;
 
-    info!(
+    tracing::info!(
         total_checked = result.total_checked,
         healthy = healthy,
         unhealthy = unhealthy,
@@ -365,6 +379,7 @@ pub async fn retry_webhook_registration(
     }
 
     let webhook_url = get_webhook_url(&state);
+    let helius_dry_run = get_helius_dry_run(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -372,6 +387,7 @@ pub async fn retry_webhook_registration(
         stale_threshold_days: 7,
         max_registration_retries: 3,
         webhook_url,
+        helius_dry_run,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -383,7 +399,7 @@ pub async fn retry_webhook_registration(
 
     match manager.register_wallet_webhook(&wallet_address).await {
         Ok(result) if result.success => {
-            info!(
+            tracing::info!(
                 wallet = %wallet_address,
                 webhook_id = %result.webhook_id,
                 "Webhook registration retry succeeded"
@@ -391,7 +407,7 @@ pub async fn retry_webhook_registration(
             Ok(StatusCode::OK)
         }
         Ok(result) => {
-            warn!(
+            tracing::warn!(
                 wallet = %wallet_address,
                 error = ?result.error_message,
                 "Webhook registration retry failed"
@@ -399,7 +415,7 @@ pub async fn retry_webhook_registration(
             Ok(StatusCode::INTERNAL_SERVER_ERROR)
         }
         Err(e) => {
-            error!(
+            tracing::error!(
                 wallet = %wallet_address,
                 error = %e,
                 "Webhook registration retry error"
@@ -425,6 +441,7 @@ pub async fn toggle_wallet_webhook(
     }
 
     let webhook_url = get_webhook_url(&state);
+    let helius_dry_run = get_helius_dry_run(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -432,6 +449,7 @@ pub async fn toggle_wallet_webhook(
         stale_threshold_days: 7,
         max_registration_retries: 3,
         webhook_url,
+        helius_dry_run,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -446,7 +464,7 @@ pub async fn toggle_wallet_webhook(
         .await
     {
         Ok(()) => {
-            info!(
+            tracing::info!(
                 wallet = %wallet_address,
                 enabled = body.enabled,
                 "Webhook toggled successfully"
@@ -454,7 +472,7 @@ pub async fn toggle_wallet_webhook(
             Ok(StatusCode::OK)
         }
         Err(e) => {
-            error!(
+            tracing::error!(
                 wallet = %wallet_address,
                 error = %e,
                 "Failed to toggle webhook"

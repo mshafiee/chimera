@@ -532,48 +532,80 @@ pub fn parse_helius_webhook(
         return Ok(None);
     }
 
-    // Parse token balance changes
+    const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+    const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+    // Aggregate token balance changes across all account_data entries
+    let mut token_deltas: std::collections::HashMap<String, Decimal> = std::collections::HashMap::new();
+    let mut native_sol_delta = Decimal::ZERO;
+
     for account in &payload.account_data {
+        // Process token balance changes
         if let Some(token_changes) = &account.token_balance_changes {
-            if let Some(change) = token_changes.first() {
-                // Determine direction based on balance change
-                // Positive change = received tokens (BUY)
-                // Negative change = sent tokens (SELL)
+            for change in token_changes {
                 let amount_str = &change.raw_token_amount.token_amount;
                 let amount = Decimal::from_str(amount_str).unwrap_or(Decimal::ZERO);
-
-                let direction = if amount > Decimal::ZERO {
-                    SwapDirection::Buy
-                } else {
-                    SwapDirection::Sell
-                };
-
-                // Check native balance change for SOL amount
-                let sol_amount = account
-                    .native_balance_change
-                    .map(|c| Decimal::from(c) / Decimal::from(1_000_000_000u64))
-                    .unwrap_or(Decimal::ZERO);
-
-                return Ok(Some(ParsedSwap {
-                    token_in: if direction == SwapDirection::Buy {
-                        "So11111111111111111111111111111111111111112".to_string()
-                    } else {
-                        change.mint.clone()
-                    },
-                    token_out: if direction == SwapDirection::Buy {
-                        change.mint.clone()
-                    } else {
-                        "So11111111111111111111111111111111111111112".to_string()
-                    },
-                    amount_in: sol_amount.abs(),
-                    amount_out: amount.abs(),
-                    direction,
-                    dex: "Unknown".to_string(),
-                    slippage: None,
-                }));
+                
+                // Aggregate deltas per mint
+                *token_deltas.entry(change.mint.clone()).or_insert(Decimal::ZERO) += amount;
             }
+        }
+
+        // Process native SOL balance change
+        if let Some(native_change) = account.native_balance_change {
+            native_sol_delta += Decimal::from(native_change) / Decimal::from(1_000_000_000u64);
         }
     }
 
-    Ok(None)
+    // Find non-SOL tokens with significant changes
+    let mut traded_token = None;
+
+    for (mint, delta) in &token_deltas {
+        if mint != SOL_MINT && mint != WSOL_MINT && delta.abs() > Decimal::from_str("0.000001").unwrap_or(Decimal::ZERO) {
+            traded_token = Some((mint.clone(), *delta));
+            break; // Found the traded token
+        }
+    }
+
+    // If no non-SOL token found, this might be a SOL-only transaction (not a swap)
+    let (token_mint, token_delta) = match traded_token {
+        Some((mint, delta)) => (mint, delta),
+        None => return Ok(None), // No traded token found
+    };
+
+    // Determine swap direction and SOL leg
+    let direction = if token_delta > Decimal::ZERO {
+        SwapDirection::Buy // Received tokens = BUY
+    } else {
+        SwapDirection::Sell // Sent tokens = SELL
+    };
+
+    // Compute SOL amount from native balance changes
+    // For token->SOL swaps, use positive SOL delta; for SOL->token, use absolute of negative SOL delta
+    let sol_amount = if native_sol_delta > Decimal::ZERO {
+        native_sol_delta.abs()
+    } else if native_sol_delta < Decimal::ZERO {
+        native_sol_delta.abs()
+    } else {
+        // No SOL leg found, use token delta as fallback (token->token swap)
+        token_delta.abs()
+    };
+
+    Ok(Some(ParsedSwap {
+        token_in: if direction == SwapDirection::Buy {
+            SOL_MINT.to_string()
+        } else {
+            token_mint.clone()
+        },
+        token_out: if direction == SwapDirection::Buy {
+            token_mint.clone()
+        } else {
+            SOL_MINT.to_string()
+        },
+        amount_in: sol_amount,
+        amount_out: token_delta.abs(),
+        direction,
+        dex: "Unknown".to_string(),
+        slippage: None,
+    }))
 }

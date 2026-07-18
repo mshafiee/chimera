@@ -19,211 +19,214 @@ use std::sync::Arc;
 /// Helius webhook endpoint
 pub async fn helius_webhook_handler(
     State(state): State<Arc<MonitoringState>>,
-    Json(payload): Json<HeliusWebhookPayload>,
+    Json(payload): Json<Vec<HeliusWebhookPayload>>,
 ) -> StatusCode {
-    // Rate limit webhook processing (non-blocking check)
-    // Note: Full rate limiting is handled by the rate limiter, but we skip the blocking acquire
-    // to avoid Send bound issues. The rate limiter will still track usage.
-    let _ = state.webhook_rate_limiter.current_rate();
+    // Process each event in the array
+    for event in payload {
+        // Rate limit webhook processing (non-blocking check)
+        // Note: Full rate limiting is handled by the rate limiter, but we skip the blocking acquire
+        // to avoid Send bound issues. The rate limiter will still track usage.
+        let _ = state.webhook_rate_limiter.current_rate();
 
-    tracing::info!(
-        signature = %payload.signature,
-        transaction_type = %payload.transaction_type,
-        "Received Helius webhook"
-    );
+        tracing::info!(
+            signature = %event.signature,
+            transaction_type = %event.transaction_type,
+            "Received Helius webhook event"
+        );
 
-    // Parse webhook to extract swap information
-    if let Ok(Some(swap)) = parse_helius_webhook(&payload) {
-        // Find wallet address from account data
-        let wallet_address = payload
-            .account_data
-            .iter()
-            .find_map(|acc| {
-                if acc.account != payload.signature {
-                    Some(acc.account.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_default();
-
-        if !wallet_address.is_empty() {
-            // Check if wallet exists in database
-            let wallet_opt = state.db.get_wallet(&wallet_address).await;
-
-            // If wallet doesn't exist, automatically add it as CANDIDATE
-            let wallet = if let Ok(Some(w)) = wallet_opt {
-                w
-            } else {
-                // Auto-add wallet when detected making a trade
-                tracing::info!(
-                    wallet = %wallet_address,
-                    "New wallet detected, adding to database"
-                );
-
-                // Add wallet with minimal info (will be analyzed by Scout later)
-                let _ = state
-                    .db
-                    .upsert_wallet(
-                        &wallet_address,
-                        None,                 // wqs_score - will be calculated by Scout
-                        None,                 // roi_7d
-                        None,                 // roi_30d
-                        Some(1),              // trade_count_30d - at least 1 trade detected
-                        None,                 // win_rate
-                        None,                 // max_drawdown_30d
-                        Some(swap.amount_in), // avg_trade_size_sol
-                        Some("Auto-added from webhook detection"), // notes
-                    )
-                    .await;
-
-                // Fetch the newly added wallet
-                match state.db.get_wallet(&wallet_address).await {
-                    Ok(Some(w)) => w,
-                    _ => {
-                        tracing::warn!(
-                            wallet = %wallet_address,
-                            "Failed to retrieve newly added wallet"
-                        );
-                        return StatusCode::OK; // Don't fail, just skip
+        // Parse webhook to extract swap information
+        if let Ok(Some(swap)) = parse_helius_webhook(&event) {
+            // Find wallet address from account data
+            let wallet_address = event
+                .account_data
+                .iter()
+                .find_map(|acc| {
+                    if acc.account != event.signature {
+                        Some(acc.account.clone())
+                    } else {
+                        None
                     }
-                }
-            };
+                })
+                .unwrap_or_default();
 
-            // Only process signals from ACTIVE wallets
-            if wallet.status == "ACTIVE" {
-                // FIX 1: Check circuit breaker before queuing
-                if let Some(ref cb) = state.circuit_breaker {
-                    if !cb.is_trading_allowed() {
-                        let reason = cb
-                            .trip_reason()
-                            .map(|r| r.to_string())
-                            .unwrap_or_else(|| "Circuit breaker tripped".to_string());
-                        tracing::warn!(
-                            wallet = %wallet_address,
-                            reason = %reason,
-                            "Helius webhook signal blocked by circuit breaker"
-                        );
-                        return StatusCode::SERVICE_UNAVAILABLE;
-                    }
-                }
+            if !wallet_address.is_empty() {
+                // Check if wallet exists in database
+                let wallet_opt = state.db.get_wallet(&wallet_address).await;
 
-                // Generate signal
-                let direction = if swap.direction == crate::monitoring::SwapDirection::Buy {
-                    Action::Buy
+                // If wallet doesn't exist, automatically add it as CANDIDATE
+                let wallet = if let Ok(Some(w)) = wallet_opt {
+                    w
                 } else {
-                    Action::Sell
-                };
-
-                // FIX 2: Determine strategy, downgrading Spear to Shield when in RPC fallback
-                let in_fallback = state.engine.is_in_fallback();
-                let strategy = if wallet
-                    .wqs_score
-                    .map(|s| s >= rust_decimal::Decimal::from(70))
-                    .unwrap_or(false)
-                {
-                    Strategy::Shield
-                } else if in_fallback {
-                    // Cannot run Spear when primary RPC is unavailable; use Shield
+                    // Auto-add wallet when detected making a trade
                     tracing::info!(
                         wallet = %wallet_address,
-                        "RPC in fallback mode — downgrading Spear signal to Shield"
+                        "New wallet detected, adding to database"
                     );
-                    Strategy::Shield
-                } else {
-                    Strategy::Spear
+
+                    // Add wallet with minimal info (will be analyzed by Scout later)
+                    let _ = state
+                        .db
+                        .upsert_wallet(
+                            &wallet_address,
+                            None,                 // wqs_score - will be calculated by Scout
+                            None,                 // roi_7d
+                            None,                 // roi_30d
+                            Some(1),              // trade_count_30d - at least 1 trade detected
+                            None,                 // win_rate
+                            None,                 // max_drawdown_30d
+                            Some(swap.amount_in), // avg_trade_size_sol
+                            Some("Auto-added from webhook detection"), // notes
+                        )
+                        .await;
+
+                    // Fetch the newly added wallet
+                    match state.db.get_wallet(&wallet_address).await {
+                        Ok(Some(w)) => w,
+                        _ => {
+                            tracing::warn!(
+                                wallet = %wallet_address,
+                                "Failed to retrieve newly added wallet"
+                            );
+                            continue; // Skip this event, but continue processing others
+                        }
+                    }
                 };
 
-                let target_token = if direction == Action::Buy {
-                    swap.token_out.clone()
-                } else {
-                    swap.token_in.clone()
-                };
-
-                // FIX 1: Token fast_check before queuing (BUY only)
-                if direction == Action::Buy {
-                    if let Some(ref tp) = state.token_parser {
-                        match tp.fast_check(&target_token, strategy).await {
-                            Ok(result) if !result.safe => {
-                                let reason = result
-                                    .rejection_reason
-                                    .unwrap_or_else(|| "Token failed safety check".to_string());
-                                tracing::warn!(
-                                    wallet = %wallet_address,
-                                    token = %target_token,
-                                    reason = %reason,
-                                    "Helius webhook token rejected by fast-path safety check"
-                                );
-                                return StatusCode::OK; // Not an error on our end; just skip
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    token = %target_token,
-                                    error = %e,
-                                    "Helius webhook token fast-check failed; proceeding to slow path"
-                                );
-                            }
-                            Ok(_) => {} // safe — continue
+                // Only process signals from ACTIVE wallets
+                if wallet.status == "ACTIVE" {
+                    // FIX 1: Check circuit breaker before queuing
+                    if let Some(ref cb) = state.circuit_breaker {
+                        if !cb.is_trading_allowed() {
+                            let reason = cb
+                                .trip_reason()
+                                .map(|r| r.to_string())
+                                .unwrap_or_else(|| "Circuit breaker tripped".to_string());
+                            tracing::warn!(
+                                wallet = %wallet_address,
+                                reason = %reason,
+                                "Helius webhook signal blocked by circuit breaker"
+                            );
+                            continue; // Skip this event, but continue processing others
                         }
                     }
 
-                    // FIX 1: Check portfolio heat before queuing BUY signals
-                    if let Some(ref ph) = state.portfolio_heat {
-                        match ph.can_open_position(swap.amount_in).await {
-                            Ok(false) => {
-                                tracing::warn!(
-                                    wallet = %wallet_address,
-                                    token = %target_token,
-                                    "Helius webhook BUY rejected: portfolio heat limit reached"
-                                );
-                                return StatusCode::SERVICE_UNAVAILABLE;
+                    // Generate signal
+                    let direction = if swap.direction == crate::monitoring::SwapDirection::Buy {
+                        Action::Buy
+                    } else {
+                        Action::Sell
+                    };
+
+                    // FIX 2: Determine strategy, downgrading Spear to Shield when in RPC fallback
+                    let in_fallback = state.engine.is_in_fallback();
+                    let strategy = if wallet
+                        .wqs_score
+                        .map(|s| s >= rust_decimal::Decimal::from(70))
+                        .unwrap_or(false)
+                    {
+                        Strategy::Shield
+                    } else if in_fallback {
+                        // Cannot run Spear when primary RPC is unavailable; use Shield
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            "RPC in fallback mode — downgrading Spear signal to Shield"
+                        );
+                        Strategy::Shield
+                    } else {
+                        Strategy::Spear
+                    };
+
+                    let target_token = if direction == Action::Buy {
+                        swap.token_out.clone()
+                    } else {
+                        swap.token_in.clone()
+                    };
+
+                    // FIX 1: Token fast_check before queuing (BUY only)
+                    if direction == Action::Buy {
+                        if let Some(ref tp) = state.token_parser {
+                            match tp.fast_check(&target_token, strategy).await {
+                                Ok(result) if !result.safe => {
+                                    let reason = result
+                                        .rejection_reason
+                                        .unwrap_or_else(|| "Token failed safety check".to_string());
+                                    tracing::warn!(
+                                        wallet = %wallet_address,
+                                        token = %target_token,
+                                        reason = %reason,
+                                        "Helius webhook token rejected by fast-path safety check"
+                                    );
+                                    continue; // Skip this event, but continue processing others
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        token = %target_token,
+                                        error = %e,
+                                        "Helius webhook token fast-check failed; proceeding to slow path"
+                                    );
+                                }
+                                Ok(_) => {} // safe — continue
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Portfolio heat check failed for Helius webhook; allowing"
-                                );
+                        }
+
+                        // FIX 1: Check portfolio heat before queuing BUY signals
+                        if let Some(ref ph) = state.portfolio_heat {
+                            match ph.can_open_position(swap.amount_in).await {
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        wallet = %wallet_address,
+                                        token = %target_token,
+                                        "Helius webhook BUY rejected: portfolio heat limit reached"
+                                    );
+                                    continue; // Skip this event, but continue processing others
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Portfolio heat check failed for Helius webhook; allowing"
+                                    );
+                                }
+                                Ok(true) => {} // heat OK — continue
                             }
-                            Ok(true) => {} // heat OK — continue
                         }
                     }
+
+                    let signal_payload = SignalPayload {
+                        wallet_address: wallet_address.clone(),
+                        strategy,
+                        token: target_token.clone(),
+                        token_address: Some(target_token),
+                        action: direction,
+                        amount_sol: swap.amount_in,
+                        trade_uuid: None,
+                        exit_fraction: None,
+                    };
+
+                    let signal = Signal::new(
+                        signal_payload,
+                        chrono::Utc::now().timestamp(),
+                        None, // source_ip
+                    );
+
+                    // Queue signal with wallet WQS
+                    let wallet_wqs = wallet.wqs_score.map(|s| s.to_f64().unwrap_or(0.0));
+                    if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
+                        tracing::error!(error = %e, "Failed to queue signal from webhook");
+                        continue; // Skip this event, but continue processing others
+                    }
+
+                    tracing::info!(
+                        wallet = %wallet_address,
+                        token = %swap.token_out,
+                        "Queued signal from webhook"
+                    );
+                } else {
+                    tracing::debug!(
+                        wallet = %wallet_address,
+                        status = %wallet.status,
+                        "Wallet detected but not ACTIVE, skipping signal"
+                    );
                 }
-
-                let signal_payload = SignalPayload {
-                    wallet_address: wallet_address.clone(),
-                    strategy,
-                    token: target_token.clone(),
-                    token_address: Some(target_token),
-                    action: direction,
-                    amount_sol: swap.amount_in,
-                    trade_uuid: None,
-                    exit_fraction: None,
-                };
-
-                let signal = Signal::new(
-                    signal_payload,
-                    chrono::Utc::now().timestamp(),
-                    None, // source_ip
-                );
-
-                // Queue signal with wallet WQS
-                let wallet_wqs = wallet.wqs_score.map(|s| s.to_f64().unwrap_or(0.0));
-                if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
-                    tracing::error!(error = %e, "Failed to queue signal from webhook");
-                    return StatusCode::INTERNAL_SERVER_ERROR;
-                }
-
-                tracing::info!(
-                    wallet = %wallet_address,
-                    token = %swap.token_out,
-                    "Queued signal from webhook"
-                );
-            } else {
-                tracing::debug!(
-                    wallet = %wallet_address,
-                    status = %wallet.status,
-                    "Wallet detected but not ACTIVE, skipping signal"
-                );
             }
         }
     }

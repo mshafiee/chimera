@@ -316,6 +316,7 @@ pub async fn update_wallet(
                         stale_threshold_days: 7,
                         max_registration_retries: 3,
                         webhook_url: webhook_url.clone(),
+                        helius_dry_run: true,
                     };
 
                     let manager =
@@ -387,6 +388,7 @@ pub async fn update_wallet(
                         stale_threshold_days: 7,
                         max_registration_retries: 3,
                         webhook_url: webhook_url.clone(),
+                        helius_dry_run: true,
                     };
 
                     let manager =

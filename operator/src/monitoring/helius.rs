@@ -147,6 +147,7 @@ pub struct WebhookReconciliationResult {
     pub ineligible_wallets: usize,
     pub deleted_webhooks: usize,
     pub failed_deletions: usize,
+    pub would_delete: Vec<(String, String)>, // (webhook_id, reason)
     pub duration_ms: u64,
     pub details: Vec<WebhookReconciliationDetail>,
 }

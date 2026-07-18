@@ -1129,10 +1129,7 @@ pub struct WebhookLifecycleConfig {
     /// Enable Helius dashboard reconciliation on startup (default: true)
     #[serde(default = "default_helius_reconciliation_enabled")]
     pub helius_reconciliation_enabled: bool,
-    /// Delete orphaned webhooks during reconciliation (default: true)
-    #[serde(default = "default_helius_delete_orphaned")]
-    pub helius_delete_orphaned: bool,
-    /// Dry-run mode - log only, don't delete (default: false)
+    /// Dry-run mode for reconciliation - log only, don't delete (default: true)
     #[serde(default = "default_helius_dry_run")]
     pub helius_dry_run: bool,
 }
@@ -1161,12 +1158,8 @@ fn default_helius_reconciliation_enabled() -> bool {
     true
 }
 
-fn default_helius_delete_orphaned() -> bool {
-    true
-}
-
 fn default_helius_dry_run() -> bool {
-    false
+    true
 }
 
 fn default_true() -> bool {

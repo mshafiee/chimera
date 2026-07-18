@@ -24,6 +24,7 @@ pub struct WebhookLifecycleConfig {
     pub stale_threshold_days: u32,
     pub max_registration_retries: u32,
     pub webhook_url: String,
+    pub helius_dry_run: bool,
 }
 
 /// Webhook registration result
@@ -62,6 +63,7 @@ pub struct ReconciliationResult {
     pub orphaned: usize,
     pub updated: usize,
     pub failed: usize,
+    pub would_delete: Vec<(String, String)>, // (webhook_id, reason)
     pub duration_ms: i32,
 }
 
@@ -578,6 +580,7 @@ impl WebhookLifecycleManager {
         let mut orphaned = 0;
         let mut updated = 0;
         let mut failed = 0;
+        let mut would_delete = Vec::new();
 
         // Get all webhooks from Helius
         let helius_webhooks = self
@@ -624,16 +627,28 @@ impl WebhookLifecycleManager {
             .map(|dw| dw.wallet_address.clone())
             .collect();
 
-        // Cleanup orphaned webhooks
+        // Cleanup orphaned webhooks (advisory mode if helius_dry_run is true)
         for webhook_id in orphaned_webhooks {
-            match self.helius_client.delete_webhook(&webhook_id).await {
-                Ok(()) => {
-                    orphaned += 1;
-                    info!(webhook_id = %webhook_id, "Cleaned up orphaned webhook");
-                }
-                Err(e) => {
-                    failed += 1;
-                    warn!(webhook_id = %webhook_id, error = %e, "Failed to cleanup orphaned webhook");
+            if self.config.helius_dry_run {
+                // Advisory mode: log and track what would be deleted
+                would_delete.push((webhook_id.clone(), "orphaned_webhook".to_string()));
+                info!(
+                    webhook_id = %webhook_id,
+                    action = "would_delete_orphaned",
+                    "Would clean up orphaned webhook (dry-run mode)"
+                );
+                orphaned += 1;
+            } else {
+                // Actual deletion (not recommended)
+                match self.helius_client.delete_webhook(&webhook_id).await {
+                    Ok(()) => {
+                        orphaned += 1;
+                        info!(webhook_id = %webhook_id, "Cleaned up orphaned webhook");
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        warn!(webhook_id = %webhook_id, error = %e, "Failed to cleanup orphaned webhook");
+                    }
                 }
             }
         }
@@ -698,6 +713,7 @@ impl WebhookLifecycleManager {
             orphaned = orphaned,
             updated = updated,
             failed = failed,
+            would_delete_count = would_delete.len(),
             duration_ms = start.elapsed().as_millis(),
             "Webhook reconciliation completed"
         );
@@ -707,6 +723,7 @@ impl WebhookLifecycleManager {
             orphaned,
             updated,
             failed,
+            would_delete,
             duration_ms: start.elapsed().as_millis() as i32,
         })
     }
@@ -843,6 +860,7 @@ impl WebhookLifecycleManager {
         let mut ineligible_wallets = 0;
         let mut deleted_webhooks = 0;
         let mut failed_deletions = 0;
+        let mut would_delete = Vec::new();
         let mut details = Vec::new();
 
         info!(
@@ -856,6 +874,7 @@ impl WebhookLifecycleManager {
             // Check eligibility for each wallet address in the webhook
             let mut any_eligible = false;
             let mut wallet_details = Vec::new();
+            let mut ineligibility_reasons: Vec<String> = Vec::new();
 
             for wallet_address in &webhook.wallet_addresses {
                 match self.check_wallet_eligibility(wallet_address).await {
@@ -873,6 +892,7 @@ impl WebhookLifecycleManager {
                             );
                         } else {
                             ineligible_wallets += 1;
+                            ineligibility_reasons.push(eligibility.reason.clone());
                             warn!(
                                 webhook_id = %webhook_id,
                                 wallet = %wallet_address,
@@ -890,6 +910,7 @@ impl WebhookLifecycleManager {
                     }
                     Err(e) => {
                         ineligible_wallets += 1;
+                        ineligibility_reasons.push(format!("Eligibility check failed: {}", e));
                         warn!(
                             webhook_id = %webhook_id,
                             wallet = %wallet_address,
@@ -908,25 +929,40 @@ impl WebhookLifecycleManager {
 
             // Delete webhook if NO wallets are eligible
             if !any_eligible && !webhook.wallet_addresses.is_empty() {
-                info!(
-                    webhook_id = %webhook_id,
-                    wallet_count = webhook.wallet_addresses.len(),
-                    "Deleting webhook - no eligible wallets"
-                );
+                let combined_reason = ineligibility_reasons.join("; ");
+                if self.config.helius_dry_run {
+                    // Advisory mode: log and track what would be deleted
+                    would_delete.push((webhook_id.clone(), combined_reason.clone()));
+                    info!(
+                        webhook_id = %webhook_id,
+                        wallet_count = webhook.wallet_addresses.len(),
+                        action = "would_delete_unprofitable",
+                        reason = %combined_reason,
+                        "Would delete webhook - no eligible wallets (dry-run mode)"
+                    );
+                } else {
+                    // Actual deletion (not recommended)
+                    info!(
+                        webhook_id = %webhook_id,
+                        wallet_count = webhook.wallet_addresses.len(),
+                        reason = %combined_reason,
+                        "Deleting webhook - no eligible wallets"
+                    );
 
-                // Rate limit before deletion
-                self.rate_limiter
-                    .acquire_standard(RequestPriority::Polling)
-                    .await;
+                    // Rate limit before deletion
+                    self.rate_limiter
+                        .acquire_standard(RequestPriority::Polling)
+                        .await;
 
-                match self.helius_client.delete_webhook(&webhook_id).await {
-                    Ok(()) => {
-                        deleted_webhooks += 1;
-                        info!(webhook_id = %webhook_id, "Successfully deleted webhook");
-                    }
-                    Err(e) => {
-                        failed_deletions += 1;
-                        error!(webhook_id = %webhook_id, error = %e, "Failed to delete webhook");
+                    match self.helius_client.delete_webhook(&webhook_id).await {
+                        Ok(()) => {
+                            deleted_webhooks += 1;
+                            info!(webhook_id = %webhook_id, "Successfully deleted webhook");
+                        }
+                        Err(e) => {
+                            failed_deletions += 1;
+                            error!(webhook_id = %webhook_id, error = %e, "Failed to delete webhook");
+                        }
                     }
                 }
             } else if any_eligible {
@@ -947,6 +983,7 @@ impl WebhookLifecycleManager {
             eligible_wallets,
             ineligible_wallets,
             deleted_webhooks,
+            would_delete_count = would_delete.len(),
             failed_deletions,
             duration_ms,
             "Helius dashboard reconciliation completed"
@@ -958,6 +995,7 @@ impl WebhookLifecycleManager {
             ineligible_wallets,
             deleted_webhooks,
             failed_deletions,
+            would_delete,
             duration_ms,
             details,
         })

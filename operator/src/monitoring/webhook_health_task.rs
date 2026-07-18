@@ -19,6 +19,7 @@ pub struct WebhookHealthConfig {
     pub check_interval_secs: u64,
     pub stale_threshold_days: u32,
     pub webhook_url: String,
+    pub helius_dry_run: bool,
 }
 
 /// Start the webhook health monitoring task
@@ -45,6 +46,7 @@ pub async fn start_webhook_health_task(
         stale_threshold_days: config.stale_threshold_days,
         max_registration_retries: 3,
         webhook_url: config.webhook_url.clone(),
+        helius_dry_run: config.helius_dry_run,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -139,6 +141,7 @@ pub async fn manual_reconcile_webhooks(
         stale_threshold_days: 7,
         max_registration_retries: 3,
         webhook_url: webhook_url.to_string(),
+        helius_dry_run: true,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -181,6 +184,7 @@ pub async fn manual_health_check(
         stale_threshold_days,
         max_registration_retries: 3,
         webhook_url: webhook_url.to_string(),
+        helius_dry_run: true,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -263,6 +267,7 @@ pub async fn run_startup_webhook_check(
         stale_threshold_days: config.stale_threshold_days,
         max_registration_retries: 3,
         webhook_url: config.webhook_url.clone(),
+        helius_dry_run: config.helius_dry_run,
     };
 
     let manager =
@@ -374,6 +379,7 @@ pub async fn reconcile_helius_webhooks_async(
         stale_threshold_days: config.stale_threshold_days,
         max_registration_retries: 3,
         webhook_url: config.webhook_url.clone(),
+        helius_dry_run: config.helius_dry_run,
     };
 
     let manager = WebhookLifecycleManager::new(db, helius_client, rate_limiter, lifecycle_config);
@@ -405,9 +411,11 @@ mod tests {
             check_interval_secs: 3600,
             stale_threshold_days: 7,
             webhook_url: "https://example.com/webhook".to_string(),
+            helius_dry_run: true,
         };
 
         assert_eq!(config.check_interval_secs, 3600);
         assert_eq!(config.stale_threshold_days, 7);
+        assert!(config.helius_dry_run);
     }
 }

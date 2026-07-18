@@ -1656,6 +1656,7 @@ async fn main() -> anyhow::Result<()> {
                         check_interval_secs: webhook_lifecycle_config.health_check_interval_secs,
                         stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
                         webhook_url: webhook_url.clone(),
+                        helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                     };
 
                     tokio::spawn(async move {
@@ -1720,6 +1721,7 @@ async fn main() -> anyhow::Result<()> {
                         check_interval_secs: webhook_lifecycle_config.health_check_interval_secs,
                         stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
                         webhook_url: startup_webhook_url,
+                        helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                     };
 
                     tracing::info!("Running startup webhook check...");
@@ -1768,6 +1770,7 @@ async fn main() -> anyhow::Result<()> {
                                 .health_check_interval_secs,
                             stale_threshold_days: webhook_lifecycle_config.stale_threshold_days,
                             webhook_url: reconcile_webhook_url,
+                            helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                         };
 
                         tokio::spawn(async move {
