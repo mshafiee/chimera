@@ -100,6 +100,17 @@ impl WebhookLifecycleManager {
         }
     }
 
+    /// Fetch the set of webhook IDs currently registered in Helius.
+    /// Used to detect stale IDs stored in the database.
+    pub async fn get_helius_webhook_ids(&self) -> Result<Vec<String>> {
+        let webhooks = self
+            .helius_client
+            .list_webhooks_typed()
+            .await
+            .context("Failed to list Helius webhooks")?;
+        Ok(webhooks.into_iter().map(|w| w.webhook_id).collect())
+    }
+
     /// Register webhook for newly promoted wallet with comprehensive error handling
     pub async fn register_wallet_webhook(&self, wallet: &str) -> Result<WebhookRegistrationResult> {
         let start = Instant::now();
@@ -120,22 +131,50 @@ impl WebhookLifecycleManager {
             });
         }
 
-        // Check if webhook already exists
+        // Check if webhook already exists in DB
         if let Ok(Some(existing_webhook)) = self.db.get_wallet_monitoring(wallet).await {
             if let Some(webhook_id) = &existing_webhook.helius_webhook_id {
                 if !webhook_id.is_empty() {
-                    info!(
-                        wallet = %wallet,
-                        webhook_id = %webhook_id,
-                        "Webhook already exists"
-                    );
-                    return Ok(WebhookRegistrationResult {
-                        wallet_address: wallet.to_string(),
-                        webhook_id: webhook_id.clone(),
-                        success: true,
-                        error_message: None,
-                        duration_ms: start.elapsed().as_millis() as i32,
-                    });
+                    // Verify the webhook actually exists in Helius before trusting the DB record.
+                    // This catches stale IDs left over from manual deletion or prior cleanups.
+                    match self.helius_client.get_webhook_typed(webhook_id).await {
+                        Ok(_) => {
+                            info!(
+                                wallet = %wallet,
+                                webhook_id = %webhook_id,
+                                "Webhook already exists and verified in Helius"
+                            );
+                            return Ok(WebhookRegistrationResult {
+                                wallet_address: wallet.to_string(),
+                                webhook_id: webhook_id.clone(),
+                                success: true,
+                                error_message: None,
+                                duration_ms: start.elapsed().as_millis() as i32,
+                            });
+                        }
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            // 404 means the webhook was deleted from Helius — clear and re-register.
+                            if err_str.contains("404") || err_str.contains("Not Found") {
+                                warn!(
+                                    wallet = %wallet,
+                                    webhook_id = %webhook_id,
+                                    "Webhook ID no longer exists in Helius — clearing stale record and re-registering"
+                                );
+                                let _ = self.db.clear_webhook_id(wallet).await;
+                                // Fall through to actual registration below
+                            } else {
+                                // Other errors (network, 5xx) — don't clear, just report failure
+                                warn!(
+                                    wallet = %wallet,
+                                    webhook_id = %webhook_id,
+                                    error = %e,
+                                    "Could not verify webhook in Helius, will attempt re-registration"
+                                );
+                                // Fall through to actual registration below
+                            }
+                        }
+                    }
                 }
             }
         }

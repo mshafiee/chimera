@@ -533,63 +533,83 @@ pub fn parse_helius_webhook(
     }
 
     const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
-    const WSOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
-    // Aggregate token balance changes across all account_data entries
-    let mut token_deltas: std::collections::HashMap<String, Decimal> = std::collections::HashMap::new();
-    let mut native_sol_delta = Decimal::ZERO;
+    // Aggregate NET token balance changes across all account_data entries.
+    // Helius Enhanced webhooks report net deltas, so multi-hop intermediate
+    // tokens (e.g. USDC in SOL→USDC→TOKEN) correctly net to ~zero.
+    let mut token_deltas: std::collections::HashMap<String, Decimal> =
+        std::collections::HashMap::new();
 
     for account in &payload.account_data {
-        // Process token balance changes
         if let Some(token_changes) = &account.token_balance_changes {
             for change in token_changes {
-                let amount_str = &change.raw_token_amount.token_amount;
-                let amount = Decimal::from_str(amount_str).unwrap_or(Decimal::ZERO);
-                
-                // Aggregate deltas per mint
+                let amount = Decimal::from_str(&change.raw_token_amount.token_amount)
+                    .unwrap_or(Decimal::ZERO);
                 *token_deltas.entry(change.mint.clone()).or_insert(Decimal::ZERO) += amount;
             }
         }
-
-        // Process native SOL balance change
-        if let Some(native_change) = account.native_balance_change {
-            native_sol_delta += Decimal::from(native_change) / Decimal::from(1_000_000_000u64);
-        }
     }
 
-    // Find non-SOL tokens with significant changes
-    let mut traded_token = None;
-
+    // Find the traded non-SOL token (the one with a significant net delta).
+    // For multi-hop routes, only the final destination token has a non-zero net delta.
+    let mut traded_token: Option<(String, Decimal)> = None;
     for (mint, delta) in &token_deltas {
-        if mint != SOL_MINT && mint != WSOL_MINT && delta.abs() > Decimal::from_str("0.000001").unwrap_or(Decimal::ZERO) {
-            traded_token = Some((mint.clone(), *delta));
-            break; // Found the traded token
+        if mint == SOL_MINT {
+            continue;
+        }
+        // Significant threshold filters dust from rounding/fees.
+        if delta.abs() > Decimal::new(1, 6) {
+            // 0.000001
+            // If we already found a token, prefer the one with the larger absolute delta
+            // (the actual traded token, not a residual intermediate).
+            match &traded_token {
+                Some((_, prev_delta)) if prev_delta.abs() >= delta.abs() => {}
+                _ => traded_token = Some((mint.clone(), *delta)),
+            }
         }
     }
 
-    // If no non-SOL token found, this might be a SOL-only transaction (not a swap)
     let (token_mint, token_delta) = match traded_token {
-        Some((mint, delta)) => (mint, delta),
-        None => return Ok(None), // No traded token found
+        Some(v) => v,
+        None => return Ok(None), // No traded token found (SOL-only or not a swap)
     };
 
-    // Determine swap direction and SOL leg
+    // Direction: positive token delta = received tokens = BUY; negative = SELL.
     let direction = if token_delta > Decimal::ZERO {
-        SwapDirection::Buy // Received tokens = BUY
+        SwapDirection::Buy
     } else {
-        SwapDirection::Sell // Sent tokens = SELL
+        SwapDirection::Sell
     };
 
-    // Compute SOL amount from native balance changes
-    // For token->SOL swaps, use positive SOL delta; for SOL->token, use absolute of negative SOL delta
-    let sol_amount = if native_sol_delta > Decimal::ZERO {
-        native_sol_delta.abs()
-    } else if native_sol_delta < Decimal::ZERO {
-        native_sol_delta.abs()
-    } else {
-        // No SOL leg found, use token delta as fallback (token->token swap)
-        token_delta.abs()
-    };
+    // Compute the SOL leg amount. Prefer native_transfers (explicit SOL movements)
+    // over native_balance_change (which includes fees and rent).
+    let lamports_per_sol = Decimal::from(1_000_000_000u64);
+    let mut sol_amount = Decimal::ZERO;
+
+    // Sum absolute native transfer amounts — these are the explicit SOL legs of the swap.
+    for transfer in &payload.native_transfers {
+        sol_amount += Decimal::from(transfer.amount) / &lamports_per_sol;
+    }
+
+    if sol_amount == Decimal::ZERO {
+        // Fallback: use net native balance change if no explicit native transfers.
+        let native_sol_delta: Decimal = payload
+            .account_data
+            .iter()
+            .filter_map(|a| a.native_balance_change)
+            .map(|c| Decimal::from(c) / &lamports_per_sol)
+            .sum();
+        sol_amount = native_sol_delta.abs();
+    }
+
+    if sol_amount == Decimal::ZERO {
+        // Last resort: token-to-token swap with no SOL leg — use token delta magnitude.
+        sol_amount = token_delta.abs();
+    }
+
+    // Detect DEX from webhook payload heuristics (best-effort; enriched webhooks
+    // don't include instruction details, so this is approximate).
+    let dex = detect_dex_from_payload(payload);
 
     Ok(Some(ParsedSwap {
         token_in: if direction == SwapDirection::Buy {
@@ -605,7 +625,188 @@ pub fn parse_helius_webhook(
         amount_in: sol_amount,
         amount_out: token_delta.abs(),
         direction,
-        dex: "Unknown".to_string(),
+        dex,
         slippage: None,
     }))
+}
+
+/// Best-effort DEX detection from Helius Enhanced webhook payload.
+/// Enriched webhooks don't include program IDs, so we can only guess based on
+/// the number of native transfers and token deltas. Returns "Unknown" if uncertain.
+fn detect_dex_from_payload(payload: &crate::monitoring::helius::HeliusWebhookPayload) -> String {
+    // Heuristic: Jupiter routes typically have 2+ native transfers and multiple
+    // token balance changes (intermediate hops). Direct DEX swaps usually have
+    // exactly 2 native transfers and 1-2 token changes.
+    let native_transfer_count = payload.native_transfers.len();
+    let token_change_count = payload
+        .account_data
+        .iter()
+        .filter_map(|a| a.token_balance_changes.as_ref().map(|c| c.len()))
+        .sum::<usize>();
+
+    if token_change_count > 2 || native_transfer_count > 4 {
+        "Jupiter".to_string() // Multi-hop route — likely Jupiter aggregator
+    } else if native_transfer_count >= 2 {
+        "Unknown".to_string()
+    } else {
+        "Unknown".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitoring::helius::{
+        AccountData, HeliusWebhookPayload, NativeTransfer, RawTokenAmount, TokenBalanceChange,
+    };
+
+    const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+
+    fn make_payload(
+        account_data: Vec<AccountData>,
+        native_transfers: Vec<NativeTransfer>,
+    ) -> HeliusWebhookPayload {
+        HeliusWebhookPayload {
+            account_data,
+            native_transfers,
+            signature: "sig_test".to_string(),
+            slot: 1,
+            timestamp: 1,
+            transaction_error: None,
+            transaction_type: "SWAP".to_string(),
+        }
+    }
+
+    fn token_change(mint: &str, amount: &str, account: &str) -> TokenBalanceChange {
+        TokenBalanceChange {
+            mint: mint.to_string(),
+            raw_token_amount: RawTokenAmount {
+                token_amount: amount.to_string(),
+            },
+            token_account: format!("{}acct", account),
+            user_account: account.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_simple_buy_spend_sol_receive_token() {
+        // Buy: wallet spends 1 SOL, receives 1000 tokens
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(-1_000_000_000), // -1 SOL
+                token_balance_changes: Some(vec![token_change(token, "1000", wallet)]),
+            }],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_out, token);
+        assert_eq!(swap.token_in, SOL_MINT);
+        assert_eq!(swap.amount_out, rust_decimal::Decimal::new(1000, 0));
+    }
+
+    #[test]
+    fn test_simple_sell_receive_sol_lose_token() {
+        // Sell: wallet loses 500 tokens, receives 0.5 SOL
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(500_000_000), // +0.5 SOL
+                token_balance_changes: Some(vec![token_change(token, "-500", wallet)]),
+            }],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, token);
+        assert_eq!(swap.token_out, SOL_MINT);
+    }
+
+    #[test]
+    fn test_multihop_intermediate_token_nets_to_zero() {
+        // SOL -> USDC -> TARGET_TOKEN multi-hop.
+        // USDC nets to zero (intermediate hop); only TARGET should be detected.
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let usdc = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+        let target = "Target1111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(-1_000_000_000),
+                token_balance_changes: Some(vec![
+                    token_change(usdc, "2000", wallet),  // receive USDC
+                    token_change(usdc, "-2000", wallet), // spend USDC (nets to 0)
+                    token_change(target, "5000", wallet), // receive target
+                ]),
+            }],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_out, target, "must pick target, not intermediate USDC");
+    }
+
+    #[test]
+    fn test_sol_amount_from_native_transfers() {
+        // native_transfers should be preferred over native_balance_change
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let token = "TokA111111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(-50_000_000), // small change (rent/fee)
+                token_balance_changes: Some(vec![token_change(token, "100", wallet)]),
+            }],
+            vec![NativeTransfer {
+                amount: 2_000_000_000, // 2 SOL actual swap
+                from_user_account: wallet.to_string(),
+                to_user_account: "DexRouter111111111111111111111111111111111".to_string(),
+            }],
+        );
+
+        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        // Should use native_transfers (2 SOL), not native_balance_change (0.05 SOL)
+        assert!(
+            swap.amount_in >= rust_decimal::Decimal::new(2, 0),
+            "expected SOL amount from native_transfers, got {}",
+            swap.amount_in
+        );
+    }
+
+    #[test]
+    fn test_non_swap_transaction_returns_none() {
+        let payload = HeliusWebhookPayload {
+            account_data: vec![],
+            native_transfers: vec![],
+            signature: "sig".to_string(),
+            slot: 1,
+            timestamp: 1,
+            transaction_error: None,
+            transaction_type: "TRANSFER".to_string(),
+        };
+        assert!(parse_helius_webhook(&payload).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_sol_only_transaction_returns_none() {
+        // Pure SOL transfer, no token changes — not a swap we care about
+        let wallet = "Wallet111111111111111111111111111111111111";
+        let payload = make_payload(
+            vec![AccountData {
+                account: wallet.to_string(),
+                native_balance_change: Some(-1_000_000_000),
+                token_balance_changes: None,
+            }],
+            vec![],
+        );
+        assert!(parse_helius_webhook(&payload).unwrap().is_none());
+    }
 }

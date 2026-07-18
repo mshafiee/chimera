@@ -2291,6 +2291,51 @@ impl Database for PostgresBackend {
         Ok(wallets)
     }
 
+    async fn get_active_wallets_with_webhook_ids(&self) -> AppResult<Vec<(String, String)>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT w.address, wm.helius_webhook_id
+            FROM wallets w
+            JOIN wallet_monitoring wm ON w.address = wm.wallet_address
+            WHERE w.status = 'ACTIVE'
+              AND wm.helius_webhook_id IS NOT NULL
+              AND wm.helius_webhook_id != ''
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        let result: Vec<(String, String)> = rows
+            .iter()
+            .filter_map(|row| {
+                let address: Option<String> = row.try_get("address").ok()?;
+                let webhook_id: Option<String> = row.try_get("helius_webhook_id").ok()?;
+                Some((address?, webhook_id?))
+            })
+            .collect();
+
+        Ok(result)
+    }
+
+    async fn clear_webhook_id(&self, wallet_address: &str) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET helius_webhook_id = NULL,
+                webhook_status = 'orphaned',
+                webhook_health_status = 'stale',
+                updated_at = NOW()
+            WHERE wallet_address = $1
+            "#,
+        )
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(())
+    }
+
     async fn get_stale_webhook_wallets(&self, threshold_days: i32) -> AppResult<Vec<String>> {
         let wallets = sqlx::query_scalar(
             r#"

@@ -155,8 +155,11 @@ monitoring:
     high_conviction_wqs_threshold: 80    # WQS threshold for high conviction
     regular_conviction_wqs_threshold: 60   # WQS threshold for regular conviction
 
-  # 🔥 NEW: Enable Helius LaserStream WebSocket (zero-credit transaction parsing)
-  use_websocket: true  # Changed from false to true
+  # Helius LaserStream WebSocket (zero-credit transaction parsing)
+  # Disabled: the Developer plan does not include LaserStream access; the standard
+  # mainnet.helius-rpc.com WSS endpoint is for Solana subscriptions, not LaserStream,
+  # and connection attempts fail every 60s with no benefit. Rely on webhooks + RPC polling.
+  use_websocket: false
   helius_websocket_url: "wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}"
 
   # WebSocket reconnection configuration
@@ -177,8 +180,7 @@ monitoring:
     stale_threshold_days: 7       # Cleanup webhooks inactive for 7+ days
     max_registration_retries: 3   # Retry failed registrations up to 3 times
     helius_reconciliation_enabled: true  # Check Helius dashboard and clean up unprofitable webhooks
-    helius_delete_orphaned: true   # Delete webhooks for wallets that don't meet profitability criteria
-    helius_dry_run: false          # Log only, don't delete (set to true for testing)
+    helius_dry_run: true           # Advisory mode: log what would be deleted, don't actually delete
 
 # Profit management configuration
 profit_management:

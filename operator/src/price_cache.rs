@@ -511,7 +511,7 @@ impl PriceCache {
             }
         }
 
-        tracing::debug!(token_count = tokens.len(), "Updated prices");
+        tracing::trace!(token_count = tokens.len(), "Updated prices");
 
         Ok(())
     }
@@ -531,7 +531,7 @@ impl PriceCache {
         let token_list = tokens.join(",");
         let url = format!("{}/v3?ids={}", self.jupiter_price_api_url.trim_end_matches('/'), token_list);
 
-        tracing::debug!(
+        tracing::trace!(
             token_count = tokens.len(),
             url = %url,
             "Fetching prices from Jupiter"
@@ -596,7 +596,7 @@ impl PriceCache {
             }
         }
 
-        tracing::debug!(
+        tracing::trace!(
             fetched_count = results.len(),
             total_requested = tokens.len(),
             "Fetched prices from Jupiter"

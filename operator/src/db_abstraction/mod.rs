@@ -433,6 +433,12 @@ pub trait Database: Send + Sync {
     /// Get wallets that need webhook registration (ACTIVE but no webhook)
     async fn get_wallets_needing_webhook_registration(&self) -> AppResult<Vec<String>>;
 
+    /// Get ACTIVE wallets that have a webhook_id stored (for staleness verification)
+    async fn get_active_wallets_with_webhook_ids(&self) -> AppResult<Vec<(String, String)>>;
+
+    /// Clear a stale webhook_id from wallet_monitoring (sets to NULL)
+    async fn clear_webhook_id(&self, wallet_address: &str) -> AppResult<()>;
+
     /// Get stale webhook wallets for cleanup (inactive for threshold days)
     async fn get_stale_webhook_wallets(&self, threshold_days: i32) -> AppResult<Vec<String>>;
 

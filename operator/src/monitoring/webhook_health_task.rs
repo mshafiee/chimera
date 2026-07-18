@@ -278,7 +278,36 @@ pub async fn run_startup_webhook_check(
     let mut cleaned_up = 0;
     let mut failed = 0;
 
-    // 1. Register webhooks for ACTIVE wallets that need them
+    // 0. Verify existing webhook IDs against Helius — clear stale ones so they get re-registered.
+    // This fixes the case where the DB has a webhook_id but the webhook was deleted from Helius
+    // (e.g., manually or by a previous cleanup), leaving monitoring silently broken.
+    let wallets_with_ids = db.get_active_wallets_with_webhook_ids().await.unwrap_or_default();
+    if !wallets_with_ids.is_empty() {
+        match manager.get_helius_webhook_ids().await {
+            Ok(helius_webhook_ids) => {
+                let mut stale_count = 0;
+                for (wallet_address, stored_id) in &wallets_with_ids {
+                    if !helius_webhook_ids.contains(stored_id) {
+                        info!(
+                            wallet = %wallet_address,
+                            stored_webhook_id = %stored_id,
+                            "Webhook ID in DB not found in Helius — clearing for re-registration"
+                        );
+                        let _ = db.clear_webhook_id(wallet_address).await;
+                        stale_count += 1;
+                    }
+                }
+                if stale_count > 0 {
+                    info!(count = stale_count, "Cleared stale webhook IDs from database");
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "Could not verify webhook IDs against Helius — skipping staleness check");
+            }
+        }
+    }
+
+    // 1. Register webhooks for ACTIVE wallets that need them (re-query after clearing stale IDs)
     let wallets_needing_webhooks = db.get_wallets_needing_webhook_registration().await?;
     let wallets_checked = wallets_needing_webhooks.len();
 
