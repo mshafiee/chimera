@@ -494,6 +494,18 @@ impl PriceCache {
         }
     }
 
+    /// One-time eager fetch of currently-tracked token prices.
+    /// Call at startup before spawning background tasks that depend on prices
+    /// (e.g. circuit-breaker USD checks) to avoid the startup race where the
+    /// first evaluation runs before the background updater has fetched anything.
+    pub async fn prime_prices(&self) -> Result<(), PriceCacheError> {
+        let tokens = self.active_tokens.read().clone();
+        if tokens.is_empty() {
+            return Ok(());
+        }
+        self.update_prices(&tokens).await
+    }
+
     /// Update prices for a list of tokens
     async fn update_prices(&self, tokens: &[String]) -> Result<(), PriceCacheError> {
         // Fetch prices from Jupiter API

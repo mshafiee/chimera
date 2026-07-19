@@ -348,6 +348,17 @@ async fn main() -> anyhow::Result<()> {
     // Track SOL for volatility calculation
     price_cache.track_token("So11111111111111111111111111111111111111112");
 
+    // Prime the price cache eagerly so the first circuit-breaker evaluation
+    // has a SOL price for USD-denominated loss checks. Fixes startup race
+    // where CB fired before the background updater completed its first fetch.
+    match price_cache.prime_prices().await {
+        Ok(_) => tracing::info!("Price cache primed at startup"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "Failed to prime price cache at startup — CB USD checks deferred until background updater fetches"
+        ),
+    }
+
     // Initialize volume cache for liquidity drop detection
     let _volume_cache = Arc::new(engine::volume_cache::VolumeCache::new());
     tracing::info!("✓ Volume Cache initialized for liquidity monitoring");
@@ -2045,7 +2056,15 @@ async fn main() -> anyhow::Result<()> {
                 tracing::info!("Portfolio capital refresh task spawned (60s interval)");
             }
             None => {
-                tracing::warn!("Wallet keypair unavailable — portfolio capital will not auto-refresh from wallet balance");
+                if config.trade_mode == chimera_operator::config::TradeMode::Paper {
+                    tracing::debug!(
+                        "Wallet keypair unavailable in Paper mode — portfolio capital uses configured total_capital_sol (no on-chain balance to track)"
+                    );
+                } else {
+                    tracing::warn!(
+                        "Wallet keypair unavailable — portfolio capital will not auto-refresh from wallet balance. Import the vault keypair before go-live."
+                    );
+                }
             }
         }
     }
