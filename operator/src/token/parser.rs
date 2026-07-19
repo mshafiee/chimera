@@ -401,7 +401,7 @@ impl TokenParser {
                     // fix is to supply a funded keypair for simulation; until then we treat an
                     // unverifiable honeypot check as a rejection in production.
                     // Set CHIMERA_DEV_MODE=1 to bypass this gate during local testing.
-                    if std::env::var("CHIMERA_DEV_MODE").is_err() {
+                    if !crate::utils::is_dev_mode() {
                         tracing::warn!(
                             token = token_address,
                             "Honeypot simulation inconclusive (unfunded wallet) — rejecting (fail-closed)"

@@ -2479,7 +2479,7 @@ fn load_config() -> anyhow::Result<AppConfig> {
     // Hard-fail if dev mode is active in a production environment. CHIMERA_ENV=production
     // must not coexist with CHIMERA_DEV_MODE — the latter skips token safety and config
     // validation, creating a silent security bypass that is hard to detect post-deploy.
-    if std::env::var("CHIMERA_DEV_MODE").is_ok()
+    if chimera_operator::utils::is_dev_mode()
         && std::env::var("CHIMERA_ENV").as_deref() == Ok("production")
     {
         return Err(anyhow::anyhow!(
@@ -2496,7 +2496,7 @@ fn load_config() -> anyhow::Result<AppConfig> {
     // Validate configuration
     if let Err(e) = config.validate() {
         // In development, allow missing webhook secret
-        if std::env::var("CHIMERA_DEV_MODE").is_ok() {
+        if chimera_operator::utils::is_dev_mode() {
             tracing::warn!("Running in dev mode - skipping configuration validation");
         } else {
             return Err(anyhow::anyhow!("Configuration validation failed: {}", e));

@@ -2,6 +2,20 @@ use rust_decimal::prelude::*;
 
 use crate::error::AppError;
 
+/// Whether `CHIMERA_DEV_MODE` is set to a truthy value.
+///
+/// Only `1`, `true`, `yes`, `on` (case-insensitive) enable dev mode; `0`,
+/// `false`, empty, or unset all mean OFF (production-safe). Call sites
+/// previously used `var("CHIMERA_DEV_MODE").is_ok()`, which treated the
+/// documented "disable" value `CHIMERA_DEV_MODE=0` as dev-mode-ON — silently
+/// skipping `config.validate()` and the honeypot fail-closed in production.
+pub fn is_dev_mode() -> bool {
+    match std::env::var("CHIMERA_DEV_MODE") {
+        Ok(v) => matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => false,
+    }
+}
+
 /// Helius API base URL from env var with fallback
 pub fn helius_api_base_url() -> String {
     std::env::var("HELIUS_API_BASE_URL")
