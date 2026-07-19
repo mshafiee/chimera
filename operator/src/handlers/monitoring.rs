@@ -34,28 +34,65 @@ pub async fn helius_webhook_handler(
             "Received Helius webhook event"
         );
 
-        // Parse webhook to extract swap information
-        let parsed = parse_helius_webhook(&event);
-        if let Ok(Some(swap)) = parsed {
-            // Find wallet address from account data
-            let wallet_address = event
-                .account_data
-                .iter()
-                .find_map(|acc| {
-                    if acc.account != event.signature {
-                        Some(acc.account.clone())
-                    } else {
-                        None
+        // Resolve tracked wallet address: match userAccount entries against ACTIVE wallets
+        let tracked_wallet = {
+            let active_wallets = match state.db.get_wallets_by_status("ACTIVE").await {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to query active wallets, falling back to no filter");
+                    vec![]
+                }
+            };
+
+            let active_wallet_addresses: std::collections::HashSet<String> =
+                active_wallets.into_iter().map(|w| w.address).collect();
+
+            let mut matched_wallet: Option<String> = None;
+            for account in &event.account_data {
+                if let Some(token_changes) = &account.token_balance_changes {
+                    for change in token_changes {
+                        if active_wallet_addresses.contains(&change.user_account) {
+                            matched_wallet = Some(change.user_account.clone());
+                            break;
+                        }
                     }
-                })
-                .unwrap_or_default();
+                    if matched_wallet.is_some() {
+                        break;
+                    }
+                }
+            }
+
+            matched_wallet
+        };
+
+        // Parse webhook to extract swap information
+        let tracked_wallet_ref = tracked_wallet.as_deref();
+        let parsed = parse_helius_webhook(&event, tracked_wallet_ref);
+        if let Ok(Some(swap)) = parsed {
+            let wallet_address = if let Some(ref wallet) = tracked_wallet {
+                wallet.clone()
+            } else {
+                // Fallback: try to extract from account_data (legacy behavior)
+                event
+                    .account_data
+                    .iter()
+                    .find_map(|acc| {
+                        if acc.account != event.signature {
+                            Some(acc.account.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default()
+            };
 
             if !wallet_address.is_empty() {
-                tracing::debug!(
+                tracing::info!(
                     wallet = %wallet_address,
                     direction = ?swap.direction,
                     token_out = %swap.token_out,
                     amount_in = %swap.amount_in,
+                    tracked_from_db = tracked_wallet.is_some(),
                     "Parsed swap from webhook"
                 );
                 // Check if wallet exists in database
@@ -240,12 +277,29 @@ pub async fn helius_webhook_handler(
                     );
                 }
             } else {
-                tracing::debug!(
-                    signature = %event.signature,
-                    "Webhook swap skipped: could not extract wallet address from account_data"
-                );
+                if tracked_wallet.is_none() {
+                    tracing::warn!(
+                        signature = %event.signature,
+                        transaction_type = %event.transaction_type,
+                        "Webhook event has no tracked wallet (no ACTIVE wallet matched user_account)"
+                    );
+                } else {
+                    tracing::debug!(
+                        signature = %event.signature,
+                        "Webhook swap skipped: could not extract wallet address from account_data"
+                    );
+                }
             }
         } else {
+            // Log if we had a tracked wallet but still failed to parse
+            if tracked_wallet.is_some() {
+                tracing::debug!(
+                    signature = %event.signature,
+                    tracked_wallet = %tracked_wallet.unwrap(),
+                    "Webhook event parsed to no swap (Ok(None)) despite tracked wallet"
+                );
+            }
+
             // Diagnose why parse returned None/Err so silent signal drops are visible.
             let account_count = event.account_data.len();
             let token_change_count: usize = event

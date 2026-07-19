@@ -282,7 +282,7 @@ fn parse_pumpfun_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
 fn parse_balance_changes(
     pre_balances: Option<&Vec<Value>>,
     post_balances: Option<&Vec<Value>>,
-    _wallet_address: &str,
+    wallet_address: &str,
 ) -> Result<(String, String, Decimal, Decimal, SwapDirection)> {
     // Parse token balance changes from pre/post balances
     // Structure: Each balance entry has:
@@ -526,6 +526,7 @@ fn detect_dex_from_laserstream(payload: &Value) -> Result<String> {
 /// Parse Helius webhook payload to extract swap information
 pub fn parse_helius_webhook(
     payload: &crate::monitoring::helius::HeliusWebhookPayload,
+    tracked_wallet: Option<&str>,
 ) -> Result<Option<ParsedSwap>> {
     // Check if this is a SWAP transaction
     if payload.transaction_type != "SWAP" {
@@ -535,6 +536,7 @@ pub fn parse_helius_webhook(
     const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
 
     // Aggregate NET token balance changes across all account_data entries.
+    // When tracked_wallet is Some, only aggregate changes where user_account matches.
     // Helius Enhanced webhooks report net deltas, so multi-hop intermediate
     // tokens (e.g. USDC in SOL→USDC→TOKEN) correctly net to ~zero.
     let mut token_deltas: std::collections::HashMap<String, Decimal> =
@@ -543,6 +545,13 @@ pub fn parse_helius_webhook(
     for account in &payload.account_data {
         if let Some(token_changes) = &account.token_balance_changes {
             for change in token_changes {
+                // Filter by tracked wallet when provided
+                if let Some(wallet) = tracked_wallet {
+                    if change.user_account != wallet {
+                        continue;
+                    }
+                }
+
                 let amount = Decimal::from_str(&change.raw_token_amount.token_amount)
                     .unwrap_or(Decimal::ZERO);
                 *token_deltas.entry(change.mint.clone()).or_insert(Decimal::ZERO) += amount;
@@ -703,7 +712,7 @@ mod tests {
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_out, token);
         assert_eq!(swap.token_in, SOL_MINT);
@@ -724,7 +733,7 @@ mod tests {
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Sell);
         assert_eq!(swap.token_in, token);
         assert_eq!(swap.token_out, SOL_MINT);
@@ -750,7 +759,7 @@ mod tests {
             vec![],
         );
 
-        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
         assert_eq!(swap.direction, SwapDirection::Buy);
         assert_eq!(swap.token_out, target, "must pick target, not intermediate USDC");
     }
@@ -773,7 +782,7 @@ mod tests {
             }],
         );
 
-        let swap = parse_helius_webhook(&payload).unwrap().expect("should parse");
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse");
         // Should use native_transfers (2 SOL), not native_balance_change (0.05 SOL)
         assert!(
             swap.amount_in >= rust_decimal::Decimal::new(2, 0),
@@ -793,7 +802,7 @@ mod tests {
             transaction_error: None,
             transaction_type: "TRANSFER".to_string(),
         };
-        assert!(parse_helius_webhook(&payload).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, None).unwrap().is_none());
     }
 
     #[test]
@@ -808,6 +817,98 @@ mod tests {
             }],
             vec![],
         );
-        assert!(parse_helius_webhook(&payload).unwrap().is_none());
+        assert!(parse_helius_webhook(&payload, Some(wallet)).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_webhook_direct_sell_net_zero_without_filter() {
+        // Reproduce the production bug: tracked wallet SELLing token, DEX receiving same amount.
+        // Without filtering, the net delta is 0, so parser returns None.
+        let wallet = "DakNYZdrGeFwXYZXYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let dex = "DhTZ9VELL65GXYZXYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let token = "FeVAWnmq9PToqEW6XYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let amount = "3414264284053";
+
+        let payload = make_payload(
+            vec![
+                AccountData {
+                    account: wallet.to_string(),
+                    native_balance_change: Some(500_000_000), // +0.5 SOL received
+                    token_balance_changes: Some(vec![token_change(token, &format!("-{}", amount), wallet)]),
+                },
+                AccountData {
+                    account: dex.to_string(),
+                    native_balance_change: Some(-500_000_000), // -0.5 SOL sent
+                    token_balance_changes: Some(vec![token_change(token, amount, dex)]),
+                },
+            ],
+            vec![],
+        );
+
+        // Without wallet filter: net delta is 0, parser returns None
+        assert!(parse_helius_webhook(&payload, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_webhook_direct_sell_with_tracked_wallet() {
+        // Same payload as above, but with wallet filter applied.
+        // Parser should correctly detect the SELL.
+        let wallet = "DakNYZdrGeFwXYZXYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let dex = "DhTZ9VELL65GXYZXYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let token = "FeVAWnmq9PToqEW6XYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let amount = "3414264284053";
+
+        let payload = make_payload(
+            vec![
+                AccountData {
+                    account: wallet.to_string(),
+                    native_balance_change: Some(500_000_000), // +0.5 SOL received
+                    token_balance_changes: Some(vec![token_change(token, &format!("-{}", amount), wallet)]),
+                },
+                AccountData {
+                    account: dex.to_string(),
+                    native_balance_change: Some(-500_000_000), // -0.5 SOL sent
+                    token_balance_changes: Some(vec![token_change(token, amount, dex)]),
+                },
+            ],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse with wallet filter");
+        assert_eq!(swap.direction, SwapDirection::Sell);
+        assert_eq!(swap.token_in, token);
+        assert_eq!(swap.token_out, SOL_MINT);
+        assert_eq!(swap.amount_out, Decimal::from_str(amount).unwrap());
+    }
+
+    #[test]
+    fn test_webhook_buy_with_tracked_wallet() {
+        // BUY: tracked wallet receives tokens (positive delta)
+        let wallet = "DakNYZdrGeFwXYZXYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let dex = "DhTZ9VELL65GXYZXYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let token = "FeVAWnmq9PToqEW6XYZXYZXYZXYZXYZXYZXYZXYZXYZ";
+        let amount = "1000000000";
+
+        let payload = make_payload(
+            vec![
+                AccountData {
+                    account: wallet.to_string(),
+                    native_balance_change: Some(-500_000_000), // -0.5 SOL sent
+                    token_balance_changes: Some(vec![token_change(token, amount, wallet)]),
+                },
+                AccountData {
+                    account: dex.to_string(),
+                    native_balance_change: Some(500_000_000), // +0.5 SOL received
+                    token_balance_changes: Some(vec![token_change(token, &format!("-{}", amount), dex)]),
+                },
+            ],
+            vec![],
+        );
+
+        let swap = parse_helius_webhook(&payload, Some(wallet)).unwrap().expect("should parse with wallet filter");
+        assert_eq!(swap.direction, SwapDirection::Buy);
+        assert_eq!(swap.token_in, SOL_MINT);
+        assert_eq!(swap.token_out, token);
+        assert_eq!(swap.amount_out, Decimal::from_str(amount).unwrap());
     }
 }

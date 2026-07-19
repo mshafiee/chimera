@@ -71,14 +71,43 @@ async fn poll_wallets_by_tier(
         }
     };
 
-    if wallets.is_empty() {
-        tracing::trace!(tier = ?tier, "No wallets to poll for this tier");
+    // Filter out wallets where monitoring_enabled is false
+    let monitored_wallets: Vec<String> = {
+        let wallet_addresses: Vec<String> = wallets.iter().map(|w| w.address.clone()).collect();
+        let all_monitoring = match db.get_all_wallet_monitoring().await {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to query wallet_monitoring, using all wallets");
+                // Fallback to all wallets if monitoring query fails - return empty monitoring list
+                vec![]
+            }
+        };
+
+        let monitoring_enabled_set: std::collections::HashSet<String> = all_monitoring
+            .into_iter()
+            .filter(|wm| wm.monitoring_enabled > 0)
+            .map(|wm| wm.wallet_address)
+            .collect();
+
+        // If monitoring query failed, return all wallets as fallback
+        if monitoring_enabled_set.is_empty() {
+            wallet_addresses
+        } else {
+            wallet_addresses
+                .into_iter()
+                .filter(|addr| monitoring_enabled_set.contains(addr))
+                .collect()
+        }
+    };
+
+    if monitored_wallets.is_empty() {
+        tracing::trace!(tier = ?tier, "No monitored wallets to poll for this tier");
         return;
     }
 
     tracing::debug!(
         tier = ?tier,
-        wallet_count = wallets.len(),
+        wallet_count = monitored_wallets.len(),
         interval_secs = interval,
         "Polling wallets for tier"
     );
@@ -86,7 +115,7 @@ async fn poll_wallets_by_tier(
     // Poll wallets for new transactions
     let transactions = match rpc_polling::poll_wallets_batch(
         &rpc_client,
-        &wallets.iter().map(|w| w.address.clone()).collect::<Vec<_>>(),
+        &monitored_wallets,
         interval,
         config.batch_size,
         rate_limiter.clone(),

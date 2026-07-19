@@ -111,9 +111,9 @@ pub async fn poll_wallet_transactions(
         .await;
 
     // Paginated fetch: signatures are returned newest-first. Walk pages of 10 until
-    // the anchor (last_signature) is found or we exhaust 5 pages (50 signatures max).
+    // the anchor (last_signature) is found or we exhaust 20 pages (200 signatures max).
     const PAGE_SIZE: usize = 10;
-    const MAX_PAGES: usize = 5;
+    const MAX_PAGES: usize = 20;
 
     let pubkey = wallet_address.parse().context("Invalid wallet address")?;
 
@@ -193,8 +193,8 @@ pub async fn poll_wallet_transactions(
     let mut transactions = Vec::new();
     let mut latest_signature: Option<String> = None;
 
-    for sig_str in new_signatures.iter().take(5) {
-        // Limit to 5 transactions per poll
+    for sig_str in new_signatures.iter().take(15) {
+        // Limit to 15 transactions per poll (was 5)
         // Rate limit for getTransaction (transaction fetch - heavy operation)
         // Use Polling priority since this is background operation, not time-sensitive
         rate_limiter
