@@ -7,17 +7,19 @@ export interface Position {
   token_address: string
   token_symbol: string | null
   strategy: 'SHIELD' | 'SPEAR'
-  entry_amount_sol: number
-  entry_price: number
+  // NOTE: Decimal fields are serialized as strings by the API (Postgres NUMERIC).
+  // Always coerce with Number() or safeToFixed() before arithmetic/formatting.
+  entry_amount_sol: number | string
+  entry_price: number | string
   entry_tx_signature: string
-  current_price: number | null
-  unrealized_pnl_sol: number | null
-  unrealized_pnl_percent: number | null
+  current_price: number | string | null
+  unrealized_pnl_sol: number | string | null
+  unrealized_pnl_percent: number | string | null
   state: 'ACTIVE' | 'EXITING' | 'CLOSED'
-  exit_price: number | null
+  exit_price: number | string | null
   exit_tx_signature: string | null
-  realized_pnl_sol: number | null
-  realized_pnl_usd: number | null
+  realized_pnl_sol: number | string | null
+  realized_pnl_usd: number | string | null
   opened_at: string
   last_updated: string
   closed_at: string | null
@@ -28,12 +30,13 @@ export interface Wallet {
   address: string
   status: 'ACTIVE' | 'CANDIDATE' | 'REJECTED'
   wqs_score: number | null
-  roi_7d: number | null
-  roi_30d: number | null
+  // NOTE: roi/max_drawdown/avg_trade_size are NUMERIC columns serialized as strings.
+  roi_7d: number | string | null
+  roi_30d: number | string | null
   trade_count_30d: number | null
   win_rate: number | null
-  max_drawdown_30d: number | null
-  avg_trade_size_sol: number | null
+  max_drawdown_30d: number | string | null
+  avg_trade_size_sol: number | string | null
   last_trade_at: string | null
   promoted_at: string | null
   ttl_expires_at: string | null
@@ -50,14 +53,15 @@ export interface Trade {
   token_symbol: string | null
   strategy: 'SHIELD' | 'SPEAR' | 'EXIT'
   side: 'BUY' | 'SELL'
-  amount_sol: number
-  price_at_signal: number | null
+  // NOTE: Decimal fields are serialized as strings by the API (Postgres NUMERIC).
+  amount_sol: number | string
+  price_at_signal: number | string | null
   tx_signature: string | null
   status: 'PENDING' | 'QUEUED' | 'EXECUTING' | 'ACTIVE' | 'EXITING' | 'CLOSED' | 'FAILED' | 'RETRY' | 'DEAD_LETTER'
   retry_count: number
   error_message: string | null
-  pnl_sol: number | null
-  pnl_usd: number | null
+  pnl_sol: number | string | null
+  pnl_usd: number | string | null
   created_at: string
   updated_at: string
 }

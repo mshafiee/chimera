@@ -6,6 +6,7 @@ import { Badge, StatusBadge, StrategyBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { useTrades, exportTrades } from '../api'
 import { toast } from '../components/ui/Toast'
+import { safeToFixed, toNum } from '../lib/format'
 
 const PAGE_SIZE = 25
 
@@ -333,22 +334,22 @@ export function Trades() {
                       {trade.side}
                     </Badge>
                   </TableCell>
-                  <TableCell mono>{trade.amount_sol.toFixed(4)} SOL</TableCell>
+                  <TableCell mono>{safeToFixed(trade.amount_sol, 4)} SOL</TableCell>
                   <TableCell mono>
-                    {trade.price_at_signal?.toFixed(8) || '-'}
+                    {trade.price_at_signal !== null && trade.price_at_signal !== undefined && trade.price_at_signal !== ''
+                      ? safeToFixed(trade.price_at_signal, 8)
+                      : '-'}
                   </TableCell>
                   <TableCell mono>
-                    {trade.pnl_sol !== null ? (
+                    {trade.pnl_sol !== null && trade.pnl_sol !== undefined && trade.pnl_sol !== '' ? (
                       <div>
-                        <span
-                          className={trade.pnl_sol >= 0 ? 'text-profit' : 'text-loss'}
-                        >
-                          {trade.pnl_sol >= 0 ? '+' : ''}
-                          {trade.pnl_sol.toFixed(4)} SOL
+                        <span className={toNum(trade.pnl_sol) >= 0 ? 'text-profit' : 'text-loss'}>
+                          {toNum(trade.pnl_sol) >= 0 ? '+' : ''}
+                          {safeToFixed(trade.pnl_sol, 4)} SOL
                         </span>
-                        {trade.pnl_usd !== null && (
+                        {trade.pnl_usd !== null && trade.pnl_usd !== undefined && trade.pnl_usd !== '' && (
                           <div className="text-xs text-text-muted">
-                            ${trade.pnl_usd.toFixed(2)}
+                            ${safeToFixed(trade.pnl_usd, 2)}
                           </div>
                         )}
                       </div>

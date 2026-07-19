@@ -17,6 +17,7 @@ import { usePortfolioRisk, useRPCLatency, useCostAnalysis, useBalanceAndNAV } fr
 import { ApiErrorBanner } from '../components/ui/ApiErrorBanner'
 import { CostBreakdownChart } from '../components/dashboard/CostBreakdownChart'
 import { WalletAttribution } from '../components/dashboard/WalletAttribution'
+import { safeToFixed, toNum } from '../lib/format'
 
 export function Dashboard() {
   const { setLastUpdate } = useLayoutContext()
@@ -107,7 +108,7 @@ export function Dashboard() {
     
     for (const trade of sortedTrades) {
       const dateStr = new Date(trade.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      cumPnl += trade.pnl_usd || 0
+      cumPnl += toNum(trade.pnl_usd)
       pnlByDate.set(dateStr, cumPnl)
     }
     
@@ -749,26 +750,27 @@ export function Dashboard() {
                     <StrategyBadge strategy={position.strategy} />
                   </TableCell>
                   <TableCell mono className="text-xs md:text-sm">
-                    {position.entry_amount_sol.toFixed(4)} SOL
+                    {safeToFixed(position.entry_amount_sol, 4)} SOL
                   </TableCell>
                   <TableCell mono className="hidden md:table-cell text-xs md:text-sm">
-                    {position.entry_price.toFixed(8)}
+                    {safeToFixed(position.entry_price, 8)}
                   </TableCell>
                   <TableCell mono className="hidden lg:table-cell text-xs md:text-sm">
-                    {position.current_price?.toFixed(8) || '-'}
+                    {position.current_price !== null && position.current_price !== undefined && position.current_price !== ''
+                      ? safeToFixed(position.current_price, 8)
+                      : '-'}
                   </TableCell>
                   <TableCell mono className="text-xs md:text-sm">
-                    {position.unrealized_pnl_percent !== null ? (
-                      <span
-                        className={
-                          position.unrealized_pnl_percent >= 0
-                            ? 'text-profit'
-                            : 'text-loss'
-                        }
-                      >
-                        {position.unrealized_pnl_percent >= 0 ? '+' : ''}
-                        {position.unrealized_pnl_percent.toFixed(2)}%
-                      </span>
+                    {position.unrealized_pnl_percent !== null && position.unrealized_pnl_percent !== undefined && position.unrealized_pnl_percent !== '' ? (
+                      (() => {
+                        const pnlPct = Number(position.unrealized_pnl_percent)
+                        return (
+                          <span className={pnlPct >= 0 ? 'text-profit' : 'text-loss'}>
+                            {pnlPct >= 0 ? '+' : ''}
+                            {safeToFixed(position.unrealized_pnl_percent, 2)}%
+                          </span>
+                        )
+                      })()
                     ) : (
                       '-'
                     )}
@@ -847,14 +849,3 @@ function formatUptime(seconds: number): string {
   return `${minutes}m`
 }
 
-// Helper function to safely convert and format numbers
-function safeToFixed(value: unknown, decimals: number = 2): string {
-  if (value === null || value === undefined) {
-    return '0.' + '0'.repeat(decimals)
-  }
-  const num = typeof value === 'number' ? value : Number(value)
-  if (isNaN(num)) {
-    return '0.' + '0'.repeat(decimals)
-  }
-  return num.toFixed(decimals)
-}

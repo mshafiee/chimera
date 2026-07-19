@@ -1,5 +1,6 @@
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../ui/Table'
 import { Badge } from '../ui/Badge'
+import { safeToFixed } from '../../lib/format'
 import type { StopLossMetricsResponse } from '../../api'
 
 interface StopLossAnalyticsProps {
@@ -85,13 +86,13 @@ export function StopLossAnalytics({ data }: StopLossAnalyticsProps) {
                     </div>
                   </TableCell>
                   <TableCell mono className="text-sm text-right">
-                    {activation.entry_price.toFixed(8)}
+                    {safeToFixed(activation.entry_price, 8)}
                   </TableCell>
                   <TableCell mono className="text-sm text-right">
-                    {activation.stop_price.toFixed(8)}
+                    {safeToFixed(activation.stop_price, 8)}
                   </TableCell>
                   <TableCell mono className="text-sm text-right text-profit">
-                    {activation.loss_prevented_sol.toFixed(4)} SOL
+                    {safeToFixed(activation.loss_prevented_sol, 4)} SOL
                   </TableCell>
                   <TableCell>
                     <Badge variant={activation.strategy === 'SHIELD' ? 'success' : 'warning'} size="sm">

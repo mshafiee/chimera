@@ -9,6 +9,7 @@ import { Modal, ConfirmModal } from '../components/ui/Modal'
 import { useWallets, useUpdateWallet, useTrades } from '../api'
 import { useAuthStore } from '../stores/authStore'
 import { toast } from '../components/ui/Toast'
+import { safeToFixed, toNum } from '../lib/format'
 import type { Wallet } from '../types'
 
 type WalletStatus = 'ALL' | 'ACTIVE' | 'CANDIDATE' | 'REJECTED'
@@ -69,7 +70,7 @@ export function Wallets() {
       return false
     }
     
-    if (roiMinFilter !== undefined && (wallet.roi_30d === null || wallet.roi_30d < roiMinFilter)) {
+    if (roiMinFilter !== undefined && (wallet.roi_30d === null || toNum(wallet.roi_30d) < roiMinFilter)) {
       return false
     }
 
@@ -164,10 +165,10 @@ export function Wallets() {
             wallet.address,
             wallet.status,
             wallet.wqs_score?.toFixed(2) || '',
-            wallet.roi_30d?.toFixed(2) || '',
+            wallet.roi_30d !== null && wallet.roi_30d !== undefined ? safeToFixed(wallet.roi_30d, 2) : '',
             wallet.trade_count_30d?.toString() || '',
             wallet.win_rate ? (wallet.win_rate * 100).toFixed(2) : '',
-            wallet.max_drawdown_30d?.toFixed(2) || '',
+            wallet.max_drawdown_30d !== null && wallet.max_drawdown_30d !== undefined ? safeToFixed(wallet.max_drawdown_30d, 2) : '',
             wallet.ttl_expires_at || '',
           ].join(',')
         ),
@@ -536,10 +537,10 @@ export function Wallets() {
                     <TableCell mono className="hidden md:table-cell">
                       {wallet.roi_30d !== null ? (
                         <span
-                          className={wallet.roi_30d >= 0 ? 'text-profit' : 'text-loss'}
+                          className={toNum(wallet.roi_30d) >= 0 ? 'text-profit' : 'text-loss'}
                         >
-                          {wallet.roi_30d >= 0 ? '+' : ''}
-                          {wallet.roi_30d.toFixed(1)}%
+                          {toNum(wallet.roi_30d) >= 0 ? '+' : ''}
+                          {safeToFixed(wallet.roi_30d, 1)}%
                         </span>
                       ) : (
                         '-'
@@ -775,20 +776,20 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
             <div className="flex justify-between items-center">
               <span className="text-text-muted">ROI 7d:</span>
               <span className={`font-mono-numbers text-xs sm:text-sm ${
-                wallet.roi_7d !== null && wallet.roi_7d >= 0 ? 'text-profit' : 'text-loss'
+                wallet.roi_7d !== null && toNum(wallet.roi_7d) >= 0 ? 'text-profit' : 'text-loss'
               }`}>
                 {wallet.roi_7d !== null
-                  ? `${wallet.roi_7d >= 0 ? '+' : ''}${wallet.roi_7d.toFixed(1)}%`
+                  ? `${toNum(wallet.roi_7d) >= 0 ? '+' : ''}${safeToFixed(wallet.roi_7d, 1)}%`
                   : '-'}
               </span>
             </div>
             <div className="flex justify-between items-center">
               <span className="text-text-muted">ROI 30d:</span>
               <span className={`font-mono-numbers text-xs sm:text-sm ${
-                wallet.roi_30d !== null && wallet.roi_30d >= 0 ? 'text-profit' : 'text-loss'
+                wallet.roi_30d !== null && toNum(wallet.roi_30d) >= 0 ? 'text-profit' : 'text-loss'
               }`}>
                 {wallet.roi_30d !== null
-                  ? `${wallet.roi_30d >= 0 ? '+' : ''}${wallet.roi_30d.toFixed(1)}%`
+                  ? `${toNum(wallet.roi_30d) >= 0 ? '+' : ''}${safeToFixed(wallet.roi_30d, 1)}%`
                   : '-'}
               </span>
             </div>
@@ -796,7 +797,7 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
               <span className="text-text-muted">Max Drawdown:</span>
               <span className="font-mono-numbers text-xs sm:text-sm text-loss">
                 {wallet.max_drawdown_30d !== null
-                  ? `-${wallet.max_drawdown_30d.toFixed(1)}%`
+                  ? `-${safeToFixed(wallet.max_drawdown_30d, 1)}%`
                   : '-'}
               </span>
             </div>
@@ -804,7 +805,7 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
               <span className="text-text-muted">Avg Trade:</span>
               <span className="font-mono-numbers text-xs sm:text-sm">
                 {wallet.avg_trade_size_sol !== null
-                  ? `${wallet.avg_trade_size_sol.toFixed(3)} SOL`
+                  ? `${safeToFixed(wallet.avg_trade_size_sol, 3)} SOL`
                   : '-'}
               </span>
             </div>
@@ -957,15 +958,15 @@ function WalletDetails({ wallet }: { wallet: Wallet }) {
                         </span>
                       </TableCell>
                       <TableCell mono className="text-xs">
-                        {trade.amount_sol.toFixed(4)} SOL
+                        {safeToFixed(trade.amount_sol, 4)} SOL
                       </TableCell>
                       <TableCell className="hidden md:table-cell">
                         <StatusBadge status={trade.status} />
                       </TableCell>
                       <TableCell mono className="text-xs">
-                        {trade.pnl_usd !== null ? (
-                          <span className={trade.pnl_usd >= 0 ? 'text-profit' : 'text-loss'}>
-                            {trade.pnl_usd >= 0 ? '+' : ''}${trade.pnl_usd.toFixed(2)}
+                        {trade.pnl_usd !== null && trade.pnl_usd !== undefined && trade.pnl_usd !== '' ? (
+                          <span className={toNum(trade.pnl_usd) >= 0 ? 'text-profit' : 'text-loss'}>
+                            {toNum(trade.pnl_usd) >= 0 ? '+' : ''}${safeToFixed(trade.pnl_usd, 2)}
                           </span>
                         ) : (
                           '-'

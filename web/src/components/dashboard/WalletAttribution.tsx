@@ -1,5 +1,6 @@
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../ui/Table'
 import { Badge } from '../ui/Badge'
+import { safeToFixed, toNum } from '../../lib/format'
 import type { Wallet } from '../../types'
 
 interface WalletAttributionProps {
@@ -8,7 +9,7 @@ interface WalletAttributionProps {
 
 export function WalletAttribution({ wallets }: WalletAttributionProps) {
   // Sort by ROI
-  const sortedWallets = [...wallets].sort((a, b) => (b.roi_30d || 0) - (a.roi_30d || 0))
+  const sortedWallets = [...wallets].sort((a, b) => toNum(b.roi_30d) - toNum(a.roi_30d))
 
   return (
     <Table>
@@ -37,8 +38,8 @@ export function WalletAttribution({ wallets }: WalletAttributionProps) {
               </Badge>
             </TableCell>
             <TableCell mono className="text-sm text-right">
-              <span className={wallet.roi_30d && wallet.roi_30d >= 0 ? 'text-profit' : 'text-loss'}>
-                {wallet.roi_30d ? `${wallet.roi_30d >= 0 ? '+' : ''}${wallet.roi_30d.toFixed(1)}%` : 'N/A'}
+              <span className={wallet.roi_30d && toNum(wallet.roi_30d) >= 0 ? 'text-profit' : 'text-loss'}>
+                {wallet.roi_30d !== null && wallet.roi_30d !== undefined ? `${toNum(wallet.roi_30d) >= 0 ? '+' : ''}${safeToFixed(wallet.roi_30d, 1)}%` : 'N/A'}
               </span>
             </TableCell>
             <TableCell mono className="text-sm text-right">

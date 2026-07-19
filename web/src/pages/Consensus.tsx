@@ -5,6 +5,7 @@ import { useConsensus, useWalletClustering, useSignalAggregation } from '../api'
 import { ConsensusOverview } from '../components/consensus/ConsensusOverview'
 import { WalletClustersVisualization } from '../components/consensus/WalletClustersVisualization'
 import { SignalAggregationView } from '../components/consensus/SignalAggregationView'
+import { safeToFixed } from '../lib/format'
 
 export function Consensus() {
   const { data: consensusData, isLoading: consensusLoading } = useConsensus()
@@ -127,7 +128,7 @@ export function Consensus() {
                     <TableCell>
                       {signal.execution_result ? (
                         <span className={signal.execution_result.success ? 'text-profit' : 'text-loss'}>
-                          {signal.execution_result.success ? `+${signal.execution_result.pnl_sol?.toFixed(4) || 'N/A'} SOL` : 'Failed'}
+                          {signal.execution_result.success ? `+${signal.execution_result.pnl_sol !== null && signal.execution_result.pnl_sol !== undefined ? safeToFixed(signal.execution_result.pnl_sol, 4) : 'N/A'} SOL` : 'Failed'}
                         </span>
                       ) : (
                         <span className="text-text-muted">—</span>
