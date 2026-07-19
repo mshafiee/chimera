@@ -227,8 +227,20 @@ async fn main() -> anyhow::Result<()> {
     // Attached as `x-api-key` on every Jupiter request (quote/swap/price).
     // F1: keyless access is being phased out; Live mode hard-fails without it
     // (enforced in AppConfig::validate).
-    chimera_operator::jupiter::set_api_key(config.jupiter.api_key.clone());
-    if config.jupiter.api_key.is_some() {
+    //
+    // The config crate does not reliably map CHIMERA_JUPITER__API_KEY ->
+    // config.jupiter.api_key (casing), and config.yaml intentionally omits the
+    // key (secret not committed). Fall back to the env var when config has none,
+    // mirroring the Helius key resolution below.
+    let jupiter_api_key = config
+        .jupiter
+        .api_key
+        .clone()
+        .filter(|k| !k.trim().is_empty())
+        .or_else(|| std::env::var("CHIMERA_JUPITER__API_KEY").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| std::env::var("JUPITER_API_KEY").ok().filter(|s| !s.trim().is_empty()));
+    chimera_operator::jupiter::set_api_key(jupiter_api_key.clone());
+    if jupiter_api_key.is_some() {
         tracing::info!("Jupiter API key installed (x-api-key will be sent on all Jupiter requests)");
     } else {
         tracing::warn!(
