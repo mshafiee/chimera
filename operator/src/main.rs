@@ -354,13 +354,24 @@ async fn main() -> anyhow::Result<()> {
                             tracing::info!("Webhook URL validated successfully: {}", webhook_url);
                         }
                         Err(e) => {
-                            tracing::warn!(
+                            // This self-check GETs the webhook URL from INSIDE the
+                            // container. For a self-hosted URL (the server's own public
+                            // address) it requires NAT loopback, which most hosts lack —
+                            // so a connection failure here is usually a false negative,
+                            // not a real reachability problem. External delivery (what
+                            // actually matters) is verified independently by Helius. Log
+                            // at debug to avoid a misleading 'monitoring may not work'
+                            // alarm; a genuinely malformed URL still surfaces via failed
+                            // webhook registrations/deliveries.
+                            tracing::debug!(
                                 webhook_url = %webhook_url,
                                 error = %e,
-                                "Webhook URL validation failed — monitoring may not work correctly"
+                                "Webhook URL self-reachability check inconclusive \
+                                 (common for self-hosted URLs without NAT loopback); \
+                                 external delivery is verified independently"
                             );
-                            // Don't fail startup on webhook validation issues - log a warning instead
-                            // The webhook may become available later, or monitoring may be optional
+                            // Don't fail startup on webhook validation issues - the webhook
+                            // may become available later, or monitoring may be optional
                         }
                     }
                 }
