@@ -2600,23 +2600,26 @@ impl Executor {
             ).await
         } else {
             // Fallback to simple strategy-based tip calculation
-            let base_tip = match signal.payload.strategy {
+            // Scale tip by trade size (tip_percent_max default 10%), with strategy-specific floors
+            let strategy_floor = match signal.payload.strategy {
                 Strategy::Shield => self.config.jito.tip_floor_sol,
                 Strategy::Spear => {
-                    // Use higher tip for Spear to ensure bundle inclusion
+                    // Use slightly higher floor for Spear to ensure bundle inclusion
                     (self.config.jito.tip_floor_sol + self.config.jito.tip_ceiling_sol)
                         / Decimal::from(2)
                 }
-                Strategy::Exit => self.config.jito.tip_ceiling_sol, // Max tip for exits
+                Strategy::Exit => self.config.jito.tip_floor_sol, // Use floor for exits, not ceiling
             };
 
-            // Apply percentage cap
-            let max_by_percent = signal.payload.amount_sol * self.config.jito.tip_percent_max;
-            let tip = base_tip
-                .min(max_by_percent)
+            // Calculate tip as percentage of trade size (realistic MEV cost)
+            let percentage_based_tip = signal.payload.amount_sol * self.config.jito.tip_percent_max;
+
+            // Apply floor, percentage cap, and ceiling
+            let tip = percentage_based_tip
+                .max(strategy_floor)
                 .min(self.config.jito.tip_ceiling_sol);
 
-            tip.max(self.config.jito.tip_floor_sol)
+            tip
         }
     }
 

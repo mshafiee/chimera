@@ -1093,7 +1093,10 @@ async fn main() -> anyhow::Result<()> {
                 _ = prune_token.cancelled() => break,
                 _ = interval.tick() => {
                     if config_prune.degradation.log_pruning_enabled {
-                        let log_dir = std::path::PathBuf::from("logs");
+                        let log_dir = std::env::var("CHIMERA_LOG_DIR")
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .unwrap_or_else(|| "/app/data/logs".into());
                         let max_age_days = 7; // Default: prune logs older than 7 days
                         match crate::engine::prune_logs_if_needed(&log_dir, max_age_days).await {
                             Ok(_) => {

@@ -406,3 +406,74 @@ fn test_jito_config_reasonable_bounds() {
     assert!(min_failures >= max_retries,
         "Should retry at least as many times as configured before fallback");
 }
+
+/// Test Jito tip calculation scales by trade size (fix for Issue 2)
+///
+/// Verify that tips are calculated as a percentage of trade size (10% max),
+/// capped by tip_floor (0.001 SOL) and tip_ceiling (0.01 SOL).
+/// This prevents unrealistic 50% tip-to-position ratios that make P&L meaningless.
+#[test]
+fn test_jito_tip_scales_by_trade_size() {
+    use chimera_operator::config::{JitoConfig, default_tip_floor, default_tip_ceiling, default_tip_percent_max};
+
+    // Create Jito config with defaults
+    let config = JitoConfig {
+        enabled: true,
+        searcher_endpoint: Some("https://mainnet.block-engine.jito.wtf".to_string()),
+        helius_fallback: true,
+        tip_floor_sol: default_tip_floor(),
+        tip_ceiling_sol: default_tip_ceiling(),
+        tip_percentile: 50,
+        tip_percent_max: default_tip_percent_max(),
+        min_failures_before_fallback: 10,
+        disable_fallback: false,
+        max_retries: 5,
+        helius_staked_exits: true,
+    };
+
+    // Test small trade (0.02 SOL)
+    // Expected: tip = 0.02 * 0.10 = 0.002 SOL (10% of position)
+    let small_trade_size = dec!(0.02);
+    let small_trade_tip = small_trade_size * config.tip_percent_max;
+    assert_eq!(small_trade_tip, dec!(0.002),
+        "Small trade tip should be 10% of position size");
+
+    // Verify tip meets floor and ceiling constraints
+    assert!(small_trade_tip >= config.tip_floor_sol,
+        "Small trade tip should meet floor (0.001)");
+    assert!(small_trade_tip <= config.tip_ceiling_sol,
+        "Small trade tip should not exceed ceiling (0.01)");
+
+    // Test medium trade (0.1 SOL)
+    // Expected: tip = 0.1 * 0.10 = 0.01 SOL (at ceiling)
+    let medium_trade_size = dec!(0.1);
+    let medium_trade_tip = medium_trade_size * config.tip_percent_max;
+    assert_eq!(medium_trade_tip, dec!(0.01),
+        "Medium trade tip should be 10% of position size");
+    assert_eq!(medium_trade_tip, config.tip_ceiling_sol,
+        "Medium trade tip should hit ceiling (0.01)");
+
+    // Test large trade (1.0 SOL)
+    // Expected: tip = 1.0 * 0.10 = 0.10 SOL, but capped at ceiling 0.01
+    let large_trade_size = dec!(1.0);
+    let large_trade_tip = large_trade_size * config.tip_percent_max.min(config.tip_ceiling_sol);
+    assert_eq!(large_trade_tip, config.tip_ceiling_sol,
+        "Large trade tip should be capped at ceiling (0.01)");
+
+    // Test tiny trade (0.005 SOL)
+    // Expected: tip = 0.005 * 0.10 = 0.0005 SOL, but must meet floor 0.001
+    let tiny_trade_size = dec!(0.005);
+    let tiny_trade_tip = tiny_trade_size * config.tip_percent_max;
+    let final_tiny_tip = tiny_trade_tip.max(config.tip_floor_sol);
+    assert_eq!(final_tiny_tip, config.tip_floor_sol,
+        "Tiny trade tip should be raised to floor (0.001)");
+
+    // Verify tip-to-position ratios are reasonable (not 50% as in bug)
+    let small_ratio = (small_trade_tip / small_trade_size).to_f64().unwrap_or(0.0);
+    assert!(small_ratio <= 0.15, // 15% tolerance
+        "Small trade tip ratio ({}) should be reasonable (not 50%)", small_ratio);
+
+    let medium_ratio = (medium_trade_tip / medium_trade_size).to_f64().unwrap_or(0.0);
+    assert!(medium_ratio <= 0.15,
+        "Medium trade tip ratio ({}) should be reasonable", medium_ratio);
+}

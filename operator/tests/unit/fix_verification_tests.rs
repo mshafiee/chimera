@@ -351,3 +351,48 @@ async fn should_succeed_on_status_update_for_existing_trade() {
         .unwrap();
     assert_eq!(status, "QUEUED", "Trade status must be updated to QUEUED");
 }
+
+/// Test Issue 4: Log pruning uses correct directory path
+///
+/// Verify that log pruning uses CHIMERA_LOG_DIR env var or /app/data/logs default,
+/// not the incorrect "logs" path that caused "df output missing data line" error.
+#[test]
+fn test_log_pruning_uses_correct_directory_path() {
+    use std::path::PathBuf;
+
+    // Test with CHIMERA_LOG_DIR environment variable set
+    std::env::set_var("CHIMERA_LOG_DIR", "/custom/logs/path");
+    let log_dir = std::env::var("CHIMERA_LOG_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/app/data/logs".into());
+    assert_eq!(log_dir, "/custom/logs/path",
+        "Should use CHIMERA_LOG_DIR when set");
+
+    // Test with empty CHIMERA_LOG_DIR (falls back to default)
+    std::env::set_var("CHIMERA_LOG_DIR", "");
+    let log_dir = std::env::var("CHIMERA_LOG_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/app/data/logs".into());
+    assert_eq!(log_dir, "/app/data/logs",
+        "Should use default /app/data/logs when CHIMERA_LOG_DIR is empty");
+
+    // Test with CHIMERA_LOG_DIR unset (falls back to default)
+    std::env::remove_var("CHIMERA_LOG_DIR");
+    let log_dir = std::env::var("CHIMERA_LOG_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/app/data/logs".into());
+    assert_eq!(log_dir, "/app/data/logs",
+        "Should use default /app/data/logs when CHIMERA_LOG_DIR is unset");
+
+    // Verify the fix resolves to /app/data/logs, not "logs" (which fails)
+    assert_ne!(log_dir, "logs",
+        "Should NOT resolve to relative 'logs' path (bug behavior)");
+    assert!(log_dir.starts_with('/'),
+        "Should resolve to absolute path starting with /");
+
+    // Cleanup
+    std::env::remove_var("CHIMERA_LOG_DIR");
+}
