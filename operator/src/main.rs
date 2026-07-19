@@ -1097,6 +1097,7 @@ async fn main() -> anyhow::Result<()> {
                             .ok()
                             .filter(|v| !v.is_empty())
                             .unwrap_or_else(|| "/app/data/logs".into());
+                        let log_dir = std::path::PathBuf::from(log_dir);
                         let max_age_days = 7; // Default: prune logs older than 7 days
                         match crate::engine::prune_logs_if_needed(&log_dir, max_age_days).await {
                             Ok(_) => {
