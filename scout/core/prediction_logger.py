@@ -126,18 +126,34 @@ class PredictionLogger:
         return conn
 
     def _ensure_schema(self):
-        """Ensure the ml_predictions table exists."""
-        try:
-            # Read schema file
-            schema_path = Path(__file__).parent.parent.parent / "database" / "schema" / "ml_predictions.sql"
+        """Ensure the ml_predictions table exists.
 
-            if schema_path.exists():
+        The canonical home for this table is the operator's PostgreSQL
+        migration (operator/migrations_postgres/0004_ml_predictions.sql),
+        which creates it server-side at startup. This method is a best-effort
+        fallback for SQLite dev mode and searches several candidate paths so
+        it works both in the repo root and when scout is copied into /app
+        (where parent.parent.parent resolves to / instead of the repo root).
+        """
+        try:
+            # Search candidate locations: repo root, /app, and the directory
+            # two levels up from this file (covers both repo-layout and the
+            # container's /app/core/prediction_logger.py layout).
+            candidates = [
+                Path(__file__).resolve().parent.parent.parent / "database" / "schema" / "ml_predictions.sql",
+                Path("/app/database/schema/ml_predictions.sql"),
+                Path.cwd() / "database" / "schema" / "ml_predictions.sql",
+            ]
+            schema_path = next((p for p in candidates if p.exists()), None)
+
+            if schema_path is not None:
                 with open(schema_path, 'r') as f:
                     schema_sql = f.read()
 
                 conn = self._get_connection()
                 cursor = conn.cursor()
 
+                from .db import translate_ddl
                 # Execute schema - split by semicolon and filter out comments
                 for statement in schema_sql.split(';'):
                     statement = statement.strip()
@@ -151,13 +167,20 @@ class PredictionLogger:
                                 lines.append(line)
                         cleaned = '\n'.join(lines).strip()
                         if cleaned:
-                            cursor.execute(cleaned)
+                            # Translate SQLite DDL (AUTOINCREMENT, etc.) to
+                            # PostgreSQL when running on the postgres backend.
+                            cursor.execute(translate_ddl(cleaned))
 
                 conn.commit()
                 conn.close()
                 logger.info("ML predictions schema verified/created")
             else:
-                logger.warning(f"Schema file not found at {schema_path}")
+                # The operator's PostgreSQL migration creates this table at
+                # startup, so a missing schema file is informational only.
+                logger.debug(
+                    "ml_predictions.sql not found in any candidate path — "
+                    "assuming the operator migration created the table"
+                )
 
         except Exception as e:
             logger.error(f"Failed to ensure schema: {e}")

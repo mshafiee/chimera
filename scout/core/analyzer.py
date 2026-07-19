@@ -814,7 +814,9 @@ class WalletAnalyzer:
             roster_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
 
             for db_path in [roster_path]:
-                if os.path.exists(db_path):
+                from .db import _is_postgres, _is_sqlite
+                db_available = _is_postgres() or (_is_sqlite() and os.path.exists(db_path))
+                if db_available:
                     from .db import get_connection
                     conn = get_connection(db_path)
                     try:
@@ -1063,7 +1065,13 @@ class WalletAnalyzer:
         # Try to load from database first (if wallet exists there)
         try:
             db_path = os.getenv("CHIMERA_DB_PATH", "data/chimera.db")
-            if os.path.exists(db_path):
+            # On the PostgreSQL backend the SQLite file path is irrelevant —
+            # the pool connects to DATABASE_URL regardless. Only skip the DB
+            # lookup when running genuinely file-backed SQLite whose file is
+            # missing.
+            from .db import _is_postgres, _is_sqlite
+            db_available = _is_postgres() or (_is_sqlite() and os.path.exists(db_path))
+            if db_available:
                 from .db import get_connection
                 conn = get_connection(db_path)
                 try:

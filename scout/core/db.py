@@ -206,7 +206,7 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
                 "psycopg3 is required for PostgreSQL support. "
                 "Install it with: pip install 'psycopg[binary]' 'psycopg-pool'"
             )
-        
+
         # Use module-level pool
         global _postgres_pool
         if _postgres_pool is None:
@@ -216,20 +216,56 @@ def get_connection(db_path: Optional[str] = None, force_sqlite: bool = False):
                     "DATABASE_URL environment variable is required for PostgreSQL backend. "
                     "Example: postgresql://user:password@host:5432/database"
                 )
-            
+
+            # Pool sizing: scout fans out many concurrent wallet analyses
+            # (asyncio semaphores), each of which briefly checks the DB for
+            # cached metrics. The previous max_size=10 was exhausted under
+            # load, producing "couldn't get a connection after 30.00 sec" and
+            # silently dropping every wallet's DB lookup. max_size is now
+            # configurable and defaults to 20.
+            max_size = int(os.environ.get('SCOUT_DB_POOL_MAX_SIZE', '20'))
+            min_size = min(2, max_size)
+            # Fail fast (10s) instead of hanging the whole analysis batch
+            # for 30s per wallet when the pool is momentarily saturated.
+            timeout = float(os.environ.get('SCOUT_DB_POOL_TIMEOUT', '10'))
+
+            def _configure(conn):
+                # Applied to every NEW connection the pool creates, so the
+                # row_factory survives recycling (setting it only after
+                # getconn() was lost whenever the pool handed out a
+                # previously-created connection that predated the setting).
+                conn.row_factory = psycopg.rows.dict_row
+                conn.autocommit = True
+
+            def _check(conn):
+                # Health check: dead TCP connections (container restarts,
+                # idle TCP kills) are pruned before being handed out, so a
+                # stale connection never blocks a getconn() slot.
+                conn.execute("SELECT 1")
+
             _postgres_pool = ConnectionPool(
                 conninfo=database_url,
-                min_size=2,
-                max_size=10,
-                open=False
+                min_size=min_size,
+                max_size=max_size,
+                timeout=timeout,
+                max_lifetime=1800.0,   # recycle connections every 30 min
+                max_idle=300.0,        # close idle conns after 5 min
+                configure=_configure,
+                check=_check,
+                name="scout",
+                open=False,
             )
             _postgres_pool.open()
-            logger.info("PostgreSQL connection pool initialized")
-        
+            logger.info(
+                "PostgreSQL connection pool initialized: min=%d max=%d timeout=%ss",
+                min_size, max_size, timeout,
+            )
+
         # Get connection from pool
         conn = _postgres_pool.getconn()
 
-        # Use dict row factory for compatibility with SQLite
+        # Use dict row factory for compatibility with SQLite (belt-and-suspenders
+        # alongside the pool's configure callback above).
         conn.row_factory = psycopg.rows.dict_row
 
         # Wrap so the connection is returned to the pool on close/__exit__
