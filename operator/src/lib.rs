@@ -16,6 +16,7 @@ pub mod jupiter_error_handling;
 pub mod jupiter_http_client;
 pub mod jupiter_monitoring;
 pub mod jupiter_skills_integration;
+pub mod keypair_utils;
 pub mod metrics;
 pub mod middleware;
 pub mod models;

@@ -44,6 +44,9 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/chimera_operator /app/chimera_operator
+# Ship the import_keypair CLI alongside the operator so the runbook's
+# `docker compose run ... /app/import_keypair` procedure works.
+COPY --from=builder /build/target/release/import_keypair /app/import_keypair
 
 # Create directories (config files are mounted as volumes in docker-compose)
 RUN mkdir -p /app/config /app/data && chown -R chimera:chimera /app

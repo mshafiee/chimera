@@ -944,35 +944,29 @@ pub struct JupiterSwapResponse {
 }
 
 /// Load wallet keypair from vault
+///
+/// Accepts three formats in `VaultSecrets::wallet_private_key`:
+/// - Solana CLI JSON byte-array (id.json)
+/// - Base58 (86-88 chars)
+/// - Hex (128 chars — the canonical storage form written by `import_keypair`)
+///
+/// Format detection and validation is shared with the `import_keypair` tool
+/// via [`crate::keypair_utils::normalize_to_64_bytes`]. The decoded bytes are
+/// returned in a `Zeroizing` wrapper so the secret is wiped after `Keypair`
+/// construction.
 pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
-    let key_hex = secrets.wallet_private_key.as_ref().ok_or_else(|| {
+    let key_str = secrets.wallet_private_key.as_ref().ok_or_else(|| {
         crate::error::AppError::Validation("Wallet private key not found in vault".to_string())
     })?;
 
-    // Decode hex string to bytes
-    let key_bytes = hex::decode(key_hex.trim()).map_err(|e| {
-        crate::error::AppError::Validation(format!("Invalid private key hex: {}", e))
-    })?;
+    let keypair_bytes = crate::keypair_utils::normalize_to_64_bytes(key_str)?;
 
-    if key_bytes.len() != 64 {
-        return Err(crate::error::AppError::Validation(format!(
-            "Invalid keypair length (expected 64 bytes, got {})",
-            key_bytes.len()
-        )));
-    }
-
-    // Solana keypair format in vault: 64 bytes = 32 secret + 32 public
-    // Solana SDK's Keypair::try_from expects 64 bytes (full keypair array)
-    let keypair_bytes: [u8; 64] = key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| crate::error::AppError::Validation("Invalid keypair length".to_string()))?;
-
-    // Use try_from with the full 64-byte array
+    // Use try_from with the full 64-byte array. Catches bytes that decode
+    // but aren't a valid Ed25519 keypair (pubkey does not match secret).
     let keypair = Keypair::try_from(keypair_bytes.as_slice()).map_err(|e| {
         crate::error::AppError::Validation(format!(
             "Failed to create keypair from 64-byte array: {:?}. \
-                Ensure the keypair bytes are in the correct format (32 secret + 32 public).",
+             Ensure the keypair bytes are in the correct format (32 secret + 32 public).",
             e
         ))
     })?;
@@ -982,4 +976,59 @@ pub fn load_wallet_keypair(secrets: &VaultSecrets) -> AppResult<Keypair> {
     // for signing, but at least the source buffer is cleaned.
 
     Ok(keypair)
+}
+
+#[cfg(test)]
+mod load_wallet_keypair_tests {
+    use super::*;
+    use crate::vault::VaultSecrets;
+    use solana_sdk::signature::Signer;
+
+    fn secrets_with(key: Option<String>) -> VaultSecrets {
+        VaultSecrets {
+            webhook_secret: "test".to_string(),
+            webhook_secret_previous: None,
+            wallet_private_key: key,
+            rpc_api_key: None,
+            fallback_rpc_api_key: None,
+        }
+    }
+
+    #[test]
+    fn hex_round_trips() {
+        let kp = Keypair::new();
+        let s = secrets_with(Some(hex::encode(kp.to_bytes())));
+        let loaded = load_wallet_keypair(&s).unwrap();
+        assert_eq!(loaded.pubkey(), kp.pubkey());
+    }
+
+    #[test]
+    fn base58_round_trips() {
+        let kp = Keypair::new();
+        let b58 = bs58::encode(kp.to_bytes()).into_string();
+        let s = secrets_with(Some(b58));
+        let loaded = load_wallet_keypair(&s).unwrap();
+        assert_eq!(loaded.pubkey(), kp.pubkey());
+    }
+
+    #[test]
+    fn json_array_round_trips() {
+        let kp = Keypair::new();
+        let json = serde_json::to_string(&kp.to_bytes().to_vec()).unwrap();
+        let s = secrets_with(Some(json));
+        let loaded = load_wallet_keypair(&s).unwrap();
+        assert_eq!(loaded.pubkey(), kp.pubkey());
+    }
+
+    #[test]
+    fn missing_key_fails() {
+        let s = secrets_with(None);
+        assert!(load_wallet_keypair(&s).is_err());
+    }
+
+    #[test]
+    fn invalid_key_fails() {
+        let s = secrets_with(Some("not-a-keypair".to_string()));
+        assert!(load_wallet_keypair(&s).is_err());
+    }
 }

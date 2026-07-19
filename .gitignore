@@ -62,6 +62,14 @@ ssl/work/
 *.key
 *.pem
 *.crt
+# Encrypted vault files — never commit even when empty.
+# `config/secrets.enc` is the canonical vault path; `config/config.enc` was a
+# misnamed relic that has been removed. The broad `*.enc` rule catches any
+# future variant. `*.enc.bak` covers the backup created by `import_keypair`
+# during rotation (in case cleanup fails or the process is killed mid-write).
+config/secrets.enc
+config/*.enc
+config/*.enc.bak
 # MaxMind GeoIP databases (licensed, downloaded at runtime)
 docker/haproxy/geoip/*.mmdb
 

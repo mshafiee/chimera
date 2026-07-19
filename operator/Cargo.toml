@@ -96,6 +96,10 @@ rust_decimal = { version = "1.33", features = ["serde"] }
 rust_decimal_macros = "1"
 sysinfo = "0.38.4"
 
+# CLI + keypair format helpers (used by `import_keypair` tool)
+bs58 = "0.5"
+clap = { version = "4", features = ["derive"] }
+
 # Distributed Caching (optional)
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager", "aio", "connection-manager"], optional = true }
 
@@ -106,6 +110,10 @@ redis-cache = ["redis"]
 [[bin]]
 name = "generate_jwt_secret"
 path = "src/tools/generate_jwt_secret.rs"
+
+[[bin]]
+name = "import_keypair"
+path = "src/tools/import_keypair.rs"
 
 # [[bench]]
 # name = "metadata"

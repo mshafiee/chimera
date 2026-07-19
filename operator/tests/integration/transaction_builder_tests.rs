@@ -39,6 +39,43 @@ fn test_load_wallet_keypair() {
     assert_eq!(loaded.pubkey(), test_keypair.pubkey());
 }
 
+/// Loading a keypair stored as base58 should round-trip to the same pubkey.
+#[test]
+fn test_load_wallet_keypair_base58() {
+    let test_keypair = Keypair::new();
+    let b58 = bs58::encode(test_keypair.to_bytes()).into_string();
+
+    let secrets = VaultSecrets {
+        webhook_secret: "test".to_string(),
+        webhook_secret_previous: None,
+        wallet_private_key: Some(b58),
+        rpc_api_key: None,
+        fallback_rpc_api_key: None,
+    };
+
+    let loaded = load_wallet_keypair(&secrets).unwrap();
+    assert_eq!(loaded.pubkey(), test_keypair.pubkey());
+}
+
+/// Loading a keypair stored as a Solana CLI JSON byte-array (id.json) should
+/// round-trip to the same pubkey.
+#[test]
+fn test_load_wallet_keypair_json_array() {
+    let test_keypair = Keypair::new();
+    let json = serde_json::to_string(&test_keypair.to_bytes().to_vec()).unwrap();
+
+    let secrets = VaultSecrets {
+        webhook_secret: "test".to_string(),
+        webhook_secret_previous: None,
+        wallet_private_key: Some(json),
+        rpc_api_key: None,
+        fallback_rpc_api_key: None,
+    };
+
+    let loaded = load_wallet_keypair(&secrets).unwrap();
+    assert_eq!(loaded.pubkey(), test_keypair.pubkey());
+}
+
 /// Test wallet keypair loading fails with invalid key
 #[test]
 fn test_load_wallet_keypair_invalid() {
