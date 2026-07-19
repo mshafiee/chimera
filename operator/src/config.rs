@@ -11,11 +11,18 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+/// Trade execution mode.
+///
+/// **Safety:** the default is `Paper`. A trading bot must never silently fall into
+/// real-money (`Live`) mode from a missing/incomplete config — that must be an
+/// explicit opt-in via `CHIMERA_TRADE_MODE=live` or `trade_mode: live` in the
+/// config file. Previously this defaulted to `Live`, so any deploy that forgot to
+/// set the trade mode would trade real SOL.
 #[serde(rename_all = "lowercase")]
 pub enum TradeMode {
     Devnet,
-    Paper,
     #[default]
+    Paper,
     Live,
 }
 
