@@ -110,6 +110,11 @@ pub struct QuoteResult {
     pub fill_price_lamports_per_base: Option<Decimal>,
     pub in_amount: u64,
     pub out_amount: u64,
+    /// Real per-route DEX fee in SOL, summed from
+    /// `routePlan[].swapInfo.feeAmount` (converted lamports→SOL). `None` when
+    /// the quote response omitted route info. Used by paper mode so its cost
+    /// simulation matches what live mode would actually pay (P2-17/F22 parity).
+    pub route_fee_sol: Option<Decimal>,
 }
 
 impl TransactionBuilder {
@@ -904,11 +909,37 @@ impl TransactionBuilder {
             _ => None,
         };
 
+        // Extract the real per-route DEX fee so paper mode can simulate live
+        // costs accurately (P2-17/F22 parity). Mirrors the swap-response parsing
+        // in `parse_jupiter_v2_response`.
+        let route_fee_sol: Option<Decimal> = quote
+            .get("routePlan")
+            .and_then(|plan| plan.as_array())
+            .and_then(|steps| {
+                let mut total_fee = Decimal::ZERO;
+                for step in steps.iter().filter_map(|s| s.as_object()) {
+                    if let Some(swap_info) = step.get("swapInfo").and_then(|si| si.as_object()) {
+                        if let Some(fee_amount) = swap_info
+                            .get("feeAmount")
+                            .and_then(|f| f.as_str().and_then(|s| Decimal::from_str(s).ok()))
+                        {
+                            total_fee += fee_amount;
+                        }
+                    }
+                }
+                if total_fee > Decimal::ZERO {
+                    Some(total_fee / Decimal::from(LAMPORTS_PER_SOL))
+                } else {
+                    None
+                }
+            });
+
         Ok(QuoteResult {
             price_impact_pct,
             fill_price_lamports_per_base,
             in_amount,
             out_amount,
+            route_fee_sol,
         })
     }
 

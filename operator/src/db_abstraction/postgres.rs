@@ -41,7 +41,14 @@ impl PostgresBackend {
         let connect_options = PgConnectOptions::from_str(db_url)
             .map_err(AppError::Database)?
             // Application name for monitoring
-            .application_name("chimera-operator");
+            .application_name("chimera-operator")
+            // Disable the prepared-statement cache. PostgreSQL raises
+            // `cached plan must not change result type` when a migration
+            // ALTERs a table column while a prepared statement for that table
+            // is still live in the pool. Clearing the cache (capacity 0) makes
+            // every query re-Parse/Bind/Execute, trading a few hundred
+            // microseconds per query for immunity to that class of error.
+            .statement_cache_capacity(0);
 
         let pool = PgPoolOptions::new()
             .max_connections(config.max_connections)

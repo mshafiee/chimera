@@ -627,23 +627,30 @@ impl Executor {
                         "Trade executed successfully"
                     );
 
-                    // Record tip if using Jito and tip manager is available
+                    // Record tip if using Jito and tip manager is available.
+                    // The tip amount is always calculated (for cost tracking) so paper
+                    // mode projects realistic live costs, but it is only RECORDED into
+                    // the TipManager's success history for Live trades — paper/devnet
+                    // never submit a real bundle, so recording them as successes would
+                    // pollute the percentile data and skew future live tip calculations.
                     let jito_tip = if rpc_mode == RpcMode::Jito {
                         let tip = self.calculate_jito_tip(signal).await;
-                        if let Some(ref tip_manager) = self.tip_manager {
-                            if let Err(e) = tip_manager
-                                .record_tip(
-                                    tip,
-                                    Some(&outcome.signature),
-                                    signal.payload.strategy,
-                                    true, // success
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    error = %e,
-                                    "Failed to record tip in TipManager"
-                                );
+                        if self.config.trade_mode == crate::config::TradeMode::Live {
+                            if let Some(ref tip_manager) = self.tip_manager {
+                                if let Err(e) = tip_manager
+                                    .record_tip(
+                                        tip,
+                                        Some(&outcome.signature),
+                                        signal.payload.strategy,
+                                        true, // success
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Failed to record tip in TipManager"
+                                    );
+                                }
                             }
                         }
                         tip
@@ -731,20 +738,22 @@ impl Executor {
                                 "Failed to record Jito tip cost for failed trade"
                             );
                         }
-                        if let Some(ref tip_manager) = self.tip_manager {
-                            if let Err(tip_err) = tip_manager
-                                .record_tip(
-                                    jito_tip,
-                                    None, // No signature for failed trades
-                                    signal.payload.strategy,
-                                    false, // failure
-                                )
-                                .await
-                            {
-                                tracing::warn!(
-                                    error = %tip_err,
-                                    "Failed to record failed tip in TipManager"
-                                );
+                        if self.config.trade_mode == crate::config::TradeMode::Live {
+                            if let Some(ref tip_manager) = self.tip_manager {
+                                if let Err(tip_err) = tip_manager
+                                    .record_tip(
+                                        jito_tip,
+                                        None, // No signature for failed trades
+                                        signal.payload.strategy,
+                                        false, // failure
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error = %tip_err,
+                                        "Failed to record failed tip in TipManager"
+                                    );
+                                }
                             }
                         }
                     }
@@ -3113,10 +3122,15 @@ impl Executor {
 
     /// Fetch real Jupiter quotes for paper/devnet modes. Returns the data needed
     /// to build an `ExecutionOutcome` without mutating any shared state.
+    ///
+    /// Returns `(price_impact_pct, fill_price_sol_per_token, token_amount,
+    /// route_fee_sol)`. The route fee lets paper mode charge the same real
+    /// per-route DEX fee that live mode would pay (P2-17/F22 parity) instead
+    /// of the flat `amount × dex_fee_rate` estimate.
     async fn get_paper_prices(
         &self,
         signal: &Signal,
-    ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>), ExecutorError> {
+    ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>, Option<Decimal>), ExecutorError> {
         let active_client = self.active_rpc_client();
         let tx_builder = TransactionBuilder::new(active_client.clone(), self.config.clone())
             .map_err(|e| ExecutorError::TransactionFailed(format!("TransactionBuilder: {}", e)))?;
@@ -3144,6 +3158,7 @@ impl Executor {
                     result.price_impact_pct,
                     fill_price_sol,
                     Some(result.out_amount),
+                    result.route_fee_sol,
                 ))
             }
             Action::Sell => {
@@ -3194,7 +3209,7 @@ impl Executor {
                     signal.token_decimals,
                     &signal.trade_uuid,
                 );
-                Ok((result.price_impact_pct, fill_price_sol, None))
+                Ok((result.price_impact_pct, fill_price_sol, None, result.route_fee_sol))
             }
         }
     }
@@ -3206,7 +3221,8 @@ impl Executor {
             "Paper mode: fetching real Jupiter quote, no on-chain submission"
         );
 
-        let (price_impact, fill_price_sol, token_amount) = self.get_paper_prices(signal).await?;
+        let (price_impact, fill_price_sol, token_amount, route_fee_sol) =
+            self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
 
         Ok(ExecutionOutcome {
@@ -3216,7 +3232,7 @@ impl Executor {
             price_impact_pct: price_impact,
             token_amount,
             estimated_fee_sol: Some(estimated_fee_sol),
-            route_fee_sol: None,
+            route_fee_sol,
         })
     }
 
@@ -3226,7 +3242,8 @@ impl Executor {
             "Devnet mode: real Jupiter quote + minimal tx on devnet"
         );
 
-        let (price_impact, fill_price_sol, token_amount) = self.get_paper_prices(signal).await?;
+        let (price_impact, fill_price_sol, token_amount, route_fee_sol) =
+            self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
 
         let secrets = load_secrets_with_fallback().map_err(|e| {
@@ -3283,7 +3300,7 @@ impl Executor {
             price_impact_pct: price_impact,
             token_amount,
             estimated_fee_sol: Some(estimated_fee_sol),
-            route_fee_sol: None,
+            route_fee_sol,
         })
     }
 
