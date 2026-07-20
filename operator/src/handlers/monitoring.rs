@@ -277,7 +277,7 @@ pub async fn helius_webhook_handler(
                     // Insert trade into DB as PENDING before queueing (mirrors webhook handler).
                     // Without this, the worker's process_signal() fails with TradeNotFound
                     // because update_trade_status() targets a non-existent row.
-                    if let Err(e) = state
+                    match state
                         .db
                         .insert_trade(&InsertTrade {
                             trade_uuid: signal.trade_uuid.clone(),
@@ -291,13 +291,29 @@ pub async fn helius_webhook_handler(
                         })
                         .await
                     {
-                        tracing::error!(
-                            error = %e,
-                            trade_uuid = %signal.trade_uuid,
-                            wallet = %wallet_address,
-                            "Failed to insert trade from monitoring signal"
-                        );
-                        continue;
+                        Ok(_) => {}
+                        Err(e) => {
+                            let err_str = e.to_string();
+                            if err_str.contains("duplicate key") {
+                                // Helius sends duplicate webhooks for the same transaction.
+                                // The deterministic trade_uuid (wallet+token+action+amount)
+                                // ensures the same signal maps to the same DB row. This is
+                                // the dedup path — skip silently.
+                                tracing::debug!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    wallet = %wallet_address,
+                                    "Monitoring signal already in DB (duplicate Helius webhook), skipping"
+                                );
+                            } else {
+                                tracing::error!(
+                                    error = %e,
+                                    trade_uuid = %signal.trade_uuid,
+                                    wallet = %wallet_address,
+                                    "Failed to insert trade from monitoring signal"
+                                );
+                            }
+                            continue;
+                        }
                     }
 
                     // Queue signal with wallet WQS
