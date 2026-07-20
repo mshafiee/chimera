@@ -1900,9 +1900,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(health_check))
         .with_state(app_state.clone());
 
-    // Rate limiter for public API routes (more permissive — 60 req/s, burst 100)
+    // Rate limiter for public API routes (~60 req/s sustained, burst 100).
+    // NOTE: tower_governor's per_second/per_millisecond set the *interval* at which ONE
+    // token is replenished (i.e. a period), NOT a per-second rate. per_second(60) would
+    // mean only 1 token every 60s. per_millisecond(16) ≈ 1 token / 16ms ≈ 62 tokens/s.
     let public_api_limiter_conf = tower_governor::governor::GovernorConfigBuilder::default()
-        .per_second(60)
+        .per_millisecond(16)
         .burst_size(100)
         .key_extractor(middleware::ProxyAwareKeyExtractor)
         .finish()
