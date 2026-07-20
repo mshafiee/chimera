@@ -495,21 +495,27 @@ impl Executor {
                 }
             }
 
-            // Validate amount bounds (config values are already Decimal)
-            let min_position = self.config.strategy.min_position_sol;
-            if signal.payload.amount_sol < min_position {
-                return Err(ExecutorError::AmountTooSmall(
-                    signal.payload.amount_sol,
-                    min_position,
-                ));
-            }
+            // Validate amount bounds (config values are already Decimal).
+            // BUY only — SELL quantity is determined by the open position's
+            // token_amount (see get_paper_prices SELL branch), not the signal's
+            // amount_sol which is the copied wallet's sell size and may be below
+            // our min position threshold.
+            if signal.payload.action == Action::Buy {
+                let min_position = self.config.strategy.min_position_sol;
+                if signal.payload.amount_sol < min_position {
+                    return Err(ExecutorError::AmountTooSmall(
+                        signal.payload.amount_sol,
+                        min_position,
+                    ));
+                }
 
-            let max_position = self.config.strategy.max_position_sol;
-            if signal.payload.amount_sol > max_position {
-                return Err(ExecutorError::AmountTooLarge(
-                    signal.payload.amount_sol,
-                    max_position,
-                ));
+                let max_position = self.config.strategy.max_position_sol;
+                if signal.payload.amount_sol > max_position {
+                    return Err(ExecutorError::AmountTooLarge(
+                        signal.payload.amount_sol,
+                        max_position,
+                    ));
+                }
             }
 
             // Execute based on mode

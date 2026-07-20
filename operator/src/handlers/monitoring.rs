@@ -253,6 +253,38 @@ pub async fn helius_webhook_handler(
                         }
                     }
 
+                    // For SELL (exit) signals, only proceed if we hold an active
+                    // position for this token. Copy-trading: we can only exit
+                    // positions we actually opened. Without this check, every SELL
+                    // from the copied wallet creates a FAILED trade ("No active
+                    // position for SELL") that pollutes the DLQ and retry loop.
+                    if direction == Action::Sell {
+                        match state
+                            .db
+                            .get_active_position_by_wallet_token(&wallet_address, &target_token)
+                            .await
+                        {
+                            Ok(Some(_)) => {} // have position — proceed to close it
+                            Ok(None) => {
+                                tracing::debug!(
+                                    wallet = %wallet_address,
+                                    token = %target_token,
+                                    "Skipping SELL signal: no active position to close"
+                                );
+                                continue;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    wallet = %wallet_address,
+                                    token = %target_token,
+                                    error = %e,
+                                    "Position lookup failed for SELL; skipping to avoid noise FAILED trade"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
                     // Compute trade amount: use bot's configured position sizing,
                     // not the copied wallet's swap amount.
                     let trade_amount_sol = if direction == Action::Buy {

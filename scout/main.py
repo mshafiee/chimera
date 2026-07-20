@@ -669,7 +669,7 @@ async def analyze_wallets(
                     # The downstream matcher compares against actual_copy_pnl_30d_sol (in SOL)
                     # Use avg_trade_size_sol as proxy for investment size
                     investment_size_sol = wqs_metrics.avg_trade_size_sol if wqs_metrics.avg_trade_size_sol and wqs_metrics.avg_trade_size_sol > 0 else 1.0
-                    expected_return_sol = (prediction.expected_return_pct / 100.0) * investment_size_sol
+                    expected_return_sol = (prediction.expected_return_pct / 100.0) * float(investment_size_sol)
 
                     plogger = PredictionLogger()
                     plogger.log_prediction(
