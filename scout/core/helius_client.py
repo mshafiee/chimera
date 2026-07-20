@@ -2479,7 +2479,7 @@ class HeliusClient:
                     result = await asyncio.wait_for(coro, timeout=timeout_secs)
                     print(f"[Helius] Strategy ({tag}) found {len(result)} wallets")
                     return tag, result
-                except asyncio.TimeoutError:
+                except (asyncio.TimeoutError, asyncio.CancelledError):
                     print(f"[Helius] Strategy ({tag}) timed out after {timeout_secs}s — skipping")
                     return tag, {}
                 except Exception as e:

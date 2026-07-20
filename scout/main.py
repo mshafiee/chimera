@@ -974,6 +974,9 @@ async def analyze_wallets(
     for task in done:
         try:
             results.append(task.result())
+        except asyncio.CancelledError:
+            print(f"[Scout] ✗ Wallet task cancelled")
+            results.append(None)
         except Exception as e:
             print(f"[Scout] ✗ Wallet task failed: {e}")
             results.append(None)
