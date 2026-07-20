@@ -49,6 +49,14 @@ struct ProfitTargetState {
     /// Starts at 1.0 and is multiplied by (1 - tiered_exit_percent/100) for each tier hit.
     /// Used by the dust check to compute actual remaining position, not entry_amount_sol.
     remaining_fraction: Decimal,
+    /// Volatility scale captured at registration time (if data was available).
+    /// Used as a fallback when calculate_volatility returns None mid-session.
+    initial_vol_scale: Option<Decimal>,
+    /// Number of check_targets ticks since position registration.
+    /// Used for the cold-start ramp (see VOL_RAMP_TICKS).
+    ticks_since_entry: u32,
+    /// Last vol_scale value logged — used to suppress log flooding.
+    last_logged_vol_scale: Option<Decimal>,
 }
 
 /// Profit target action
@@ -67,7 +75,6 @@ pub enum ProfitTargetAction {
 /// Number of 5-second ticks over which to ramp the volatility scale from 1.0
 /// to the measured value. Prevents a sudden target snap when volatility data
 /// first becomes available (~2 min after position open at 5s intervals).
-#[allow(dead_code)]
 const VOL_RAMP_TICKS: u32 = 60;
 
 /// Compute the volatility scale factor for profit targets.
@@ -79,7 +86,6 @@ const VOL_RAMP_TICKS: u32 = 60;
 ///
 /// The cold-start ramp smooths the transition from 1.0 to the measured scale
 /// over the first `VOL_RAMP_TICKS` ticks after position registration.
-#[allow(dead_code)]
 fn compute_vol_scale(
     volatility: Option<f64>,
     threshold: Decimal,
@@ -93,7 +99,9 @@ fn compute_vol_scale(
             }
             let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
                 .unwrap_or(Decimal::ZERO);
-            (vol_dec / threshold).min(Decimal::ONE)
+            // Clamp at zero: a negative volatility reading (shouldn't happen but
+            // could from corrupted data) must never produce a negative scale.
+            ((vol_dec / threshold).min(Decimal::ONE)).max(Decimal::ZERO)
         }
         None => {
             // No live volatility — use initial estimate if available, else full scale
@@ -238,6 +246,23 @@ impl ProfitTargetManager {
                     trailing_stop_price: t_price,
                     entry_time,
                     remaining_fraction: remaining,
+                    initial_vol_scale: {
+                        match self.price_cache.calculate_volatility(token_address) {
+                            Some(vol) => {
+                                let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
+                                    .unwrap_or(Decimal::ZERO);
+                                if self.config.target_vol_scale_threshold.is_zero() {
+                                    None
+                                } else {
+                                    Some((vol_dec / self.config.target_vol_scale_threshold)
+                                        .min(Decimal::ONE))
+                                }
+                            }
+                            None => None,
+                        }
+                    },
+                    ticks_since_entry: 0,
+                    last_logged_vol_scale: None,
                 }
             }
             _ => {
@@ -254,6 +279,26 @@ impl ProfitTargetManager {
                     trailing_stop_price: Decimal::ZERO,
                     entry_time,
                     remaining_fraction: Decimal::ONE,
+                    initial_vol_scale: {
+                        // Capture initial volatility estimate if available at registration
+                        match self.price_cache.calculate_volatility(token_address) {
+                            Some(vol) => {
+                                let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
+                                    .unwrap_or(Decimal::ZERO);
+                                if self.config.target_vol_scale_threshold.is_zero() {
+                                    None
+                                } else {
+                                    let scale = (vol_dec
+                                        / self.config.target_vol_scale_threshold)
+                                        .min(Decimal::ONE);
+                                    Some(scale)
+                                }
+                            }
+                            None => None,
+                        }
+                    },
+                    ticks_since_entry: 0,
+                    last_logged_vol_scale: None,
                 };
                 if let Err(e) = self
                     .db
@@ -324,12 +369,48 @@ impl ProfitTargetManager {
         } else {
             Decimal::ONE
         };
-        // Use a distinct name so we don't shadow the `guard` write-lock binding above.
+
+        // Increment tick counter for cold-start ramp
+        state.ticks_since_entry = state.ticks_since_entry.saturating_add(1);
+
+        // Compute volatility scale factor
+        let vol = self.price_cache.calculate_volatility(token_address);
+        let vol_scale = compute_vol_scale(
+            vol,
+            self.config.target_vol_scale_threshold,
+            state.ticks_since_entry,
+            state.initial_vol_scale,
+        );
+
+        // Log vol_scale at DEBUG, but only when it changes by >10% (Issue 4: log flooding)
+        let should_log = match state.last_logged_vol_scale {
+            None => true,
+            Some(last) => {
+                let change = ((vol_scale - last).abs() / last.max(dec!(0.001))) * dec!(100);
+                change > dec!(10)
+            }
+        };
+        if should_log {
+            state.last_logged_vol_scale = Some(vol_scale);
+            tracing::debug!(
+                trade_uuid,
+                token = %token_address,
+                vol_scale = %vol_scale,
+                volatility = ?vol,
+                "Volatility scale computed for profit targets"
+            );
+        }
+
+        // Scale profit targets: apply regime multiplier × vol_scale, floor at min_target_pct
+        let min_target = self.config.min_target_pct;
         let profit_level_targets: Vec<Decimal> = self
             .config
             .targets
             .iter()
-            .map(|t| *t * multiplier)
+            .map(|t| {
+                let scaled = *t * multiplier * vol_scale;
+                scaled.max(min_target)
+            })
             .collect();
 
         // Track whether state changed so we can persist once at the end
@@ -409,11 +490,16 @@ impl ProfitTargetManager {
         // Additionally, the trailing distance widens for highly volatile tokens (mirrors
         // stop_loss.rs adaptive logic) so microcaps aren't stopped out by normal intraday
         // retracements. Cap at 40% so the stop remains actionable.
+        // Scale trailing stop activation by vol_scale (Issue 3 fix)
+        let scaled_activation = (self.config.trailing_stop_activation * vol_scale).max(min_target);
+
         let base_trailing_distance = if strategy == "SPEAR" {
             self.config.trailing_stop_distance * dec!(1.5)
         } else {
             self.config.trailing_stop_distance
         };
+        // Scale trailing distance by vol_scale so low-vol tokens get tighter stops
+        let scaled_base_distance = base_trailing_distance * vol_scale;
         let trailing_distance =
             if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
                 let vol_mult = if vol > 50.0 {
@@ -423,14 +509,17 @@ impl ProfitTargetManager {
                 } else {
                     Decimal::ONE
                 };
-                (base_trailing_distance * vol_mult).min(Decimal::from(40))
+                (scaled_base_distance * vol_mult).min(Decimal::from(40))
             } else {
-                base_trailing_distance
+                scaled_base_distance
             };
-        if profit_percent >= self.config.trailing_stop_activation && !state.trailing_stop_active {
+        if profit_percent >= scaled_activation && !state.trailing_stop_active {
             state.trailing_stop_active = true;
             let trailing_distance_ratio = trailing_distance / Decimal::from(100);
-            state.trailing_stop_price = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
+            let raw_stop = state.peak_price * (Decimal::ONE - trailing_distance_ratio);
+            // Floor: once trailing stop activates, never let it sit below a small profit lock
+            let floor_price = state.entry_price * (Decimal::ONE + min_target / Decimal::from(100));
+            state.trailing_stop_price = raw_stop.max(floor_price);
             state_changed = true;
         }
 
@@ -446,8 +535,11 @@ impl ProfitTargetManager {
             let trailing_distance_ratio = trailing_distance / Decimal::from(100);
             let new_trailing_stop_price =
                 state.peak_price * (Decimal::ONE - trailing_distance_ratio);
-            if new_trailing_stop_price > state.trailing_stop_price {
-                state.trailing_stop_price = new_trailing_stop_price;
+            // Floor clamp: trailing stop never drops below entry + min_target_pct profit
+            let floor_price = state.entry_price * (Decimal::ONE + min_target / Decimal::from(100));
+            let clamped = new_trailing_stop_price.max(floor_price);
+            if clamped > state.trailing_stop_price {
+                state.trailing_stop_price = clamped;
                 state_changed = true;
             }
         }
