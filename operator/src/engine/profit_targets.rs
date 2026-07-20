@@ -64,6 +64,58 @@ pub enum ProfitTargetAction {
     FullExit,
 }
 
+/// Number of 5-second ticks over which to ramp the volatility scale from 1.0
+/// to the measured value. Prevents a sudden target snap when volatility data
+/// first becomes available (~2 min after position open at 5s intervals).
+#[allow(dead_code)]
+const VOL_RAMP_TICKS: u32 = 60;
+
+/// Compute the volatility scale factor for profit targets.
+///
+/// Returns a value in `[0, 1]`:
+/// - High volatility (>= threshold): returns 1.0 (use full targets).
+/// - Low volatility: returns `vol / threshold` (proportionally smaller targets).
+/// - No data: returns 1.0 (safe default — full targets for unknown tokens).
+///
+/// The cold-start ramp smooths the transition from 1.0 to the measured scale
+/// over the first `VOL_RAMP_TICKS` ticks after position registration.
+#[allow(dead_code)]
+fn compute_vol_scale(
+    volatility: Option<f64>,
+    threshold: Decimal,
+    ticks_since_entry: u32,
+    initial_vol_scale: Option<Decimal>,
+) -> Decimal {
+    let raw_scale = match volatility {
+        Some(vol) => {
+            if threshold.is_zero() {
+                return Decimal::ONE;
+            }
+            let vol_dec = Decimal::from_str(&format!("{:.4}", vol))
+                .unwrap_or(Decimal::ZERO);
+            (vol_dec / threshold).min(Decimal::ONE)
+        }
+        None => {
+            // No live volatility — use initial estimate if available, else full scale
+            match initial_vol_scale {
+                Some(init) => init,
+                None => return Decimal::ONE,
+            }
+        }
+    };
+
+    // Cold-start ramp: smoothly transition from 1.0 to raw_scale over VOL_RAMP_TICKS.
+    // If initial_vol_scale was set (data existed at registration), skip the ramp.
+    if initial_vol_scale.is_some() || ticks_since_entry >= VOL_RAMP_TICKS {
+        return raw_scale;
+    }
+
+    let ramp_progress = Decimal::from(ticks_since_entry) / Decimal::from(VOL_RAMP_TICKS);
+    // effective_scale = 1.0 - (1.0 - raw_scale) * ramp_progress
+    let effective = Decimal::ONE - (Decimal::ONE - raw_scale) * ramp_progress;
+    effective.min(Decimal::ONE)
+}
+
 impl ProfitTargetManager {
     pub fn new(
         db: Arc<dyn Database>,
@@ -524,5 +576,68 @@ impl ProfitTargetManager {
         if let Err(e) = self.db.delete_exit_target(trade_uuid).await {
             tracing::warn!(trade_uuid, error = %e, "Failed to delete exit target state from DB");
         }
+    }
+}
+
+#[cfg(test)]
+mod vol_scale_tests {
+    use super::*;
+
+    #[test]
+    fn test_high_volatility_full_scale() {
+        // Vol=60%, threshold=30% → scale=1.0 (capped)
+        let scale = compute_vol_scale(Some(60.0), dec!(30.0), 100, None);
+        assert_eq!(scale, Decimal::ONE);
+    }
+
+    #[test]
+    fn test_moderate_volatility_partial_scale() {
+        // Vol=15%, threshold=30% → scale=0.5
+        let scale = compute_vol_scale(Some(15.0), dec!(30.0), 100, None);
+        assert_eq!(scale, dec!(0.5));
+    }
+
+    #[test]
+    fn test_low_volatility_small_scale() {
+        // Vol=5%, threshold=30% → scale=0.1667
+        let scale = compute_vol_scale(Some(5.0), dec!(30.0), 100, None);
+        // 5/30 = 0.16666... — check it's between 0.16 and 0.17
+        assert!(scale > dec!(0.16) && scale < dec!(0.17));
+    }
+
+    #[test]
+    fn test_no_volatility_uses_full_scale() {
+        let scale = compute_vol_scale(None, dec!(30.0), 100, None);
+        assert_eq!(scale, Decimal::ONE);
+    }
+
+    #[test]
+    fn test_no_volatility_but_has_initial_estimate() {
+        // No live vol data, but initial estimate was vol=10% → scale=10/30=0.333
+        let scale = compute_vol_scale(None, dec!(30.0), 100, Some(dec!(0.3333)));
+        assert!(scale > dec!(0.30) && scale < dec!(0.40));
+    }
+
+    #[test]
+    fn test_cold_start_ramp_smooths_transition() {
+        // Vol=5% (scale would be 0.167), but only 3 ticks elapsed (ramp 60 ticks)
+        // ramp_progress = 3/60 = 0.05
+        // effective_scale = 1.0 - (1.0 - 0.167) * 0.05 = 1.0 - 0.0417 = 0.958
+        let scale = compute_vol_scale(Some(5.0), dec!(30.0), 3, None);
+        assert!(scale > dec!(0.95) && scale < dec!(0.97));
+    }
+
+    #[test]
+    fn test_ramp_completes_after_60_ticks() {
+        // After 60 ticks, ramp is fully applied — scale = raw 5/30 = 0.167
+        let scale = compute_vol_scale(Some(5.0), dec!(30.0), 60, None);
+        assert!(scale > dec!(0.16) && scale < dec!(0.17));
+    }
+
+    #[test]
+    fn test_zero_volatility_full_scale() {
+        // Vol=0% is degenerate but shouldn't crash — scale=0, but callers clamp to min_target_pct
+        let scale = compute_vol_scale(Some(0.0), dec!(30.0), 100, None);
+        assert_eq!(scale, Decimal::ZERO);
     }
 }
