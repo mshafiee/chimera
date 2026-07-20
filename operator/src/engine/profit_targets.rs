@@ -776,4 +776,65 @@ mod vol_scale_tests {
         // Still only tier 0 — no double sell
         assert_eq!(targets_hit, vec![0]);
     }
+
+    #[test]
+    fn test_effective_targets_high_vol_unchanged() {
+        // Vol=60%, threshold=30% → scale=1.0
+        // base [25,50,100,200] × 1.0 = [25,50,100,200]
+        let scale = compute_vol_scale(Some(60.0), dec!(30.0), 100, None);
+        assert_eq!(scale, Decimal::ONE);
+        let min_target = dec!(5.0);
+        let effective: Vec<Decimal> = [dec!(25), dec!(50), dec!(100), dec!(200)]
+            .into_iter()
+            .map(|t| (t * scale).max(min_target))
+            .collect();
+        assert_eq!(effective, vec![dec!(25), dec!(50), dec!(100), dec!(200)]);
+    }
+
+    #[test]
+    fn test_effective_targets_low_vol_floored() {
+        // Vol=3%, threshold=30% → scale=0.1
+        // base [25,50,100,200] × 0.1 = [2.5,5,10,20] → floored to [5,5,10,20]
+        let scale = compute_vol_scale(Some(3.0), dec!(30.0), 100, None);
+        let min_target = dec!(5.0);
+        let effective: Vec<Decimal> = [dec!(25), dec!(50), dec!(100), dec!(200)]
+            .into_iter()
+            .map(|t| (t * scale).max(min_target))
+            .collect();
+        assert_eq!(effective[0], min_target); // floored
+        assert_eq!(effective[1], min_target); // floored
+        assert_eq!(effective[2], dec!(10));
+        assert_eq!(effective[3], dec!(20));
+    }
+
+    #[test]
+    fn test_trailing_activation_scales_and_floors() {
+        // Vol=5%, threshold=30% → scale=0.167
+        // activation 30% × 0.167 = 5.0 → floored at min_target 5.0
+        let scale = compute_vol_scale(Some(5.0), dec!(30.0), 100, None);
+        let activation = (dec!(30) * scale).max(dec!(5.0));
+        assert!(activation >= dec!(5.0)); // never below min_target
+    }
+
+    #[test]
+    fn test_cold_start_ramp_gradual() {
+        // At tick 0: ramp=0 → effective_scale=1.0 (full targets, safe)
+        let scale_t0 = compute_vol_scale(Some(5.0), dec!(30.0), 0, None);
+        assert!(scale_t0 > dec!(0.99));
+
+        // At tick 30 (halfway): ramp=0.5 → effective_scale ≈ 0.583
+        let scale_t30 = compute_vol_scale(Some(5.0), dec!(30.0), 30, None);
+        assert!(scale_t30 > dec!(0.55) && scale_t30 < dec!(0.62));
+
+        // At tick 60 (done): effective_scale ≈ 0.167
+        let scale_t60 = compute_vol_scale(Some(5.0), dec!(30.0), 60, None);
+        assert!(scale_t60 > dec!(0.16) && scale_t60 < dec!(0.17));
+    }
+
+    #[test]
+    fn test_initial_estimate_skips_ramp() {
+        // If initial_vol_scale is set, no ramp — immediate scale
+        let scale = compute_vol_scale(None, dec!(30.0), 5, Some(dec!(0.333)));
+        assert_eq!(scale, dec!(0.333));
+    }
 }
