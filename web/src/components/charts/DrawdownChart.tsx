@@ -25,6 +25,15 @@ interface DrawdownChartProps {
   className?: string
 }
 
+// Theme tokens
+const COLOR_PROFIT = '#00FF88'
+const COLOR_SPEAR = '#FF8800'
+const COLOR_LOSS = '#FF4444'
+
+const AXIS_TICK = { fill: '#888888', fontSize: 12 }
+const AXIS_STROKE = '#3A3A3A'
+const GRID_STROKE = '#3A3A3A'
+
 export function DrawdownChart({
   currentDrawdownPercent,
   maxDrawdownPercent,
@@ -39,9 +48,9 @@ export function DrawdownChart({
   // Get drawdown status
   const getDrawdownStatus = (current: number, max: number) => {
     const ratio = current / max
-    if (ratio < 0.3) return { status: 'Minor', color: '#10b981' }
-    if (ratio < 0.6) return { status: 'Moderate', color: '#f59e0b' }
-    return { status: 'Significant', color: '#ef4444' }
+    if (ratio < 0.3) return { status: 'Minor', color: COLOR_PROFIT }
+    if (ratio < 0.6) return { status: 'Moderate', color: COLOR_SPEAR }
+    return { status: 'Significant', color: COLOR_LOSS }
   }
 
   const drawdownStatus = getDrawdownStatus(currentDrawdownPercent, maxDrawdownPercent)
@@ -78,6 +87,23 @@ export function DrawdownChart({
     return data
   }
 
+  const CustomTooltip = ({ active, payload, label }: any) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-surface border border-border rounded-lg p-3 shadow-lg">
+          <p className="text-xs text-text-muted mb-1">{label ? new Date(label).toLocaleDateString() : ''}</p>
+          <p className="text-sm">
+            <span className="text-text-muted">Drawdown: </span>
+            <span className="font-medium font-mono-numbers" style={{ color: COLOR_LOSS }}>
+              {payload[0].value.toFixed(1)}%
+            </span>
+          </p>
+        </div>
+      )
+    }
+    return null
+  }
+
   return (
     <Card className={className}>
       <CardHeader>
@@ -87,39 +113,39 @@ export function DrawdownChart({
         {/* Key Metrics */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
           {/* Current Drawdown */}
-          <div className="p-4 bg-red-50 rounded-lg">
-            <h3 className="text-sm font-medium text-gray-600">Current Drawdown</h3>
-            <p className="text-2xl font-bold text-red-600">
+          <div className="p-4 bg-loss/10 rounded-lg">
+            <h3 className="text-sm font-medium text-text-muted">Current Drawdown</h3>
+            <p className="text-2xl font-bold font-mono-numbers text-loss">
               {currentDrawdownPercent.toFixed(1)}%
             </p>
-            <p className="text-xs text-gray-500">From peak</p>
+            <p className="text-xs text-text-muted">From peak</p>
           </div>
 
           {/* Maximum Drawdown */}
-          <div className="p-4 bg-orange-50 rounded-lg">
-            <h3 className="text-sm font-medium text-gray-600">Max Drawdown</h3>
-            <p className="text-2xl font-bold text-orange-600">
+          <div className="p-4 bg-spear/10 rounded-lg">
+            <h3 className="text-sm font-medium text-text-muted">Max Drawdown</h3>
+            <p className="text-2xl font-bold font-mono-numbers text-spear">
               {maxDrawdownPercent.toFixed(1)}%
             </p>
-            <p className="text-xs text-gray-500">Historical worst</p>
+            <p className="text-xs text-text-muted">Historical worst</p>
           </div>
 
           {/* Duration */}
-          <div className="p-4 bg-blue-50 rounded-lg">
-            <h3 className="text-sm font-medium text-gray-600">Drawdown Duration</h3>
-            <p className="text-2xl font-bold text-blue-600">
+          <div className="p-4 bg-shield/10 rounded-lg">
+            <h3 className="text-sm font-medium text-text-muted">Drawdown Duration</h3>
+            <p className="text-2xl font-bold font-mono-numbers text-shield">
               {drawdownDurationDays}
             </p>
-            <p className="text-xs text-gray-500">Days since peak</p>
+            <p className="text-xs text-text-muted">Days since peak</p>
           </div>
 
           {/* Recovery Progress */}
-          <div className="p-4 bg-green-50 rounded-lg">
-            <h3 className="text-sm font-medium text-gray-600">Recovery Progress</h3>
-            <p className="text-2xl font-bold text-green-600">
+          <div className="p-4 bg-profit/10 rounded-lg">
+            <h3 className="text-sm font-medium text-text-muted">Recovery Progress</h3>
+            <p className="text-2xl font-bold font-mono-numbers text-profit">
               {recoveryPercent.toFixed(0)}%
             </p>
-            <p className="text-xs text-gray-500">Of max drawdown</p>
+            <p className="text-xs text-text-muted">Of max drawdown</p>
           </div>
         </div>
 
@@ -135,44 +161,50 @@ export function DrawdownChart({
 
         {/* Drawdown Chart */}
         <div className="mb-4">
-          <h3 className="text-sm font-medium text-gray-600 mb-3">Drawdown History</h3>
+          <h3 className="text-sm font-medium text-text-muted mb-3">Drawdown History</h3>
           <ResponsiveContainer width="100%" height={300}>
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="drawdownGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.8} />
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
+                  <stop offset="5%" stopColor={COLOR_LOSS} stopOpacity={0.8} />
+                  <stop offset="95%" stopColor={COLOR_LOSS} stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" />
+              <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} opacity={0.3} vertical={false} />
               <XAxis
                 dataKey="timestamp"
+                tick={AXIS_TICK}
+                stroke={AXIS_STROKE}
+                tickLine={false}
                 tickFormatter={(value) => {
                   const date = new Date(value)
                   return `${date.getMonth() + 1}/${date.getDate()}`
                 }}
               />
-              <YAxis label={{ value: 'Drawdown %', angle: -90, position: 'insideLeft' }} />
-              <Tooltip
-                formatter={(value: number) => [`${value.toFixed(1)}%`, 'Drawdown']}
-                labelFormatter={(value) => new Date(value).toLocaleDateString()}
+              <YAxis
+                tick={AXIS_TICK}
+                stroke={AXIS_STROKE}
+                tickLine={false}
+                label={{ value: 'Drawdown %', angle: -90, position: 'insideLeft', fill: '#888888' }}
               />
+              <Tooltip content={<CustomTooltip />} />
               <ReferenceLine
                 y={currentDrawdownPercent}
-                stroke="#ef4444"
+                stroke={COLOR_LOSS}
                 strokeDasharray="3 3"
-                label="Current"
+                label={{ value: 'Current', fill: COLOR_LOSS, fontSize: 11 }}
               />
               <ReferenceLine
                 y={maxDrawdownPercent}
-                stroke="#f59e0b"
+                stroke={COLOR_SPEAR}
                 strokeDasharray="3 3"
-                label="Max"
+                label={{ value: 'Max', fill: COLOR_SPEAR, fontSize: 11 }}
               />
               <Area
                 type="monotone"
                 dataKey="drawdown"
-                stroke="#ef4444"
+                stroke={COLOR_LOSS}
+                strokeWidth={2}
                 fillOpacity={1}
                 fill="url(#drawdownGradient)"
               />
@@ -182,8 +214,8 @@ export function DrawdownChart({
 
         {/* Recovery Analysis */}
         {currentDrawdownPercent < maxDrawdownPercent * 0.5 && (
-          <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
-            <p className="text-sm text-green-800">
+          <div className="p-3 bg-profit/10 border border-profit/30 rounded-lg">
+            <p className="text-sm text-profit">
               <strong>Positive Recovery:</strong> Portfolio has recovered {recoveryPercent.toFixed(0)}% from maximum drawdown.
               Current risk level is {drawdownStatus.status.toLowerCase()}.
             </p>
@@ -191,8 +223,8 @@ export function DrawdownChart({
         )}
 
         {currentDrawdownPercent > maxDrawdownPercent * 0.8 && (
-          <div className="p-3 bg-red-50 border border-red-200 rounded-lg">
-            <p className="text-sm text-red-800">
+          <div className="p-3 bg-loss/10 border border-loss/30 rounded-lg">
+            <p className="text-sm text-loss">
               <strong>Elevated Risk:</strong> Portfolio is near maximum drawdown levels.
               Consider reducing position sizes or reviewing risk management strategy.
             </p>

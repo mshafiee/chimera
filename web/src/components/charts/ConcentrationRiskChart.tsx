@@ -26,7 +26,17 @@ interface ConcentrationRiskChartProps {
   className?: string
 }
 
-const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82CA9D']
+// Theme-aware palette (shield, profit, spear, loss + accents)
+const COLORS = ['#00D4FF', '#00FF88', '#FF8800', '#FF4444', '#8B5CF6', '#14B8A6']
+
+const COLOR_PROFIT = '#00FF88'
+const COLOR_SPEAR = '#FF8800'
+const COLOR_LOSS = '#FF4444'
+const COLOR_SHIELD = '#00D4FF'
+
+const AXIS_TICK = { fill: '#888888', fontSize: 12 }
+const AXIS_STROKE = '#3A3A3A'
+const GRID_STROKE = '#3A3A3A'
 
 export function ConcentrationRiskChart({
   byToken,
@@ -37,9 +47,9 @@ export function ConcentrationRiskChart({
 }: ConcentrationRiskChartProps) {
   // HHI ranges: 0-1500 (competitive), 1500-2500 (moderate), 2500+ (high)
   const getHHIStatus = (hhiValue: number) => {
-    if (hhiValue < 1500) return { status: 'Competitive', color: '#10b981' }
-    if (hhiValue < 2500) return { status: 'Moderate', color: '#f59e0b' }
-    return { status: 'High', color: '#ef4444' }
+    if (hhiValue < 1500) return { status: 'Competitive', color: COLOR_PROFIT }
+    if (hhiValue < 2500) return { status: 'Moderate', color: COLOR_SPEAR }
+    return { status: 'High', color: COLOR_LOSS }
   }
 
   const hhiStatus = getHHIStatus(hhi)
@@ -59,6 +69,34 @@ export function ConcentrationRiskChart({
     amount: item.value
   }))
 
+  const TokenTooltip = ({ active, payload }: any) => {
+    if (active && payload && payload.length) {
+      const data = payload[0].payload
+      return (
+        <div className="bg-surface border border-border rounded-lg p-3 shadow-lg">
+          <p className="font-medium">{data.full}</p>
+          <p className="text-xs text-text-muted">Concentration: {data.value.toFixed(1)}%</p>
+          <p className="text-xs text-text-muted">Amount: {data.amount.toFixed(2)} SOL</p>
+        </div>
+      )
+    }
+    return null
+  }
+
+  const SectorTooltip = ({ active, payload }: any) => {
+    if (active && payload && payload.length) {
+      const data = payload[0].payload
+      return (
+        <div className="bg-surface border border-border rounded-lg p-3 shadow-lg">
+          <p className="font-medium">{data.name}</p>
+          <p className="text-xs text-text-muted">Concentration: {data.value.toFixed(1)}%</p>
+          <p className="text-xs text-text-muted">Amount: {data.amount.toFixed(2)} SOL</p>
+        </div>
+      )
+    }
+    return null
+  }
+
   return (
     <Card className={className}>
       <CardHeader>
@@ -66,13 +104,13 @@ export function ConcentrationRiskChart({
       </CardHeader>
       <CardContent>
         {/* HHI Metric */}
-        <div className="mb-6 flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+        <div className="mb-6 flex items-center justify-between p-4 bg-surface-light rounded-lg">
           <div>
-            <h3 className="text-sm font-medium text-gray-600">Herfindahl-Hirschman Index</h3>
-            <p className="text-xs text-gray-500">Market concentration measure</p>
+            <h3 className="text-sm font-medium text-text-muted">Herfindahl-Hirschman Index</h3>
+            <p className="text-xs text-text-muted">Market concentration measure</p>
           </div>
           <div className="text-right">
-            <span className="text-2xl font-bold" style={{ color: hhiStatus.color }}>
+            <span className="text-2xl font-bold font-mono-numbers" style={{ color: hhiStatus.color }}>
               {hhi.toFixed(0)}
             </span>
             <span
@@ -85,13 +123,13 @@ export function ConcentrationRiskChart({
         </div>
 
         {/* Maximum Concentration */}
-        <div className="mb-6 p-4 bg-blue-50 rounded-lg">
+        <div className="mb-6 p-4 bg-shield/10 rounded-lg">
           <div className="flex justify-between items-center">
             <div>
-              <h3 className="text-sm font-medium text-gray-600">Maximum Concentration</h3>
-              <p className="text-xs text-gray-500">Largest single position</p>
+              <h3 className="text-sm font-medium text-text-muted">Maximum Concentration</h3>
+              <p className="text-xs text-text-muted">Largest single position</p>
             </div>
-            <span className="text-2xl font-bold text-blue-600">
+            <span className="text-2xl font-bold font-mono-numbers text-shield">
               {maxConcentrationPercent.toFixed(1)}%
             </span>
           </div>
@@ -101,41 +139,34 @@ export function ConcentrationRiskChart({
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Token Concentration */}
           <div>
-            <h3 className="text-sm font-medium text-gray-600 mb-3">Top Token Concentrations</h3>
+            <h3 className="text-sm font-medium text-text-muted mb-3">Top Token Concentrations</h3>
             <ResponsiveContainer width="100%" height={250}>
               <BarChart data={tokenData} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis type="number" domain={[0, Math.max(100, maxConcentrationPercent * 1.2)]} />
-                <YAxis dataKey="name" type="category" width={80} />
-                <Tooltip
-                  formatter={(value: number, name: string) => {
-                    if (name === 'value') {
-                      return [`${value.toFixed(1)}%`, 'Concentration']
-                    }
-                    return [value, name]
-                  }}
-                  content={({ payload }) => {
-                    if (payload && payload.length > 0) {
-                      const data = payload[0].payload
-                      return (
-                        <div className="bg-white p-2 border rounded shadow">
-                          <p className="font-medium">{data.full}</p>
-                          <p>Concentration: {data.value.toFixed(1)}%</p>
-                          <p>Amount: {data.amount.toFixed(2)} SOL</p>
-                        </div>
-                      )
-                    }
-                    return null
-                  }}
+                <CartesianGrid strokeDasharray="3 3" stroke={GRID_STROKE} opacity={0.3} horizontal={false} />
+                <XAxis
+                  type="number"
+                  domain={[0, Math.max(100, maxConcentrationPercent * 1.2)]}
+                  tick={AXIS_TICK}
+                  stroke={AXIS_STROKE}
+                  tickLine={false}
                 />
-                <Bar dataKey="value" fill="#3b82f6" radius={[0, 4, 4, 0]} />
+                <YAxis
+                  dataKey="name"
+                  type="category"
+                  width={80}
+                  tick={AXIS_TICK}
+                  stroke={AXIS_STROKE}
+                  tickLine={false}
+                />
+                <Tooltip content={<TokenTooltip />} cursor={{ fill: '#2E2E2E', opacity: 0.5 }} />
+                <Bar dataKey="value" fill={COLOR_SHIELD} radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
 
           {/* Sector Concentration */}
           <div>
-            <h3 className="text-sm font-medium text-gray-600 mb-3">Sector Distribution</h3>
+            <h3 className="text-sm font-medium text-text-muted mb-3">Sector Distribution</h3>
             <ResponsiveContainer width="100%" height={250}>
               <PieChart>
                 <Pie
@@ -145,28 +176,16 @@ export function ConcentrationRiskChart({
                   labelLine={false}
                   label={({ name, percentage }) => `${name}: ${percentage.toFixed(0)}%`}
                   outerRadius={80}
-                  fill="#8884d8"
+                  fill={COLOR_SHIELD}
                   dataKey="value"
+                  stroke="#242424"
+                  strokeWidth={1}
                 >
                   {sectorData.map((_entry, index) => (
                     <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                   ))}
                 </Pie>
-                <Tooltip
-                  content={({ payload }) => {
-                    if (payload && payload.length > 0) {
-                      const data = payload[0].payload
-                      return (
-                        <div className="bg-white p-2 border rounded shadow">
-                          <p className="font-medium">{data.name}</p>
-                          <p>Concentration: {data.value.toFixed(1)}%</p>
-                          <p>Amount: {data.amount.toFixed(2)} SOL</p>
-                        </div>
-                      )
-                    }
-                    return null
-                  }}
-                />
+                <Tooltip content={<SectorTooltip />} />
               </PieChart>
             </ResponsiveContainer>
           </div>
@@ -174,8 +193,8 @@ export function ConcentrationRiskChart({
 
         {/* Risk Alert */}
         {maxConcentrationPercent > 20 && (
-          <div className="mt-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <p className="text-sm text-yellow-800">
+          <div className="mt-4 p-3 bg-spear/10 border border-spear/30 rounded-lg">
+            <p className="text-sm text-spear">
               <strong>Warning:</strong> High concentration detected. Consider diversifying positions to reduce risk.
             </p>
           </div>
