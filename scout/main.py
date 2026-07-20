@@ -2254,12 +2254,30 @@ async def main_async():
     if args.verbose or args.dry_run or stats["total"] > 0:
         analyzer.print_parse_health_dashboard()
 
-    # If overall parse rate across ALL wallets is below threshold, exit non-zero
-    # so that cron can alert. Configurable via SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT.
-    if analyzer.is_parse_rate_below_threshold():
-        exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
-        print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
-        sys.exit(2)
+    # Write wallets to database BEFORE the parse-rate health check.
+    # The parse-rate check below calls sys.exit(2), which would skip this
+    # write entirely. With chronic parse rate ~32% < 40% threshold, that
+    # meant NO discovered wallets ever reached the operator's monitoring
+    # list — the root cause of zero wallet promotion and zero actionable
+    # paper trades.
+    if args.dry_run:
+        print("\n[Scout] Dry run mode - not writing to database")
+    else:
+        output_path = Path(args.output)
+
+        print(f"\n[Scout] Writing {len(records)} wallets to database...")
+
+        try:
+            success_count = write_wallets_to_db(records)
+            print(f"[Scout] Successfully wrote {success_count}/{len(records)} wallets to database")
+
+            if success_count < len(records):
+                print(f"[Scout] ⚠ Warning: {len(records) - success_count} wallets failed to write")
+        except Exception as e:
+            print(f"[Scout] ERROR: Failed to write wallets to database: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
     # Summary
     print("\n[Scout] Analysis complete:")
@@ -2270,32 +2288,21 @@ async def main_async():
     if stats.get('trajectory_demotions', 0) > 0 or stats.get('trajectory_peak_blocks', 0) > 0:
         print(f"  Trajectory demotions: {stats['trajectory_demotions']}")
         print(f"  Peak blocks: {stats['trajectory_peak_blocks']}")
-    
+
     if not args.skip_backtest:
         print("\n[Scout] Backtest results:")
         print(f"  Passed: {stats['backtest_passed']}")
         print(f"  Failed: {stats['backtest_failed']}")
         print(f"  Skipped: {stats['backtest_skipped']}")
-    
-    # Write output
-    if args.dry_run:
-        print("\n[Scout] Dry run mode - not writing to database")
-    else:
-        output_path = Path(args.output)
-        
-        print(f"\n[Scout] Writing {len(records)} wallets to database...")
-        
-        try:
-            success_count = write_wallets_to_db(records)
-            print(f"[Scout] Successfully wrote {success_count}/{len(records)} wallets to database")
-            
-            if success_count < len(records):
-                print(f"[Scout] ⚠ Warning: {len(records) - success_count} wallets failed to write")
-        except Exception as e:
-            print(f"[Scout] ERROR: Failed to write wallets to database: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
+
+    # If overall parse rate across ALL wallets is below threshold, exit non-zero
+    # so that cron can alert. Configurable via SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT.
+    # Runs AFTER the database write so low parse rate does not block wallet
+    # promotion to the operator.
+    if analyzer.is_parse_rate_below_threshold():
+        exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
+        print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
+        sys.exit(2)
 
     # Print optimization report if enabled
     if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_optimization_enabled():
