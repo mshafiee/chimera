@@ -219,18 +219,23 @@ impl ProfitTargetManager {
             Ok(Some(data)) => {
                 let peak = data.peak_price.max(current_price);
                 let peak_pct = data.peak_profit_percent;
+                let targets_count = self.config.targets.len();
                 let targets_hit: Vec<usize> =
-                    serde_json::from_str(&data.targets_hit).unwrap_or_else(|_| {
-                        // Backward compat: old rows stored Decimal values.
-                        // Clear and re-evaluate from scratch (safe — may re-trigger
-                        // a tier that was already hit, but that's better than panic).
-                        tracing::warn!(
-                            trade_uuid,
-                            raw = %data.targets_hit,
-                            "Migrating targets_hit from value-based to index-based (resetting)"
-                        );
-                        Vec::new()
-                    });
+                    serde_json::from_str::<Vec<usize>>(&data.targets_hit)
+                        .ok()
+                        .filter(|v| v.iter().all(|&i| i < targets_count))
+                        .unwrap_or_else(|| {
+                            // Backward compat: old rows stored Decimal values.
+                            // Clear and re-evaluate from scratch (safe — may re-trigger
+                            // a tier that was already hit, but that's better than panic).
+                            tracing::warn!(
+                                trade_uuid,
+                                raw = %data.targets_hit,
+                                targets_count,
+                                "Migrating targets_hit from value-based to index-based (resetting)"
+                            );
+                            Vec::new()
+                        });
                 let t_price = data.trailing_stop_price;
                 let remaining = data.remaining_fraction;
                 tracing::debug!(trade_uuid, %remaining, "Restored profit target state from DB");
