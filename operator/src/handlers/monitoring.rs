@@ -2,6 +2,7 @@
 //!
 //! Handles Helius webhook endpoint and monitoring status
 
+use crate::db_abstraction::{InsertTrade, UpdateTradeStatus};
 use crate::middleware::{AuthExtension, Role};
 use crate::models::{Action, Signal, SignalPayload, Strategy};
 use crate::monitoring::transaction_parser::parse_helius_webhook;
@@ -240,13 +241,29 @@ pub async fn helius_webhook_handler(
                         }
                     }
 
+                    // Compute trade amount: use bot's configured position sizing,
+                    // not the copied wallet's swap amount.
+                    let trade_amount_sol = if direction == Action::Buy {
+                        let max_pos = state.config.strategy.max_position_sol;
+                        let min_pos = state.config.strategy.min_position_sol;
+                        if swap.amount_in > max_pos {
+                            max_pos
+                        } else if swap.amount_in < min_pos {
+                            min_pos
+                        } else {
+                            swap.amount_in
+                        }
+                    } else {
+                        swap.amount_in
+                    };
+
                     let signal_payload = SignalPayload {
                         wallet_address: wallet_address.clone(),
                         strategy,
                         token: target_token.clone(),
                         token_address: Some(target_token),
                         action: direction,
-                        amount_sol: swap.amount_in,
+                        amount_sol: trade_amount_sol,
                         trade_uuid: None,
                         exit_fraction: None,
                     };
@@ -257,16 +274,77 @@ pub async fn helius_webhook_handler(
                         None, // source_ip
                     );
 
+                    // Insert trade into DB as PENDING before queueing (mirrors webhook handler).
+                    // Without this, the worker's process_signal() fails with TradeNotFound
+                    // because update_trade_status() targets a non-existent row.
+                    if let Err(e) = state
+                        .db
+                        .insert_trade(&InsertTrade {
+                            trade_uuid: signal.trade_uuid.clone(),
+                            wallet_address: signal.payload.wallet_address.clone(),
+                            token_address: signal.token_address().to_string(),
+                            token_symbol: Some(signal.payload.token.clone()),
+                            strategy: signal.payload.strategy.to_string(),
+                            side: signal.payload.action.to_string(),
+                            amount_sol: signal.payload.amount_sol,
+                            status: "PENDING".to_string(),
+                        })
+                        .await
+                    {
+                        tracing::error!(
+                            error = %e,
+                            trade_uuid = %signal.trade_uuid,
+                            wallet = %wallet_address,
+                            "Failed to insert trade from monitoring signal"
+                        );
+                        continue;
+                    }
+
                     // Queue signal with wallet WQS
                     let wallet_wqs = wallet.wqs_score.map(|s| s.to_f64().unwrap_or(0.0));
+                    let signal_uuid = signal.trade_uuid.clone();
                     if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
-                        tracing::error!(error = %e, "Failed to queue signal from webhook");
+                        tracing::error!(
+                            error = %e,
+                            trade_uuid = %signal_uuid,
+                            "Failed to queue signal from webhook"
+                        );
+                        let _ = state
+                            .db
+                            .update_trade_status(&UpdateTradeStatus {
+                                trade_uuid: signal_uuid,
+                                status: "FAILED".to_string(),
+                                tx_signature: None,
+                                error_message: Some(format!("Queue failed: {}", e)),
+                                network_fee_sol: None,
+                            })
+                            .await;
                         continue; // Skip this event, but continue processing others
+                    }
+
+                    // Update trade status to QUEUED after successful queue
+                    if let Err(e) = state
+                        .db
+                        .update_trade_status(&UpdateTradeStatus {
+                            trade_uuid: signal_uuid.clone(),
+                            status: "QUEUED".to_string(),
+                            tx_signature: None,
+                            error_message: None,
+                            network_fee_sol: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            trade_uuid = %signal_uuid,
+                            "Failed to update monitoring trade status to QUEUED"
+                        );
                     }
 
                     tracing::info!(
                         wallet = %wallet_address,
                         token = %swap.token_out,
+                        trade_uuid = %signal_uuid,
                         "Queued signal from webhook"
                     );
                 } else {

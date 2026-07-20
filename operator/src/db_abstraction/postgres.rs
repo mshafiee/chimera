@@ -1552,6 +1552,8 @@ impl Database for PostgresBackend {
 
         let is_full_close = exit_fraction >= Decimal::ONE;
 
+        let mut fully_closed_entry_uuids: Vec<String> = Vec::new();
+
         for (id, entry_price_dec, entry_amount_dec, entry_trade_uuid, entry_sol_price_opt) in
             active_positions.iter()
         {
@@ -1691,6 +1693,8 @@ impl Database for PostgresBackend {
                     );
                     continue;
                 }
+
+                fully_closed_entry_uuids.push(entry_trade_uuid.clone());
             } else {
                 let remaining_amount = entry_amount_dec - exited_amount;
 
@@ -1752,6 +1756,24 @@ impl Database for PostgresBackend {
             }
 
             gross_pnl += pnl_sol;
+        }
+
+        // Mark fully-closed entry (BUY) trades as CLOSED so they don't stay ACTIVE forever.
+        // Without this, the trades table accumulates orphaned ACTIVE rows whose positions are CLOSED,
+        // which corrupts circuit-breaker loss counts and dashboard stats.
+        for entry_uuid in &fully_closed_entry_uuids {
+            let rows = sqlx::query(
+                "UPDATE trades SET status = 'CLOSED' WHERE trade_uuid = $1 AND status = 'ACTIVE'",
+            )
+            .bind(entry_uuid)
+            .execute(&mut *tx)
+            .await?;
+            if rows.rows_affected() > 0 {
+                tracing::info!(
+                    entry_trade_uuid = %entry_uuid,
+                    "Marked BUY trade CLOSED after position fully closed"
+                );
+            }
         }
 
         let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;

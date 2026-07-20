@@ -236,6 +236,16 @@ impl RecoveryManager {
                 self.db
                     .update_position_state(&position.trade_uuid, "CLOSED")
                     .await?;
+                let _ = self
+                    .db
+                    .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                        trade_uuid: position.trade_uuid.clone(),
+                        status: "CLOSED".to_string(),
+                        tx_signature: position.exit_tx_signature.clone(),
+                        error_message: None,
+                        network_fee_sol: None,
+                    })
+                    .await;
 
                 let tx_sig = position
                     .exit_tx_signature
@@ -410,6 +420,18 @@ impl RecoveryManager {
             self.db
                 .update_position_state(&position.trade_uuid, "CLOSED")
                 .await?;
+            let _ = self
+                .db
+                .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                    trade_uuid: position.trade_uuid.clone(),
+                    status: "CLOSED".to_string(),
+                    tx_signature: None,
+                    error_message: Some(
+                        "Auto-recovery: position marked CLOSED (zero on-chain balance)".to_string(),
+                    ),
+                    network_fee_sol: None,
+                })
+                .await;
             self.db.insert_reconciliation_log(
                 &position.trade_uuid,
                 "EXITING",
