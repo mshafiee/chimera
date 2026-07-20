@@ -41,7 +41,7 @@ struct ProfitTargetState {
     current_price: Decimal,
     peak_price: Decimal,
     peak_profit_percent: Decimal,
-    targets_hit: Vec<Decimal>, // Which targets have been hit
+    targets_hit: Vec<usize>, // Which target indices have been hit (index-based, not value-based)
     trailing_stop_active: bool,
     trailing_stop_price: Decimal,
     entry_time: SystemTime,
@@ -211,8 +211,18 @@ impl ProfitTargetManager {
             Ok(Some(data)) => {
                 let peak = data.peak_price.max(current_price);
                 let peak_pct = data.peak_profit_percent;
-                let targets_hit: Vec<Decimal> =
-                    serde_json::from_str(&data.targets_hit).unwrap_or_default();
+                let targets_hit: Vec<usize> =
+                    serde_json::from_str(&data.targets_hit).unwrap_or_else(|_| {
+                        // Backward compat: old rows stored Decimal values.
+                        // Clear and re-evaluate from scratch (safe — may re-trigger
+                        // a tier that was already hit, but that's better than panic).
+                        tracing::warn!(
+                            trade_uuid,
+                            raw = %data.targets_hit,
+                            "Migrating targets_hit from value-based to index-based (resetting)"
+                        );
+                        Vec::new()
+                    });
                 let t_price = data.trailing_stop_price;
                 let remaining = data.remaining_fraction;
                 tracing::debug!(trade_uuid, %remaining, "Restored profit target state from DB");
@@ -334,9 +344,9 @@ impl ProfitTargetManager {
         {
             let mut new_targets_hit = 0;
 
-            for target in &profit_level_targets {
-                if profit_percent >= *target && !state.targets_hit.contains(target) {
-                    state.targets_hit.push(*target);
+            for (i, target) in profit_level_targets.iter().enumerate() {
+                if profit_percent >= *target && !state.targets_hit.contains(&i) {
+                    state.targets_hit.push(i);
                     state_changed = true;
                     new_targets_hit += 1;
                 }
@@ -444,7 +454,7 @@ impl ProfitTargetManager {
 
         // Snapshot state for DB persistence (before releasing the lock)
         let db_snapshot = if state_changed {
-            let th: Vec<Decimal> = state.targets_hit.clone();
+            let th: Vec<usize> = state.targets_hit.clone();
             let th_json = serde_json::to_string(&th).unwrap_or_else(|_| "[]".to_string());
             Some((
                 state.entry_price,
@@ -639,5 +649,39 @@ mod vol_scale_tests {
         // Vol=0% is degenerate but shouldn't crash — scale=0, but callers clamp to min_target_pct
         let scale = compute_vol_scale(Some(0.0), dec!(30.0), 100, None);
         assert_eq!(scale, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_index_based_tracking_no_double_sell() {
+        // Simulate: target[0] scaled to 4.2% on tick 1, then 3.8% on tick 2.
+        // With value-based tracking, tick 2 would re-trigger tier 0.
+        // With index-based tracking, tier 0 stays hit regardless of value drift.
+        let mut targets_hit: Vec<usize> = vec![];
+
+        // Tick 1: profit=4.2%, scaled_targets=[4.2, 8.3, 16.7, 33.3]
+        // Tier 0 (4.2) is hit
+        for (i, target) in [dec!(4.2), dec!(8.3), dec!(16.7), dec!(33.3)]
+            .iter()
+            .enumerate()
+        {
+            if dec!(4.2) >= *target && !targets_hit.contains(&i) {
+                targets_hit.push(i);
+            }
+        }
+        assert_eq!(targets_hit, vec![0]);
+
+        // Tick 2: profit=3.9%, scaled_targets=[3.8, 7.5, 15.0, 30.0] (volatility dropped)
+        // Value 3.8 is NOT in old targets_hit (which had 4.2), so value-based would
+        // re-trigger. Index-based: tier 0 already hit → skip.
+        for (i, target) in [dec!(3.8), dec!(7.5), dec!(15.0), dec!(30.0)]
+            .iter()
+            .enumerate()
+        {
+            if dec!(3.9) >= *target && !targets_hit.contains(&i) {
+                targets_hit.push(i);
+            }
+        }
+        // Still only tier 0 — no double sell
+        assert_eq!(targets_hit, vec![0]);
     }
 }
