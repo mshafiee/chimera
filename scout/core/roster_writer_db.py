@@ -15,7 +15,7 @@ import logging
 from decimal import Decimal
 from dataclasses import dataclass
 from typing import List, Optional
-from .db import execute_query, execute_update, Connection
+from .db import execute_update
 from .utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -57,76 +57,75 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
         True if successful, False otherwise
     """
     try:
-        with Connection() as conn:
-            # PostgreSQL upsert query
-            query = """
-                INSERT INTO wallets (
-                    address, status, wqs_score, wqs_confidence,
-                    roi_7d, roi_30d, trade_count_30d, win_rate,
-                    max_drawdown_30d, avg_trade_size_sol, avg_win_sol, avg_loss_sol,
-                    profit_factor, realized_pnl_30d_sol, last_trade_at,
-                    promoted_at, ttl_expires_at, notes, archetype,
-                    avg_entry_delay_seconds, last_arb_check_at
-                ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
-                )
-                ON CONFLICT (address) DO UPDATE SET
-                    status = EXCLUDED.status,
-                    wqs_score = EXCLUDED.wqs_score,
-                    wqs_confidence = EXCLUDED.wqs_confidence,
-                    roi_7d = EXCLUDED.roi_7d,
-                    roi_30d = EXCLUDED.roi_30d,
-                    trade_count_30d = EXCLUDED.trade_count_30d,
-                    win_rate = EXCLUDED.win_rate,
-                    max_drawdown_30d = EXCLUDED.max_drawdown_30d,
-                    avg_trade_size_sol = EXCLUDED.avg_trade_size_sol,
-                    avg_win_sol = EXCLUDED.avg_win_sol,
-                    avg_loss_sol = EXCLUDED.avg_loss_sol,
-                    profit_factor = EXCLUDED.profit_factor,
-                    realized_pnl_30d_sol = EXCLUDED.realized_pnl_30d_sol,
-                    last_trade_at = EXCLUDED.last_trade_at,
-                    promoted_at = COALESCE(EXCLUDED.promoted_at, wallets.promoted_at),
-                    ttl_expires_at = EXCLUDED.ttl_expires_at,
-                    notes = EXCLUDED.notes,
-                    archetype = EXCLUDED.archetype,
-                    avg_entry_delay_seconds = EXCLUDED.avg_entry_delay_seconds,
-                    last_arb_check_at = CASE
-                        WHEN EXCLUDED.archetype = 'ARBITRAGE' OR EXCLUDED.archetype != COALESCE(wallets.archetype, '')
-                        THEN CURRENT_TIMESTAMP
-                        ELSE COALESCE(wallets.last_arb_check_at, EXCLUDED.last_arb_check_at)
-                    END,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE wallets.address = EXCLUDED.address
-            """
-            
-            params = (
-                wallet.address,
-                wallet.status,
-                wallet.wqs_score,
-                wallet.wqs_confidence,
-                wallet.roi_7d,
-                wallet.roi_30d,
-                wallet.trade_count_30d,
-                wallet.win_rate,
-                wallet.max_drawdown_30d,
-                wallet.avg_trade_size_sol,
-                wallet.avg_win_sol,
-                wallet.avg_loss_sol,
-                wallet.profit_factor,
-                wallet.realized_pnl_30d_sol,
-                wallet.last_trade_at,
-                wallet.promoted_at,
-                wallet.ttl_expires_at,
-                wallet.notes,
-                wallet.archetype,
-                wallet.avg_entry_delay_seconds,
-                utcnow().isoformat() if wallet.archetype == 'ARBITRAGE' else None,
+        # PostgreSQL upsert query
+        query = """
+            INSERT INTO wallets (
+                address, status, wqs_score, wqs_confidence,
+                roi_7d, roi_30d, trade_count_30d, win_rate,
+                max_drawdown_30d, avg_trade_size_sol, avg_win_sol, avg_loss_sol,
+                profit_factor, realized_pnl_30d_sol, last_trade_at,
+                promoted_at, ttl_expires_at, notes, archetype,
+                avg_entry_delay_seconds, last_arb_check_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
-            
-            execute_update(conn, query, params)
-            logger.debug(f"Wrote wallet {wallet.address} to database")
-            return True
-            
+            ON CONFLICT (address) DO UPDATE SET
+                status = EXCLUDED.status,
+                wqs_score = EXCLUDED.wqs_score,
+                wqs_confidence = EXCLUDED.wqs_confidence,
+                roi_7d = EXCLUDED.roi_7d,
+                roi_30d = EXCLUDED.roi_30d,
+                trade_count_30d = EXCLUDED.trade_count_30d,
+                win_rate = EXCLUDED.win_rate,
+                max_drawdown_30d = EXCLUDED.max_drawdown_30d,
+                avg_trade_size_sol = EXCLUDED.avg_trade_size_sol,
+                avg_win_sol = EXCLUDED.avg_win_sol,
+                avg_loss_sol = EXCLUDED.avg_loss_sol,
+                profit_factor = EXCLUDED.profit_factor,
+                realized_pnl_30d_sol = EXCLUDED.realized_pnl_30d_sol,
+                last_trade_at = EXCLUDED.last_trade_at,
+                promoted_at = COALESCE(EXCLUDED.promoted_at, wallets.promoted_at),
+                ttl_expires_at = EXCLUDED.ttl_expires_at,
+                notes = EXCLUDED.notes,
+                archetype = EXCLUDED.archetype,
+                avg_entry_delay_seconds = EXCLUDED.avg_entry_delay_seconds,
+                last_arb_check_at = CASE
+                    WHEN EXCLUDED.archetype = 'ARBITRAGE' OR EXCLUDED.archetype != COALESCE(wallets.archetype, '')
+                    THEN CURRENT_TIMESTAMP
+                    ELSE COALESCE(wallets.last_arb_check_at, EXCLUDED.last_arb_check_at)
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE wallets.address = EXCLUDED.address
+        """
+
+        params = (
+            wallet.address,
+            wallet.status,
+            wallet.wqs_score,
+            wallet.wqs_confidence,
+            wallet.roi_7d,
+            wallet.roi_30d,
+            wallet.trade_count_30d,
+            wallet.win_rate,
+            wallet.max_drawdown_30d,
+            wallet.avg_trade_size_sol,
+            wallet.avg_win_sol,
+            wallet.avg_loss_sol,
+            wallet.profit_factor,
+            wallet.realized_pnl_30d_sol,
+            wallet.last_trade_at,
+            wallet.promoted_at,
+            wallet.ttl_expires_at,
+            wallet.notes,
+            wallet.archetype,
+            wallet.avg_entry_delay_seconds,
+            utcnow().isoformat() if wallet.archetype == 'ARBITRAGE' else None,
+        )
+
+        execute_update(query, params)
+        logger.debug(f"Wrote wallet {wallet.address} to database")
+        return True
+
     except Exception as e:
         logger.error(f"Failed to write wallet {wallet.address} to database: {e}")
         return False
@@ -164,16 +163,15 @@ def update_wallet_status(address: str, status: str) -> bool:
         True if successful, False otherwise
     """
     try:
-        with Connection() as conn:
-            query = """
-                UPDATE wallets
-                SET status = %s, updated_at = CURRENT_TIMESTAMP
-                WHERE address = %s
-            """
-            execute_update(conn, query, (status, address))
-            logger.debug(f"Updated wallet {address} status to {status}")
-            return True
-            
+        query = """
+            UPDATE wallets
+            SET status = %s, updated_at = CURRENT_TIMESTAMP
+            WHERE address = %s
+        """
+        execute_update(query, (status, address))
+        logger.debug(f"Updated wallet {address} status to {status}")
+        return True
+
     except Exception as e:
         logger.error(f"Failed to update wallet {address} status: {e}")
         return False
@@ -190,12 +188,11 @@ def delete_wallet(address: str) -> bool:
         True if successful, False otherwise
     """
     try:
-        with Connection() as conn:
-            query = "DELETE FROM wallets WHERE address = %s"
-            execute_update(conn, query, (address,))
-            logger.debug(f"Deleted wallet {address} from database")
-            return True
-            
+        query = "DELETE FROM wallets WHERE address = %s"
+        execute_update(query, (address,))
+        logger.debug(f"Deleted wallet {address} from database")
+        return True
+
     except Exception as e:
         logger.error(f"Failed to delete wallet {address}: {e}")
         return False
