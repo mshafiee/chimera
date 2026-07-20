@@ -975,7 +975,7 @@ async def analyze_wallets(
         task.add_done_callback(
             lambda t, a=addr: print(
                 f"[Scout] ✗ Task crashed for {a[:8]}: {t.exception()}"
-            ) if t.exception() and not t.cancelled() else None
+            ) if (not t.cancelled() and t.exception()) else None
         )
     done, _ = await asyncio.wait(tasks)
     results = []

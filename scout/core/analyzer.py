@@ -1362,6 +1362,7 @@ class WalletAnalyzer:
             parse_rate=parse_rate,
             mev_risk_score=mev_risk_score,
             is_tg_bot_user=(bot_swap_ratio >= 0.5 and total_swaps >= 10),
+            transactions=transactions,
         )
         if metrics:
             print(f"  [{address[:8]}] ✓ Metrics calculated successfully")
@@ -2215,7 +2216,7 @@ class WalletAnalyzer:
             self._wallet_age_cache[address] = creation_time
         return creation_time
 
-    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None, mev_risk_score: Optional[float] = None, is_tg_bot_user: bool = False) -> Optional[WalletMetrics]:
+    async def _calculate_metrics_from_trades(self, address: str, trades: List[HistoricalTrade], dex_diversity_score: Optional[int] = None, uses_limit_orders: bool = False, uses_mev_protection: bool = False, is_unproven_from_parse: bool = False, parse_rate: Optional[float] = None, mev_risk_score: Optional[float] = None, is_tg_bot_user: bool = False, transactions: Optional[List[Dict[str, Any]]] = None) -> Optional[WalletMetrics]:
         """Calculate wallet metrics from historical trades."""
         if not trades:
             return None
@@ -2631,12 +2632,13 @@ class WalletAnalyzer:
             if CONFIG_AVAILABLE and ScoutConfig:
                 min_trades_for_arb = ScoutConfig.get_arb_min_trades_for_detection()
             
-            # Only compute round-trip ratio if we have enough trades
-            if len(transactions) >= min_trades_for_arb:
+            # Only compute round-trip ratio if we have enough raw transactions
+            if transactions and len(transactions) >= min_trades_for_arb:
                 round_trip_ratio = self._detect_round_trip_ratio_from_transactions(transactions, address)
                 print(f"  [{address[:8]}] Round-trip ratio: {round_trip_ratio:.2%}")
             else:
-                print(f"  [{address[:8]}] Skipping round-trip detection (insufficient trades: {len(transactions)} < {min_trades_for_arb})")
+                _tx_count = len(transactions) if transactions else 0
+                print(f"  [{address[:8]}] Skipping round-trip detection (insufficient transactions: {_tx_count} < {min_trades_for_arb})")
         except Exception as e:
             print(f"  [{address[:8]}] Warning: Could not detect round-trip ratio: {e}")
 
