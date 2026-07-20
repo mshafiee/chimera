@@ -204,6 +204,20 @@ pub async fn helius_webhook_handler(
                         continue;
                     }
 
+                    // Skip pump.fun bonding-curve tokens for BUY signals.
+                    // These tokens have $0 DEX liquidity — they only trade on pump.fun's
+                    // internal AMM. Copy-trading them is a guaranteed loss from Jito tips.
+                    if direction == Action::Buy
+                        && crate::token::is_pumpfun_token(&target_token)
+                    {
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            token = %target_token,
+                            "Skipping pump.fun bonding-curve token BUY — no DEX exit liquidity"
+                        );
+                        continue;
+                    }
+
                     // FIX 1: Token fast_check before queuing (BUY only)
                     if direction == Action::Buy {
                         if let Some(ref tp) = state.token_parser {

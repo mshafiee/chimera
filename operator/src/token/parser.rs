@@ -40,6 +40,16 @@ pub fn is_non_speculative(token_address: &str) -> bool {
         || token_address == known_tokens::WSOL
 }
 
+/// Check if a token is a pump.fun bonding-curve token.
+///
+/// Pump.fun mints tokens with addresses ending in "pump". These tokens trade on
+/// pump.fun's internal bonding curve and have $0 DEX liquidity until they
+/// graduate to Raydium. Copy-trading these tokens is guaranteed to lose money
+/// from Jito tips + fees because there is no exit liquidity on DEX.
+pub fn is_pumpfun_token(token_address: &str) -> bool {
+    token_address.ends_with("pump")
+}
+
 /// Result of a token safety check
 #[derive(Debug, Clone)]
 pub struct TokenSafetyResult {
