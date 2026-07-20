@@ -3225,6 +3225,15 @@ impl Executor {
             self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
 
+        // Apply the same cost efficiency gate as live Jito mode.
+        // Paper trading must be an exact simulation: if live mode would reject
+        // the trade because the Jito tip + DEX fee + slippage exceeds the
+        // strategy cost limit, paper mode must also reject it. Without this,
+        // paper trades execute at a loss that live mode would never allow.
+        let tip = self.calculate_jito_tip(signal).await;
+        self.check_execution_costs(signal, price_impact, tip, route_fee_sol)
+            .await?;
+
         Ok(ExecutionOutcome {
             signature: format!("simulated_{}", signal.trade_uuid),
             confirmed: true,
