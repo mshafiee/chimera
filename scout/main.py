@@ -553,6 +553,15 @@ async def analyze_wallets(
 
             print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
             trades = analyzer._trades_cache.get(wallet_address, [])
+            if not trades:
+                # DB-cached metrics don't populate _trades_cache; fetch explicitly
+                # so the backtest validator has trade data to simulate.
+                try:
+                    base = getattr(analyzer, '_analyzer', analyzer)
+                    trades = await base.get_historical_trades(wallet_address)
+                except Exception as e:
+                    print(f"[Scout] Warning: could not fetch trades for {wallet_address[:8]}...: {e}")
+                    trades = []
             print(f"[Scout] Got {len(trades)} trades from cache")
 
             # --- Chronological split for clean WQS ---

@@ -1086,11 +1086,11 @@ class WalletAnalyzer:
                     row = cursor.fetchone()
 
                     if row:
-                        roi_7d = row['roi_7d']
-                        roi_30d = row['roi_30d']
+                        roi_7d = float(row['roi_7d']) if row['roi_7d'] is not None else None
+                        roi_30d = float(row['roi_30d']) if row['roi_30d'] is not None else None
                         trade_count_30d = row['trade_count_30d']
-                        win_rate = row['win_rate']
-                        max_drawdown_30d = row['max_drawdown_30d']
+                        win_rate = float(row['win_rate']) if row['win_rate'] is not None else None
+                        max_drawdown_30d = float(row['max_drawdown_30d']) if row['max_drawdown_30d'] is not None else None
                         avg_trade_size_sol = row['avg_trade_size_sol']
                         last_trade_at = row['last_trade_at']
 

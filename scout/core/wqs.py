@@ -322,8 +322,8 @@ def _calculate_enhanced_momentum_score(metrics) -> float:
         return 0.0
 
     score = 0.0
-    roi_7d = metrics.roi_7d
-    roi_30d = metrics.roi_30d
+    roi_7d = float(metrics.roi_7d)
+    roi_30d = float(metrics.roi_30d)
 
     if roi_30d > 0:
         momentum_ratio = roi_7d / roi_30d
