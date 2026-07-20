@@ -2472,13 +2472,16 @@ class HeliusClient:
             )
 
             async def _safe_strategy(
-                tag: str, coro: "Any"
+                tag: str, coro: "Any", timeout_secs: int = 120
             ) -> Tuple[str, Dict[str, int]]:
-                """Wrap a strategy coroutine so exceptions are caught and logged."""
+                """Wrap a strategy coroutine so exceptions/timeouts are caught and logged."""
                 try:
-                    result = await coro
+                    result = await asyncio.wait_for(coro, timeout=timeout_secs)
                     print(f"[Helius] Strategy ({tag}) found {len(result)} wallets")
                     return tag, result
+                except asyncio.TimeoutError:
+                    print(f"[Helius] Strategy ({tag}) timed out after {timeout_secs}s — skipping")
+                    return tag, {}
                 except Exception as e:
                     print(f"[Helius] Strategy ({tag}) failed: {e}")
                     return tag, {}
