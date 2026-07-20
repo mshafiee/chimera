@@ -167,20 +167,18 @@ pub async fn helius_webhook_handler(
                         Action::Sell
                     };
 
-                    // FIX 2: Determine strategy, downgrading Spear to Shield when in RPC fallback
-                    let in_fallback = state.engine.is_in_fallback();
+                    // Determine strategy based on wallet WQS.
+                    // High-WQS wallets (≥70) → Shield (conservative).
+                    // Low-WQS wallets → Spear (aggressive, lower quality threshold).
+                    // The executor guards Spear execution when RPC is degraded —
+                    // do NOT downgrade here, as it forces the Shield quality
+                    // threshold (0.55) which low-WQS wallets can never reach,
+                    // guaranteeing rejection.
                     let strategy = if wallet
                         .wqs_score
                         .map(|s| s >= rust_decimal::Decimal::from(70))
                         .unwrap_or(false)
                     {
-                        Strategy::Shield
-                    } else if in_fallback {
-                        // Cannot run Spear when primary RPC is unavailable; use Shield
-                        tracing::info!(
-                            wallet = %wallet_address,
-                            "RPC in fallback mode — downgrading Spear signal to Shield"
-                        );
                         Strategy::Shield
                     } else {
                         Strategy::Spear

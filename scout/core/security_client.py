@@ -142,7 +142,11 @@ class RugCheckClient:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status == 200:
                     data = await response.json()
-                    score = data.get('score', 0)
+                    raw_score = data.get('score', 0)
+                    try:
+                        score = int(raw_score)
+                    except (TypeError, ValueError):
+                        score = 0
                     risks = data.get('risks', [])
                     
                     # Critical Failures
@@ -159,7 +163,11 @@ class RugCheckClient:
                     for r in risks:
                         if isinstance(r, dict):
                             if 'TopHoldersPercentage' in r.get('name', '') or 'top' in r.get('name', '').lower():
-                                top_holders_concentration = r.get('value', 0)
+                                raw_val = r.get('value', 0)
+                                try:
+                                    top_holders_concentration = float(raw_val)
+                                except (TypeError, ValueError):
+                                    top_holders_concentration = 0
                                 break
                     
                     # High concentration (>80%) is risky

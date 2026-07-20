@@ -603,7 +603,7 @@ async def analyze_wallets(
                     pass
 
             # Survivorship bias flag (informational)
-            survivorship = analyzer._compute_survivorship_flag(trades)
+            survivorship = WalletAnalyzer._compute_survivorship_flag(trades)
             if survivorship == "FRESH_30D":
                 sorted_t = sorted(trades, key=lambda t: t.timestamp)
                 span = (sorted_t[-1].timestamp - sorted_t[0].timestamp).days

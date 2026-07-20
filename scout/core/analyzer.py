@@ -1944,13 +1944,7 @@ class WalletAnalyzer:
         # This should be computed before calling determine_archetype
         if hasattr(metrics, 'round_trip_ratio') and metrics.round_trip_ratio is not None:
             threshold = 0.60  # Default threshold
-            try:
-                from ..config import ScoutConfig
-                CONFIG_AVAILABLE = True
-            except ImportError:
-                CONFIG_AVAILABLE = False
-            
-            if CONFIG_AVAILABLE:
+            if CONFIG_AVAILABLE and ScoutConfig:
                 threshold = ScoutConfig.get_arb_round_trip_threshold_pct()
             
             if metrics.round_trip_ratio >= threshold:
@@ -2625,15 +2619,8 @@ class WalletAnalyzer:
         print(f"  [{address[:8]}] Detecting round-trip ratio...")
         round_trip_ratio = None
         try:
-            # Get config for arb detection
-            try:
-                from ..config import ScoutConfig
-                CONFIG_AVAILABLE = True
-            except ImportError:
-                CONFIG_AVAILABLE = False
-            
             min_trades_for_arb = 10
-            if CONFIG_AVAILABLE:
+            if CONFIG_AVAILABLE and ScoutConfig:
                 min_trades_for_arb = ScoutConfig.get_arb_min_trades_for_detection()
             
             # Only compute round-trip ratio if we have enough trades

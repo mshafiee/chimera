@@ -449,8 +449,12 @@ impl Executor {
                 "Executing trade"
             );
 
-            // Check if Spear is allowed in current mode
-            if signal.payload.strategy == Strategy::Spear && rpc_mode == RpcMode::Standard {
+            // Check if Spear is allowed in current mode (Live only — Paper/Devnet
+            // simulate execution and don't depend on RPC speed)
+            if signal.payload.strategy == Strategy::Spear
+                && rpc_mode == RpcMode::Standard
+                && self.config.trade_mode == crate::config::TradeMode::Live
+            {
                 return Err(ExecutorError::SpearDisabled);
             }
 
