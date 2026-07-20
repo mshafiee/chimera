@@ -852,38 +852,41 @@ async fn main() -> anyhow::Result<()> {
                                     tracing::error!(error = %e, "Failed to batch mark DLQ items as processed");
                                 } else {
                                     // Phase 4: Batch update trade statuses
-                                    // Only reset to RETRY if the trade is still DEAD_LETTER.
-                                    // A trade may have been successfully processed (ACTIVE/CLOSED)
-                                    // by a later signal while the DLQ entry was still pending.
+                                    // Use an atomic conditional UPDATE (WHERE status = 'DEAD_LETTER')
+                                    // to avoid a TOCTOU race where the trade transitions to
+                                    // ACTIVE between a SELECT and UPDATE.
                                     let mut updated_count = 0;
                                     for status_update in &status_updates {
-                                        // Check current status before overwriting
-                                        match dlq_pool.get_trade_by_uuid(&status_update.trade_uuid).await {
-                                            Ok(Some(trade))
-                                                if trade.status == "DEAD_LETTER" =>
-                                            {
-                                                if dlq_pool.update_trade_status(status_update).await.is_ok() {
-                                                    updated_count += 1;
-                                                }
+                                        let result = match dlq_pool.pool() {
+                                            crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
+                                                sqlx::query(
+                                                    r#"
+                                                    UPDATE trades
+                                                    SET status = 'RETRY', error_message = NULL
+                                                    WHERE trade_uuid = $1 AND status = 'DEAD_LETTER'
+                                                    "#,
+                                                )
+                                                .bind(&status_update.trade_uuid)
+                                                .execute(pool)
+                                                .await
                                             }
-                                            Ok(Some(trade)) => {
+                                        };
+
+                                        match result {
+                                            Ok(res) if res.rows_affected() > 0 => {
+                                                updated_count += 1;
+                                            }
+                                            Ok(_) => {
                                                 tracing::info!(
                                                     trade_uuid = %status_update.trade_uuid,
-                                                    current_status = %trade.status,
-                                                    "DLQ retry: skipping status reset — trade already progressed past DEAD_LETTER"
-                                                );
-                                            }
-                                            Ok(None) => {
-                                                tracing::warn!(
-                                                    trade_uuid = %status_update.trade_uuid,
-                                                    "DLQ retry: trade not found in DB"
+                                                    "DLQ retry: skipping — trade no longer DEAD_LETTER"
                                                 );
                                             }
                                             Err(e) => {
                                                 tracing::warn!(
                                                     trade_uuid = %status_update.trade_uuid,
                                                     error = %e,
-                                                    "DLQ retry: failed to check current trade status"
+                                                    "DLQ retry: conditional UPDATE failed"
                                                 );
                                             }
                                         }
