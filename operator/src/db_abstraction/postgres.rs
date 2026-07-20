@@ -3430,7 +3430,12 @@ impl Database for PostgresBackend {
                   OR $3 ILIKE '%mint authority%'
                   OR $3 ILIKE '%freeze authority%'
                   OR $3 ILIKE '%not speculative%'
-                  OR $3 ILIKE '%Amount%below minimum%'))
+                  OR $3 ILIKE '%Amount%below minimum%'
+                  OR $3 ILIKE '%allocation limit%'
+                  OR $3 ILIKE '%Cost efficiency%'
+                  OR $3 ILIKE '%total exposure%'
+                  OR $3 ILIKE '%portfolio heat%'
+                  OR $3 ILIKE '%Missing token_address%'))
             "#,
         )
         .bind(trade_uuid)

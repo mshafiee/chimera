@@ -421,7 +421,7 @@ impl SignalProcessor {
                 if let Some(ref ws) = self.ws_state {
                     ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
                         trade_uuid: trade_uuid.clone(),
-                        status: "DEAD_LEAD_LETTER".to_string(),
+                        status: "DEAD_LETTER".to_string(),
                         token_symbol: Some(signal.payload.token.clone()),
                         strategy: signal.payload.strategy.to_string(),
                     }));

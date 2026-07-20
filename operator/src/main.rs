@@ -97,6 +97,7 @@ use chimera_operator::price_cache::PriceCache;
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
+use rust_decimal::prelude::ToPrimitive;
 
 async fn run_preflight(config: &AppConfig) -> anyhow::Result<()> {
     match config.trade_mode {
@@ -771,6 +772,7 @@ async fn main() -> anyhow::Result<()> {
     // Spawn DLQ retry worker task
     let dlq_token = cancel_token.clone();
     let dlq_pool = db_pool.clone();
+    let dlq_engine = _engine_handle.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
         loop {
@@ -823,25 +825,27 @@ async fn main() -> anyhow::Result<()> {
                                     continue;
                                 }
 
-                                // Parse payload and prepare for re-queue
-                                match serde_json::from_str::<serde_json::Value>(&item.payload) {
-                                    Ok(_) => {
+                                // Parse payload, reconstruct signal, and re-inject into engine
+                                match serde_json::from_str::<SignalPayload>(&item.payload) {
+                                    Ok(payload) => {
+                                        let trade_uuid = payload.trade_uuid.clone()
+                                            .unwrap_or_else(|| item.trade_uuid.clone());
                                         processed_items.push(chimera_operator::db_abstraction::UpdateDlqItemParams {
-                                            trade_uuid: item.trade_uuid.clone(),
+                                            trade_uuid: trade_uuid.clone(),
                                             retry_count: new_count,
                                             can_retry: can_still_retry,
                                             mark_processed: true,
                                         });
                                         status_updates.push(chimera_operator::db_abstraction::UpdateTradeStatus {
-                                            trade_uuid: item.trade_uuid.clone(),
-                                            status: "RETRY".to_string(),
+                                            trade_uuid: trade_uuid.clone(),
+                                            status: "QUEUED".to_string(),
                                             tx_signature: None,
                                             error_message: None,
                                             network_fee_sol: None,
                                         });
                                     }
                                     Err(e) => {
-                                        tracing::warn!(error = %e, uuid = %item.trade_uuid, "Failed to parse DLQ payload");
+                                        tracing::warn!(error = %e, uuid = %item.trade_uuid, "Failed to parse DLQ payload as SignalPayload");
                                     }
                                 }
                             }
@@ -851,18 +855,19 @@ async fn main() -> anyhow::Result<()> {
                                 if let Err(e) = dlq_pool.update_dlq_items_batch(processed_items).await {
                                     tracing::error!(error = %e, "Failed to batch mark DLQ items as processed");
                                 } else {
-                                    // Phase 4: Batch update trade statuses
+                                    // Phase 4: Re-inject each signal into the engine and set trade to QUEUED.
                                     // Use an atomic conditional UPDATE (WHERE status = 'DEAD_LETTER')
                                     // to avoid a TOCTOU race where the trade transitions to
                                     // ACTIVE between a SELECT and UPDATE.
                                     let mut updated_count = 0;
                                     for status_update in &status_updates {
+                                        // Conditionally move DEAD_LETTER → QUEUED
                                         let result = match dlq_pool.pool() {
                                             crate::db_abstraction::DbPool::PostgreSQL(ref pool) => {
                                                 sqlx::query(
                                                     r#"
                                                     UPDATE trades
-                                                    SET status = 'RETRY', error_message = NULL
+                                                    SET status = 'QUEUED', error_message = NULL
                                                     WHERE trade_uuid = $1 AND status = 'DEAD_LETTER'
                                                     "#,
                                                 )
@@ -874,7 +879,61 @@ async fn main() -> anyhow::Result<()> {
 
                                         match result {
                                             Ok(res) if res.rows_affected() > 0 => {
-                                                updated_count += 1;
+                                                // Re-parse payload to reconstruct signal for re-injection
+                                                let dlq_item = items.iter().find(|i| {
+                                                    i.trade_uuid == status_update.trade_uuid
+                                                });
+                                                if let Some(dlq_item) = dlq_item {
+                                                    match serde_json::from_str::<SignalPayload>(&dlq_item.payload) {
+                                                        Ok(payload) => {
+                                                            let signal = Signal::new(
+                                                                payload,
+                                                                chrono::Utc::now().timestamp(),
+                                                                None,
+                                                            );
+                                                            // Look up wallet WQS for proper routing
+                                                            let wallet_wqs = dlq_pool
+                                                                .get_wallet(&signal.payload.wallet_address)
+                                                                .await
+                                                                .ok()
+                                                                .flatten()
+                                                                .and_then(|w| w.wqs_score)
+                                                                .and_then(|wqs| wqs.to_f64());
+                                                            match dlq_engine.queue_signal(signal.clone(), wallet_wqs).await {
+                                                                Ok(_) => {
+                                                                    updated_count += 1;
+                                                                    tracing::info!(
+                                                                        trade_uuid = %status_update.trade_uuid,
+                                                                        retry_count = dlq_item.retry_count + 1,
+                                                                        "DLQ retry: signal re-injected into engine"
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    tracing::warn!(
+                                                                        trade_uuid = %status_update.trade_uuid,
+                                                                        error = %e,
+                                                                        "DLQ retry: failed to queue signal — reverting to DEAD_LETTER"
+                                                                    );
+                                                                    // Revert to DEAD_LETTER so it can be retried next cycle
+                                                                    let _ = dlq_pool.update_trade_status(&chimera_operator::db_abstraction::UpdateTradeStatus {
+                                                                        trade_uuid: status_update.trade_uuid.clone(),
+                                                                        status: "DEAD_LETTER".to_string(),
+                                                                        tx_signature: None,
+                                                                        error_message: Some(format!("DLQ re-queue failed: {}", e)),
+                                                                        network_fee_sol: None,
+                                                                    }).await;
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                trade_uuid = %status_update.trade_uuid,
+                                                                error = %e,
+                                                                "DLQ retry: failed to re-parse payload for re-injection"
+                                                            );
+                                                        }
+                                                    }
+                                                }
                                             }
                                             Ok(_) => {
                                                 tracing::info!(
@@ -891,7 +950,7 @@ async fn main() -> anyhow::Result<()> {
                                             }
                                         }
                                     }
-                                    tracing::info!("DLQ batch: {}/{} items re-queued to RETRY", updated_count, status_updates.len());
+                                    tracing::info!("DLQ batch: {}/{} items re-injected into engine", updated_count, status_updates.len());
                                 }
                             }
                         }
