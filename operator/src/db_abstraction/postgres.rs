@@ -3419,8 +3419,18 @@ impl Database for PostgresBackend {
 
         sqlx::query(
             r#"
-            INSERT INTO dead_letter_queue (trade_uuid, payload, reason, error_details)
-            VALUES ($1, $2, 'DEAD_LETTER', $3)
+            INSERT INTO dead_letter_queue (trade_uuid, payload, reason, error_details, can_retry)
+            VALUES ($1, $2, 'DEAD_LETTER', $3,
+                NOT ($3 ILIKE '%liquidity%'
+                  OR $3 ILIKE '%No active position%'
+                  OR $3 ILIKE '%rug%'
+                  OR $3 ILIKE '%honeypot%'
+                  OR $3 ILIKE '%rejected%'
+                  OR $3 ILIKE '%below minimum%'
+                  OR $3 ILIKE '%mint authority%'
+                  OR $3 ILIKE '%freeze authority%'
+                  OR $3 ILIKE '%not speculative%'
+                  OR $3 ILIKE '%Amount%below minimum%'))
             "#,
         )
         .bind(trade_uuid)

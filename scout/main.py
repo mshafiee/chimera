@@ -489,6 +489,10 @@ async def analyze_wallets(
     """
     Analyze wallets in parallel and generate roster records.
     """
+    # Configurable confidence threshold for ACTIVE promotion.
+    # Lower this (e.g. 0.50) in paper mode to expand the monitored wallet pool.
+    min_confidence_active = float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70"))
+
     # Macro kill switch: emergency pause prevents all new promotions
     if os.getenv("SCOUT_EMERGENCY_PAUSE", "false").lower() == "true":
         print("[Scout] EMERGENCY PAUSE ACTIVE — returning zero promotions")
@@ -711,7 +715,7 @@ async def analyze_wallets(
             wqs_score = min(wqs_score, 100.0)
 
             # Initial Status (with confidence gating for ACTIVE)
-            if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
+            if wqs_score >= min_wqs_active and wqs_confidence >= min_confidence_active:
                 initial_status = "ACTIVE"
             elif wqs_score >= min_wqs_candidate:
                 initial_status = "CANDIDATE"
@@ -729,7 +733,7 @@ async def analyze_wallets(
                 if trajectory_boost > 0:
                     wqs_score += trajectory_boost
                     heuristic_boost_used += trajectory_boost
-                if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
+                if wqs_score >= min_wqs_active and wqs_confidence >= min_confidence_active:
                     initial_status = "ACTIVE"
                 print(f"[Scout] {wallet_address[:8]}... IMPROVING trajectory, "
                       f"+{trajectory_boost:.0f} WQS (heuristic total: {heuristic_boost_used:.1f}, "
