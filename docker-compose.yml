@@ -214,7 +214,7 @@ services:
     command: >
        sh -c "
          echo '[Scout] Starting wallet analysis...';
-         python main.py || true;
+          python main.py --skip-backtest || true;
          echo '[Scout] Analysis complete, sleeping for 24 hours...';
           sleep 86400;
         "
