@@ -16,7 +16,6 @@ from decimal import Decimal
 from dataclasses import dataclass
 from typing import List, Optional
 from .db import execute_update
-from .utils import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +64,9 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
                 max_drawdown_30d, avg_trade_size_sol, avg_win_sol, avg_loss_sol,
                 profit_factor, realized_pnl_30d_sol, last_trade_at,
                 promoted_at, ttl_expires_at, notes, archetype,
-                avg_entry_delay_seconds, last_arb_check_at
+                avg_entry_delay_seconds
             ) VALUES (
-                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
             )
             ON CONFLICT (address) DO UPDATE SET
                 status = EXCLUDED.status,
@@ -89,11 +88,6 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
                 notes = EXCLUDED.notes,
                 archetype = EXCLUDED.archetype,
                 avg_entry_delay_seconds = EXCLUDED.avg_entry_delay_seconds,
-                last_arb_check_at = CASE
-                    WHEN EXCLUDED.archetype = 'ARBITRAGE' OR EXCLUDED.archetype != COALESCE(wallets.archetype, '')
-                    THEN CURRENT_TIMESTAMP
-                    ELSE COALESCE(wallets.last_arb_check_at, EXCLUDED.last_arb_check_at)
-                END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE wallets.address = EXCLUDED.address
         """
@@ -119,7 +113,6 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
             wallet.notes,
             wallet.archetype,
             wallet.avg_entry_delay_seconds,
-            utcnow().isoformat() if wallet.archetype == 'ARBITRAGE' else None,
         )
 
         execute_update(query, params)
