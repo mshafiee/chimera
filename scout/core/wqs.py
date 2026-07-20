@@ -408,6 +408,7 @@ class WalletMetrics:
     replay_data_gap_ratio: Optional[float] = None  # Ratio of SELL events with data gaps to total SELL events
     is_tg_bot_user: bool = False  # Flagged as Telegram bot user (≥50% of ≥10 swaps through bot router)
     round_trip_ratio: Optional[float] = None  # Ratio of round-trip swaps to total swaps (arbitrage detection)
+    pumpfun_trade_ratio: Optional[float] = None  # Fraction of trades on pump.fun bonding-curve tokens (mint ends with "pump")
 
 
 @dataclass
@@ -526,6 +527,16 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         
     if (metrics.avg_trade_size_sol or Decimal(0)) < Decimal('0.05'):
         tracker.add_neg(PenaltyCategory.PUMP_SPIKE, 10.0)
+
+    # Pump.fun bonding-curve concentration check.
+    # These tokens have $0 DEX liquidity — copy-trading is guaranteed to lose
+    # from Jito tips. Hard-reject wallets that are predominantly pump.fun traders.
+    if metrics.pumpfun_trade_ratio is not None:
+        if metrics.pumpfun_trade_ratio > 0.5:
+            tracker.add_neg("pumpfun_concentration", 100.0)
+            return tracker.to_components(is_instant_reject=True)
+        elif metrics.pumpfun_trade_ratio >= 0.3:
+            tracker.add_neg("pumpfun_concentration", 15.0)
 
     if metrics.win_streak_consistency and metrics.win_streak_consistency > 0.4:
         tracker.add_pos("consistency_score", 5.0)

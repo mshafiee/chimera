@@ -2615,6 +2615,14 @@ class WalletAnalyzer:
                 token_categories.add(cat)
         unique_token_categories = len(token_categories) if token_categories else None
 
+        # Phase 2d: Pump.fun bonding-curve token concentration
+        # Tokens with mint address ending in "pump" are pump.fun bonding-curve tokens
+        # with $0 DEX liquidity — copy-trading them is a guaranteed loss from Jito tips.
+        pumpfun_count = sum(1 for t in trades if t.token_address and t.token_address.endswith("pump"))
+        pumpfun_trade_ratio = (pumpfun_count / len(trades)) if trades else None
+        if pumpfun_trade_ratio is not None:
+            print(f"  [{address[:8]}] Pump.fun trade ratio: {pumpfun_trade_ratio:.2%} ({pumpfun_count}/{len(trades)})")
+
         # Round-trip detection for arbitrage classification
         print(f"  [{address[:8]}] Detecting round-trip ratio...")
         round_trip_ratio = None
@@ -2691,6 +2699,7 @@ class WalletAnalyzer:
             replay_data_gap_ratio=replay_data_gap_ratio,
             is_tg_bot_user=is_tg_bot_user,
             round_trip_ratio=round_trip_ratio,
+            pumpfun_trade_ratio=pumpfun_trade_ratio,
         )
 
     def compute_wallet_trade_stats(self, trades: List[HistoricalTrade]) -> Dict[str, Optional[Any]]:

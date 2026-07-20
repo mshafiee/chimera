@@ -187,8 +187,12 @@ services:
       - SCOUT_MIN_WQS_CANDIDATE=10.0
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
       - SCOUT_MIN_CONFIDENCE_ACTIVE=0.45
-      # Clean token list (removed invalid addresses: GCS89xYV, Ac7m5c4t, G0AT7B4R, M00DENG)
-      - SCOUT_ACTIVE_TOKENS=DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263,EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm,7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr,Grass7B4RdKfBCjTKgSqnXkqjwiG6DuGc62rSdZ9mtm,So11111111111111111111111111111111111111112
+      # Backtest cost calibration — match production Jito tip (default 0.0001 is 30x too low).
+      # Production charges 0.0012-0.0055 SOL tips; 0.003 is the median observed tip.
+      # Without this, the backtest approves wallets whose historical edge can't cover real costs.
+      - SCOUT_JITO_TIP_SOL=0.003
+      - SCOUT_PRIORITY_FEE_SOL=0.0001
+      # Active tokens fall back to config/active_tokens.txt (100+ established tokens)
       # API Keys for validation (Loaded from env_file)
       # Database configuration
       - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
@@ -214,7 +218,7 @@ services:
     command: >
        sh -c "
          echo '[Scout] Starting wallet analysis...';
-          python main.py --skip-backtest || true;
+          python main.py || true;
          echo '[Scout] Analysis complete, sleeping for 24 hours...';
           sleep 86400;
         "
