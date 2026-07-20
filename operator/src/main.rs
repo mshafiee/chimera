@@ -651,6 +651,7 @@ async fn main() -> anyhow::Result<()> {
                 match pnl_db.get_active_position_tokens().await {
                     Ok(positions) => {
                         for pos in positions {
+                            pnl_pc.track_token(&pos.token_address);
                             if let Some(current_usd) = pnl_pc.get_price_usd(&pos.token_address) {
                                 let entry = if pos.entry_price.is_zero() {
                                     current_usd
@@ -851,10 +852,40 @@ async fn main() -> anyhow::Result<()> {
                                     tracing::error!(error = %e, "Failed to batch mark DLQ items as processed");
                                 } else {
                                     // Phase 4: Batch update trade statuses
+                                    // Only reset to RETRY if the trade is still DEAD_LETTER.
+                                    // A trade may have been successfully processed (ACTIVE/CLOSED)
+                                    // by a later signal while the DLQ entry was still pending.
                                     let mut updated_count = 0;
                                     for status_update in &status_updates {
-                                        if dlq_pool.update_trade_status(status_update).await.is_ok() {
-                                            updated_count += 1;
+                                        // Check current status before overwriting
+                                        match dlq_pool.get_trade_by_uuid(&status_update.trade_uuid).await {
+                                            Ok(Some(trade))
+                                                if trade.status == "DEAD_LETTER" =>
+                                            {
+                                                if dlq_pool.update_trade_status(status_update).await.is_ok() {
+                                                    updated_count += 1;
+                                                }
+                                            }
+                                            Ok(Some(trade)) => {
+                                                tracing::info!(
+                                                    trade_uuid = %status_update.trade_uuid,
+                                                    current_status = %trade.status,
+                                                    "DLQ retry: skipping status reset — trade already progressed past DEAD_LETTER"
+                                                );
+                                            }
+                                            Ok(None) => {
+                                                tracing::warn!(
+                                                    trade_uuid = %status_update.trade_uuid,
+                                                    "DLQ retry: trade not found in DB"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    trade_uuid = %status_update.trade_uuid,
+                                                    error = %e,
+                                                    "DLQ retry: failed to check current trade status"
+                                                );
+                                            }
                                         }
                                     }
                                     tracing::info!("DLQ batch: {}/{} items re-queued to RETRY", updated_count, status_updates.len());
@@ -1181,6 +1212,7 @@ async fn main() -> anyhow::Result<()> {
         let monitor_pt = profit_target_mgr;
         let monitor_engine = _engine_handle.clone();
         let monitor_token = cancel_token.clone();
+        let monitor_pc = price_cache.clone();
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -1227,6 +1259,7 @@ async fn main() -> anyhow::Result<()> {
 
                         for pos in &positions {
                             last_checked.insert(pos.trade_uuid.clone(), now);
+                            monitor_pc.track_token(&pos.token_address);
                         }
 
                         last_checked.retain(|uuid, _| positions.iter().any(|p| &p.trade_uuid == uuid));

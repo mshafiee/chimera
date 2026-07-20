@@ -653,6 +653,14 @@ impl SignalProcessor {
                                 "Position opened successfully for BUY signal"
                             );
 
+                            // Track the token in the price cache so the position
+                            // monitor and PnL refresh tasks can fetch live prices.
+                            // Without this, stop-loss/profit-target/time-exit checks
+                            // silently no-op because get_price_usd returns None.
+                            if let Some(ref pc) = self.price_cache {
+                                pc.track_token(signal.token_address());
+                            }
+
                             // Update in-memory registry with the new position
                             if let Some(ref registry) = self.state_registry {
                                 let position_state = crate::state::registry::PositionState {
