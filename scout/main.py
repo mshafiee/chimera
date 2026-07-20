@@ -1899,7 +1899,10 @@ async def main_async():
                 fee_estimator = None
                 try:
                     fee_estimator = CostEstimator(helius_api_key=helius_api_key)
-                    dyn_prio, dyn_jito = await fee_estimator.get_all_estimates(strategy="SHIELD")
+                    dyn_prio, dyn_jito = await asyncio.wait_for(
+                        fee_estimator.get_all_estimates(strategy="SHIELD"),
+                        timeout=15.0,
+                    )
                     dyn_prio_float = float(dyn_prio)
                     dyn_jito_float = float(dyn_jito)
                     if dyn_prio_float > 0:
