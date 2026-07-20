@@ -1303,6 +1303,15 @@ pub struct ProfitManagementConfig {
     /// Trailing stop distance from peak (%)
     #[serde(default = "default_trailing_stop_distance")]
     pub trailing_stop_distance: Decimal,
+    /// Volatility threshold above which targets are used at full strength (%).
+    /// Tokens with volatility below this get proportionally scaled-down targets.
+    /// Example: threshold=30.0, token vol=15.0 → scale=0.5 → target[0] halved.
+    #[serde(default = "default_target_vol_scale_threshold")]
+    pub target_vol_scale_threshold: Decimal,
+    /// Floor for scaled profit targets (%). Prevents targets from dropping
+    /// below break-even (~4% round-trip cost). Must be less than targets[0].
+    #[serde(default = "default_min_target_pct")]
+    pub min_target_pct: Decimal,
     /// Maximum allowable loss before stop fires (floor on the dynamic stop, not a fixed trigger).
     /// The adaptive stop may widen due to volatility/consensus, but never beyond this value.
     #[serde(default = "default_max_stop_loss_distance", alias = "hard_stop_loss")]
@@ -1369,6 +1378,14 @@ fn default_trailing_stop_distance() -> Decimal {
     dec!(15.0)
 }
 
+fn default_target_vol_scale_threshold() -> Decimal {
+    dec!(30.0)
+}
+
+fn default_min_target_pct() -> Decimal {
+    dec!(5.0)
+}
+
 fn default_max_stop_loss_distance() -> Decimal {
     dec!(-25.0)
 }
@@ -1400,6 +1417,8 @@ impl Default for ProfitManagementConfig {
             tiered_exit_percent: default_tiered_exit_percent(),
             trailing_stop_activation: default_trailing_stop_activation(),
             trailing_stop_distance: default_trailing_stop_distance(),
+            target_vol_scale_threshold: default_target_vol_scale_threshold(),
+            min_target_pct: default_min_target_pct(),
             max_stop_loss_distance: default_max_stop_loss_distance(),
             time_exit_hours: default_time_exit_hours(),
             wick_protection_secs: default_wick_protection_secs(),
@@ -2221,5 +2240,28 @@ mod tests {
         assert_eq!(default_port(), 8080);
         assert_eq!(default_max_timestamp_drift(), 60);
         assert_eq!(default_queue_capacity(), 1000);
+    }
+}
+
+#[cfg(test)]
+mod vol_target_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_new_config_fields_have_defaults() {
+        let config = ProfitManagementConfig::default();
+        assert_eq!(config.target_vol_scale_threshold, dec!(30.0));
+        assert_eq!(config.min_target_pct, dec!(5.0));
+    }
+
+    #[test]
+    fn test_config_parses_new_fields() {
+        // serde_yaml isn't a project dependency; serde_json exercises the same
+        // #[derive(Deserialize)] path, which is what we're verifying here.
+        let json = r#"{"targets": [10, 20, 40, 80], "target_vol_scale_threshold": 25.0, "min_target_pct": 6.0}"#;
+        let config: ProfitManagementConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.target_vol_scale_threshold, dec!(25.0));
+        assert_eq!(config.min_target_pct, dec!(6.0));
+        assert_eq!(config.targets, vec![dec!(10), dec!(20), dec!(40), dec!(80)]);
     }
 }
