@@ -705,7 +705,11 @@ async def analyze_wallets(
             # Step 2: Multi-TF trajectory interpretation (from wqs_metrics)
             trajectory = _interpret_trajectory(wqs_metrics.roi_7d, wqs_metrics.roi_30d)
             wmi = _compute_wmi(wqs_metrics.roi_7d, wqs_metrics.roi_30d, wqs_metrics.trade_count_30d)
-            
+
+            # Cap WQS at 100 — raw_score (positive components) can exceed 100
+            # for exceptional wallets, but the scale is defined as 0-100.
+            wqs_score = min(wqs_score, 100.0)
+
             # Initial Status (with confidence gating for ACTIVE)
             if wqs_score >= min_wqs_active and wqs_confidence >= 0.70:
                 initial_status = "ACTIVE"

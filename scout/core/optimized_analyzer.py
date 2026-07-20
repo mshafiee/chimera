@@ -246,3 +246,15 @@ class OptimizedWalletAnalyzer:
         if hasattr(self._analyzer, '_calculate_alpha_decay'):
             return self._analyzer._calculate_alpha_decay(trades)
         return {}
+
+    def _calculate_trade_size_decay(self, trades):
+        """Delegate _calculate_trade_size_decay to base analyzer."""
+        if hasattr(self._analyzer, '_calculate_trade_size_decay'):
+            return self._analyzer._calculate_trade_size_decay(trades)
+        return None
+
+    def _calculate_token_rotation_decay(self, trades):
+        """Delegate _calculate_token_rotation_decay to base analyzer."""
+        if hasattr(self._analyzer, '_calculate_token_rotation_decay'):
+            return self._analyzer._calculate_token_rotation_decay(trades)
+        return None
