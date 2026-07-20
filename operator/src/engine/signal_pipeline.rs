@@ -551,6 +551,18 @@ impl SignalProcessor {
         }
         }
 
+        // Ensure token_decimals is populated — required by executor's convert_fill_price().
+        // The monitoring handler and polling task may not have set it.
+        if signal.token_decimals.is_none() {
+            if let Some(ref token_parser) = self.token_parser {
+                if let Some(ref token_address) = signal.payload.token_address {
+                    if let Some(decimals) = token_parser.get_token_decimals(token_address).await {
+                        signal.token_decimals = Some(decimals);
+                    }
+                }
+            }
+        }
+
         // Execute the trade
         let result = {
             let executor = self.executor.read().await;

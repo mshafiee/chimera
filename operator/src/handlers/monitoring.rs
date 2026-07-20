@@ -268,11 +268,20 @@ pub async fn helius_webhook_handler(
                         exit_fraction: None,
                     };
 
-                    let signal = Signal::new(
+                    let mut signal = Signal::new(
                         signal_payload,
                         chrono::Utc::now().timestamp(),
                         None, // source_ip
                     );
+
+                    // Populate token decimals — required by the executor's convert_fill_price()
+                    // to compute entry_price. Without this, entry_price=0 and position insert
+                    // fails with "Entry price must be positive".
+                    if let Some(ref tp) = state.token_parser {
+                        if let Some(decimals) = tp.get_token_decimals(signal.token_address()).await {
+                            signal.token_decimals = Some(decimals);
+                        }
+                    }
 
                     // Insert trade into DB as PENDING before queueing (mirrors webhook handler).
                     // Without this, the worker's process_signal() fails with TradeNotFound
