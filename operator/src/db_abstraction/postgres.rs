@@ -725,7 +725,10 @@ impl Database for PostgresBackend {
         let (status, min_wqs, max_wqs) = match tier {
             ConvictionTier::High => (Some("ACTIVE"), Some(80), None),
             ConvictionTier::Regular => (Some("ACTIVE"), Some(60), Some(79)),
-            ConvictionTier::Emerging => (None, None, Some(59)), // Both ACTIVE and CANDIDATE
+            // Emerging: all non-High/Regular wallets (ACTIVE low-WQS + all CANDIDATE).
+            // No WQS ceiling — high-WQS CANDIDATE wallets (e.g. SCALPER WQS=100+
+            // with confidence < 0.70 that can't reach ACTIVE) must still be polled.
+            ConvictionTier::Emerging => (None, None, None),
         };
 
         self.get_wallets_with_wqs(status, min_wqs, max_wqs).await
