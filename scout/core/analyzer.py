@@ -1250,6 +1250,12 @@ class WalletAnalyzer:
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
 
+        # Cache parsed trades so the backtest validator (main.py:555) can access them.
+        # Without this, _trades_cache is empty and every ACTIVE-qualified wallet is
+        # silently demoted to CANDIDATE at the "No trades" backtest branch.
+        if trades:
+            await self._trades_cache_set(address, trades)
+
         # Phase 5a: Telegram bot detection
         # Count swaps routed through known bot routers (programId or feePayer)
         bot_swap_count = 0
