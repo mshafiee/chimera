@@ -27,6 +27,19 @@ pub mod known_tokens {
     pub const WSOL: &str = constants::mints::SOL;
 }
 
+/// Check if a token is non-speculative (stablecoin or wrapped SOL).
+///
+/// These tokens cannot generate profit from price movement in copy trading:
+/// - Stablecoins (USDC, USDT) peg to ~$1.00 and barely move
+/// - WSOL is just wrapped native SOL, not a speculative token
+///
+/// Copy-trading buys of these tokens is a guaranteed loss from Jito tips + DEX fees.
+pub fn is_non_speculative(token_address: &str) -> bool {
+    token_address == known_tokens::USDC
+        || token_address == known_tokens::USDT
+        || token_address == known_tokens::WSOL
+}
+
 /// Result of a token safety check
 #[derive(Debug, Clone)]
 pub struct TokenSafetyResult {

@@ -192,6 +192,20 @@ pub async fn helius_webhook_handler(
                         swap.token_in.clone()
                     };
 
+                    // Skip stablecoins and wrapped SOL for BUY signals.
+                    // These tokens cannot generate profit from price movement,
+                    // so every trade is a guaranteed loss from Jito tips + DEX fees.
+                    if direction == Action::Buy
+                        && crate::token::is_non_speculative(&target_token)
+                    {
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            token = %target_token,
+                            "Skipping non-speculative token BUY (stablecoin/WSOL) — no profit potential"
+                        );
+                        continue;
+                    }
+
                     // FIX 1: Token fast_check before queuing (BUY only)
                     if direction == Action::Buy {
                         if let Some(ref tp) = state.token_parser {
@@ -257,6 +271,29 @@ pub async fn helius_webhook_handler(
                         swap.amount_in
                     };
 
+                    // Generate a time-bucketed trade UUID for monitoring signals.
+                    // Unlike webhook signals (which use a pure hash for permanent dedup),
+                    // monitoring signals use a 5-minute time bucket so that:
+                    // 1. Duplicate Helius webhooks within the same 5-min window → same UUID → dedup
+                    // 2. After a position closes, new signals in a later window → new UUID → new trade
+                    // This prevents the system from being permanently locked out of a
+                    // wallet+token pair after the first trade closes.
+                    let time_bucket = chrono::Utc::now().timestamp() / 300; // 5-minute buckets
+                    let monitoring_uuid = {
+                        use sha2::{Sha256, Digest};
+                        let mut hasher = Sha256::new();
+                        hasher.update(wallet_address.as_bytes());
+                        hasher.update(b"|");
+                        hasher.update(target_token.as_bytes());
+                        hasher.update(b"|");
+                        hasher.update(direction.to_string().as_bytes());
+                        hasher.update(b"|");
+                        hasher.update(trade_amount_sol.to_string().as_bytes());
+                        hasher.update(b"|");
+                        hasher.update(time_bucket.to_le_bytes());
+                        hex::encode(&hasher.finalize()[..16])
+                    };
+
                     let signal_payload = SignalPayload {
                         wallet_address: wallet_address.clone(),
                         strategy,
@@ -264,7 +301,7 @@ pub async fn helius_webhook_handler(
                         token_address: Some(target_token),
                         action: direction,
                         amount_sol: trade_amount_sol,
-                        trade_uuid: None,
+                        trade_uuid: Some(monitoring_uuid),
                         exit_fraction: None,
                     };
 
