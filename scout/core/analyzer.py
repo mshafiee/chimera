@@ -1086,8 +1086,13 @@ class WalletAnalyzer:
                     row = cursor.fetchone()
 
                     if row:
-                        wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, \
-                        max_drawdown_30d, avg_trade_size_sol, last_trade_at = row
+                        roi_7d = row['roi_7d']
+                        roi_30d = row['roi_30d']
+                        trade_count_30d = row['trade_count_30d']
+                        win_rate = row['win_rate']
+                        max_drawdown_30d = row['max_drawdown_30d']
+                        avg_trade_size_sol = row['avg_trade_size_sol']
+                        last_trade_at = row['last_trade_at']
 
                         is_stale = False
                         if last_trade_at:

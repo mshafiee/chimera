@@ -482,6 +482,11 @@ class HeliusClient:
         if not self.api_key or not token_address:
             return None
 
+        # Pump.fun bonding-curve tokens (mint ends with "pump") have no
+        # signature history on Helius enhanced API — querying them 404s.
+        if token_address.endswith("pump"):
+            return None
+
         try:
             endpoint = f"/addresses/{token_address}/signatures"
             params = {"limit": 50, "api-key": self.api_key}
