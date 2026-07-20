@@ -26,28 +26,13 @@ import type { TimeRange } from '@/components/ui/TimeRangePicker'
 
 type HeatStatus = 'normal' | 'elevated' | 'high' | 'critical'
 
-function heatValueClass(status: HeatStatus): string {
-  switch (status) {
-    case 'critical':
-    case 'high':
-      return 'text-loss'
-    case 'elevated':
-      return 'text-spear'
-    default:
-      return 'text-profit'
-  }
-}
+type HeatBadgeVariant = 'danger' | 'warning' | 'success'
 
-function heatBadgeVariant(status: HeatStatus): 'danger' | 'warning' | 'success' {
-  switch (status) {
-    case 'critical':
-    case 'high':
-      return 'danger'
-    case 'elevated':
-      return 'warning'
-    default:
-      return 'success'
-  }
+const HEAT_STATUS_STYLES: Record<HeatStatus, { text: string; variant: HeatBadgeVariant }> = {
+  normal: { text: 'text-profit', variant: 'success' },
+  elevated: { text: 'text-spear', variant: 'warning' },
+  high: { text: 'text-loss', variant: 'danger' },
+  critical: { text: 'text-loss', variant: 'danger' },
 }
 
 function concentrationClass(percent: number): string {
@@ -99,6 +84,7 @@ export function RiskDashboard() {
   }, [portfolioRisk, setLastUpdate])
 
   const heatStatus: HeatStatus = portfolioRisk?.heat_status ?? 'normal'
+  const heatStyle = HEAT_STATUS_STYLES[heatStatus]
 
   return (
     <div className="space-y-6">
@@ -140,10 +126,10 @@ export function RiskDashboard() {
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <SummaryTile label="Portfolio Heat">
             <div className="flex items-center gap-2">
-              <span className={`text-2xl font-bold font-mono-numbers ${heatValueClass(heatStatus)}`}>
+              <span className={`text-2xl font-bold font-mono-numbers ${heatStyle.text}`}>
                 {safeToFixed(portfolioRisk.portfolio_heat_percent, 1)}%
               </span>
-              <Badge variant={heatBadgeVariant(heatStatus)}>{heatStatus}</Badge>
+              <Badge variant={heatStyle.variant}>{heatStatus}</Badge>
             </div>
           </SummaryTile>
 
