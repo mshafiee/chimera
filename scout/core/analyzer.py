@@ -2988,7 +2988,7 @@ class WalletAnalyzer:
         avg_second = sum(t.amount_sol for t in second_half) / max(1, len(second_half))
         if avg_first <= 0:
             return None
-        ratio = avg_second / avg_first
+        ratio = float(avg_second) / float(avg_first)
         return max(0.0, min(1.0, ratio))
 
     @staticmethod
