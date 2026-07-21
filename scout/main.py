@@ -2328,7 +2328,8 @@ async def main_async():
                 if metrics is None:
                     print(f"[Scout] Re-validation skipped for {addr[:8]}: no metrics available")
                     continue
-                trades = await analyzer.get_historical_trades(addr, days=30)
+                base_analyzer = getattr(analyzer, '_analyzer', analyzer)
+                trades = await base_analyzer.get_historical_trades(addr, days=30)
                 result = validator.validate_for_promotion(
                     addr, metrics, trades, strategy="SHIELD"
                 )
