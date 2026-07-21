@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from .db import get_connection
+from .db import get_connection, _is_sqlite, _translate_pg_to_sqlite
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,13 @@ class PredictionLogger:
     - Update predictions with actual results
     - Manage prediction lifecycle (expire, clean up)
     """
+
+    @staticmethod
+    def _exec(cursor, query, params=None):
+        """Execute a query with automatic %s → ? translation for SQLite."""
+        if _is_sqlite():
+            query = _translate_pg_to_sqlite(query)
+        cursor.execute(query, params or ())
 
     def __init__(
         self,
@@ -169,7 +176,7 @@ class PredictionLogger:
                         if cleaned:
                             # Translate SQLite DDL (AUTOINCREMENT, etc.) to
                             # PostgreSQL when running on the postgres backend.
-                            cursor.execute(translate_ddl(cleaned))
+                            self._exec(cursor, translate_ddl(cleaned))
 
                 conn.commit()
                 conn.close()
@@ -220,14 +227,14 @@ class PredictionLogger:
 
             now = datetime.utcnow().isoformat()
 
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 INSERT INTO ml_predictions (
                     wallet_address, prediction_timestamp, model_type,
                     predicted_pnl_sol, predicted_class, confidence,
                     features_json, strategy, wqs_score_at_prediction,
                     wqs_components_json, status, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING', %s, %s)
                 """,
                 (
                     wallet_address,
@@ -300,7 +307,7 @@ class PredictionLogger:
                 query += " LIMIT %s"
                 params.append(limit)
 
-            cursor.execute(query, params)
+            self._exec(cursor, query, params)
 
             records = []
             for row in cursor.fetchall():
@@ -337,8 +344,8 @@ class PredictionLogger:
             cursor = conn.cursor()
 
             # Get prediction timestamp to calculate days_to_match
-            cursor.execute(
-                "SELECT prediction_timestamp FROM ml_predictions WHERE id = ?",
+            self._exec(cursor, 
+                "SELECT prediction_timestamp FROM ml_predictions WHERE id = %s",
                 (prediction_id,)
             )
             row = cursor.fetchone()
@@ -354,17 +361,17 @@ class PredictionLogger:
 
             now_iso = now.isoformat()
 
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 UPDATE ml_predictions
-                SET actual_pnl_sol = ?,
-                    actual_pnl_7d_sol = ?,
-                    actual_pnl_30d_sol = ?,
-                    match_timestamp = ?,
-                    days_to_match = ?,
+                SET actual_pnl_sol = %s,
+                    actual_pnl_7d_sol = %s,
+                    actual_pnl_30d_sol = %s,
+                    match_timestamp = %s,
+                    days_to_match = %s,
                     status = 'MATCHED',
-                    updated_at = ?
-                WHERE id = ?
+                    updated_at = %s
+                WHERE id = %s
                 """,
                 (
                     float(actual_pnl_sol),
@@ -418,13 +425,13 @@ class PredictionLogger:
 
             query = """
                 UPDATE ml_predictions
-                SET actual_pnl_sol = COALESCE(?, actual_pnl_sol),
-                    actual_pnl_7d_sol = COALESCE(?, actual_pnl_7d_sol),
-                    actual_pnl_30d_sol = COALESCE(?, actual_pnl_30d_sol),
-                    match_timestamp = ?,
+                SET actual_pnl_sol = COALESCE(%s, actual_pnl_sol),
+                    actual_pnl_7d_sol = COALESCE(%s, actual_pnl_7d_sol),
+                    actual_pnl_30d_sol = COALESCE(%s, actual_pnl_30d_sol),
+                    match_timestamp = %s,
                     status = 'MATCHED',
-                    updated_at = ?
-                WHERE wallet_address = ?
+                    updated_at = %s
+                WHERE wallet_address = %s
                 AND status = 'PENDING'
             """
             params = [
@@ -437,14 +444,14 @@ class PredictionLogger:
             ]
 
             if model_type:
-                query += " AND model_type = ?"
+                query += " AND model_type = %s"
                 params.append(model_type)
 
             if prediction_timestamp:
-                query += " AND prediction_timestamp = ?"
+                query += " AND prediction_timestamp = %s"
                 params.append(prediction_timestamp)
 
-            cursor.execute(query, params)
+            self._exec(cursor, query, params)
 
             updated_count = cursor.rowcount
             conn.commit()
@@ -477,12 +484,12 @@ class PredictionLogger:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 UPDATE ml_predictions
-                SET status = 'EXPIRED', updated_at = ?
+                SET status = 'EXPIRED', updated_at = %s
                 WHERE status = 'PENDING'
-                AND prediction_timestamp < ?
+                AND prediction_timestamp < %s
                 """,
                 (now, threshold)
             )
@@ -510,7 +517,7 @@ class PredictionLogger:
             cursor = conn.cursor()
 
             # Count by status
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 SELECT status, COUNT(*) as count
                 FROM ml_predictions
@@ -521,7 +528,7 @@ class PredictionLogger:
             status_counts = {row['status']: row['count'] for row in cursor.fetchall()}
 
             # Count by model type
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 SELECT model_type, COUNT(*) as count
                 FROM ml_predictions
@@ -532,11 +539,11 @@ class PredictionLogger:
             model_counts = {row['model_type']: row['count'] for row in cursor.fetchall()}
 
             # Total predictions
-            cursor.execute("SELECT COUNT(*) as total FROM ml_predictions")
+            self._exec(cursor, "SELECT COUNT(*) as total FROM ml_predictions")
             total = cursor.fetchone()['total']
 
             # Matched prediction stats
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 SELECT
                     COUNT(*) as matched_count,
@@ -584,10 +591,10 @@ class PredictionLogger:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            cursor.execute(
+            self._exec(cursor, 
                 """
                 DELETE FROM ml_predictions
-                WHERE prediction_timestamp < ?
+                WHERE prediction_timestamp < %s
                 AND status IN ('EXPIRED', 'MATCHED')
                 """,
                 (threshold,)
