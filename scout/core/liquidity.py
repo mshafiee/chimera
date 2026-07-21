@@ -586,8 +586,8 @@ class LiquidityProvider:
                 """
                 SELECT liquidity_usd, price_usd, volume_24h_usd, timestamp, source
                 FROM historical_liquidity
-                WHERE token_address = ? AND timestamp BETWEEN ? AND ?
-                ORDER BY ABS(julianday(timestamp) - julianday(?))
+                WHERE token_address = %s AND timestamp BETWEEN %s AND %s
+                ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - EXTRACT(EPOCH FROM %s)) / 86400.0
                 LIMIT 1
                 """,
                 (token_address, time_start.isoformat(), time_end.isoformat(), timestamp.isoformat()),
@@ -651,9 +651,14 @@ class LiquidityProvider:
             
             cursor.execute(
                 """
-                INSERT OR REPLACE INTO historical_liquidity 
+                INSERT INTO historical_liquidity
                 (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (token_address, timestamp) DO UPDATE SET
+                    liquidity_usd = EXCLUDED.liquidity_usd,
+                    price_usd = EXCLUDED.price_usd,
+                    volume_24h_usd = EXCLUDED.volume_24h_usd,
+                    source = EXCLUDED.source
                 """,
                 (
                     liquidity_data.token_address,
@@ -714,9 +719,14 @@ class LiquidityProvider:
                 try:
                     cursor.execute(
                         """
-                        INSERT OR REPLACE INTO historical_liquidity 
+                        INSERT INTO historical_liquidity
                         (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (token_address, timestamp) DO UPDATE SET
+                            liquidity_usd = EXCLUDED.liquidity_usd,
+                            price_usd = EXCLUDED.price_usd,
+                            volume_24h_usd = EXCLUDED.volume_24h_usd,
+                            source = EXCLUDED.source
                         """,
                         (
                             liquidity_data.token_address,
