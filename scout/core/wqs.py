@@ -695,8 +695,14 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     
     if metrics.last_trade_at:
         try:
-            last_trade_str = metrics.last_trade_at.replace("Z", "+00:00")
-            last_trade = datetime.fromisoformat(last_trade_str)
+            last_trade_at = metrics.last_trade_at
+            if isinstance(last_trade_at, str):
+                last_trade_str = last_trade_at.replace("Z", "+00:00")
+                last_trade = datetime.fromisoformat(last_trade_str)
+            elif isinstance(last_trade_at, datetime):
+                last_trade = last_trade_at
+            else:
+                last_trade = datetime.fromisoformat(str(last_trade_at))
             now = utcnow()
             if last_trade.tzinfo is None:
                 now = now.replace(tzinfo=None)

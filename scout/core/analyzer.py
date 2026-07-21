@@ -2300,8 +2300,7 @@ class WalletAnalyzer:
                     # Filter trades to only those with safe tokens
                     trades = [t for t in trades if t.token_address in safe_tokens]
                     if not trades:
-                        print(f"  [{address[:8]}] All trades filtered as risky")
-                        return None
+                        print(f"  [{address[:8]}] All trades filtered as risky — continuing with empty trade set")
             else:
                 print(f"  [{address[:8]}] All {len(safe_tokens)} tokens passed RugCheck")
         else:

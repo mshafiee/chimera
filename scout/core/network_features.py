@@ -146,9 +146,16 @@ class NetworkFeatures:
 
         # Add nodes and edges
         for edge in transaction_graph.get('edges', []):
-            from_addr = edge.get('from')
-            to_addr = edge.get('to')
-            weight = edge.get('weight', 1.0)
+            if isinstance(edge, dict):
+                from_addr = edge.get('from')
+                to_addr = edge.get('to')
+                weight = edge.get('weight', 1.0)
+            elif isinstance(edge, (tuple, list)) and len(edge) >= 2:
+                from_addr = edge[0]
+                to_addr = edge[1]
+                weight = edge[2].get('weight', 1.0) if isinstance(edge[2], dict) else 1.0
+            else:
+                continue
 
             if from_addr and to_addr:
                 G.add_edge(from_addr, to_addr, weight=weight)
