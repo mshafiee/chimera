@@ -44,8 +44,8 @@ circuit_breakers:
   cooldown_minutes: 30
 
 strategy:
-  shield_percent: 70
-  spear_percent: 30
+  shield_percent: 50
+  spear_percent: 50
   max_position_sol: 1.0
   min_position_sol: 0.01
   shield_signal_quality_threshold: 0.65
@@ -165,7 +165,7 @@ profit_management:
   hard_stop_loss: -8
   time_exit_hours: 12
   losing_time_exit_hours_spear: 1
-  wick_protection_secs: 15
+  wick_protection_secs: 30
 
 # Position sizing configuration
 position_sizing:
