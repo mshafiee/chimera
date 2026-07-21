@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # ruff: noqa: E402
 from core.utils import utcnow
 
-from core.roster_writer_db import WalletRecord, write_wallets_to_db, get_wallets_by_status
+from core.roster_writer_db import WalletRecord, write_wallets_to_db, get_wallets_by_status, update_wallet_status
 from core.wqs import calculate_wqs_with_confidence, \
     _calculate_raw_score, _interpret_trajectory, _compute_wmi
 from core.analyzer import WalletAnalyzer
@@ -2310,10 +2310,10 @@ async def main_async():
     # The main analysis only processes newly-discovered wallets each cycle,
     # so CANDIDATE wallets from previous cycles can be stuck indefinitely
     # even after confidence/threshold fixes. This sweep re-evaluates the
-    # top N CANDIDATE wallets by WQS to unblock promotion.
+    # top N CANDIDATE wallets by WQS directly via the validator.
     _reval_enabled = os.getenv("SCOUT_REVALIDATE_CANDIDATES", "").lower() not in ("", "false", "0")
     _reval_limit = int(os.getenv("SCOUT_REVALIDATE_CANDIDATES_LIMIT", "5"))
-    if _reval_enabled and not args.dry_run:
+    if _reval_enabled and not args.dry_run and validator is not None:
         print(f"\n[Scout] Re-validation sweep for existing CANDIDATE wallets (top {_reval_limit})...")
         existing_candidates = get_wallets_by_status("CANDIDATE")[:_reval_limit]
         reval_promoted = 0
@@ -2324,21 +2324,20 @@ async def main_async():
                 continue
             print(f"[Scout] Re-validating {addr[:8]}... (WQS={candidate.get('wqs_score', 0):.0f})")
             try:
-                _, _, reval_results = await analyze_wallets(
-                    analyzer,
-                    validator,
-                    args.min_wqs_active,
-                    args.min_wqs_candidate,
-                    skip_backtest=args.skip_backtest,
-                    verbose=args.verbose,
-                    wallet_address=addr,
-                    dry_run=False,
+                metrics = await analyzer.get_wallet_metrics(addr)
+                if metrics is None:
+                    print(f"[Scout] Re-validation skipped for {addr[:8]}: no metrics available")
+                    continue
+                trades = await analyzer.get_historical_trades(addr, days=30)
+                result = validator.validate_for_promotion(
+                    addr, metrics, trades, strategy="SHIELD"
                 )
-                if reval_results and len(reval_results) > 0:
-                    new_status = reval_results[0].get("status", "CANDIDATE")
-                    if new_status == "ACTIVE":
-                        reval_promoted += 1
-                        print(f"[Scout] ✓ Promoted {addr[:8]} → ACTIVE")
+                if result.passed:
+                    update_wallet_status(addr, "ACTIVE")
+                    reval_promoted += 1
+                    print(f"[Scout] ✓ Promoted {addr[:8]} → ACTIVE ({result.reason})")
+                else:
+                    print(f"[Scout]   {addr[:8]} still failed: {result.reason}")
             except Exception as e:
                 print(f"[Scout] Re-validation error for {addr[:8]}: {e}")
 
