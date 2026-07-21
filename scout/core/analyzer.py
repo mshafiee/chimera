@@ -2271,11 +2271,15 @@ class WalletAnalyzer:
                 else:
                     risky_tokens.append(token_addr)
             
-            # Proactive circuit breaker: if >50% risky after checking tokens, abort
+            # Proactive circuit breaker: if >50% risky after checking tokens, abort.
+            # Requires a minimum sample of unique tokens — with only 1-2 checked, a
+            # 100% ratio is statistically meaningless and nukes legitimate single-token
+            # traders. Fall through to per-token filtering for small samples instead.
+            RUGCHECK_MIN_CIRCUIT_BREAKER_TOKENS = 3
             risky_ratio = len(risky_tokens) / max(1, len(token_list)) if risky_tokens else 0.0
             if risky_tokens:
                 fail_mode = ScoutConfig.get_rugcheck_fail_mode() if CONFIG_AVAILABLE else "closed"
-                if risky_ratio > 0.5:
+                if risky_ratio > 0.5 and len(token_list) >= RUGCHECK_MIN_CIRCUIT_BREAKER_TOKENS:
                     logger.warning(
                         "RugCheck degraded: %.0f%% tokens flagged risky (%d/%d).",
                         risky_ratio * 100, len(risky_tokens), len(token_list),
@@ -2289,7 +2293,10 @@ class WalletAnalyzer:
                         print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — dropping wallet (capital-protective)")
                         return None
                 else:
-                    print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens ({risky_ratio*100:.0f}% of unique tokens)")
+                    if risky_ratio > 0.5:
+                        print(f"  [{address[:8]}] Skipping circuit breaker (only {len(token_list)} unique token(s) < {RUGCHECK_MIN_CIRCUIT_BREAKER_TOKENS} min) — filtering risky tokens individually")
+                    else:
+                        print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens ({risky_ratio*100:.0f}% of unique tokens)")
                     # Filter trades to only those with safe tokens
                     trades = [t for t in trades if t.token_address in safe_tokens]
                     if not trades:

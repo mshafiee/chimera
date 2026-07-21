@@ -81,6 +81,11 @@ class PromotionCriteria:
     # recent trades.
     min_holdout_pnl_sol: float = 0.01
 
+    # Minimum WQS statistical confidence required for promotion.
+    # Lower (e.g. 0.45) in paper mode to expand the monitored wallet pool;
+    # keep high (0.70) in live mode. Mirrors SCOUT_MIN_CONFIDENCE_ACTIVE.
+    min_confidence: float = 0.70
+
     # Low-churn filter to prevent promotion of latency-impaired wallets
     forbidden_archetypes: set[str] = None
     min_avg_hold_time_hours: float = 2.0
@@ -291,15 +296,15 @@ class PrePromotionValidator:
             )
 
         # Check against archetype-specific threshold
-        if boosted_wqs_score < archetype_threshold or wqs_confidence < 0.70:
+        if boosted_wqs_score < archetype_threshold or wqs_confidence < self.criteria.min_confidence:
             reason_parts = []
             if boosted_wqs_score < archetype_threshold:
                 reason_parts.append(
                     f"boosted WQS {boosted_wqs_score:.1f} < {archetype_threshold:.1f} "
                     f"(base WQS {wqs_score:.1f}, archetype={getattr(metrics, 'archetype', 'N/A')})"
                 )
-            if wqs_confidence < 0.70:
-                reason_parts.append(f"confidence {wqs_confidence:.2f} < 0.70")
+            if wqs_confidence < self.criteria.min_confidence:
+                reason_parts.append(f"confidence {wqs_confidence:.2f} < {self.criteria.min_confidence:.2f}")
             logger.info(f"Wallet failed WQS check: {'; '.join(reason_parts)}")
             return ValidationResult(
                 wallet_address=wallet_address,

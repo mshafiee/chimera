@@ -1949,6 +1949,9 @@ async def main_async():
                 # Keep WQS threshold aligned with ACTIVE gate (validator only runs for ACTIVE candidates)
                 # Note: min_wqs_score should match min_wqs_active (rescaled 0-100 range)
                 min_wqs_score=args.min_wqs_active,
+                # Mirror the classification confidence gate so the validator does not
+                # re-impose a stricter hardcoded threshold than the roster builder.
+                min_confidence=float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70")),
                 min_trades=5,  # Minimum raw swap events
                 min_close_ratio=0.4,  # At least 40% of trades must be SELLs with PnL
                 walk_forward_enabled=True,
