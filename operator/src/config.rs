@@ -448,7 +448,7 @@ pub struct StrategyConfig {
 }
 
 fn default_shield_percent() -> u32 {
-    70
+    50
 }
 
 fn default_shield_signal_quality_threshold() -> f64 {
@@ -460,7 +460,7 @@ fn default_spear_signal_quality_threshold() -> f64 {
 }
 
 fn default_spear_percent() -> u32 {
-    30
+    50
 }
 
 fn default_max_position() -> Decimal {
@@ -2181,8 +2181,8 @@ impl Default for AppConfig {
                 max_jupiter_failures: default_max_jupiter_failures(),
             },
             strategy: StrategyConfig {
-                shield_percent: 70,
-                spear_percent: 30,
+                shield_percent: 50,
+                spear_percent: 50,
                 max_position_sol: dec!(1.0),
                 min_position_sol: dec!(0.01),
                 shield_signal_quality_threshold: 0.65,
@@ -2240,6 +2240,60 @@ mod tests {
         assert_eq!(default_port(), 8080);
         assert_eq!(default_max_timestamp_drift(), 60);
         assert_eq!(default_queue_capacity(), 1000);
+    }
+
+    #[test]
+    fn test_default_strategy_allocation_sums_to_100() {
+        // Serde defaults must satisfy the shield_percent + spear_percent == 100
+        // invariant enforced by validate() (config.rs:1889), so a config file
+        // that omits the strategy allocation block still loads cleanly.
+        assert_eq!(default_shield_percent(), 50);
+        assert_eq!(default_spear_percent(), 50);
+        assert_eq!(default_shield_percent() + default_spear_percent(), 100);
+    }
+
+    /// Loads the committed repo-root `config.yaml`, runs full `validate()`,
+    /// and verifies the SPEAR heat-budget arithmetic so that a misconfigured
+    /// allocation (e.g. a sum != 100 or a budget too small for `base_size_sol`)
+    /// fails the test suite rather than silently blocking SPEAR trades at runtime.
+    #[test]
+    fn test_repo_config_yaml_parses_validates_and_spear_budget() {
+        // Tests run from operator/; config.yaml lives at the repo root.
+        let candidates = ["../config.yaml", "config.yaml", "../../config.yaml"];
+        let path = candidates
+            .iter()
+            .map(std::path::Path::new)
+            .find(|p| p.exists())
+            .expect("config.yaml must be present to validate the committed config");
+
+        let mut config = AppConfig::load(Some(&std::path::PathBuf::from(path)))
+            .expect("committed config.yaml must deserialize");
+
+        // config.yaml carries an unresolved ${...} webhook-secret placeholder;
+        // resolve it to a non-empty value so validate() exercises every check
+        // (including the shield+spear==100 invariant at config.rs:1889) instead
+        // of bailing on the secret.
+        config.security.webhook_secret = "test-secret-for-config-validation".to_string();
+        config
+            .validate()
+            .expect("committed config.yaml must pass validate()");
+
+        // SPEAR heat budget = total_capital_sol × max_heat(20%) × spear_percent/100.
+        // The 20% global heat is hardcoded in signal_pipeline.rs (open item to
+        // make configurable); mirror it here so this test fails if the budget no
+        // longer admits at least one SPEAR position at base_size_sol.
+        let capital = config.position_sizing.total_capital_sol;
+        let max_heat = Decimal::from(20) / Decimal::from(100); // 0.20 (matches signal_pipeline.rs)
+        let spear_budget = capital
+            * max_heat
+            * (Decimal::from(config.strategy.spear_percent) / Decimal::from(100));
+        let base_size = config.position_sizing.base_size_sol;
+        assert!(
+            spear_budget >= base_size,
+            "SPEAR budget {} SOL must be >= base_size {} SOL, else Spear trades are fully blocked",
+            spear_budget,
+            base_size,
+        );
     }
 }
 
