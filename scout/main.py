@@ -688,10 +688,11 @@ async def analyze_wallets(
                     plogger.log_prediction(
                         wallet_address=wallet_address,
                         model_type="simple_ensemble",
-                        # Normalize expected_return_pct to SOL units for proper matching
-                        # against actual_copy_pnl_30d_sol (downstream comparison is now SOL to SOL)
-                        predicted_pnl=expected_return_sol,
+                        predicted_pnl_sol=expected_return_sol,
                         confidence=prediction.confidence,
+                        strategy="SHIELD",
+                        wqs_score=wqs_score,
+                        wqs_components={},
                         features={
                             'roi_7d': wqs_metrics.roi_7d,
                             'roi_30d': wqs_metrics.roi_30d,
@@ -886,11 +887,11 @@ async def analyze_wallets(
                     # Build performance history from trades
                     performance_history = []
                     for trade in trades:
-                        if trade.get('timestamp') and (trade.get('pnl_sol') or trade.get('pnl')):
+                        if trade.timestamp and trade.pnl_sol:
                             performance_history.append({
-                                'timestamp': trade.get('timestamp'),
-                                'pnl_sol': trade.get('pnl_sol', trade.get('pnl', 0.0)),
-                                'roi': trade.get('roi', 0.0)
+                                'timestamp': trade.timestamp,
+                                'pnl_sol': float(trade.pnl_sol),
+                                'roi': 0.0,
                             })
 
                     if performance_history:
@@ -915,11 +916,11 @@ async def analyze_wallets(
                     # Build trade history for risk analysis
                     trade_history = []
                     for trade in trades:
-                        if trade.get('pnl_sol') or trade.get('pnl'):
+                        if trade.pnl_sol:
                             trade_history.append({
-                                'pnl_sol': trade.get('pnl_sol', trade.get('pnl', 0.0)),
-                                'pnl': trade.get('pnl', 0.0),
-                                'timestamp': trade.get('timestamp'),
+                                'pnl_sol': float(trade.pnl_sol),
+                                'pnl': float(trade.pnl_sol),
+                                'timestamp': trade.timestamp,
                             })
 
                     if len(trade_history) >= 5:  # Minimum sample requirement

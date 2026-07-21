@@ -20,8 +20,10 @@ use tokio::time::interval;
 /// Default cache TTL in seconds
 const DEFAULT_CACHE_TTL_SECS: i64 = 30;
 
-/// Price update interval for active tokens
-const PRICE_UPDATE_INTERVAL_SECS: u64 = 5;
+/// Price update interval for active tokens.
+/// Jupiter's free API rate-limits at ~5s polling; 15s keeps prices fresh
+/// within the 30s staleness threshold while avoiding 429 responses.
+const PRICE_UPDATE_INTERVAL_SECS: u64 = 15;
 
 /// Decimals cache TTL in seconds (24 hours - decimals are immutable for minted tokens)
 const DECIMALS_TTL_SECS: i64 = 86400;
@@ -480,6 +482,8 @@ impl PriceCache {
         let mut update_interval =
             interval(std::time::Duration::from_secs(PRICE_UPDATE_INTERVAL_SECS));
 
+        let mut rate_limit_cooldown = false;
+
         loop {
             update_interval.tick().await;
 
@@ -488,8 +492,22 @@ impl PriceCache {
                 continue;
             }
 
-            if let Err(e) = self.update_prices(&tokens).await {
-                tracing::error!(error = %e, "Failed to update prices");
+            // After a 429, skip one tick to let the API rate-limit window reset.
+            if rate_limit_cooldown {
+                rate_limit_cooldown = false;
+                tracing::debug!("Skipping price update (rate-limit cooldown)");
+                continue;
+            }
+
+            match self.update_prices(&tokens).await {
+                Err(PriceCacheError::RateLimited) => {
+                    tracing::warn!("Jupiter price API rate-limited, entering cooldown for one cycle");
+                    rate_limit_cooldown = true;
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to update prices");
+                }
+                Ok(_) => {}
             }
         }
     }
