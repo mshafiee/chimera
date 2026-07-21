@@ -3248,7 +3248,7 @@ class WalletAnalyzer:
                     await self._trades_cache_set(address, trades)
                     return trades
             except Exception as e:
-                logger.warning("Failed to fetch trades for %s: %s", address[:8], e)
+                logger.warning("Failed to fetch trades for %s: %s", address[:8], e, exc_info=True)
         
         # Fall back to cached sample data
         trades = self._trades_cache.get(address, [])
@@ -3348,7 +3348,10 @@ class WalletAnalyzer:
                 print(f"[Analyzer] Warning: Failed to store liquidity snapshots: {e}")
         
         # Enrich with realized PnL before returning/caching
-        self._enrich_trades_with_realized_pnl(trades)
+        try:
+            self._enrich_trades_with_realized_pnl(trades)
+        except Exception as e:
+            logger.warning("PnL enrichment failed for %s: %s (trades returned without realized PnL)", address[:8], e)
         return sorted(trades, key=lambda t: t.timestamp, reverse=True)
     
     async def fetch_recent_trades(self, address: str, days: int = 30) -> List[dict]:
