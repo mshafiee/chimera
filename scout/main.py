@@ -1017,7 +1017,10 @@ async def analyze_wallets(
             for res in results:
                 if res and res.get('address'):
                     wallet_addresses.append(res['address'])
-                    wallet_trades_map[res['address']] = res.get('trades', [])
+                    wallet_trades_map[res['address']] = [
+                        {'token': t.token_address, 'amount': float(t.amount_sol)}
+                        for t in res.get('trades', [])
+                    ]
 
             if wallet_addresses:
                 # Build network graph from all wallets using batch method
