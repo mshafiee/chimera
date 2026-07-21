@@ -150,7 +150,7 @@ class NetworkFeatures:
                 from_addr = edge.get('from')
                 to_addr = edge.get('to')
                 weight = edge.get('weight', 1.0)
-            elif isinstance(edge, (tuple, list)) and len(edge) >= 2:
+            elif isinstance(edge, (tuple, list)) and len(edge) >= 3:
                 from_addr = edge[0]
                 to_addr = edge[1]
                 weight = edge[2].get('weight', 1.0) if isinstance(edge[2], dict) else 1.0
