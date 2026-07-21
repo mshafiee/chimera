@@ -32,6 +32,18 @@ try:
 except ImportError:
     ACTIVITY_CACHE_AVAILABLE = False
 
+
+def _safe_float(value, default: float = 0.0) -> float:
+    """Convert a value to float, tolerating dict/None from Helius API responses.
+
+    Some Helius enriched-transaction fields (rawTokenAmountBefore, nativeBalanceChange)
+    arrive as nested dicts rather than plain numbers, which crashes ``float()``.
+    """
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 # Import credit tracker
 try:
     from .helius_credit_tracker import get_credit_tracker
@@ -2917,19 +2929,28 @@ class HeliusClient:
             return None
 
         # Strategy 1: wallet-relative deltas (primary)
-        result = self._parse_swap_from_deltas(tx, wallet_address)
-        if result:
-            return result
+        try:
+            result = self._parse_swap_from_deltas(tx, wallet_address)
+            if result:
+                return result
+        except Exception as e:
+            logger.debug("Strategy 1 delta parser failed: %s", e)
 
         # Strategy 2: swap events (newer Helius enriched format)
-        result = self._parse_swap_from_events(tx, wallet_address)
-        if result:
-            return result
+        try:
+            result = self._parse_swap_from_events(tx, wallet_address)
+            if result:
+                return result
+        except Exception as e:
+            logger.debug("Strategy 2 events parser failed: %s", e)
 
         # Strategy 3: raw accountData balance changes (fallback)
-        result = self._parse_swap_from_account_data(tx, wallet_address)
-        if result:
-            return result
+        try:
+            result = self._parse_swap_from_account_data(tx, wallet_address)
+            if result:
+                return result
+        except Exception as e:
+            logger.debug("Strategy 3 account-data parser failed: %s", e)
 
         return None
 
@@ -3465,11 +3486,11 @@ class HeliusClient:
         if native_input is not None and native_output is not None:
             # SOL-in token-out = BUY, SOL-out token-in = SELL
             if isinstance(native_input, dict):
-                sol_in = float(native_input.get("amount", 0))
+                sol_in = _safe_float(native_input.get("amount", 0))
             else:
                 sol_in = float(native_input) if native_input else 0.0
             if isinstance(native_output, dict):
-                sol_out = float(native_output.get("amount", 0))
+                sol_out = _safe_float(native_output.get("amount", 0))
             else:
                 sol_out = float(native_output) if native_output else 0.0
 
@@ -3478,7 +3499,7 @@ class HeliusClient:
             for ti in token_inputs:
                 if isinstance(ti, dict):
                     token_in_mint = ti.get("mint") or token_in_mint
-                    token_in_count += float(ti.get("rawTokenAmount", 0))
+                    token_in_count += _safe_float(ti.get("rawTokenAmount", 0))
                 else:
                     token_in_count += float(ti) if ti else 0.0
 
@@ -3487,7 +3508,7 @@ class HeliusClient:
             for to in token_outputs:
                 if isinstance(to, dict):
                     token_out_mint = to.get("mint") or token_out_mint
-                    token_out_count += float(to.get("rawTokenAmount", 0))
+                    token_out_count += _safe_float(to.get("rawTokenAmount", 0))
                 else:
                     token_out_count += float(to) if to else 0.0
 
@@ -3543,13 +3564,13 @@ class HeliusClient:
             for ti in token_inputs:
                 if isinstance(ti, dict):
                     token_in_mint = ti.get("mint") or token_in_mint
-                    token_in_count += float(ti.get("rawTokenAmount", 0))
+                    token_in_count += _safe_float(ti.get("rawTokenAmount", 0))
             token_out_mint = None
             token_out_count = 0.0
             for to in token_outputs:
                 if isinstance(to, dict):
                     token_out_mint = to.get("mint") or token_out_mint
-                    token_out_count += float(to.get("rawTokenAmount", 0))
+                    token_out_count += _safe_float(to.get("rawTokenAmount", 0))
 
             if token_in_mint and token_out_mint and token_out_count > 0:
                 token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
@@ -3608,8 +3629,8 @@ class HeliusClient:
             mint = change.get("mint")
             if not mint:
                 continue
-            raw_before = float(change.get("rawTokenAmountBefore", 0) or 0)
-            raw_after = float(change.get("rawTokenAmountAfter", 0) or 0)
+            raw_before = _safe_float(change.get("rawTokenAmountBefore", 0) or 0)
+            raw_after = _safe_float(change.get("rawTokenAmountAfter", 0) or 0)
             delta = raw_after - raw_before
             if abs(delta) > abs(best_delta):
                 best_delta = delta
@@ -3619,15 +3640,18 @@ class HeliusClient:
             return None
 
         mint = best_change.get("mint", "")
-        token_decimals = int(best_change.get("decimals", 0) or 0)
+        try:
+            token_decimals = int(best_change.get("decimals", 0) or 0)
+        except (TypeError, ValueError):
+            token_decimals = 0
         token_amount = abs(best_delta)
         if token_decimals > 0:
             token_amount /= (10 ** token_decimals)
 
         # Try to determine SOL delta from native balance changes
         sol_delta = 0.0
-        native_before = float(wallet_data.get("nativeBalanceChange", {}).get("before", 0) or 0)
-        native_after = float(wallet_data.get("nativeBalanceChange", {}).get("after", 0) or 0)
+        native_before = _safe_float(wallet_data.get("nativeBalanceChange", {}).get("before", 0) or 0)
+        native_after = _safe_float(wallet_data.get("nativeBalanceChange", {}).get("after", 0) or 0)
         if native_before or native_after:
             sol_delta = (native_after - native_before) / 1e9
 
