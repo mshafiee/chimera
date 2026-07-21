@@ -72,6 +72,7 @@ use chimera_operator::handlers::{
     reset_circuit_breaker,
     retry_webhook_registration,
     retry_dead_letter_item,
+    debug_backtest_smoke,
     toggle_wallet_webhook,
     trigger_scout_run,
     trip_circuit_breaker,
@@ -2100,6 +2101,7 @@ async fn main() -> anyhow::Result<()> {
             "/reconciliation/discrepancies/:id/resolve",
             post(chimera_operator::handlers::resolve_discrepancy),
         )
+        .route("/debug/backtest-smoke", post(debug_backtest_smoke))
         .with_state(api_state.clone())
         .layer(axum_middleware::from_fn_with_state(
             auth_state.clone(),

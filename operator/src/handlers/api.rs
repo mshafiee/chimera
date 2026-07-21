@@ -18,10 +18,10 @@ use std::sync::Arc;
 use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db_abstraction::{
-    trades_to_csv, trades_to_pdf, ConfigAuditItem, Database, DeadLetterItem, LatencyBucket,
-    PositionDetail, TradeDetail, WalletDetail,
+    trades_to_csv, trades_to_pdf, ConfigAuditItem, Database, DbPool, DeadLetterItem,
+    LatencyBucket, PositionDetail, TradeDetail, WalletDetail,
 };
-use crate::error::AppError;
+use crate::error::{AppError, AppResult};
 use crate::middleware::{AuthExtension, Role};
 use crate::monitoring::signal_aggregator::SignalAggregator;
 use crate::notifications::{CompositeNotifier, NotificationEvent};
@@ -3136,4 +3136,111 @@ pub async fn resolve_discrepancy(
         .await?;
 
     Ok(Json(ResolveDiscrepancyResponse { success: true }))
+}
+
+// =============================================================================
+// DEBUG SMOKE-TEST: PnL POPULATION VERIFICATION
+// =============================================================================
+
+/// Request body for the debug backtest smoke-test endpoint.
+#[derive(Debug, Deserialize)]
+pub struct DebugBacktestSmokeRequest {
+    pub wallet_address: String,
+}
+
+/// Response for the debug backtest smoke-test endpoint.
+///
+/// Reports PnL-population coverage for a wallet's CLOSED trades so the
+/// `close_position_full` fix (postgres.rs) can be confirmed live without
+/// waiting for a full reporting cycle.
+#[derive(Debug, Serialize)]
+pub struct DebugBacktestSmokeResponse {
+    pub wallet_address: String,
+    pub total_trades: i64,
+    pub closed_trades: i64,
+    pub pnl_populated_closes: i64,
+    pub passed: bool,
+    pub notes: String,
+}
+
+/// Debug smoke-test: verify the PnL-population fix is live for a wallet.
+///
+/// POST /api/v1/debug/backtest-smoke
+/// Requires: protected route bearer auth (inherited from `protected_api_routes`).
+pub async fn debug_backtest_smoke(
+    State(state): State<Arc<ApiState>>,
+    Json(payload): Json<DebugBacktestSmokeRequest>,
+) -> Result<Json<DebugBacktestSmokeResponse>, AppError> {
+    let pool = pg_pool(&state.db)?;
+    let wallet_address = payload.wallet_address.trim().to_string();
+
+    if wallet_address.is_empty() {
+        return Err(AppError::BadRequest(
+            "wallet_address must not be empty".to_string(),
+        ));
+    }
+
+    let total_trades: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM trades WHERE wallet_address = $1",
+    )
+    .bind(&wallet_address)
+    .fetch_one(&pool)
+    .await?;
+
+    let closed_trades: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM trades WHERE wallet_address = $1 AND status = 'CLOSED'",
+    )
+    .bind(&wallet_address)
+    .fetch_one(&pool)
+    .await?;
+
+    let pnl_populated_closes: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM trades WHERE wallet_address = $1 AND status = 'CLOSED' AND pnl_sol IS NOT NULL",
+    )
+    .bind(&wallet_address)
+    .fetch_one(&pool)
+    .await?;
+
+    let passed = pnl_populated_closes > 0;
+    let notes = if closed_trades == 0 {
+        "Inconclusive: wallet has no CLOSED trades yet. The fix cannot be confirmed until a trade closes.".to_string()
+    } else if passed {
+        format!(
+            "PASS: {}/{} CLOSED trades have pnl_sol populated.",
+            pnl_populated_closes, closed_trades
+        )
+    } else {
+        "FAIL: CLOSED trades exist but none have pnl_sol populated. Pre-deploy closes may be NULL; a new close is needed to confirm.".to_string()
+    };
+
+    tracing::info!(
+        wallet_address = %wallet_address,
+        total_trades,
+        closed_trades,
+        pnl_populated_closes,
+        passed,
+        "Debug backtest smoke-test queried"
+    );
+
+    Ok(Json(DebugBacktestSmokeResponse {
+        wallet_address,
+        total_trades,
+        closed_trades,
+        pnl_populated_closes,
+        passed,
+        notes,
+    }))
+}
+
+/// Extract the underlying PostgreSQL pool from the database trait object.
+///
+/// Returns an error for non-PostgreSQL backends (this handler requires raw
+/// SQL access to the `trades` table).
+fn pg_pool(db: &Arc<dyn Database>) -> AppResult<sqlx::Pool<sqlx::Postgres>> {
+    match db.pool() {
+        DbPool::PostgreSQL(p) => Ok(p),
+        _ => Err(AppError::Internal(
+            "PostgreSQL backend required for debug endpoint".to_string(),
+        )),
+    }
 }
