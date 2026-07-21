@@ -2330,7 +2330,7 @@ async def main_async():
                     continue
                 base_analyzer = getattr(analyzer, '_analyzer', analyzer)
                 trades = await base_analyzer.get_historical_trades(addr, days=30)
-                result = validator.validate_for_promotion(
+                result = await validator.validate_for_promotion(
                     addr, metrics, trades, strategy="SHIELD"
                 )
                 if result.passed:
