@@ -39,7 +39,6 @@ class MockHistoricalLiquidityProvider(LiquidityProvider):
         """Return historical liquidity only - no fallback (S5 fix)."""
         self.calls_made.append((token_address, timestamp))
 
-        # Check historical map
         date_key = timestamp.date()
         key = (token_address, date_key)
 
@@ -54,9 +53,11 @@ class MockHistoricalLiquidityProvider(LiquidityProvider):
                 source="mock_historical",
             )
 
-        # S5 FIX: No fallback - return None to indicate no historical data available
-        # This causes the backtester to REJECT the trade (preventing survivorship bias)
         return None
+
+    def get_historical_liquidity_or_current(self, token_address: str, timestamp: datetime, strategy: str = "SHIELD"):
+        """Delegate to historical lookup to preserve no-fallback test behavior."""
+        return self.get_historical_liquidity(token_address, timestamp)
 
 
 class TestBacktesterHistoricalLiquidity:

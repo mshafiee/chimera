@@ -1787,6 +1787,22 @@ impl Database for PostgresBackend {
                 .await?
                 .unwrap_or(Decimal::ZERO);
         let new_net = current_net + net_pnl;
+
+        let pnl_usd = sol_price_usd
+            .map(|price| net_pnl * price)
+            .unwrap_or(Decimal::ZERO);
+
+        sqlx::query(
+            r#"
+            UPDATE trades SET pnl_sol = $1, pnl_usd = $2 WHERE trade_uuid = $3
+            "#,
+        )
+        .bind(net_pnl)
+        .bind(pnl_usd)
+        .bind(trade_uuid)
+        .execute(&mut *tx)
+        .await?;
+
         sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
             .bind(new_net)
             .bind(trade_uuid)

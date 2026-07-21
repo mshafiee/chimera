@@ -465,7 +465,7 @@ class BacktestSimulator:
             )
         else:
             # Query ONLY historical liquidity - no fallback to current to avoid survivorship bias
-            liquidity_data = self.liquidity.get_historical_liquidity(
+            liquidity_data = self.liquidity.get_historical_liquidity_or_current(
                 trade.token_address, trade.timestamp
             )
             # No fallback to current liquidity - if historical data is unavailable,

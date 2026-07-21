@@ -1453,8 +1453,8 @@ class WalletAnalyzer:
                 token_address=token_mint,
                 token_symbol=token_symbol,
                 action=action,
-                amount_sol=sol_amount,  # SOL notional (spent/received)
-                price_at_trade=price_sol,  # SOL per token
+                amount_sol=sol_amount,
+                price_at_trade=price_sol,
                 timestamp=timestamp,
                 tx_signature=swap.get("signature", ""),
                 pnl_sol=None,
@@ -1464,7 +1464,16 @@ class WalletAnalyzer:
                 price_sol=price_sol,
                 price_usd=price_usd,
             )
-            # If we didn't get USD price directly, derive it from SOL/USD.
+
+            try:
+                liquidity_data = self.liquidity_provider.get_historical_liquidity_or_current(
+                    token_mint, timestamp
+                )
+                if liquidity_data and liquidity_data.liquidity_usd:
+                    trade.liquidity_at_trade_usd = liquidity_data.liquidity_usd
+            except Exception as e:
+                logger.debug(f"Liquidity enrichment failed for {token_mint[:8]}: {e}")
+
             if trade.price_usd is None and trade.price_sol and trade.price_sol > Decimal('0'):
                 sol_price_usd_float = await self.liquidity_provider.get_sol_price_usd()
                 sol_price_usd = float_to_decimal(sol_price_usd_float)
