@@ -2311,8 +2311,8 @@ async def main_async():
     # so CANDIDATE wallets from previous cycles can be stuck indefinitely
     # even after confidence/threshold fixes. This sweep re-evaluates the
     # top N CANDIDATE wallets by WQS to unblock promotion.
-    _reval_limit = int(os.getenv("SCOUT_REVALIDATE_CANDIDATES", "5"))
     _reval_enabled = os.getenv("SCOUT_REVALIDATE_CANDIDATES", "").lower() not in ("", "false", "0")
+    _reval_limit = int(os.getenv("SCOUT_REVALIDATE_CANDIDATES_LIMIT", "5"))
     if _reval_enabled and not args.dry_run:
         print(f"\n[Scout] Re-validation sweep for existing CANDIDATE wallets (top {_reval_limit})...")
         existing_candidates = get_wallets_by_status("CANDIDATE")[:_reval_limit]

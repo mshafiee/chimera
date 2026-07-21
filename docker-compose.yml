@@ -189,6 +189,7 @@ services:
       - SCOUT_MIN_CONFIDENCE_ACTIVE=0.45
       # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
       - SCOUT_REVALIDATE_CANDIDATES=true
+      - SCOUT_REVALIDATE_CANDIDATES_LIMIT=5
       # Parse failure debug: completed data collection (2142 files captured)
       # Backtest cost calibration — match production Jito tip (default 0.0001 is 30x too low).
       # Production charges 0.0012-0.0055 SOL tips; 0.003 is the median observed tip.
