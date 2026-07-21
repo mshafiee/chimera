@@ -51,7 +51,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # ruff: noqa: E402
 from core.utils import utcnow
 
-from core.roster_writer_db import WalletRecord, write_wallets_to_db, get_wallets_by_status, update_wallet_status
+from core.roster_writer_db import WalletRecord, write_wallets_to_db, get_wallets_by_status
 from core.wqs import calculate_wqs_with_confidence, \
     _calculate_raw_score, _interpret_trajectory, _compute_wmi
 from core.analyzer import WalletAnalyzer
@@ -2332,7 +2332,6 @@ async def main_async():
                     skip_backtest=args.skip_backtest,
                     verbose=args.verbose,
                     wallet_address=addr,
-                    last_price=last_price,
                     dry_run=False,
                 )
                 if reval_results and len(reval_results) > 0:

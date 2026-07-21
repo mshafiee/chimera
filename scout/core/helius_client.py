@@ -3131,7 +3131,8 @@ class HeliusClient:
 
                 # Stablecoin→stablecoin swap (e.g. USDC→USDT): both mints are in
                 # stable_mints so the loop above never assigns other_mint. Fall
-                # back to the second stablecoin by absolute delta.
+                # back to the second stablecoin (different from stable_mint_used)
+                # by absolute delta.
                 if other_mint is None and stable_mint_used is not None:
                     for mint, delta in token_deltas.items():
                         if mint in stable_mints and mint != stable_mint_used and abs(delta) >= 1e-12:
