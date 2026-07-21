@@ -60,7 +60,7 @@ class PromotionCriteria:
     # Minimum ratio of realized closes (SELLs with PnL) to total trades required for promotion.
     # Default 0.4 means at least 40% of trades must be SELLs with computed PnL.
     # This replaces the old fixed min_closes_required (10) which contradicted min_trades (5).
-    min_close_ratio: float = 0.4
+    min_close_ratio: float = 0.20
     max_rejection_rate: float = 0.5  # Max 50% of trades can be rejected
     require_positive_simulated_pnl: bool = True
     max_pnl_reduction_percent: float = 80.0  # Max 80% reduction allowed
@@ -74,7 +74,7 @@ class PromotionCriteria:
 
     # Penalty applied to effective WQS when walk-forward falls back to
     # full-set validation due to insufficient holdout closes.
-    walk_forward_fallback_penalty: float = 15.0
+    walk_forward_fallback_penalty: float = 5.0
 
     # Minimum net realized PnL (SOL) required in the walk-forward OOS holdout
     # period. Removes wallets that pass on full-set but fail on the most
@@ -84,7 +84,7 @@ class PromotionCriteria:
     # Minimum WQS statistical confidence required for promotion.
     # Lower (e.g. 0.45) in paper mode to expand the monitored wallet pool;
     # keep high (0.70) in live mode. Mirrors SCOUT_MIN_CONFIDENCE_ACTIVE.
-    min_confidence: float = 0.70
+    min_confidence: float = 0.50
 
     # Low-churn filter to prevent promotion of latency-impaired wallets
     forbidden_archetypes: set[str] = None
