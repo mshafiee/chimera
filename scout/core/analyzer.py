@@ -13,6 +13,7 @@ In production, this connects to:
 from collections import OrderedDict
 
 import asyncio
+import json
 import os
 import time
 import logging
@@ -1176,6 +1177,10 @@ class WalletAnalyzer:
         trades = []
         parse_failures = 0
         trade_failures = 0
+        _debug_parse = os.getenv("SCOUT_DEBUG_PARSE_FAILURES", "").lower() == "true"
+        _debug_dir = None
+        if _debug_parse:
+            _debug_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "parse_failures")
         self._parse_stats["transactions_fetched"] += len(transactions)
         for i, tx in enumerate(transactions):
             if i % 25 == 0 and i > 0:
@@ -1247,6 +1252,26 @@ class WalletAnalyzer:
                             print(f"  [{address[:8]}]   - instructions: {len(tx['instructions'])} items")
                         if tx.get("source"):
                             print(f"  [{address[:8]}]   - source: {tx['source']}")
+                
+                # Debug capture: write compact failure snapshot for offline analysis
+                if _debug_parse and _debug_dir:
+                    try:
+                        os.makedirs(_debug_dir, exist_ok=True)
+                        sig = tx.get("signature", "unknown")
+                        debug_file = os.path.join(_debug_dir, f"{sig[:16]}_{reason}.json")
+                        with open(debug_file, "w") as f:
+                            json.dump({
+                                "signature": sig,
+                                "reason": reason,
+                                "tx_type": tx.get("type", "unknown"),
+                                "tokenTransfers": len(tx.get("tokenTransfers", [])),
+                                "nativeTransfers": len(tx.get("nativeTransfers", [])),
+                                "accountData": len(tx.get("accountData", [])),
+                                "events_keys": list(tx.get("events", {}).keys()) if isinstance(tx.get("events"), dict) else None,
+                                "instructions": len(tx.get("instructions", [])),
+                            }, f, default=str)
+                    except Exception:
+                        pass
         
         print(f"  [{address[:8]}] Parsed {len(trades)} trades from {len(transactions)} transactions")
 
@@ -3350,7 +3375,7 @@ class WalletAnalyzer:
         try:
             self._enrich_trades_with_realized_pnl(trades)
         except Exception as e:
-            logger.warning("PnL enrichment failed for %s: %s (trades returned without realized PnL)", address[:8], e)
+            logger.warning("PnL enrichment partially failed for %s: %s — trades returned (some may lack realized PnL)", address[:8], e)
         return sorted(trades, key=lambda t: t.timestamp, reverse=True)
     
     async def fetch_recent_trades(self, address: str, days: int = 30) -> List[dict]:
