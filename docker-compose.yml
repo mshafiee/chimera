@@ -187,8 +187,9 @@ services:
       - SCOUT_MIN_WQS_CANDIDATE=10.0
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
       - SCOUT_MIN_CONFIDENCE_ACTIVE=0.45
-      # Parse failure debug: write compact failure snapshots to data/parse_failures/ for one cycle
-      - SCOUT_DEBUG_PARSE_FAILURES=true
+      # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
+      - SCOUT_REVALIDATE_CANDIDATES=true
+      # Parse failure debug: completed data collection (2142 files captured)
       # Backtest cost calibration — match production Jito tip (default 0.0001 is 30x too low).
       # Production charges 0.0012-0.0055 SOL tips; 0.003 is the median observed tip.
       # Without this, the backtest approves wallets whose historical edge can't cover real costs.
