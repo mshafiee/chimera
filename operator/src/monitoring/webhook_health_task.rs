@@ -20,6 +20,7 @@ pub struct WebhookHealthConfig {
     pub stale_threshold_days: u32,
     pub webhook_url: String,
     pub helius_dry_run: bool,
+    pub auto_cleanup_enabled: bool,
 }
 
 /// Start the webhook health monitoring task
@@ -41,7 +42,7 @@ pub async fn start_webhook_health_task(
     // Create webhook lifecycle manager
     let lifecycle_config = WebhookLifecycleConfig {
         auto_register_enabled: true,
-        auto_cleanup_enabled: true,
+        auto_cleanup_enabled: config.auto_cleanup_enabled,
         health_check_interval_secs: config.check_interval_secs,
         stale_threshold_days: config.stale_threshold_days,
         max_registration_retries: 3,
@@ -262,7 +263,7 @@ pub async fn run_startup_webhook_check(
 
     let lifecycle_config = WebhookLifecycleConfig {
         auto_register_enabled: true,
-        auto_cleanup_enabled: config.stale_threshold_days > 0,
+        auto_cleanup_enabled: config.auto_cleanup_enabled,
         health_check_interval_secs: config.check_interval_secs,
         stale_threshold_days: config.stale_threshold_days,
         max_registration_retries: 3,
@@ -363,7 +364,7 @@ pub async fn run_startup_webhook_check(
     }
 
     // 3. Cleanup stale webhooks if enabled
-    if config.stale_threshold_days > 0 {
+    if config.auto_cleanup_enabled {
         match manager.health_check_webhooks().await {
             Ok(health_result) => {
                 cleaned_up = health_result.cleaned_up;
@@ -449,10 +450,12 @@ mod tests {
             stale_threshold_days: 7,
             webhook_url: "https://example.com/webhook".to_string(),
             helius_dry_run: true,
+            auto_cleanup_enabled: false,
         };
 
         assert_eq!(config.check_interval_secs, 3600);
         assert_eq!(config.stale_threshold_days, 7);
         assert!(config.helius_dry_run);
+        assert!(!config.auto_cleanup_enabled);
     }
 }
