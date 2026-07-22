@@ -725,13 +725,16 @@ impl Database for PostgresBackend {
         let (status, min_wqs, max_wqs) = match tier {
             ConvictionTier::High => (Some("ACTIVE"), Some(80), None),
             ConvictionTier::Regular => (Some("ACTIVE"), Some(60), Some(79)),
-            // Emerging: all non-High/Regular wallets (ACTIVE low-WQS + all CANDIDATE).
-            // No WQS ceiling — high-WQS CANDIDATE wallets (e.g. SCALPER WQS=100+
-            // with confidence < 0.70 that can't reach ACTIVE) must still be polled.
-            ConvictionTier::Emerging => (None, None, None),
+            ConvictionTier::Emerging => (Some("ACTIVE"), Some(0), Some(59)),
         };
 
-        self.get_wallets_with_wqs(status, min_wqs, max_wqs).await
+        let mut wallets = self.get_wallets_with_wqs(status, min_wqs, max_wqs).await?;
+
+        if matches!(tier, ConvictionTier::Emerging) {
+            wallets.retain(|w| w.status != "REJECTED");
+        }
+
+        Ok(wallets)
     }
 
     async fn get_wallets_with_wqs(
@@ -2324,14 +2327,14 @@ impl Database for PostgresBackend {
                     CASE WHEN $2 IS NOT NULL THEN 'active' ELSE 'orphaned' END,
                     CASE WHEN $2 IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(wallet_address) DO UPDATE SET
-                helius_webhook_id = COALESCE($4, wallet_monitoring.helius_webhook_id),
-                monitoring_enabled = $5,
+                helius_webhook_id = $2,
+                monitoring_enabled = $3,
                 webhook_status = CASE
-                    WHEN $4 IS NOT NULL THEN 'active'
-                    ELSE wallet_monitoring.webhook_status
+                    WHEN $2 IS NOT NULL THEN 'active'
+                    ELSE 'orphaned'
                 END,
                 webhook_registered_at = CASE
-                    WHEN $4 IS NOT NULL THEN CURRENT_TIMESTAMP
+                    WHEN $2 IS NOT NULL THEN CURRENT_TIMESTAMP
                     ELSE wallet_monitoring.webhook_registered_at
                 END,
                 last_monitored_at = CURRENT_TIMESTAMP,
@@ -2339,8 +2342,6 @@ impl Database for PostgresBackend {
             "#,
         )
         .bind(wallet_address)
-        .bind(helius_webhook_id)
-        .bind(monitoring_enabled)
         .bind(helius_webhook_id)
         .bind(monitoring_enabled)
         .execute(&self.pool)

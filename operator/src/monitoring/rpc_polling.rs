@@ -212,86 +212,96 @@ pub async fn poll_wallet_transactions(
                 ),
             )
             .await;
-            if let Ok(tx) = tx_result {
-                // Convert UiTransaction to JSON Value for parser
-                let tx_json: Value =
-                    serde_json::to_value(&tx).context("Failed to serialize transaction to JSON")?;
+            match tx_result {
+                Ok(tx) => {
+                    // Convert UiTransaction to JSON Value for parser
+                    let tx_json: Value =
+                        serde_json::to_value(&tx).context("Failed to serialize transaction to JSON")?;
 
-                // Parse transaction to extract swap info using transaction_parser
-                match transaction_parser::parse_transaction(&tx_json, wallet_address) {
-                    Ok(tx_info) => {
-                        if let Some(swap) = tx_info.parsed_swap {
-                            // Extract token address and direction from parsed swap
-                            let token_address =
-                                if swap.direction == transaction_parser::SwapDirection::Buy {
-                                    Some(swap.token_out.clone())
-                                } else {
-                                    Some(swap.token_in.clone())
+                    // Parse transaction to extract swap info using transaction_parser
+                    match transaction_parser::parse_transaction(&tx_json, wallet_address) {
+                        Ok(tx_info) => {
+                            if let Some(swap) = tx_info.parsed_swap {
+                                // Extract token address and direction from parsed swap
+                                let token_address =
+                                    if swap.direction == transaction_parser::SwapDirection::Buy {
+                                        Some(swap.token_out.clone())
+                                    } else {
+                                        Some(swap.token_in.clone())
+                                    };
+
+                                let direction = match swap.direction {
+                                    transaction_parser::SwapDirection::Buy => Some("BUY".to_string()),
+                                    transaction_parser::SwapDirection::Sell => Some("SELL".to_string()),
                                 };
 
-                            let direction = match swap.direction {
-                                transaction_parser::SwapDirection::Buy => Some("BUY".to_string()),
-                                transaction_parser::SwapDirection::Sell => Some("SELL".to_string()),
-                            };
-
-                            // Calculate SOL amount (amount_in for BUY, amount_out for SELL)
-                            let sol_mint = "So11111111111111111111111111111111111111112";
-                            let amount_sol =
-                                if swap.direction == transaction_parser::SwapDirection::Buy {
-                                    // Buying: amount_in is SOL
-                                    if swap.token_in == sol_mint {
-                                        Some(swap.amount_in)
+                                // Calculate SOL amount (amount_in for BUY, amount_out for SELL)
+                                let sol_mint = "So11111111111111111111111111111111111111112";
+                                let amount_sol =
+                                    if swap.direction == transaction_parser::SwapDirection::Buy {
+                                        // Buying: amount_in is SOL
+                                        if swap.token_in == sol_mint {
+                                            Some(swap.amount_in)
+                                        } else {
+                                            Some(swap.amount_out) // Fallback
+                                        }
                                     } else {
-                                        Some(swap.amount_out) // Fallback
-                                    }
-                                } else {
-                                    // Selling: amount_out is SOL
-                                    if swap.token_out == sol_mint {
-                                        Some(swap.amount_out)
-                                    } else {
-                                        Some(swap.amount_in) // Fallback
-                                    }
-                                };
+                                        // Selling: amount_out is SOL
+                                        if swap.token_out == sol_mint {
+                                            Some(swap.amount_out)
+                                        } else {
+                                            Some(swap.amount_in) // Fallback
+                                        }
+                                    };
 
+                                tracing::debug!(
+                                    wallet = wallet_address,
+                                    signature = sig_str,
+                                    direction = ?direction,
+                                    token = ?token_address,
+                                    amount_sol = ?amount_sol,
+                                    "Parsed swap transaction from RPC polling"
+                                );
+
+                                transactions.push(WalletTransaction {
+                                    wallet_address: wallet_address.to_string(),
+                                    signature: sig_str.clone(),
+                                    token_address,
+                                    direction,
+                                    amount_sol,
+                                    timestamp: tx.block_time.unwrap_or(0),
+                                });
+                            } else {
+                                // Not a swap transaction, skip
+                                tracing::trace!(
+                                    wallet = wallet_address,
+                                    signature = sig_str,
+                                    "Transaction is not a swap, skipping"
+                                );
+                            }
+                        }
+                        Err(e) => {
                             tracing::debug!(
                                 wallet = wallet_address,
                                 signature = sig_str,
-                                direction = ?direction,
-                                token = ?token_address,
-                                amount_sol = ?amount_sol,
-                                "Parsed swap transaction from RPC polling"
-                            );
-
-                            transactions.push(WalletTransaction {
-                                wallet_address: wallet_address.to_string(),
-                                signature: sig_str.clone(),
-                                token_address,
-                                direction,
-                                amount_sol,
-                                timestamp: tx.block_time.unwrap_or(0),
-                            });
-                        } else {
-                            // Not a swap transaction, skip
-                            tracing::trace!(
-                                wallet = wallet_address,
-                                signature = sig_str,
-                                "Transaction is not a swap, skipping"
+                                error = %e,
+                                "Failed to parse transaction"
                             );
                         }
                     }
-                    Err(e) => {
-                        tracing::debug!(
-                            wallet = wallet_address,
-                            signature = sig_str,
-                            error = %e,
-                            "Failed to parse transaction"
-                        );
+
+                    // Track latest signature for database update
+                    if latest_signature.is_none() {
+                        latest_signature = Some(sig_str.clone());
                     }
                 }
-
-                // Track latest signature for database update
-                if latest_signature.is_none() {
-                    latest_signature = Some(sig_str.clone());
+                Err(e) => {
+                    tracing::warn!(
+                        wallet = wallet_address,
+                        signature = sig_str,
+                        error = %e,
+                        "Failed to fetch transaction during polling"
+                    );
                 }
             }
         }

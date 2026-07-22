@@ -166,6 +166,59 @@ async fn poll_wallets_by_tier(
     }
 }
 
+/// Spawn a single-tier polling loop as an independent task.
+///
+/// Each tier gets its own interval, so high-conviction polling is never
+/// blocked by slow batches on other tiers.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_tier_loop(
+    tier: crate::config::ConvictionTier,
+    cancel_token: CancellationToken,
+    interval_secs: u64,
+    db: Arc<dyn Database>,
+    engine: EngineHandle,
+    config: PollingConfig,
+    rpc_client: Arc<RpcClient>,
+    rate_limiter: Arc<RateLimiter>,
+    polling_state: Arc<RpcPollingState>,
+    circuit_breaker: Arc<CircuitBreaker>,
+    token_parser: Arc<TokenParser>,
+    exit_detector: Arc<ExitDetector>,
+    pending_exits: Arc<RwLock<Vec<super::ExitSignal>>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!(
+                        tier = ?tier,
+                        "RPC polling tier task shutting down"
+                    );
+                    break;
+                }
+                _ = interval.tick() => {
+                    poll_wallets_by_tier(
+                        db.clone(),
+                        engine.clone(),
+                        tier,
+                        &config,
+                        rpc_client.clone(),
+                        rate_limiter.clone(),
+                        polling_state.clone(),
+                        circuit_breaker.clone(),
+                        token_parser.clone(),
+                        exit_detector.clone(),
+                        pending_exits.clone(),
+                    ).await;
+                }
+            }
+        }
+    })
+}
+
 /// Start the RPC polling background task
 ///
 /// This task runs continuously, polling ACTIVE wallets for new transactions
@@ -246,74 +299,64 @@ pub async fn start_polling_task(
     });
 
     if config.tiered_polling_enabled {
-        // Tiered polling: separate intervals for each tier
-        let mut high_interval = tokio::time::interval(Duration::from_secs(
-            config.high_conviction_interval_secs.unwrap_or(config.interval_secs)
-        ));
-        let mut regular_interval = tokio::time::interval(Duration::from_secs(
-            config.regular_conviction_interval_secs.unwrap_or(config.interval_secs)
-        ));
-        let mut emerging_interval = tokio::time::interval(Duration::from_secs(
-            config.emerging_conviction_interval_secs.unwrap_or(config.interval_secs)
-        ));
+        let high_interval_secs = config.high_conviction_interval_secs.unwrap_or(config.interval_secs);
+        let regular_interval_secs = config.regular_conviction_interval_secs.unwrap_or(config.interval_secs);
+        let emerging_interval_secs = config.emerging_conviction_interval_secs.unwrap_or(config.interval_secs);
 
-        high_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        regular_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        emerging_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let high_handle = spawn_tier_loop(
+            crate::config::ConvictionTier::High,
+            cancel_token.clone(),
+            high_interval_secs,
+            db.clone(),
+            engine.clone(),
+            config.clone(),
+            rpc_client.clone(),
+            rate_limiter.clone(),
+            polling_state.clone(),
+            circuit_breaker.clone(),
+            token_parser.clone(),
+            exit_detector.clone(),
+            pending_exits.clone(),
+        );
+        let regular_handle = spawn_tier_loop(
+            crate::config::ConvictionTier::Regular,
+            cancel_token.clone(),
+            regular_interval_secs,
+            db.clone(),
+            engine.clone(),
+            config.clone(),
+            rpc_client.clone(),
+            rate_limiter.clone(),
+            polling_state.clone(),
+            circuit_breaker.clone(),
+            token_parser.clone(),
+            exit_detector.clone(),
+            pending_exits.clone(),
+        );
+        let emerging_handle = spawn_tier_loop(
+            crate::config::ConvictionTier::Emerging,
+            cancel_token.clone(),
+            emerging_interval_secs,
+            db.clone(),
+            engine.clone(),
+            config.clone(),
+            rpc_client.clone(),
+            rate_limiter.clone(),
+            polling_state.clone(),
+            circuit_breaker.clone(),
+            token_parser.clone(),
+            exit_detector.clone(),
+            pending_exits.clone(),
+        );
 
-        loop {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!("RPC polling task shutting down");
-                    break;
-                }
-                _ = high_interval.tick() => {
-                    poll_wallets_by_tier(
-                        db.clone(),
-                        engine.clone(),
-                        crate::config::ConvictionTier::High,
-                        &config,
-                        rpc_client.clone(),
-                        rate_limiter.clone(),
-                        polling_state.clone(),
-                        circuit_breaker.clone(),
-                        token_parser.clone(),
-                        exit_detector.clone(),
-                        pending_exits.clone(),
-                    ).await;
-                }
-                _ = regular_interval.tick() => {
-                    poll_wallets_by_tier(
-                        db.clone(),
-                        engine.clone(),
-                        crate::config::ConvictionTier::Regular,
-                        &config,
-                        rpc_client.clone(),
-                        rate_limiter.clone(),
-                        polling_state.clone(),
-                        circuit_breaker.clone(),
-                        token_parser.clone(),
-                        exit_detector.clone(),
-                        pending_exits.clone(),
-                    ).await;
-                }
-                _ = emerging_interval.tick() => {
-                    poll_wallets_by_tier(
-                        db.clone(),
-                        engine.clone(),
-                        crate::config::ConvictionTier::Emerging,
-                        &config,
-                        rpc_client.clone(),
-                        rate_limiter.clone(),
-                        polling_state.clone(),
-                        circuit_breaker.clone(),
-                        token_parser.clone(),
-                        exit_detector.clone(),
-                        pending_exits.clone(),
-                    ).await;
-                }
-            }
-        }
+        cancel_token.cancelled().await;
+        tracing::info!("RPC polling task shutting down, waiting for tier tasks");
+
+        let _ = tokio::time::timeout(Duration::from_secs(10), async {
+            std::mem::drop(high_handle.await);
+            std::mem::drop(regular_handle.await);
+            std::mem::drop(emerging_handle.await);
+        }).await;
     } else {
         // Legacy single-interval polling (unchanged)
         let mut interval = tokio::time::interval(Duration::from_secs(config.interval_secs));

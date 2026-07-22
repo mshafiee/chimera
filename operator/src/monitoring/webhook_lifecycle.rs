@@ -281,13 +281,37 @@ impl WebhookLifecycleManager {
             .acquire_standard(RequestPriority::Polling)
             .await;
 
+        if self.config.helius_dry_run {
+            info!(
+                wallet = %wallet,
+                webhook_id = %webhook_id,
+                "Would delete webhook (dry-run mode)"
+            );
+            let _ = self
+                .db
+                .log_webhook_lifecycle_event(
+                    wallet,
+                    "delete",
+                    "success",
+                    Some(&webhook_id),
+                    Some(&format!("Would delete webhook for wallet {} (dry-run)", wallet)),
+                    None,
+                    Some(start.elapsed().as_millis() as i32),
+                )
+                .await;
+            return Ok(());
+        }
+
         // Delete webhook from Helius
         match self.helius_client.delete_webhook(&webhook_id).await {
             Ok(()) => {
-                // Update database
-                let _ = self.db.upsert_wallet_monitoring(wallet, None, false).await;
+                let _ = self.db.clear_webhook_id(wallet).await;
 
-                // Log successful cleanup
+                let _ = self
+                    .db
+                    .upsert_wallet_monitoring(wallet, None, false)
+                    .await;
+
                 let _ = self
                     .db
                     .log_webhook_lifecycle_event(
@@ -309,7 +333,6 @@ impl WebhookLifecycleManager {
                 Ok(())
             }
             Err(e) => {
-                // Log failed cleanup
                 let _ = self
                     .db
                     .log_webhook_lifecycle_event(
@@ -660,7 +683,7 @@ impl WebhookLifecycleManager {
             .collect();
 
         // Find missing webhooks (in DB but not in Helius)
-        let missing_wallets: Vec<String> = db_webhooks
+        let mut missing_wallets: Vec<String> = db_webhooks
             .iter()
             .filter(|dw| dw.monitoring_enabled == 1 && dw.helius_webhook_id.is_none())
             .map(|dw| dw.wallet_address.clone())
@@ -688,11 +711,67 @@ impl WebhookLifecycleManager {
                         failed += 1;
                         warn!(webhook_id = %webhook_id, error = %e, "Failed to cleanup orphaned webhook");
                     }
+            }
+        }
+    }
+
+    // Recover unhealthy/paused webhooks: delete stale Helius entry,
+    // clear DB ID, then register fresh below.
+    let recovery_wallets: Vec<String> = db_webhooks
+        .iter()
+        .filter(|dw| {
+            dw.monitoring_enabled == 1
+                && dw.helius_webhook_id.is_some()
+                && (dw.webhook_health_status.as_deref() == Some("unhealthy")
+                    || dw.webhook_status.as_deref() == Some("paused")
+                    || dw.webhook_health_status.as_deref() == Some("error"))
+        })
+        .map(|dw| dw.wallet_address.clone())
+        .collect();
+
+    for wallet in &recovery_wallets {
+        let webhook_id = db_webhooks
+            .iter()
+            .find(|dw| dw.wallet_address == *wallet)
+            .and_then(|dw| dw.helius_webhook_id.clone());
+
+        if let Some(ref id) = webhook_id {
+            if !self.config.helius_dry_run {
+                match self.helius_client.delete_webhook(id).await {
+                    Ok(()) => {
+                        info!(
+                            wallet = %wallet,
+                            webhook_id = %id,
+                            "Deleted stale webhook for recovery"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            wallet = %wallet,
+                            webhook_id = %id,
+                            error = %e,
+                            "Failed to delete stale webhook for recovery"
+                        );
+                        continue;
+                    }
                 }
+            } else {
+                info!(
+                    wallet = %wallet,
+                    webhook_id = %id,
+                    "Would delete stale webhook for recovery (dry-run)"
+                );
             }
         }
 
-        // Register missing webhooks
+        if let Err(e) = self.db.clear_webhook_id(wallet).await {
+            warn!(wallet = %wallet, error = %e, "Failed to clear webhook_id for recovery");
+        }
+
+        missing_wallets.push(wallet.clone());
+    }
+
+    // Register missing webhooks
         for wallet in missing_wallets {
             match self.register_wallet_webhook(&wallet).await {
                 Ok(result) if result.success => {
