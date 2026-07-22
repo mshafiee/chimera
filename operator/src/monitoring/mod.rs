@@ -62,6 +62,10 @@ pub struct MonitoringState {
     pub token_parser: Option<Arc<TokenParser>>,
     /// Portfolio heat — checked before queuing new BUY signals
     pub portfolio_heat: Option<Arc<PortfolioHeat>>,
+    /// Webhook signature dedup cache: signature → first-seen Instant.
+    /// Prevents processing the same transaction delivered by multiple
+    /// orphaned webhooks.
+    pub processed_signatures: Arc<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
 }
 
 impl MonitoringState {
@@ -147,6 +151,9 @@ impl MonitoringState {
             circuit_breaker: None,
             token_parser: None,
             portfolio_heat: None,
+            processed_signatures: Arc::new(parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 

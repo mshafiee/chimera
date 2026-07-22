@@ -29,6 +29,27 @@ pub async fn helius_webhook_handler(
         // to avoid Send bound issues. The rate limiter will still track usage.
         let _ = state.webhook_rate_limiter.current_rate();
 
+        // Dedup: skip if this signature was already processed within the last 5 minutes.
+        // Multiple orphaned webhooks deliver the same transaction, causing redundant
+        // parse/filter cycles that waste CPU and flood logs.
+        {
+            let mut seen = state.processed_signatures.lock();
+            if let Some(ts) = seen.get(&event.signature) {
+                if ts.elapsed().as_secs() < 300 {
+                    tracing::debug!(
+                        signature = %event.signature,
+                        "Duplicate webhook event skipped (already processed)"
+                    );
+                    continue;
+                }
+            }
+            seen.insert(event.signature.clone(), std::time::Instant::now());
+            // Periodic cleanup: evict entries older than 10 minutes to bound memory
+            if seen.len() > 5000 {
+                seen.retain(|_, ts| ts.elapsed().as_secs() < 600);
+            }
+        }
+
         tracing::info!(
             signature = %event.signature,
             transaction_type = %event.transaction_type,

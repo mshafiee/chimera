@@ -175,12 +175,12 @@ monitoring:
   # Webhook lifecycle management
   webhook_lifecycle:
     auto_register_enabled: true    # Auto-register webhooks for promoted wallets
-    auto_cleanup_enabled: false    # Disabled: newly-registered webhooks haven't had deliveries yet
+    auto_cleanup_enabled: true     # Auto-cleanup orphaned webhooks to prevent plan-limit exhaustion
     health_check_interval_secs: 3600  # Health check every hour
     stale_threshold_days: 7       # Cleanup webhooks inactive for 7+ days
     max_registration_retries: 3   # Retry failed registrations up to 3 times
     helius_reconciliation_enabled: true  # Check Helius dashboard and clean up unprofitable webhooks
-    helius_dry_run: true           # Advisory mode: log what would be deleted, don't actually delete
+    helius_dry_run: false          # Actually delete orphaned webhooks (was: advisory mode)
 
 # Profit management configuration
 profit_management:
