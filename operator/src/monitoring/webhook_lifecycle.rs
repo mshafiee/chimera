@@ -897,6 +897,29 @@ impl WebhookLifecycleManager {
                 // Check if webhook is unhealthy
                 if let Ok(Some(monitoring)) = self.db.get_wallet_monitoring(wallet).await {
                     if monitoring.webhook_health_status.as_deref() == Some("unhealthy") {
+                        // Grace period: skip cleanup for webhooks registered within 30 minutes.
+                        // Newly-registered webhooks may not have propagated on Helius yet
+                        // (isActive=false) or received their first delivery.
+                        let within_grace = monitoring
+                            .webhook_registered_at
+                            .as_deref()
+                            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                            .map(|dt| {
+                                chrono::Utc::now()
+                                    .signed_duration_since(dt.with_timezone(&chrono::Utc))
+                                    .num_minutes()
+                                    < 30
+                            })
+                            .unwrap_or(false);
+
+                        if within_grace {
+                            info!(
+                                wallet = %wallet,
+                                "Skipping cleanup: webhook registered within 30-min grace period"
+                            );
+                            continue;
+                        }
+
                         unhealthy_wallets.push(wallet.clone());
                     }
                 }
