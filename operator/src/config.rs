@@ -2258,42 +2258,51 @@ mod tests {
     /// fails the test suite rather than silently blocking SPEAR trades at runtime.
     #[test]
     fn test_repo_config_yaml_parses_validates_and_spear_budget() {
-        // Tests run from operator/; config.yaml lives at the repo root.
-        let candidates = ["../config.yaml", "config.yaml", "../../config.yaml"];
-        let path = candidates
-            .iter()
-            .map(std::path::Path::new)
-            .find(|p| p.exists())
-            .expect("config.yaml must be present to validate the committed config");
+        // Tests run from operator/. Validate BOTH committed config files:
+        // the root config.yaml AND config/config.yaml (the file production
+        // actually mounts — see docker-compose.yml `./config:/app/config`).
+        let candidates = [
+            "../config/config.yaml",
+            "../config.yaml",
+            "config.yaml",
+            "../../config.yaml",
+        ];
+        let mut validated = 0usize;
+        for cand in candidates {
+            let path = std::path::Path::new(cand);
+            if !path.exists() {
+                continue;
+            }
+            let mut config = AppConfig::load(Some(&std::path::PathBuf::from(cand)))
+                .unwrap_or_else(|e| panic!("committed config {} must deserialize: {e}", cand));
 
-        let mut config = AppConfig::load(Some(&std::path::PathBuf::from(path)))
-            .expect("committed config.yaml must deserialize");
+            // config.yaml carries an unresolved ${...} webhook-secret placeholder;
+            // resolve it to a non-empty value so validate() exercises every check
+            // (including the shield+spear==100 invariant at config.rs:1889) instead
+            // of bailing on the secret.
+            config.security.webhook_secret = "test-secret-for-config-validation".to_string();
+            config
+                .validate()
+                .unwrap_or_else(|e| panic!("committed config {} must pass validate(): {e}", cand));
 
-        // config.yaml carries an unresolved ${...} webhook-secret placeholder;
-        // resolve it to a non-empty value so validate() exercises every check
-        // (including the shield+spear==100 invariant at config.rs:1889) instead
-        // of bailing on the secret.
-        config.security.webhook_secret = "test-secret-for-config-validation".to_string();
-        config
-            .validate()
-            .expect("committed config.yaml must pass validate()");
-
-        // SPEAR heat budget = total_capital_sol × max_heat(20%) × spear_percent/100.
-        // The 20% global heat is hardcoded in signal_pipeline.rs (open item to
-        // make configurable); mirror it here so this test fails if the budget no
-        // longer admits at least one SPEAR position at base_size_sol.
-        let capital = config.position_sizing.total_capital_sol;
-        let max_heat = Decimal::from(20) / Decimal::from(100); // 0.20 (matches signal_pipeline.rs)
-        let spear_budget = capital
-            * max_heat
-            * (Decimal::from(config.strategy.spear_percent) / Decimal::from(100));
-        let base_size = config.position_sizing.base_size_sol;
-        assert!(
-            spear_budget >= base_size,
-            "SPEAR budget {} SOL must be >= base_size {} SOL, else Spear trades are fully blocked",
-            spear_budget,
-            base_size,
-        );
+            // SPEAR heat budget = total_capital_sol × max_heat(20%) × spear_percent/100.
+            // The 20% global heat is hardcoded in signal_pipeline.rs (open item to
+            // make configurable); mirror it here so this test fails if the budget no
+            // longer admits at least one SPEAR position at base_size_sol.
+            let capital = config.position_sizing.total_capital_sol;
+            let max_heat = Decimal::from(20) / Decimal::from(100); // 0.20 (matches signal_pipeline.rs)
+            let spear_budget = capital
+                * max_heat
+                * (Decimal::from(config.strategy.spear_percent) / Decimal::from(100));
+            let base_size = config.position_sizing.base_size_sol;
+            assert!(
+                spear_budget >= base_size,
+                "{}: SPEAR budget {} SOL must be >= base_size {} SOL, else Spear trades are fully blocked",
+                cand, spear_budget, base_size,
+            );
+            validated += 1;
+        }
+        assert!(validated > 0, "no committed config.yaml found to validate");
     }
 }
 
