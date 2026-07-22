@@ -412,7 +412,7 @@ pub async fn reconcile_helius_webhooks_async(
 
     let lifecycle_config = WebhookLifecycleConfig {
         auto_register_enabled: false, // Don't register, only assess profitability
-        auto_cleanup_enabled: true,
+        auto_cleanup_enabled: config.auto_cleanup_enabled,
         health_check_interval_secs: config.check_interval_secs,
         stale_threshold_days: config.stale_threshold_days,
         max_registration_retries: 3,
