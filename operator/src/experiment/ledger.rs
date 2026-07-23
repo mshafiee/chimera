@@ -137,6 +137,12 @@ pub struct ExperimentLedger {
     trades: Vec<ExperimentTrade>,
 }
 
+impl Default for ExperimentLedger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExperimentLedger {
     pub fn new() -> Self {
         Self {

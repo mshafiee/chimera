@@ -123,7 +123,7 @@ impl Database for PostgresBackend {
         use super::PoolStats;
 
         let max_connections = self.pool.size() as usize;
-        let idle_connections = self.pool.num_idle() as usize;
+        let idle_connections = self.pool.num_idle();
         let active_connections = max_connections.saturating_sub(idle_connections);
 
         let utilization_percent = if max_connections > 0 {
@@ -225,7 +225,7 @@ impl Database for PostgresBackend {
         .bind(&trade.token_symbol)
         .bind(&trade.strategy)
         .bind(&trade.side)
-        .bind(&trade.amount_sol)
+        .bind(trade.amount_sol)
         .bind(&trade.status)
         .fetch_one(&self.pool)
         .await?;
@@ -4119,13 +4119,13 @@ impl Database for PostgresBackend {
         .bind(&trade.token_address)
         .bind(&trade.strategy)
         .bind(&trade.side)
-        .bind(&trade.amount_sol)
+        .bind(trade.amount_sol)
         .bind(&trade.status)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| AppError::Database(e))?
+        .map_err(AppError::Database)?
         .try_get("id")
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         // Insert position
         sqlx::query(
@@ -4133,11 +4133,11 @@ impl Database for PostgresBackend {
         )
         .bind(&trade.trade_uuid)
         .bind(&trade.token_address)
-        .bind(&position.entry_amount_sol)
-        .bind(&position.entry_price)
+        .bind(position.entry_amount_sol)
+        .bind(position.entry_price)
         .execute(&mut *tx)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         // Commit transaction
         tx.commit().await.map_err(|e| {
@@ -4167,7 +4167,7 @@ impl Database for PostgresBackend {
         .bind(trade_uuid)
         .execute(&mut *tx)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         // Update position state if provided
         if let Some(state) = position_state {
@@ -4178,7 +4178,7 @@ impl Database for PostgresBackend {
             .bind(trade_uuid)
             .execute(&mut *tx)
             .await
-            .map_err(|e| AppError::Database(e))?;
+            .map_err(AppError::Database)?;
         }
 
         // Commit transaction
@@ -4430,13 +4430,13 @@ impl PostgresBackend {
         .bind(&trade.token_address)
         .bind(&trade.strategy)
         .bind(&trade.side)
-        .bind(&trade.amount_sol)
+        .bind(trade.amount_sol)
         .bind(&trade.status)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|e| AppError::Database(e))?
+        .map_err(AppError::Database)?
         .try_get("id")
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         // Insert position
         sqlx::query(
@@ -4444,11 +4444,11 @@ impl PostgresBackend {
         )
         .bind(&trade.trade_uuid)
         .bind(&trade.token_address)
-        .bind(&position.entry_amount_sol)
-        .bind(&position.entry_price)
+        .bind(position.entry_amount_sol)
+        .bind(position.entry_price)
         .execute(&mut *tx)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         // Commit transaction
         tx.commit().await.map_err(|e| {
@@ -4478,7 +4478,7 @@ impl PostgresBackend {
         .bind(trade_uuid)
         .execute(&mut *tx)
         .await
-        .map_err(|e| AppError::Database(e))?;
+        .map_err(AppError::Database)?;
 
         // Update position state if provided
         if let Some(state) = position_state {
@@ -4489,7 +4489,7 @@ impl PostgresBackend {
             .bind(trade_uuid)
             .execute(&mut *tx)
             .await
-            .map_err(|e| AppError::Database(e))?;
+            .map_err(AppError::Database)?;
         }
 
         // Commit transaction

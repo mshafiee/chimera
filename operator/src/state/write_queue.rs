@@ -344,7 +344,7 @@ impl AsyncWriteQueue {
         mut retry_count: u32,
     ) -> WriteResult {
         let start_total = Instant::now();
-        let mut current_operation = operation;
+        let current_operation = operation;
 
         loop {
             let start = Instant::now();

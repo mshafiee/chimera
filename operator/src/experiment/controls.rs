@@ -5,7 +5,6 @@
 
 use chrono::{DateTime, Utc};
 use rust_decimal::prelude::*;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use rand::prelude::*;
@@ -193,7 +192,7 @@ impl ControlArms {
             .sum();
 
         let win_count = closed_trades.iter().filter(|t| {
-            t.pnl.map_or(false, |p| p > Decimal::ZERO)
+            t.pnl.is_some_and(|p| p > Decimal::ZERO)
         }).count();
 
         let avg_pnl = total_pnl / Decimal::from(closed_trades.len() as u64);

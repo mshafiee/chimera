@@ -306,7 +306,7 @@ pub async fn get_consensus(
     };
 
     // Get active clusters
-    let active_clusters = if let Some(ref agg) = state.signal_aggregator {
+    let _active_clusters = if let Some(ref agg) = state.signal_aggregator {
         get_active_clusters(agg, &pg_pool(&state.db)?, "24h", 24).await
     } else {
         Vec::new()
@@ -337,7 +337,7 @@ pub async fn get_wallet_clustering(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<WalletClusteringResponse>, AppError> {
     let pool = pg_pool(&state.db)?;
-    let clusters = if let Some(ref agg) = state.signal_aggregator {
+    let _clusters = if let Some(ref agg) = state.signal_aggregator {
         get_active_clusters(agg, &pool, "24h", 24).await
     } else {
         Vec::new()
@@ -588,7 +588,7 @@ pub async fn get_signal_quality(
         0.0
     };
 
-    let hours = match range.as_str() {
+    let _hours = match range.as_str() {
         "1h" => 1,
         "6h" => 6,
         "24h" => 24,
@@ -712,7 +712,7 @@ async fn calculate_clustering_coefficient(
 
 /// Get active clusters from signal aggregator and database
 async fn get_active_clusters(
-    agg: &Arc<crate::monitoring::SignalAggregator>,
+    _agg: &Arc<crate::monitoring::SignalAggregator>,
     db: &sqlx::Pool<sqlx::Postgres>,
     _cutoff_str: &str,
     hours: i64,
@@ -801,13 +801,13 @@ async fn calculate_divergence_alerts(
 
             // Create wallet clusters for divergent wallets
             let wallets_clustered = vec![WalletCluster {
-                cluster_id: format!("holders_{}", token_address[..8].to_string()),
+                cluster_id: format!("holders_{}", &token_address[..8]),
                 wallet_addresses: buyers.iter().map(|b| b.wallet_address.clone()).collect(),
                 signal: "BUY".to_string(),
             }];
 
             let wallets_divergent = vec![WalletCluster {
-                cluster_id: format!("sellers_{}", token_address[..8].to_string()),
+                cluster_id: format!("sellers_{}", &token_address[..8]),
                 wallet_addresses: sellers.iter().map(|s| s.wallet_address.clone()).collect(),
                 signal: "SELL".to_string(),
             }];

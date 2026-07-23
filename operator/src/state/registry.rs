@@ -454,8 +454,8 @@ impl StateRegistry {
         // Add exposure from pending, queued, or executing trades in memory
         for entry in self.trades.iter() {
             let trade = entry.value();
-            if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing) {
-                if trade.side == "BUY" {
+            if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing)
+                && trade.side == "BUY" {
                     total_exposure += trade.amount_sol;
                     match trade.strategy.as_str() {
                         "SHIELD" => shield_exposure += trade.amount_sol,
@@ -467,7 +467,6 @@ impl StateRegistry {
                         }
                     }
                 }
-            }
         }
 
         PortfolioHeatState {

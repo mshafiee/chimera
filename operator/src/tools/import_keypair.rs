@@ -3,7 +3,9 @@
 //! Reads a keypair from stdin (or `--keypair-file`), auto-detects its format
 //! (Solana CLI JSON / base58 / hex), validates it, and stores it — along with
 //! the current `CHIMERA_SECURITY__WEBHOOK_SECRET` — into `config/secrets.enc`.
-//!
+
+#![allow(warnings)]
+
 //! # Why this exists
 //!
 //! The operator's normal container mount (`./config:/app/config:ro` in

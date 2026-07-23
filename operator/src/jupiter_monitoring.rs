@@ -122,14 +122,14 @@ impl JupiterMetrics {
             prometheus::HistogramOpts::new(
                 "jupiter_request_duration_seconds",
                 "Jupiter API request duration in seconds"
-            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0].into()),
+            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]),
         ).unwrap();
 
         let jupiter_request_duration_by_endpoint_seconds = Histogram::with_opts(
             prometheus::HistogramOpts::new(
                 "jupiter_request_duration_by_endpoint_seconds",
                 "Jupiter API request duration by endpoint"
-            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0].into())
+            ).buckets(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0])
                 .const_label("endpoint", "unknown"),
         ).unwrap();
 
@@ -224,7 +224,7 @@ impl JupiterMetrics {
             prometheus::HistogramOpts::new(
                 "jupiter_response_size_bytes",
                 "Jupiter API response size in bytes"
-            ).buckets(vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0].into()),
+            ).buckets(vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0]),
         ).unwrap();
 
         // Quota metrics
@@ -298,7 +298,7 @@ impl JupiterMetrics {
     }
 
     /// Record a Jupiter API request
-    pub fn record_request(&self, endpoint: &str, duration_secs: f64, success: bool) {
+    pub fn record_request(&self, _endpoint: &str, duration_secs: f64, success: bool) {
         self.jupiter_requests_total.inc();
 
         if success {
@@ -430,9 +430,9 @@ impl JupiterMetrics {
             rate_limit_errors: self.jupiter_rate_limit_errors_total.get() as i64,
             timeout_errors: self.jupiter_timeout_errors_total.get() as i64,
             circuit_breaker_trips: self.jupiter_circuit_breaker_trips_total.get() as i64,
-            consecutive_failures: self.jupiter_consecutive_failures.get() as i64,
-            active_connections: self.jupiter_active_connections.get() as i64,
-            idle_connections: self.jupiter_idle_connections.get() as i64,
+            consecutive_failures: self.jupiter_consecutive_failures.get(),
+            active_connections: self.jupiter_active_connections.get(),
+            idle_connections: self.jupiter_idle_connections.get(),
             connection_reuses: self.jupiter_connection_reuses_total.get() as i64,
             avg_response_time_ms: self.jupiter_avg_response_time_ms.get(),
             p95_response_time_ms: self.jupiter_p95_response_time_ms.get(),
@@ -445,7 +445,7 @@ impl JupiterMetrics {
             cache_hits: self.jupiter_route_cache_hits_total.get() as i64,
             cache_misses: self.jupiter_route_cache_misses_total.get() as i64,
             quota_usage_percent: self.jupiter_quota_usage_percent.get(),
-            quota_remaining: self.jupiter_quota_remaining.get() as i64,
+            quota_remaining: self.jupiter_quota_remaining.get(),
             custom_metrics: custom_metrics.clone(),
         }
     }

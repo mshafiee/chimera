@@ -80,7 +80,7 @@ impl KeyExtractor for ProxyAwareKeyExtractor {
                 if let Ok(header_str) = header_value.to_str() {
                     // Use rightmost IP (closest to our trusted proxy) instead of leftmost
                     // This prevents client from spoofing their IP
-                    if let Some(client_ip) = header_str.split(',').last() {
+                    if let Some(client_ip) = header_str.split(',').next_back() {
                         let ip = client_ip.trim();
                         if !ip.is_empty() && (ip.contains('.') || ip.contains(':')) {
                             return Ok(ip.to_string());

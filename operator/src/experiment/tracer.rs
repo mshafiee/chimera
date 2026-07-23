@@ -92,7 +92,7 @@ impl TracerHook {
     }
 
     /// Check if tracer should fire for this paper trade
-    pub async fn should_fire_tracer(&self, paper_trade_uuid: &str) -> bool {
+    pub async fn should_fire_tracer(&self, _paper_trade_uuid: &str) -> bool {
         if !self.enabled {
             return false;
         }

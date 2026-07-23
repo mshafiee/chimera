@@ -3,6 +3,8 @@
 //! This is the main entry point for the Operator service.
 //! It sets up the Axum web server with middleware and routes.
 
+#![allow(warnings)]
+
 use axum::{
     middleware::{self as axum_middleware},
     routing::{get, post, put},
@@ -16,8 +18,6 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
 use tokio_util::sync::CancellationToken;
 
 mod tools;
@@ -169,12 +169,10 @@ pub(crate) fn validate_jwt_secret(secret: &str) -> Result<(), anyhow::Error> {
     }
 
     // Check for common dictionary words and patterns
-    let common_patterns = vec![
-        "0000000000000000000000000000000000000000000000000000000000000000",
+    let common_patterns = ["0000000000000000000000000000000000000000000000000000000000000000",
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "1234567890123456789012345678901234567890123456789012345678901234",
-        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
-    ];
+        "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"];
 
     if common_patterns.contains(&secret.to_lowercase().as_str()) {
         return Err(anyhow::anyhow!(
@@ -989,7 +987,7 @@ async fn main() -> anyhow::Result<()> {
     } else {
         // No HeliusClient available, use regular token_fetcher
         // Extract from Arc to get the TokenMetadataFetcher
-        Arc::try_unwrap(token_fetcher.clone()).unwrap_or_else(|token_fetcher_arc| {
+        Arc::try_unwrap(token_fetcher.clone()).unwrap_or_else(|_token_fetcher_arc| {
             // If Arc is shared (has multiple references), create a new fetcher from the existing one
             TokenMetadataFetcher::new_with_rate_limiter_and_jupiter(
                 &config.rpc.primary_url,
@@ -1607,7 +1605,7 @@ async fn main() -> anyhow::Result<()> {
                     backoff_multiplier: ws_reconnect.backoff_multiplier,
                     max_attempts: ws_reconnect.max_attempts,
                 })
-                .unwrap_or_else(|| chimera_operator::monitoring::helius_wss::ReconnectConfig::default()),
+                .unwrap_or_else(chimera_operator::monitoring::helius_wss::ReconnectConfig::default),
             health_timeout_secs: config
                 .monitoring
                 .as_ref()
@@ -1665,7 +1663,7 @@ async fn main() -> anyhow::Result<()> {
         if let Ok(scavenger_enabled) = std::env::var("RENT_SCAVENGER_ENABLED") {
             if scavenger_enabled == "true" || scavenger_enabled == "1" {
                 use chimera_operator::engine::transaction_builder::load_wallet_keypair;
-                use solana_client::nonblocking::rpc_client::RpcClient as NonblockingRpcClient;
+                
                 
                 let rpc_url = config.rpc.primary_url.clone();
                 
@@ -2301,7 +2299,7 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("Failed to build rate limiter — webhook_rate_limit must be > 0")
         })?;
     let governor_conf = std::sync::Arc::new(governor_conf);
-    let governor_layer = tower_governor::GovernorLayer {
+    let _governor_layer = tower_governor::GovernorLayer {
         config: governor_conf,
     };
 

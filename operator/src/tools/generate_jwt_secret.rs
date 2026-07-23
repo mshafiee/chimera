@@ -1,3 +1,5 @@
+#![allow(warnings)]
+
 use anyhow::Result;
 use rand::Rng;
 

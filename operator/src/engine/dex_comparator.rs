@@ -234,7 +234,7 @@ impl DexComparator {
         // Determine if we're using v2 API (includes /v2 in URL)
         let use_v2 = self.jupiter_api_url.contains("/v2") || self.jupiter_api_url.contains("swap/v2");
 
-        let (endpoint, quote_key) = if use_v2 {
+        let (endpoint, _quote_key) = if use_v2 {
             // v2 uses /order endpoint for Meta-Aggregator
             ("/order", "transaction")
         } else {
@@ -354,12 +354,7 @@ impl DexComparator {
         let slippage_fraction = if let Some(pct_str) = quote.get("priceImpactPct").and_then(|v| v.as_str()) {
             // v1 format: percentage string
             Decimal::from_str(pct_str).ok().map(|pct| pct / Decimal::from(100))
-        } else if let Some(pct_decimal) = quote.get("priceImpact").and_then(|v| v.as_f64()) {
-            // v2 format: decimal (already a fraction, just need absolute value)
-            Some(Decimal::from_f64(pct_decimal.abs()).unwrap_or(Decimal::ZERO))
-        } else {
-            None
-        }.unwrap_or(Decimal::ZERO);
+        } else { quote.get("priceImpact").and_then(|v| v.as_f64()).map(|pct_decimal| Decimal::from_f64(pct_decimal.abs()).unwrap_or(Decimal::ZERO)) }.unwrap_or(Decimal::ZERO);
 
         let slippage_sol = trade_value_sol * slippage_fraction;
         let total_cost_sol = fee_sol + slippage_sol;

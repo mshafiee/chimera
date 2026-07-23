@@ -186,7 +186,7 @@ impl HeliusClient {
     pub fn get_metrics(&self) -> HeliusMetrics {
         let cache_hits = self.cache_hits.load(std::sync::atomic::Ordering::Relaxed);
         let cache_misses = self.cache_misses.load(std::sync::atomic::Ordering::Relaxed);
-        let cache_size = self.metadata_cache.read().len() as u64;
+        let _cache_size = self.metadata_cache.read().len() as u64;
 
         HeliusMetrics {
             cache_hits, // Actual cache hits since start

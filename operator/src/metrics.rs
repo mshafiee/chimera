@@ -176,37 +176,37 @@ impl ExecutionLockMetrics {
 
     /// Increment successful lock acquisition counter
     pub fn increment_lock_acquire_success(&self) {
-        let _ = self.acquire_success.inc();
+        self.acquire_success.inc();
     }
 
     /// Increment failed lock acquisition counter
     pub fn increment_lock_acquire_failed(&self) {
-        let _ = self.acquire_failed.inc();
+        self.acquire_failed.inc();
     }
 
     /// Increment disabled lock acquisition counter
     pub fn increment_lock_acquire_disabled(&self) {
-        let _ = self.acquire_disabled.inc();
+        self.acquire_disabled.inc();
     }
 
     /// Increment lock release counter
     pub fn increment_lock_released(&self) {
-        let _ = self.released.inc();
+        self.released.inc();
     }
 
     /// Increment force release counter
     pub fn increment_lock_force_released(&self) {
-        let _ = self.force_released.inc();
+        self.force_released.inc();
     }
 
     /// Increment expired lock reclaimed counter
     pub fn increment_lock_expired_reclaimed(&self) {
-        let _ = self.expired_reclaimed.inc();
+        self.expired_reclaimed.inc();
     }
 
     /// Increment expired lock cleaned up counter
     pub fn increment_lock_expired_cleaned(&self) {
-        let _ = self.expired_cleaned.inc();
+        self.expired_cleaned.inc();
     }
 
     /// Record lock held duration

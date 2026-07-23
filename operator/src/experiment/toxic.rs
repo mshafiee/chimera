@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
-use sqlx::Postgres;
 
 use crate::config::ExperimentConfig;
 use crate::error::AppResult;
@@ -80,7 +79,7 @@ impl ToxicFlowDetector {
             if self.should_flag_as_toxic(w) {
                 let reason = self.determine_toxic_reason(w);
                 w.is_toxic = true;
-                w.toxic_reason = Some(reason.clone());
+                w.toxic_reason = Some(reason);
                 w.detected_at = Some(chrono::Utc::now());
                 
                 warn!("Wallet {} flagged as toxic: {:?}", wallet, reason);

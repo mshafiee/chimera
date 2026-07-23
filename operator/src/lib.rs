@@ -3,6 +3,8 @@
 //! High-frequency copy-trading system for Solana.
 //! This library exposes core modules for testing.
 
+#![allow(warnings)]
+
 pub mod circuit_breaker;
 pub mod config;
 pub mod constants;

@@ -3,7 +3,7 @@
 //! Evaluates 21-day experiment data and emits GO/KILL decision
 //! using BCa bootstrap confidence intervals.
 
-use chrono::{DateTime, Utc, Duration};
+use chrono::{DateTime, Duration, Utc};
 use rust_decimal::prelude::*;
 use serde::{Deserialize, Serialize};
 use rand::prelude::*;
@@ -285,7 +285,7 @@ impl VerdictEvaluator {
         }
 
         let n = values.len();
-        use rand::seq::SliceRandom;
+        
         let mut rng = rand::thread_rng();
 
         // Convert to f64 for bootstrap
@@ -419,7 +419,7 @@ impl VerdictEvaluator {
             return ControlComparison::default();
         }
 
-        use rand::seq::SliceRandom;
+        
         let mut rng = rand::thread_rng();
 
         let strategy_float: Vec<f64> = strategy.iter()

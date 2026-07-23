@@ -282,7 +282,7 @@ fn parse_pumpfun_swap(tx_json: &Value, wallet_address: &str) -> Result<ParsedSwa
 fn parse_balance_changes(
     pre_balances: Option<&Vec<Value>>,
     post_balances: Option<&Vec<Value>>,
-    wallet_address: &str,
+    _wallet_address: &str,
 ) -> Result<(String, String, Decimal, Decimal, SwapDirection)> {
     // Parse token balance changes from pre/post balances
     // Structure: Each balance entry has:
@@ -597,7 +597,7 @@ pub fn parse_helius_webhook(
 
     // Sum absolute native transfer amounts — these are the explicit SOL legs of the swap.
     for transfer in &payload.native_transfers {
-        sol_amount += Decimal::from(transfer.amount) / &lamports_per_sol;
+        sol_amount += Decimal::from(transfer.amount) / lamports_per_sol;
     }
 
     if sol_amount == Decimal::ZERO {
@@ -606,7 +606,7 @@ pub fn parse_helius_webhook(
             .account_data
             .iter()
             .filter_map(|a| a.native_balance_change)
-            .map(|c| Decimal::from(c) / &lamports_per_sol)
+            .map(|c| Decimal::from(c) / lamports_per_sol)
             .sum();
         sol_amount = native_sol_delta.abs();
     }

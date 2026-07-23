@@ -266,7 +266,7 @@ impl MetadataCacheStore {
     }
 
     /// Insert token metadata into cache with TTL
-    pub async fn insert(&self, key: String, value: super::metadata::TokenMetadata, ttl_secs: u64) {
+    pub async fn insert(&self, key: String, value: super::metadata::TokenMetadata, _ttl_secs: u64) {
         match self {
             Self::Memory(cache) => {
                 let mut cache_write = cache.write();

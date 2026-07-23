@@ -389,7 +389,7 @@ impl Engine {
         // Create execution lock if enabled in configuration
         let execution_lock_config = config.execution_lock.clone();
         let execution_lock = if execution_lock_config.enabled {
-            let lock_metrics = metrics.as_ref().map(|m| {
+            let lock_metrics = metrics.as_ref().map(|_m| {
                 Arc::new(crate::metrics::ExecutionLockMetrics::new())
             });
             Some(Arc::new(ExecutionLock::new(execution_lock_config, lock_metrics)))

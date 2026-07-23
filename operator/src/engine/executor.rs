@@ -600,9 +600,9 @@ impl Executor {
                         );
                     }
                 }
-                Err(ExecutorError::Rpc(ref rpc_err)) => {
+                Err(ExecutorError::Rpc(ref rpc_err))
                     // Check if this is a rate limit error and handle with degradation system
-                    if Self::is_rate_limit_error(rpc_err) && self.config.degradation.rpc_rate_limit_enabled {
+                    if Self::is_rate_limit_error(rpc_err) && self.config.degradation.rpc_rate_limit_enabled => {
                         if attempts < 10 {
                             let backoff = crate::engine::handle_rpc_rate_limit().await;
                             tracing::warn!(
@@ -623,7 +623,6 @@ impl Executor {
                             );
                         }
                     }
-                }
                 _ => {}
             }
 
@@ -1187,7 +1186,7 @@ impl Executor {
         let state = self.mutable.lock();
         let total_submissions = state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed);
         let successful_resolutions = state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed);
-        let failed_resolutions = state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed);
+        let _failed_resolutions = state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed);
         drop(state);
 
         let resolution_success_rate = if total_submissions > 0 {
@@ -1930,7 +1929,7 @@ impl Executor {
     async fn submit_transaction_helius_staked(
         &self,
         transaction: &Transaction,
-        keypair: &solana_sdk::signature::Keypair,
+        _keypair: &solana_sdk::signature::Keypair,
     ) -> Result<String, ExecutorError> {
         // Get Helius API key from vault for staked connection
         let secrets = load_secrets_with_fallback().map_err(|e| {
@@ -2634,11 +2633,11 @@ impl Executor {
             let percentage_based_tip = signal.payload.amount_sol * self.config.jito.tip_percent_max;
 
             // Apply floor, percentage cap, and ceiling
-            let tip = percentage_based_tip
-                .max(strategy_floor)
-                .min(self.config.jito.tip_ceiling_sol);
+            
 
-            tip
+            percentage_based_tip
+                .max(strategy_floor)
+                .min(self.config.jito.tip_ceiling_sol)
         }
     }
 

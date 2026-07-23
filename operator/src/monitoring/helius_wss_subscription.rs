@@ -44,7 +44,7 @@ impl SubscriptionManager {
         tracing::info!(wallet = %wallet, "Subscribing to wallet transactions");
 
         // Create subscription request
-        let request = SubscriptionRequest {
+        let _request = SubscriptionRequest {
             jsonrpc: "2.0".to_string(),
             id: 1,
             method: "transactionSubscribe".to_string(),

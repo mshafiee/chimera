@@ -7,9 +7,7 @@
 //! the main database using this module.
 
 use chrono::{DateTime, Utc};
-use sqlx::Postgres;
 use std::path::Path;
-use tracing::{error, info, warn};
 
 use crate::error::{AppError, AppResult};
 

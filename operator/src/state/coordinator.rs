@@ -214,8 +214,8 @@ impl StateCoordinator {
 
         // Add pending trades
         for trade in self.registry.get_all_trades() {
-            if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing) {
-                if trade.side == "BUY" {
+            if matches!(trade.status, TradeStatus::Pending | TradeStatus::Queued | TradeStatus::Executing)
+                && trade.side == "BUY" {
                     total_exposure += trade.amount_sol;
                     // Use actual strategy for accurate allocation
                     match trade.strategy.as_str() {
@@ -228,7 +228,6 @@ impl StateCoordinator {
                         }
                     }
                 }
-            }
         }
 
         self.registry.update_portfolio_heat(PortfolioHeatState {
