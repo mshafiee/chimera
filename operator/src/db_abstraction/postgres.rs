@@ -1445,7 +1445,7 @@ impl Database for PostgresBackend {
         sol_price_usd: Option<Decimal>,
         exit_fraction: Decimal,
         confirmed: bool,
-    ) -> AppResult<()> {
+    ) -> AppResult<bool> {
         if exit_price.is_zero() {
             return Err(AppError::Validation(
                 "exit_price cannot be zero — PnL calculations would produce -100% loss".to_string(),
@@ -1477,7 +1477,7 @@ impl Database for PostgresBackend {
                 "No active positions found to close"
             );
             tx.commit().await?;
-            return Ok(());
+            return Ok(false);
         }
 
         #[allow(clippy::type_complexity)]
@@ -1807,13 +1807,13 @@ impl Database for PostgresBackend {
         .await?;
 
         sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
-            .bind(new_net)
-            .bind(trade_uuid)
-            .execute(&mut *tx)
-            .await?;
+             .bind(new_net)
+             .bind(trade_uuid)
+             .execute(&mut *tx)
+             .await?;
 
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
 
     async fn update_position_token_amount(&self, uuid: &str, token_amount: u64) -> AppResult<()> {

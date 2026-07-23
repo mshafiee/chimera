@@ -129,6 +129,11 @@ async fn test_close_position_no_active_position_is_noop() {
         result.is_ok(),
         "Closing non-existent position should not error"
     );
+    assert_eq!(
+        result.unwrap(),
+        false,
+        "No active position was closed"
+    );
 
     let pool = pg_pool(&db);
     let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions")

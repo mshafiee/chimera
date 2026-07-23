@@ -572,7 +572,12 @@ async fn test_close_position_no_active_positions_returns_ok_silently() {
 
     assert!(
         result.is_ok(),
-        "BUG DOCUMENTED: close_position returns Ok() when no position found — silent no-op"
+        "close_position returns Ok(false) when no position found — silent no-op"
+    );
+    assert_eq!(
+        result.unwrap(),
+        false,
+        "close_position should return false when no active positions exist"
     );
 }
 

@@ -407,17 +407,22 @@ async fn auto_resolve_exit(
         ));
     };
 
-    db.close_position_full(
-        trade_uuid,
-        wallet_address,
-        token_address,
-        price,
-        exit_sig,
-        None,
-        Decimal::ONE,
-        true,
-    )
-    .await?;
+    let position_closed = db
+        .close_position_full(
+            trade_uuid,
+            wallet_address,
+            token_address,
+            price,
+            exit_sig,
+            None,
+            Decimal::ONE,
+            true,
+        )
+        .await?;
+
+    if !position_closed {
+        return Ok(());
+    }
 
     // Close succeeded — the position is now CLOSED and won't be re-examined. Record
     // the resolution best-effort; a failure here must NOT surface as AUTO_RESOLVE_FAILED.

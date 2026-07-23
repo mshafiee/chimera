@@ -820,7 +820,7 @@ impl SignalProcessor {
                         "Calling close_position_full for SELL signal"
                     );
 
-                    if let Err(e) = self
+                    match self
                         .db
                         .close_position_full(
                             &trade_uuid,
@@ -834,27 +834,27 @@ impl SignalProcessor {
                         )
                         .await
                     {
-                        tracing::error!(error = %e, "Failed to close position");
-                    } else {
-                        tracing::info!(
-                            trade_uuid = %trade_uuid,
-                            is_paper_trade = is_paper_trade,
-                            "Position closed successfully for SELL signal"
-                        );
-                    }
+                        Ok(position_closed) => {
+                            let final_status = if position_closed { "CLOSED" } else { "REJECTED" };
+                            let err_msg = if position_closed { None } else { Some("Skipped: no active position found to close".to_string()) };
 
-                    if let Err(e) = self
-                        .db
-                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
-                            trade_uuid: trade_uuid.clone(),
-                            status: "CLOSED".to_string(),
-                            tx_signature: Some(outcome.signature.clone()),
-                            error_message: None,
-                            network_fee_sol: None,
-                        })
-                        .await
-                    {
-                        tracing::error!(error = %e, "Failed to update trade status to CLOSED");
+                            if let Err(e) = self
+                                .db
+                                .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                                    trade_uuid: trade_uuid.clone(),
+                                    status: final_status.to_string(),
+                                    tx_signature: Some(outcome.signature.clone()),
+                                    error_message: err_msg,
+                                    network_fee_sol: None,
+                                })
+                                .await
+                            {
+                                tracing::error!(error = %e, "Failed to update sell trade status");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to close position");
+                        }
                     }
                 }
             }

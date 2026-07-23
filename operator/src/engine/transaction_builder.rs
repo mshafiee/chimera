@@ -848,14 +848,14 @@ impl TransactionBuilder {
 
             match res {
                 Ok(response) => {
-                    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS || response.status().is_server_error() {
-                        if retries > 0 {
-                            retries -= 1;
-                            tracing::warn!(status = %response.status(), retries_left = retries, delay_ms = delay.as_millis(), "Jupiter quote rate limited/server error, backing off");
-                            tokio::time::sleep(delay).await;
-                            delay *= 2;
-                            continue;
-                        }
+                    if (response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS || response.status().is_server_error())
+                        && retries > 0
+                    {
+                        retries -= 1;
+                        tracing::warn!(status = %response.status(), retries_left = retries, delay_ms = delay.as_millis(), "Jupiter quote rate limited/server error, backing off");
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                        continue;
                     }
 
                     if !response.status().is_success() {

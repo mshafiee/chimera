@@ -348,7 +348,7 @@ pub trait Database: Send + Sync {
         sol_price_usd: Option<rust_decimal::Decimal>,
         exit_fraction: rust_decimal::Decimal,
         confirmed: bool,
-    ) -> AppResult<()>;
+    ) -> AppResult<bool>;
 
     async fn update_position_token_amount(
         &self,
@@ -777,7 +777,7 @@ pub trait Database: Send + Sync {
         let trade_id = timed_query("insert_trade_and_create_position_insert_trade", self.insert_trade(trade)).await?;
 
         // Create position with the trade_id
-        let mut position = position.clone();
+        let position = position.clone();
         // Note: InsertPosition would need a trade_id field for proper foreign key
         timed_query("insert_trade_and_create_position_insert_position", self.insert_position(&position)).await?;
 
