@@ -618,8 +618,14 @@ impl PriceCache {
                     }
                 };
                 // Store decimals for separate cache
-                decimals_map.insert(token.clone(), (price_data.decimals, price_data.blockId));
-                results.push((token.clone(), price, Some(price_data.decimals)));
+                decimals_map.insert(
+                    token.clone(),
+                    (
+                        price_data.decimals.unwrap_or(9),
+                        price_data.blockId.unwrap_or_default(),
+                    ),
+                );
+                results.push((token.clone(), price, Some(price_data.decimals.unwrap_or(9))));
             } else {
                 tracing::warn!(token = token, "Token not found in Jupiter price response");
                 // Skip tokens not found in response
@@ -805,15 +811,20 @@ struct JupiterPriceData {
     /// Price in USD (field name changed from "price" to "usdPrice" in V3)
     usdPrice: f64,
     /// Block height when this price was recorded
-    blockId: u64,
+    #[serde(default)]
+    blockId: Option<u64>,
     /// Token decimals
-    decimals: u8,
+    #[serde(default)]
+    decimals: Option<u8>,
     /// Price change over 24 hours (percentage)
-    priceChange24h: f64,
+    #[serde(default)]
+    priceChange24h: Option<f64>,
     /// When this price was first created
-    createdAt: String,
+    #[serde(default)]
+    createdAt: Option<String>,
     /// Liquidity available for this token
-    liquidity: f64,
+    #[serde(default)]
+    liquidity: Option<f64>,
 }
 
 /// Price cache errors
@@ -855,6 +866,50 @@ mod tests {
     fn test_price_cache_miss() {
         let cache = PriceCache::new().expect("Failed to create price cache for test");
         assert!(cache.get_price("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_jupiter_price_response_deserialization_with_null_fields() {
+        let json_data = r#"{
+            "So11111111111111111111111111111111111111112": {
+                "usdPrice": 180.5,
+                "blockId": 1234567,
+                "decimals": 9,
+                "priceChange24h": 2.5,
+                "createdAt": "2026-07-23T00:00:00Z",
+                "liquidity": 1000000.0
+            },
+            "32vUHPxVShN552WwJ36vWnxCoy34eTDHRiQwL6ZA3ntP": {
+                "usdPrice": 0.000046,
+                "blockId": null,
+                "decimals": 6,
+                "priceChange24h": null,
+                "createdAt": null,
+                "liquidity": null
+            }
+        }"#;
+
+        let res: Result<JupiterPriceResponse, _> = serde_json::from_str(json_data);
+        assert!(
+            res.is_ok(),
+            "Failed to deserialize Jupiter price response with null fields: {:?}",
+            res.err()
+        );
+        let data = res.unwrap();
+        assert_eq!(data.data.len(), 2);
+        let sol = data
+            .data
+            .get("So11111111111111111111111111111111111111112")
+            .unwrap();
+        assert_eq!(sol.usdPrice, 180.5);
+        let meme = data
+            .data
+            .get("32vUHPxVShN552WwJ36vWnxCoy34eTDHRiQwL6ZA3ntP")
+            .unwrap();
+        assert_eq!(meme.usdPrice, 0.000046);
+        assert!(meme.priceChange24h.is_none());
+        assert!(meme.blockId.is_none());
+        assert!(meme.liquidity.is_none());
     }
 
     #[test]
