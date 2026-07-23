@@ -837,30 +837,55 @@ impl TransactionBuilder {
             self.config.jupiter.api_url, input_mint, output_mint, amount, slippage_bps
         );
 
-        tracing::debug!(url = %url, "Requesting Jupiter quote");
-        let response = crate::jupiter::with_api_key(self.http_client.get(&url))
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!(error = %e, url = %url, "Jupiter quote request failed");
-                crate::error::AppError::Http(format!(
-                    "Jupiter quote request failed: {} (URL: {})",
-                    e, url
-                ))
-            })?;
+        let mut retries = 3;
+        let mut delay = std::time::Duration::from_millis(200);
 
-        if !response.status().is_success() {
-            return Err(crate::error::AppError::Http(format!(
-                "Jupiter quote API returned error: {}",
-                response.status()
-            )));
+        loop {
+            tracing::debug!(url = %url, "Requesting Jupiter quote");
+            let res = crate::jupiter::with_api_key(self.http_client.get(&url))
+                .send()
+                .await;
+
+            match res {
+                Ok(response) => {
+                    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS || response.status().is_server_error() {
+                        if retries > 0 {
+                            retries -= 1;
+                            tracing::warn!(status = %response.status(), retries_left = retries, delay_ms = delay.as_millis(), "Jupiter quote rate limited/server error, backing off");
+                            tokio::time::sleep(delay).await;
+                            delay *= 2;
+                            continue;
+                        }
+                    }
+
+                    if !response.status().is_success() {
+                        return Err(crate::error::AppError::Http(format!(
+                            "Jupiter quote API returned error: {}",
+                            response.status()
+                        )));
+                    }
+
+                    let quote: JupiterQuote = response.json().await.map_err(|e| {
+                        crate::error::AppError::Parse(format!("Failed to parse Jupiter quote: {}", e))
+                    })?;
+
+                    return Ok(quote);
+                }
+                Err(e) => {
+                    if retries > 0 {
+                        retries -= 1;
+                        tracing::warn!(error = %e, retries_left = retries, delay_ms = delay.as_millis(), "Jupiter quote request transport error, backing off");
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+                    return Err(crate::error::AppError::Http(format!(
+                        "Jupiter quote request failed: {} (URL: {})",
+                        e, url
+                    )));
+                }
+            }
         }
-
-        let quote: JupiterQuote = response.json().await.map_err(|e| {
-            crate::error::AppError::Parse(format!("Failed to parse Jupiter quote: {}", e))
-        })?;
-
-        Ok(quote)
     }
 
     pub async fn get_quote_prices(
