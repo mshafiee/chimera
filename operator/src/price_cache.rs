@@ -383,6 +383,17 @@ impl PriceCache {
         self.get_price_usd(&self.sol_mint)
     }
 
+    /// Get last known non-zero SOL price in USD, even if the primary entry is expired
+    pub fn get_sol_price_usd_fallback(&self) -> Option<Decimal> {
+        if let Some(price) = self.get_sol_price_usd() {
+            if !price.is_zero() {
+                return Some(price);
+            }
+        }
+        let inner = self.inner.read();
+        inner.prices.get(&self.sol_mint).map(|p| p.price_usd)
+    }
+
     /// Get SOL price volatility (for market condition filtering)
     pub fn get_sol_volatility(&self) -> Option<f64> {
         self.calculate_volatility(&self.sol_mint)

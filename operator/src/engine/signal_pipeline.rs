@@ -597,12 +597,16 @@ impl SignalProcessor {
                     let sol_price_usd = self
                         .price_cache
                         .as_ref()
-                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL))
+                        .and_then(|c| c.get_sol_price_usd_fallback())
                         .unwrap_or(Decimal::ZERO);
 
                     let entry_price = if let Some(fps) = fill_price_sol {
-                        if !sol_price_usd.is_zero() {
-                            fps * sol_price_usd
+                        if !fps.is_zero() {
+                            if !sol_price_usd.is_zero() {
+                                fps * sol_price_usd
+                            } else {
+                                fps
+                            }
                         } else {
                             self.price_cache
                                 .as_ref()
