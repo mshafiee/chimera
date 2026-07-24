@@ -44,6 +44,11 @@ pub struct SignalProcessor {
     /// Execution lock for preventing concurrent processing of same trade_uuid
     #[allow(dead_code)] // Used when available
     execution_lock: Option<Arc<crate::engine::ExecutionLock>>,
+    /// Per-token BUY admission locks (A2): serialize duplicate pre-check +
+    /// execution + position open per token so two concurrent BUYs for the
+    /// same token cannot both pass pre-checks and submit. Shared across all
+    /// SignalProcessor clones (workers) via Arc.
+    admission_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Worker ID for lock attribution (set by worker pool or engine)
     worker_id: String,
 }
@@ -76,6 +81,7 @@ impl SignalProcessor {
             state_registry,
             write_queue,
             execution_lock: None, // Set via with_execution_lock()
+            admission_locks: Arc::new(dashmap::DashMap::new()),
             worker_id: "sequential".to_string(), // Default worker ID
         }
     }
@@ -563,6 +569,73 @@ impl SignalProcessor {
             }
         }
 
+        // A2: serialized BUY admission per token. Two concurrent BUYs for the
+        // same wallet/token must not both pass pre-checks and submit — the
+        // atomic write-time check in activate_trade_and_open_position is the
+        // backstop; this lock + pre-check prevents the wasted submission.
+        let admission_lock: Option<Arc<tokio::sync::Mutex<()>>> =
+            if signal.payload.action == Action::Buy {
+                Some(
+                    self.admission_locks
+                        .entry(signal.token_address().to_string())
+                        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                        .value()
+                        .clone(),
+                )
+            } else {
+                None
+            };
+
+        let _admission_guard = if let Some(ref lock) = admission_lock {
+            let guard = lock.lock().await;
+
+            match self
+                .db
+                .get_active_position_by_wallet_token(
+                    &signal.payload.wallet_address,
+                    signal.token_address(),
+                )
+                .await
+            {
+                Ok(Some(_)) => {
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        wallet = %signal.payload.wallet_address,
+                        token = %signal.payload.token,
+                        "BUY rejected at pre-execution admission: active position already exists for wallet/token"
+                    );
+                    if let Err(e) = self
+                        .db
+                        .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                            trade_uuid: trade_uuid.clone(),
+                            status: "REJECTED".to_string(),
+                            tx_signature: None,
+                            error_message: Some(
+                                "Duplicate position detected at pre-execution admission"
+                                    .to_string(),
+                            ),
+                            network_fee_sol: None,
+                        })
+                        .await
+                    {
+                        tracing::error!(error = %e, "Failed to mark duplicate BUY as REJECTED");
+                    }
+                    return;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        trade_uuid = %trade_uuid,
+                        "Admission duplicate pre-check failed; proceeding (atomic write-time check is backstop)"
+                    );
+                }
+            }
+            Some(guard)
+        } else {
+            None
+        };
+
         // Execute the trade
         let result = {
             let executor = self.executor.read().await;
@@ -593,6 +666,33 @@ impl SignalProcessor {
                         is_paper_trade = is_paper_trade,
                         "BUY signal detected - opening position"
                     );
+
+                    if !outcome.confirmed {
+                        // A2: unconfirmed BUY — never open a position on an
+                        // unresolved submission. Mark PENDING_CONFIRMATION;
+                        // recovery reconciliation finalizes (opens) or fails
+                        // the trade after re-checking the signature.
+                        tracing::warn!(
+                            trade_uuid = %trade_uuid,
+                            tx_signature = %outcome.signature,
+                            "BUY submitted but unconfirmed — deferring position open to recovery"
+                        );
+                        if let Err(e) = self
+                            .db
+                            .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
+                                trade_uuid: trade_uuid.clone(),
+                                status: "PENDING_CONFIRMATION".to_string(),
+                                tx_signature: Some(outcome.signature.clone()),
+                                error_message: None,
+                                network_fee_sol: outcome.estimated_fee_sol,
+                            })
+                            .await
+                        {
+                            tracing::error!(error = %e, "Failed to mark BUY as PENDING_CONFIRMATION");
+                        }
+                        return;
+                    }
+
                     let fill_price_sol = outcome.fill_price_sol_per_token;
                     let sol_price_usd = self
                         .price_cache
@@ -838,7 +938,17 @@ impl SignalProcessor {
                         .await
                     {
                         Ok(position_closed) => {
-                            let final_status = if position_closed { "CLOSED" } else { "REJECTED" };
+                            // A2: an unconfirmed SELL submission stays EXITING
+                            // (position row also stays EXITING via confirmed=false)
+                            // until recovery reconciles the signature. Only a
+                            // confirmed close finalizes the trade as CLOSED.
+                            let final_status = if !position_closed {
+                                "REJECTED"
+                            } else if !outcome.confirmed {
+                                "EXITING"
+                            } else {
+                                "CLOSED"
+                            };
                             let err_msg = if position_closed { None } else { Some("Skipped: no active position found to close".to_string()) };
 
                             if let Err(e) = self

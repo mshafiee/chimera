@@ -49,6 +49,37 @@ fn max_price_impact_pct() -> Decimal {
     Decimal::from_str("5").unwrap_or(Decimal::ZERO)
 }
 
+/// A2: absolute price-impact gate evaluated BEFORE any submission. Rejecting
+/// after a live submission converts a landed BUY into a failure record while
+/// the tokens are already in the wallet — the cap must run at quote time.
+/// BUY entries only; EXIT/SELL signals are exempt so protective exits always
+/// proceed.
+fn enforce_price_impact_cap(
+    signal: &Signal,
+    price_impact_pct: Option<Decimal>,
+) -> Result<(), ExecutorError> {
+    if signal.payload.action != Action::Buy {
+        return Ok(());
+    }
+    if let Some(impact) = price_impact_pct {
+        let max_impact = max_price_impact_pct();
+        if impact > max_impact {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                token = %signal.payload.token,
+                price_impact_pct = %impact,
+                max_pct = %max_impact,
+                "Trade rejected pre-submission: price impact exceeds cap (thin liquidity)"
+            );
+            return Err(ExecutorError::TransactionFailed(format!(
+                "Price impact {:.2}% exceeds max {:.0}% — thin liquidity (pre-submission gate)",
+                impact, max_impact
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// RPC mode for trade execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RpcMode {
@@ -545,11 +576,10 @@ impl Executor {
                 },
             };
 
-            // Price-impact gate (replaces the removed Liq/FDV Ghost-Chain ratio).
-            // Reject BUY entries whose Jupiter-quoted price impact exceeds the cap —
-            // high impact signals thin liquidity, the real rug-exit risk. EXIT/SELL
-            // signals are exempt so stop-losses can always close positions. Verified
-            // majors also pass through here; their deep liquidity keeps impact low.
+            // A2: the absolute price-impact cap now runs BEFORE submission in
+            // every execution path (see `enforce_price_impact_cap`). This
+            // post-execution observation is telemetry only — a landed trade
+            // must never be converted into a failure record.
             if signal.payload.action == Action::Buy {
                 let max_impact = max_price_impact_pct();
                 if let Ok(ref outcome) = result {
@@ -560,12 +590,8 @@ impl Executor {
                                 token = %signal.payload.token,
                                 price_impact_pct = %impact,
                                 max_pct = %max_impact,
-                                "Trade rejected: price impact exceeds cap (thin liquidity)"
+                                "Post-execution telemetry: fill price impact exceeded cap (pre-submission gate should have rejected)"
                             );
-                            return Err(ExecutorError::TransactionFailed(format!(
-                                "Price impact {:.2}% exceeds max {:.0}% — thin liquidity",
-                                impact, max_impact
-                            )));
                         }
                     }
                 }
@@ -1435,6 +1461,9 @@ impl Executor {
             .fill_price_lamports_per_base()
             .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
 
+        // A2: absolute price-impact gate BEFORE tip calculation / submission.
+        enforce_price_impact_cap(signal, price_impact)?;
+
         // Calculate dynamic tip
         let tip = self.calculate_jito_tip(signal).await;
 
@@ -2231,6 +2260,9 @@ impl Executor {
         let fill_price_sol = built_tx
             .fill_price_lamports_per_base()
             .and_then(|lpb| lamports_per_base_to_sol_per_token(lpb, signal.token_decimals));
+
+        // A2: absolute price-impact gate BEFORE submission.
+        enforce_price_impact_cap(signal, price_impact)?;
 
         // Check total execution cost cap
         self.check_execution_costs(
@@ -3300,6 +3332,9 @@ impl Executor {
         let (price_impact, fill_price_sol, token_amount, route_fee_sol, executed_output_sol) =
             self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
+
+        // A2: absolute price-impact gate BEFORE the simulated fill is accepted.
+        enforce_price_impact_cap(signal, price_impact)?;
 
         // Apply the same cost efficiency gate as live Jito mode.
         // Paper trading must be an exact simulation: if live mode would reject
