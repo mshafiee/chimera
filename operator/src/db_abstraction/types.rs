@@ -370,8 +370,16 @@ pub struct TradeDetail {
     pub slippage_cost_sol: Option<rust_decimal::Decimal>,
     pub total_cost_sol: Option<rust_decimal::Decimal>,
     pub net_pnl_sol: Option<rust_decimal::Decimal>,
+    /// A3: false for rows produced by the pre-fix accounting model
+    /// (quarantined). Decision metrics must exclude these rows.
+    #[serde(default = "default_pnl_data_valid")]
+    pub pnl_data_valid: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_pnl_data_valid() -> bool {
+    true
 }
 
 /// Webhook audit log record
@@ -577,6 +585,7 @@ impl From<Trade> for TradeDetail {
             slippage_cost_sol: Some(t.slippage_cost_sol),
             total_cost_sol: Some(t.total_cost_sol),
             net_pnl_sol: t.net_pnl_sol,
+            pnl_data_valid: true,
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
         }

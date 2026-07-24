@@ -940,7 +940,7 @@ impl Database for PostgresBackend {
                 COUNT(*) as total_trades,
                 SUM(CASE WHEN status = 'CLOSED' THEN 1 ELSE 0 END)::bigint as successful_trades,
                 SUM(CASE WHEN status = 'FAILED' OR status = 'DEAD_LETTER' THEN 1 ELSE 0 END)::bigint as failed_trades,
-                COALESCE(SUM(net_pnl_sol), 0) as total_pnl_sol,
+                COALESCE(SUM(net_pnl_sol) FILTER (WHERE pnl_data_valid), 0) as total_pnl_sol,
                 COALESCE(SUM(amount_sol), 0) as total_volume_sol
             FROM trades
             "#,
@@ -1092,7 +1092,7 @@ impl Database for PostgresBackend {
         let total: Decimal = if let Some(t) = to {
             sqlx::query_scalar::<_, Decimal>(
                 r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-                   WHERE state = 'CLOSED' AND closed_at >= NOW() - ($1 || ' hours')::interval
+                   WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - ($1 || ' hours')::interval
                    AND closed_at < NOW() - ($2 || ' hours')::interval"#,
             )
             .bind(from)
@@ -1103,7 +1103,7 @@ impl Database for PostgresBackend {
         } else {
             sqlx::query_scalar::<_, Decimal>(
                 r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-                   WHERE state = 'CLOSED' AND closed_at >= NOW() - ($1 || ' hours')::interval"#,
+                   WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - ($1 || ' hours')::interval"#,
             )
             .bind(from)
             .fetch_one(&self.pool)
@@ -1117,7 +1117,7 @@ impl Database for PostgresBackend {
     async fn get_pnl_24h(&self) -> AppResult<Decimal> {
         let total: Decimal = sqlx::query_scalar::<_, Decimal>(
             r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-               WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours'"#,
+               WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '24 hours'"#,
         )
         .fetch_one(&self.pool)
         .await
@@ -1129,7 +1129,7 @@ impl Database for PostgresBackend {
     async fn get_pnl_7d(&self) -> AppResult<Decimal> {
         let total: Decimal = sqlx::query_scalar::<_, Decimal>(
             r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-               WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '7 days'"#,
+               WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '7 days'"#,
         )
         .fetch_one(&self.pool)
         .await
@@ -1141,7 +1141,7 @@ impl Database for PostgresBackend {
     async fn get_pnl_30d(&self) -> AppResult<Decimal> {
         let total: Decimal = sqlx::query_scalar::<_, Decimal>(
             r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions
-               WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '30 days'"#,
+               WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '30 days'"#,
         )
         .fetch_one(&self.pool)
         .await
@@ -1162,6 +1162,7 @@ impl Database for PostgresBackend {
             SELECT COALESCE(net_pnl_sol, 0.0)
             FROM trades
             WHERE status = 'CLOSED'
+            AND pnl_data_valid
             AND strategy = $1
             AND created_at >= NOW() - ($2 || ' days')::interval
             ORDER BY created_at DESC
@@ -1210,6 +1211,7 @@ impl Database for PostgresBackend {
             FROM trades t
             LEFT JOIN positions p ON p.trade_uuid = t.trade_uuid
             WHERE t.status = 'CLOSED'
+            AND t.pnl_data_valid
             ORDER BY t.created_at DESC
             LIMIT 20
             "#,
@@ -1236,7 +1238,7 @@ impl Database for PostgresBackend {
             r#"
             SELECT COALESCE(realized_pnl_sol, 0.0)
             FROM positions
-            WHERE state = 'CLOSED'
+            WHERE state = 'CLOSED' AND pnl_data_valid
             ORDER BY closed_at ASC
             "#,
         )
@@ -3198,7 +3200,7 @@ impl Database for PostgresBackend {
             SELECT id, trade_uuid, wallet_address, token_address, token_symbol, strategy,
                    side, amount_sol, price_at_signal, tx_signature, status, retry_count,
                    error_message, pnl_sol, pnl_usd, jito_tip_sol, dex_fee_sol, slippage_cost_sol,
-                   total_cost_sol, net_pnl_sol, created_at, updated_at
+                   total_cost_sol, net_pnl_sol, pnl_data_valid, created_at, updated_at
             FROM trades
             WHERE 1=1
             "#,
@@ -3280,6 +3282,9 @@ impl Database for PostgresBackend {
                     .try_get::<Option<Decimal>, _>("net_pnl_sol")
                     .ok()
                     .flatten(),
+                pnl_data_valid: row
+                    .try_get::<bool, _>("pnl_data_valid")
+                    .unwrap_or(true),
                 created_at: row
                     .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                     .map(|dt| dt.to_rfc3339())
@@ -4073,21 +4078,21 @@ impl Database for PostgresBackend {
         .map_err(AppError::Database)?;
 
         let realized_pnl_sol: Decimal = sqlx::query_scalar::<_, Decimal>(
-            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours'"#,
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '24 hours'"#,
         )
         .fetch_one(&self.pool)
         .await
         .map_err(AppError::Database)?;
 
         let realized_usd: Decimal = sqlx::query_scalar::<_, Decimal>(
-            r#"SELECT COALESCE(SUM(realized_pnl_usd), 0.0) FROM positions WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours' AND realized_pnl_usd IS NOT NULL"#,
+            r#"SELECT COALESCE(SUM(realized_pnl_usd), 0.0) FROM positions WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '24 hours' AND realized_pnl_usd IS NOT NULL"#,
         )
         .fetch_one(&self.pool)
         .await
         .map_err(AppError::Database)?;
 
         let null_price_pnl_sol: Decimal = sqlx::query_scalar::<_, Decimal>(
-            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions WHERE state = 'CLOSED' AND closed_at >= NOW() - INTERVAL '24 hours' AND realized_pnl_usd IS NULL"#,
+            r#"SELECT COALESCE(SUM(realized_pnl_sol), 0.0) FROM positions WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '24 hours' AND realized_pnl_usd IS NULL"#,
         )
         .fetch_one(&self.pool)
         .await

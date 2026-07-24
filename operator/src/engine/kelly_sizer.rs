@@ -101,6 +101,11 @@ impl KellySizer {
         let mut valid_trades_count = 0;
 
         for trade in &trades {
+            // A3: exclude rows quarantined from the pre-fix accounting model —
+            // their PnL is not decision-grade evidence.
+            if !trade.pnl_data_valid {
+                continue;
+            }
             if let Some(pnl) = trade.net_pnl_sol {
                 let entry_size = trade.amount_sol;
                 if !entry_size.is_zero() {
