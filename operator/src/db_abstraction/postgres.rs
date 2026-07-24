@@ -1489,10 +1489,12 @@ impl Database for PostgresBackend {
             .fetch_optional(&mut *tx)
             .await?;
 
-        let exit_total_costs = exit_costs
-            .map(|(t, d, s, _)| {
-                t.unwrap_or(Decimal::ZERO) + d.unwrap_or(Decimal::ZERO) + s.unwrap_or(Decimal::ZERO)
-            })
+        // A1 canonical cost model: net PnL = gross(fill-price cash flows)
+        // − network fees − Jito tips. DEX route fees and price impact are
+        // ATTRIBUTION ONLY — the executable Jupiter quote already embeds
+        // them in outAmount, so subtracting them here would double-count.
+        let exit_tip = exit_costs
+            .and_then(|(t, _, _, _)| t)
             .unwrap_or(Decimal::ZERO);
         let exit_network_fee = exit_costs
             .and_then(|(_, _, _, nf)| nf)
@@ -1560,6 +1562,17 @@ impl Database for PostgresBackend {
 
         let mut fully_closed_entry_uuids: Vec<String> = Vec::new();
 
+        // A1: the exit transaction's tip and network fee belong to THIS close
+        // event and are allocated once across all positions being closed
+        // (normally one; duplicates share the allocation).
+        let position_count = Decimal::from(active_positions.len() as u64);
+        let exit_tip_alloc = exit_tip
+            .checked_div(position_count)
+            .unwrap_or(Decimal::ZERO);
+        let exit_network_fee_alloc = exit_network_fee
+            .checked_div(position_count)
+            .unwrap_or(Decimal::ZERO);
+
         for (id, entry_price_dec, entry_amount_dec, entry_trade_uuid, entry_sol_price_opt) in
             active_positions.iter()
         {
@@ -1571,6 +1584,13 @@ impl Database for PostgresBackend {
 
             let exited_amount = entry_amount_dec * exit_fraction;
 
+            // A1 canonical gross PnL: every branch computes
+            //   (exit_price / entry_price − 1) × exited_amount
+            // i.e. return-times-capital in SOL. When both SOL/USD rates are
+            // known the USD prices are converted to SOL-per-token first (the
+            // SOL/USD rate cancels in the ratio); otherwise the ratio is
+            // computed directly from USD prices — no per-token diff is ever
+            // divided by a SOL price without exposure scaling.
             let pnl_sol = if !entry_price_dec.is_zero() {
                 if let (Some(entry_sol_price), Some(exit_sol_price)) =
                     (entry_sol_price_dec, sol_price_usd)
@@ -1589,60 +1609,35 @@ impl Database for PostgresBackend {
                         } else {
                             Decimal::ZERO
                         }
-                    } else if !entry_sol_price.is_zero() {
+                    } else {
                         tracing::warn!(
                             trade_uuid = %trade_uuid,
-                            "Current SOL price is zero; using entry-time SOL price for PnL conversion"
+                            "SOL/USD conversion price zero at close; using direct USD return ratio for PnL"
                         );
-                        let usd_diff = exit_price - entry_price_dec;
-                        usd_diff / entry_sol_price
-                    } else {
-                        tracing::error!(
-                            trade_uuid = %trade_uuid,
-                            "Cannot compute SOL PnL: entry_sol_price is zero"
-                        );
-                        Decimal::ZERO
-                    }
-                } else if let Some(entry_sol_price) = entry_sol_price_dec {
-                    if !entry_sol_price.is_zero() {
-                        tracing::warn!(
-                            trade_uuid = %trade_uuid,
-                            "Current SOL price unavailable; using entry-time SOL price for PnL conversion"
-                        );
-                        let usd_diff = exit_price - entry_price_dec;
-                        usd_diff / entry_sol_price
-                    } else {
-                        tracing::error!(
-                            trade_uuid = %trade_uuid,
-                            "Cannot compute SOL PnL: entry_sol_price is zero"
-                        );
-                        Decimal::ZERO
+                        let ratio = (exit_price - entry_price_dec) / entry_price_dec;
+                        ratio * exited_amount
                     }
                 } else {
-                    tracing::error!(
-                        trade_uuid = %trade_uuid,
-                        entry_price = %entry_price_dec,
-                        exit_price = %exit_price,
-                        "No SOL/USD price data available (neither entry nor current)"
-                    );
-                    if !entry_price_dec.is_zero() {
-                        let diff = exit_price - entry_price_dec;
-                        let ratio = diff / entry_price_dec;
-                        ratio * exited_amount
-                    } else {
-                        Decimal::ZERO
+                    if sol_price_usd.is_none() || entry_sol_price_dec.is_none() {
+                        tracing::warn!(
+                            trade_uuid = %trade_uuid,
+                            "SOL/USD price data incomplete; using direct USD return ratio for PnL"
+                        );
                     }
+                    let ratio = (exit_price - entry_price_dec) / entry_price_dec;
+                    ratio * exited_amount
                 }
             } else {
                 Decimal::ZERO
             };
 
-            if let Some((et, ed, es, orig_amount, entry_nf)) =
+            if let Some((et, _ed, _es, orig_amount, entry_nf)) =
                 entry_costs_map.get(entry_trade_uuid.as_str())
             {
-                let total_entry_cost = (*et).unwrap_or(Decimal::ZERO)
-                    + (*ed).unwrap_or(Decimal::ZERO)
-                    + (*es).unwrap_or(Decimal::ZERO);
+                // A1: only tips + network fees are real out-of-pocket costs.
+                // dex_fee_sol / slippage_cost_sol columns stay populated for
+                // attribution but are never subtracted (embedded in fills).
+                let entry_tip = (*et).unwrap_or(Decimal::ZERO);
                 let entry_network_fee = (*entry_nf).unwrap_or(Decimal::ZERO);
                 let exited_fraction_of_original = if !orig_amount.is_zero() {
                     exited_amount
@@ -1651,31 +1646,33 @@ impl Database for PostgresBackend {
                 } else {
                     exit_fraction
                 };
-                let proportional_entry_cost = total_entry_cost * exited_fraction_of_original;
+                let proportional_entry_tip = entry_tip * exited_fraction_of_original;
                 let proportional_entry_network_fee =
                     entry_network_fee * exited_fraction_of_original;
-                entry_total_costs += proportional_entry_cost + proportional_entry_network_fee;
-                let proportional_exit_network_fee = exit_network_fee * exit_fraction;
+                entry_total_costs += proportional_entry_tip + proportional_entry_network_fee;
                 let net_pnl_sol = pnl_sol
-                    - proportional_entry_cost
+                    - proportional_entry_tip
                     - proportional_entry_network_fee
-                    - exit_total_costs
-                    - proportional_exit_network_fee;
+                    - exit_tip_alloc
+                    - exit_network_fee_alloc;
                 net_pnl_opt = Some(net_pnl_sol);
             }
 
             let pnl_usd_opt: Option<Decimal> = sol_price_usd.map(|sol_usd| pnl_sol * sol_usd);
 
             if is_full_close {
+                // A1: accumulate — earlier tiered partial closes already
+                // recorded realized PnL on this row; the final tranche must
+                // ADD to it, never overwrite it.
                 let rows = sqlx::query(
                     r#"
                     UPDATE positions
                     SET
                         exit_price = $1,
                         exit_tx_signature = $2,
-                        realized_pnl_sol = $3,
-                        realized_pnl_usd = $4,
-                        realized_net_pnl_sol = $5,
+                        realized_pnl_sol = COALESCE(realized_pnl_sol, 0) + $3,
+                        realized_pnl_usd = COALESCE(realized_pnl_usd, 0) + $4,
+                        realized_net_pnl_sol = COALESCE(realized_net_pnl_sol, 0) + $5,
                         closed_at = CASE WHEN $6 THEN NOW() ELSE NULL END,
                         state = $7
                     WHERE id = $8 AND state IN ('ACTIVE', 'EXITING')
@@ -1684,8 +1681,8 @@ impl Database for PostgresBackend {
                 .bind(exit_price)
                 .bind(signature)
                 .bind(pnl_sol)
-                .bind(pnl_usd_opt)
-                .bind(net_pnl_opt)
+                .bind(pnl_usd_opt.unwrap_or(Decimal::ZERO))
+                .bind(net_pnl_opt.unwrap_or(Decimal::ZERO))
                 .bind(confirmed)
                 .bind(if confirmed { "CLOSED" } else { "EXITING" })
                 .bind(id)
@@ -1782,7 +1779,10 @@ impl Database for PostgresBackend {
             }
         }
 
-        let net_pnl = gross_pnl - entry_total_costs - exit_total_costs;
+        // A1: aggregate net PnL = gross − entry (tips + network fees)
+        // − exit tip − exit network fee. Previously the exit network fee was
+        // omitted here even though position-level math included it.
+        let net_pnl = gross_pnl - entry_total_costs - exit_tip - exit_network_fee;
         let current_net: Decimal =
             sqlx::query_scalar("SELECT COALESCE(net_pnl_sol, 0) FROM trades WHERE trade_uuid = $1")
                 .bind(trade_uuid)

@@ -100,6 +100,17 @@ pub struct JitoHealth {
 /// Outcome from a single trade execution — returned by `execute()` instead of
 /// mutating shared `parking_lot::Mutex` fields. Carries all per-signal results
 /// so concurrent workers never clobber each other's state.
+///
+/// ## Canonical units (A1 accounting contract)
+/// - `fill_price_sol_per_token`: SOL per **whole token** (never USD).
+/// - `executed_output_sol`: SOL gross proceeds of a SELL (from the Jupiter
+///   quote's `outAmount`). This is the only valid basis for exit-side
+///   attribution costs — never the copied wallet's signal amount.
+/// - `route_fee_sol` / `price_impact_pct`: **attribution only**. The Jupiter
+///   executable quote already embeds pool impact and route economics in
+///   `outAmount`; net PnL must never subtract them a second time. Net PnL is
+///   `gross(fill-price cash flows) − network fees − paid (or paper-simulated)
+///   Jito tips`.
 #[derive(Debug, Clone, Default)]
 pub struct ExecutionOutcome {
     /// Transaction signature (simulated prefix for paper mode)
@@ -116,8 +127,13 @@ pub struct ExecutionOutcome {
     pub estimated_fee_sol: Option<Decimal>,
     /// Real per-route DEX fee in SOL from the Jupiter quote
     /// (`routePlan[].swapInfo.feeAmount`). `None` for paper/devnet or when the
-    /// quote lacked route info (P2-17).
+    /// quote lacked route info (P2-17). Attribution only — already embedded
+    /// in the executable quote's output amount.
     pub route_fee_sol: Option<Decimal>,
+    /// SELL gross SOL proceeds from the Jupiter quote (`outAmount / 1e9`).
+    /// `None` for BUY or when the quote lacked output info. Exit-side cost
+    /// attribution must use this executed notional, never the signal amount.
+    pub executed_output_sol: Option<Decimal>,
 }
 
 impl ExecutionOutcome {
@@ -136,6 +152,7 @@ impl ExecutionOutcome {
             token_amount: None,
             estimated_fee_sol: None,
             route_fee_sol,
+            executed_output_sol: None,
         }
     }
 }
@@ -668,15 +685,29 @@ impl Executor {
                     };
 
                     // Track costs: Jito tip, DEX fee, slippage.
+                    // A1: these are ATTRIBUTION-ONLY metrics — the executable
+                    // Jupiter quote already embeds route fees and price impact
+                    // in outAmount, so net PnL (postgres close_position_full)
+                    // subtracts only network fees + tips. SELL attribution is
+                    // scaled to the executed output notional (gross SOL
+                    // proceeds), never the copied wallet's signal amount.
                     // F5/F6: slippage uses the unified estimate (engine::slippage),
                     // preferring Jupiter's real priceImpactPct (outcome.price_impact_pct),
                     // then the liquidity-aware sqrt model, then the config tier.
                     // P2-17/F22: DEX fee is the real per-route fee from the quote
                     // (routePlan[].swapInfo.feeAmount) when the outcome carries it,
                     // else the flat config rate.
-                    let dex_fee_sol = outcome.route_fee_sol.unwrap_or_else(|| {
-                        signal.payload.amount_sol * self.config.strategy.dex_fee_rate
-                    });
+                    let cost_basis_sol = if signal.payload.action == Action::Sell {
+                        outcome
+                            .executed_output_sol
+                            .filter(|v| !v.is_zero())
+                            .unwrap_or(signal.payload.amount_sol)
+                    } else {
+                        signal.payload.amount_sol
+                    };
+                    let dex_fee_sol = outcome
+                        .route_fee_sol
+                        .unwrap_or_else(|| cost_basis_sol * self.config.strategy.dex_fee_rate);
                     let slippage = self.slippage_estimate(signal, outcome.price_impact_pct);
                     if outcome.price_impact_pct.is_none() {
                         tracing::debug!(
@@ -685,7 +716,7 @@ impl Executor {
                             "No Jupiter price impact — using estimated slippage for cost tracking"
                         );
                     }
-                    let slippage_cost_sol = slippage.expected_cost_sol(signal.payload.amount_sol);
+                    let slippage_cost_sol = slippage.expected_cost_sol(cost_basis_sol);
 
                     // Update trade costs in database
                     if let Err(e) = self
@@ -728,8 +759,25 @@ impl Executor {
                         "Trade execution failed"
                     );
 
-                    // Record costs even for failed trades — Jito tip was still paid
-                    if rpc_mode == RpcMode::Jito {
+                    // A1: record a Jito tip on failure ONLY when the transaction
+                    // actually reached submission in Live mode — the tip transfer
+                    // can only exist if a bundle was sent. Pre-submission
+                    // failures (config, quote, build, cost-gate) and paper/devnet
+                    // mode never transfer a tip, so recording one fabricates cost.
+                    let post_submission_failure =
+                        matches!(&e, ExecutorError::BlockhashExpired | ExecutorError::Timeout)
+                            || matches!(&e, ExecutorError::TransactionFailed(msg) if {
+                                let m = msg.to_lowercase();
+                                m.contains("bundle")
+                                    || m.contains("timeout")
+                                    || m.contains("landed")
+                                    || m.contains("insufficient tip")
+                                    || m.contains("confirmation")
+                            });
+                    let tip_could_have_landed = rpc_mode == RpcMode::Jito
+                        && self.config.trade_mode == crate::config::TradeMode::Live
+                        && post_submission_failure;
+                    if tip_could_have_landed {
                         let jito_tip = self.calculate_jito_tip(signal).await;
                         if let Err(cost_err) = self
                             .db
@@ -3133,13 +3181,15 @@ impl Executor {
     /// to build an `ExecutionOutcome` without mutating any shared state.
     ///
     /// Returns `(price_impact_pct, fill_price_sol_per_token, token_amount,
-    /// route_fee_sol)`. The route fee lets paper mode charge the same real
-    /// per-route DEX fee that live mode would pay (P2-17/F22 parity) instead
-    /// of the flat `amount × dex_fee_rate` estimate.
+    /// route_fee_sol, executed_output_sol)`. The route fee lets paper mode
+    /// charge the same real per-route DEX fee that live mode would pay
+    /// (P2-17/F22 parity) instead of the flat `amount × dex_fee_rate` estimate.
+    /// `executed_output_sol` is the SELL gross SOL proceeds (A1 attribution
+    /// basis); `None` for BUY.
     async fn get_paper_prices(
         &self,
         signal: &Signal,
-    ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>, Option<Decimal>), ExecutorError> {
+    ) -> Result<(Option<Decimal>, Option<Decimal>, Option<u64>, Option<Decimal>, Option<Decimal>), ExecutorError> {
         let active_client = self.active_rpc_client();
         let tx_builder = TransactionBuilder::new(active_client.clone(), self.config.clone())
             .map_err(|e| ExecutorError::TransactionFailed(format!("TransactionBuilder: {}", e)))?;
@@ -3168,6 +3218,7 @@ impl Executor {
                     fill_price_sol,
                     Some(result.out_amount),
                     result.route_fee_sol,
+                    None,
                 ))
             }
             Action::Sell => {
@@ -3218,19 +3269,35 @@ impl Executor {
                     signal.token_decimals,
                     &signal.trade_uuid,
                 );
-                Ok((result.price_impact_pct, fill_price_sol, None, result.route_fee_sol))
+                // A1: SELL executed notional = gross SOL proceeds from the quote.
+                // Exit-side cost attribution uses this, never the signal amount.
+                let executed_output_sol = if result.out_amount > 0 {
+                    Some(
+                        Decimal::from(result.out_amount)
+                            / Decimal::from(crate::engine::dex_comparator::LAMPORTS_PER_SOL),
+                    )
+                } else {
+                    None
+                };
+                Ok((
+                    result.price_impact_pct,
+                    fill_price_sol,
+                    None,
+                    result.route_fee_sol,
+                    executed_output_sol,
+                ))
             }
         }
     }
 
     async fn execute_paper(&self, signal: &Signal) -> Result<ExecutionOutcome, ExecutorError> {
         tracing::info!(
-            trade_uuid = %signal.trade_uuid,
+            trade_uuid = %signal.payload.action,
             action = %signal.payload.action,
             "Paper mode: fetching real Jupiter quote, no on-chain submission"
         );
 
-        let (price_impact, fill_price_sol, token_amount, route_fee_sol) =
+        let (price_impact, fill_price_sol, token_amount, route_fee_sol, executed_output_sol) =
             self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
 
@@ -3251,6 +3318,7 @@ impl Executor {
             token_amount,
             estimated_fee_sol: Some(estimated_fee_sol),
             route_fee_sol,
+            executed_output_sol,
         })
     }
 
@@ -3260,7 +3328,7 @@ impl Executor {
             "Devnet mode: real Jupiter quote + minimal tx on devnet"
         );
 
-        let (price_impact, fill_price_sol, token_amount, route_fee_sol) =
+        let (price_impact, fill_price_sol, token_amount, route_fee_sol, executed_output_sol) =
             self.get_paper_prices(signal).await?;
         let estimated_fee_sol = self.estimate_network_fee().await;
 
@@ -3319,6 +3387,7 @@ impl Executor {
             token_amount,
             estimated_fee_sol: Some(estimated_fee_sol),
             route_fee_sol,
+            executed_output_sol,
         })
     }
 

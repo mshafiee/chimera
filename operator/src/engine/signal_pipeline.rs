@@ -600,24 +600,25 @@ impl SignalProcessor {
                         .and_then(|c| c.get_sol_price_usd_fallback())
                         .unwrap_or(Decimal::ZERO);
 
+                    // A1 canonical unit: `entry_price` is ALWAYS USD per whole
+                    // token. `fill_price_sol_per_token` is SOL per whole token —
+                    // it may only be persisted as USD after multiplication by a
+                    // valid SOL/USD price. Storing the raw SOL fill in the USD
+                    // field corrupts every downstream PnL calculation.
+                    let token_price_usd = self
+                        .price_cache
+                        .as_ref()
+                        .and_then(|c| c.get_price_usd(signal.token_address()))
+                        .unwrap_or(Decimal::ZERO);
+
                     let entry_price = if let Some(fps) = fill_price_sol {
-                        if !fps.is_zero() {
-                            if !sol_price_usd.is_zero() {
-                                fps * sol_price_usd
-                            } else {
-                                fps
-                            }
+                        if !fps.is_zero() && !sol_price_usd.is_zero() {
+                            fps * sol_price_usd
                         } else {
-                            self.price_cache
-                                .as_ref()
-                                .and_then(|c| c.get_price_usd(signal.token_address()))
-                                .unwrap_or(Decimal::ZERO)
+                            token_price_usd
                         }
                     } else {
-                        self.price_cache
-                            .as_ref()
-                            .and_then(|c| c.get_price_usd(signal.token_address()))
-                            .unwrap_or(Decimal::ZERO)
+                        token_price_usd
                     };
 
                     if entry_price.is_zero() {
@@ -750,14 +751,16 @@ impl SignalProcessor {
                     );
 
                     let fill_price_sol = outcome.fill_price_sol_per_token;
+                    // A1: use the last-known SOL price fallback so a stale
+                    // primary entry does not force a zero exit price.
                     let sol_price_usd = self
                         .price_cache
                         .as_ref()
-                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL))
+                        .and_then(|c| c.get_sol_price_usd_fallback())
                         .unwrap_or(Decimal::ZERO);
 
                     let exit_price = if let Some(fps) = fill_price_sol {
-                        if !sol_price_usd.is_zero() {
+                        if !fps.is_zero() && !sol_price_usd.is_zero() {
                             fps * sol_price_usd
                         } else {
                             self.price_cache
@@ -775,7 +778,7 @@ impl SignalProcessor {
                     let sol_price_usd_opt = self
                         .price_cache
                         .as_ref()
-                        .and_then(|c| c.get_price_usd(crate::constants::mints::SOL));
+                        .and_then(|c| c.get_sol_price_usd_fallback());
 
                     if let Err(e) = self
                         .db
