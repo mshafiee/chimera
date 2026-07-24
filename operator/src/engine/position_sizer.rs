@@ -26,6 +26,7 @@ pub struct PositionSizer {
 pub struct SizingFactors {
     pub is_consensus: bool,
     pub wallet_wqs: f64, // WQS score (0-100), used for threshold comparisons only
+    pub wqs_confidence: Option<f64>, // Scout statistical confidence (0.0-1.0)
     pub wallet_success_rate: Decimal, // Success rate (0.0-1.0), used in financial calculations
     pub token_age_hours: Option<f64>, // Token age in hours, used for threshold comparisons only
     pub estimated_slippage: Decimal, // Slippage percentage, used in financial calculations
@@ -136,21 +137,31 @@ impl PositionSizer {
                         .get_closed_trade_count_for_wallet(&factors.wallet_address)
                         .await
                         .unwrap_or(0);
-                    // Floor at 0.05 (5%) so unproven wallets (0 trades) get a minimal but
-                    // non-zero base.
-                    let confidence =
+                    let confidence = if trade_count >= 15 {
                         Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
-                            .unwrap_or(dec!(0.05));
+                            .unwrap_or(dec!(0.05))
+                    } else {
+                        let conf_f64 = factors.wqs_confidence.unwrap_or(0.50).clamp(0.35, 1.0);
+                        Decimal::from_f64_retain(conf_f64).unwrap_or(dec!(0.50))
+                    };
                     let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                         .unwrap_or(Decimal::from_str("0.5").unwrap_or(dec!(0.5)));
                     // Set a conservative capital cap so the multiplicative chain (regime,
                     // consensus, quality) cannot push an unproven wallet past a modest
                     // fraction of total capital. Scales linearly: 0 trades → 2%, 14 trades → 9.5%.
                     // Uses 15-trade denominator to match Kelly's minimum threshold.
-                    let fallback_cap_pct = Decimal::from_f64_retain(
-                        (trade_count as f64 / 15.0 * 0.075 + 0.02).min(0.10),
-                    )
-                    .unwrap_or(dec!(0.02));
+                    let fallback_cap_pct = if trade_count >= 15 {
+                        Decimal::from_f64_retain(
+                            (trade_count as f64 / 15.0 * 0.075 + 0.02).min(0.10),
+                        )
+                        .unwrap_or(dec!(0.02))
+                    } else {
+                        let conf_f64 = factors.wqs_confidence.unwrap_or(0.50).clamp(0.35, 1.0);
+                        Decimal::from_f64_retain(
+                            (conf_f64 * 0.075 + 0.02).min(0.10),
+                        )
+                        .unwrap_or(dec!(0.075))
+                    };
                     full_kelly_cap = Some(factors.total_capital_sol * fallback_cap_pct);
                     // Do NOT clamp to min_size_sol here — the fallback cap already
                     // constrains unproven wallets. Clamping up would inflate a
@@ -167,8 +178,13 @@ impl PositionSizer {
                 .get_closed_trade_count_for_wallet(&factors.wallet_address)
                 .await
                 .unwrap_or(0);
-            let confidence = Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
-                .unwrap_or(dec!(0.05));
+            let confidence = if trade_count >= 15 {
+                Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
+                    .unwrap_or(dec!(0.05))
+            } else {
+                let conf_f64 = factors.wqs_confidence.unwrap_or(0.50).clamp(0.35, 1.0);
+                Decimal::from_f64_retain(conf_f64).unwrap_or(dec!(0.50))
+            };
             let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
                 .unwrap_or(Decimal::from_str("0.5").unwrap_or(dec!(0.5)));
             (self.config.base_size_sol * wqs_factor * confidence).min(self.config.max_size_sol)
@@ -364,11 +380,15 @@ impl PositionSizer {
     ) -> SizingFactors {
         // Get wallet from database
         let wallet_opt = self.db.get_wallet(wallet_address).await;
-        let wqs = match wallet_opt {
+        let wqs = match &wallet_opt {
             Ok(Some(w)) => w.wqs_score.unwrap_or(Default::default()),
             _ => Default::default(),
         };
         let wqs = wqs.to_f64().unwrap_or(50.0);
+        let wqs_confidence = match &wallet_opt {
+            Ok(Some(w)) => w.wqs_confidence.and_then(|d| d.to_f64()),
+            _ => None,
+        };
 
         // Get wallet performance metrics from database
         // Convert success rate percentage to Decimal (0.0-1.0)
@@ -400,6 +420,7 @@ impl PositionSizer {
         SizingFactors {
             is_consensus,
             wallet_wqs: wqs,
+            wqs_confidence,
             wallet_success_rate: success_rate,
             token_age_hours,
             estimated_slippage,

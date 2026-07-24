@@ -282,9 +282,10 @@ pub async fn webhook_handler(
                 let win_rate = wallet
                     .win_rate
                     .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
+                let wqs_confidence = wallet.wqs_confidence.and_then(|d| d.to_f64());
                 Some((
                     wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(50.0),
-                    wallet.wqs_score,
+                    wqs_confidence,
                     win_rate,
                 ))
             }
@@ -608,6 +609,10 @@ pub async fn webhook_handler(
                 .map(|(_, _, wr)| *wr)
                 .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
 
+            let wqs_confidence = wallet_data
+                .as_ref()
+                .and_then(|(_, conf, _)| *conf);
+
             let regime_multiplier = if let Some(ref regime_detector) = state.market_regime {
                 if let Some(ref token_address) = signal.payload.token_address {
                     regime_detector.get_regime_multiplier(token_address)
@@ -621,6 +626,7 @@ pub async fn webhook_handler(
             let factors = SizingFactors {
                 is_consensus,
                 wallet_wqs,
+                wqs_confidence,
                 wallet_success_rate,
                 token_age_hours,
                 estimated_slippage: Decimal::ZERO,

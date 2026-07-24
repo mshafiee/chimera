@@ -189,17 +189,24 @@ pub async fn helius_webhook_handler(
                     };
 
                     // Determine strategy based on wallet WQS.
-                    // High-WQS wallets (≥70) → Shield (conservative).
-                    // Low-WQS wallets → Spear (aggressive, lower quality threshold).
-                    // The executor guards Spear execution when RPC is degraded —
-                    // do NOT downgrade here, as it forces the Shield quality
-                    // threshold (0.55) which low-WQS wallets can never reach,
-                    // guaranteeing rejection.
-                    let strategy = if wallet
+                    // High-WQS wallets (≥80) → Shield (conservative).
+                    // Medium-WQS wallets (70–79) → Spear.
+                    // Low-WQS wallets (<70) → Dropped entirely (hard WQS quality gate).
+                    let wallet_wqs = wallet
                         .wqs_score
-                        .map(|s| s >= rust_decimal::Decimal::from(70))
-                        .unwrap_or(false)
-                    {
+                        .and_then(|s| s.to_f64())
+                        .unwrap_or(0.0);
+
+                    if direction == Action::Buy && wallet_wqs < 70.0 {
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            wqs = wallet_wqs,
+                            "Skipping BUY signal for wallet with low WQS (<70.0) — rejecting low-quality copy trade"
+                        );
+                        continue;
+                    }
+
+                    let strategy = if wallet_wqs >= 80.0 {
                         Strategy::Shield
                     } else {
                         Strategy::Spear
