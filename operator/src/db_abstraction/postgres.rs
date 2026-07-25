@@ -145,6 +145,24 @@ impl Database for PostgresBackend {
     // ========================================================================
 
     async fn run_migrations(&self) -> AppResult<()> {
+        // 0001_full_schema.sql issues `COMMENT ON TABLE schema_migrations`
+        // BEFORE its own CREATE TABLE (historical ordering bug). On a fresh
+        // database that COMMENT fails and the whole migration chain aborts.
+        // The applied-migration file cannot be edited (sqlx checksum), so
+        // pre-create the table here — 0001's CREATE IF NOT EXISTS is then a
+        // no-op and its COMMENT succeeds. Harmless on existing databases.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
         sqlx::migrate!("./migrations_postgres")
             .run(&self.pool)
             .await
@@ -1292,6 +1310,18 @@ impl Database for PostgresBackend {
         entry_sol_price_usd: Option<Decimal>,
     ) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
+
+        // A2: serialize concurrent opens for the same wallet+token across ALL
+        // callers (not just the in-process pipeline lock). Under READ
+        // COMMITTED, concurrent transactions would otherwise both pass the
+        // duplicate check before either commits (write-skew), creating
+        // duplicate ACTIVE positions. The advisory lock is held until this
+        // transaction commits/rolls back, so the second opener observes the
+        // first opener's committed row and is rejected by the duplicate check.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("{}:{}", wallet_address, token_address))
+            .execute(&mut *tx)
+            .await?;
 
         if entry_price <= Decimal::ZERO {
             tracing::warn!(

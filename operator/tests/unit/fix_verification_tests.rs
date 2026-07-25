@@ -344,7 +344,7 @@ async fn should_succeed_on_status_update_for_existing_trade() {
 
     // Verify status was actually changed
     let pool = pg_pool(&db);
-    let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE trade_uuid = ?")
+    let status: String = sqlx::query_scalar("SELECT status FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await

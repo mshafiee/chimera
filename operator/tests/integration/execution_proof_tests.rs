@@ -152,7 +152,7 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
     // Step 3: Verify realized PnL = (150−200)/200 × 1.0 = −0.25 SOL
     let pool = pg_pool(&db);
     let (state, pnl_str): (String, String) =
-        sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
             .bind(UUID)
             .fetch_one(&pool)
             .await
@@ -232,7 +232,7 @@ async fn test_profit_capture_positive_pnl_recorded() {
 
     let pool = pg_pool(&db);
     let (state, pnl_str): (String, String) =
-        sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
             .bind(UUID)
             .fetch_one(&pool)
             .await

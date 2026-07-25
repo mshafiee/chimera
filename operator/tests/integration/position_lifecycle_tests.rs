@@ -92,7 +92,7 @@ async fn test_duplicate_buy_uuid_idempotency() {
     );
 
     // Only one position should exist
-    let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = ?")
+    let pos_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -204,7 +204,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .unwrap();
 
     let (realized_pnl_str,): (String,) =
-        sqlx::query_as("SELECT realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT realized_pnl_sol FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -235,7 +235,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     db.update_trade_net_pnl(uuid, net).await.unwrap();
 
     let (net_stored_str,): (String,) =
-        sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -312,7 +312,7 @@ async fn test_full_trade_status_progression() {
         })
         .await
         .unwrap();
-        let (s,): (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+        let (s,): (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -361,7 +361,7 @@ async fn test_full_trade_status_progression() {
     .unwrap();
 
     let (final_status,): (String,) =
-        sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -369,7 +369,7 @@ async fn test_full_trade_status_progression() {
     assert_eq!(final_status, "CLOSED");
 
     let (pos_state,): (String,) =
-        sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -428,7 +428,7 @@ async fn test_failed_trade_can_retry() {
     .await
     .unwrap();
 
-    let (status,): (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+    let (status,): (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await

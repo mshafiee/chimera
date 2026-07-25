@@ -58,6 +58,7 @@ fn neutral_factors() -> SizingFactors {
     SizingFactors {
         is_consensus: false,
         wallet_wqs: 50.0,
+        wqs_confidence: None,
         wallet_success_rate: Decimal::from_str("0.5").unwrap(),
         token_age_hours: Some(72.0), // >24h: no penalty
         estimated_slippage: Decimal::from_str("1.0").unwrap(), // <2%: no penalty
@@ -242,7 +243,7 @@ async fn test_consensus_multiplier_increases_size() {
     // multiplier's effect is visible (0 trades = confidence 0.05).
 
     let (db, _tmp) = create_test_db().await;
-    let _pool = pg_pool(sqlite_pool(&db)db);
+    let _pool = pg_pool(&db);
     let config = sizing_config_with_max("2.0", "5.0", "0.01", 5);
     let sizer = PositionSizer::new(db, config);
 
@@ -270,13 +271,14 @@ async fn test_position_size_capped_at_max() {
     // Even with maximum multipliers (consensus + high WQS + high quality), size ≤ max.
 
     let (db, _tmp) = create_test_db().await;
-    let _pool = pg_pool(sqlite_pool(&db)db);
+    let _pool = pg_pool(&db);
     let cfg = sizing_config_with_max("5.0", "6.0", "0.5", 20); // max=6 SOL, base=5
     let sizer = PositionSizer::new(db, cfg);
 
     let factors = SizingFactors {
         is_consensus: true,                                       // 1.5x
-        wallet_wqs: 90.0,                                         // 1.2x
+        wallet_wqs: 90.0,
+        wqs_confidence: None,                                         // 1.2x
         wallet_success_rate: Decimal::from_str("0.8").unwrap(),   // 1.1x
         token_age_hours: Some(100.0),                             // no penalty
         estimated_slippage: Decimal::from_str("0.5").unwrap(),    // no penalty
@@ -307,13 +309,14 @@ async fn test_position_size_floor_at_minimum() {
     // Size must not go below min_size_sol.
 
     let (db, _tmp) = create_test_db().await;
-    let _pool = pg_pool(sqlite_pool(&db)db);
+    let _pool = pg_pool(&db);
     let cfg = sizing_config_with_max("2.0", "20.0", "0.5", 10); // min=0.5 SOL
     let sizer = PositionSizer::new(db, cfg);
 
     let factors = SizingFactors {
         is_consensus: false,
-        wallet_wqs: 10.0,                                        // low: no WQS bonus
+        wallet_wqs: 10.0,
+        wqs_confidence: None,                                        // low: no WQS bonus
         wallet_success_rate: Decimal::from_str("0.2").unwrap(),  // 0.8x penalty
         token_age_hours: Some(1.0),                              // 0.5x penalty
         estimated_slippage: Decimal::from_str("5.0").unwrap(),   // 0.7x penalty
@@ -346,7 +349,7 @@ async fn test_high_wqs_multiplier_applied() {
     // Use a large base_size so the WQS factor pushes both values above min_size_sol
     // (with 0 closed trades, confidence=0.05: 10.0 * 0.85 * 0.05 = 0.425 vs 0.25).
     let (db, _tmp) = create_test_db().await;
-    let _pool = pg_pool(sqlite_pool(&db)db);
+    let _pool = pg_pool(&db);
     let sizer = PositionSizer::new(
         db,
         Arc::new(chimera_operator::config::PositionSizingConfig {
@@ -407,7 +410,8 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
     // Setup moderately conservative factors (all around 0.8x equivalent)
     let factors = SizingFactors {
         is_consensus: false,                                     // 1.0x (no boost)
-        wallet_wqs: 50.0,                                       // neutral WQS
+        wallet_wqs: 50.0,
+        wqs_confidence: None,                                       // neutral WQS
         wallet_success_rate: Decimal::from_str("0.5").unwrap(),  // neutral performance
         token_age_hours: Some(72.0),                            // old token: 1.0x (no penalty)
         estimated_slippage: Decimal::from_str("3.0").unwrap(),  // ~0.8x penalty
@@ -479,7 +483,8 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
     // Setup factors with maximum boost multipliers
     let factors = SizingFactors {
         is_consensus: true,                                      // 1.5x boost
-        wallet_wqs: 90.0,                                       // high WQS
+        wallet_wqs: 90.0,
+        wqs_confidence: None,                                       // high WQS
         wallet_success_rate: Decimal::from_str("0.8").unwrap(), // 1.1x boost
         token_age_hours: Some(100.0),                            // 1.0x (no penalty)
         estimated_slippage: Decimal::from_str("0.5").unwrap(),   // 1.0x (no penalty)

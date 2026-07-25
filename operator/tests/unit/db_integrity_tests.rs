@@ -79,7 +79,7 @@ async fn test_update_trade_status_nonexistent_uuid_silent_success() {
 
     // Confirm nothing was actually inserted
     let pool = pg_pool(&db);
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = ?")
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = $1")
         .bind("nonexistent-uuid-xyz")
         .fetch_one(&pool)
         .await
@@ -110,7 +110,7 @@ async fn test_update_trade_status_real_trade_affects_exactly_one_row() {
     .await
     .unwrap();
 
-    let status: (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+    let status: (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -184,7 +184,7 @@ async fn test_close_position_closes_only_specified_position() {
 
     // Both positions are ACTIVE
     let active: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND state = 'ACTIVE'",
+        "SELECT COUNT(*) FROM positions WHERE wallet_address = $1 AND state = 'ACTIVE'",
     )
     .bind("wallet_multi")
     .fetch_one(&pool)
@@ -208,7 +208,7 @@ async fn test_close_position_closes_only_specified_position() {
 
     // Only ONE position should be CLOSED (uuid1), uuid2 remains ACTIVE
     let closed: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM positions WHERE wallet_address = ? AND token_address = ? AND state = 'CLOSED'"
+        "SELECT COUNT(*) FROM positions WHERE wallet_address = $1 AND token_address = $2 AND state = 'CLOSED'"
     )
     .bind("wallet_multi")
     .bind("token_A")
@@ -221,7 +221,7 @@ async fn test_close_position_closes_only_specified_position() {
     );
 
     // Verify uuid2 is still ACTIVE
-    let uuid2_state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = ?")
+    let uuid2_state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = $1")
         .bind(uuid2)
         .fetch_one(&pool)
         .await
@@ -291,7 +291,7 @@ async fn test_close_position_zero_exit_price_is_rejected() {
     );
 
     // Position should still be ACTIVE (not closed)
-    let state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = ?")
+    let state: (String,) = sqlx::query_as("SELECT state FROM positions WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -348,7 +348,7 @@ async fn test_open_position_zero_entry_price_is_rejected() {
     );
 
     // No position should have been created
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = ?")
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -393,7 +393,7 @@ async fn test_trade_costs_accumulate_on_retry() {
     .unwrap();
 
     let (jito_str, total_str): (String, String) =
-        sqlx::query_as("SELECT jito_tip_sol, total_cost_sol FROM trades WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT jito_tip_sol, total_cost_sol FROM trades WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -460,7 +460,7 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
     .unwrap();
 
     // FK constraint PREVENTS the trade from being deleted
-    let delete_result = sqlx::query("DELETE FROM trades WHERE trade_uuid = ?")
+    let delete_result = sqlx::query("DELETE FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .execute(&pool)
         .await;
@@ -472,7 +472,7 @@ async fn test_position_can_become_orphaned_after_trade_delete() {
 
     // Position is still intact — trade deletion was blocked
     let pos_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = ? AND state = 'ACTIVE'")
+        sqlx::query_as("SELECT COUNT(*) FROM positions WHERE trade_uuid = $1 AND state = 'ACTIVE'")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -530,7 +530,7 @@ async fn test_pnl_precision_f64_roundtrip() {
     .unwrap();
 
     let stored: (String,) =
-        sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT entry_price FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -633,7 +633,7 @@ async fn test_close_position_unconfirmed_sets_exiting_state() {
     assert!(result.is_ok());
 
     let (state, closed_at): (String, Option<String>) =
-        sqlx::query_as("SELECT state, closed_at FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT state, closed_at FROM positions WHERE trade_uuid = $1")
             .bind(uuid)
             .fetch_one(&pool)
             .await
@@ -695,7 +695,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
     .unwrap();
 
     // Update status to associate signature
-    sqlx::query("UPDATE trades SET tx_signature = ? WHERE trade_uuid = ?")
+    sqlx::query("UPDATE trades SET tx_signature = $1 WHERE trade_uuid = $2")
         .bind("sig_revert_sell")
         .bind(exit_uuid)
         .execute(&pool)
@@ -719,7 +719,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
 
     // Verify DB states after unconfirmed partial close
     let (state_before, amount_str, exit_price_str, exit_sig_before, pnl_str): (String, String, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
@@ -740,7 +740,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
 
     // Verify DB states after reversion
     let (state_after, amount_after_str, exit_price_after_str, exit_sig_after, pnl_after_str): (String, String, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT state, entry_amount_sol, exit_price, exit_tx_signature, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
             .bind(entry_uuid)
             .fetch_one(&pool)
             .await
@@ -757,7 +757,7 @@ async fn test_revert_position_exit_restores_state_and_amount() {
 
     // Verify the exit trade status is marked FAILED
     let exit_trade_status: (String,) =
-        sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+        sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = $1")
             .bind(exit_uuid)
             .fetch_one(&pool)
             .await

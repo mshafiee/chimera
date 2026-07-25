@@ -56,6 +56,11 @@ mod position_lifecycle_tests;
 #[path = "integration/execution_proof_tests.rs"]
 mod execution_proof_tests;
 
+// ── A1/A2 accounting characterization tests ────────────────────────────────────
+
+#[path = "integration/accounting_characterization_tests.rs"]
+mod accounting_characterization_tests;
+
 #[path = "integration/parallel_execution_test.rs"]
 mod parallel_execution_test;
 

@@ -71,8 +71,24 @@ jobs:
   rust-tests:
     name: Rust Unit & Integration Tests
     runs-on: ubuntu-latest
+    # PostgreSQL is the only supported database (SQLite decommissioned).
+    # Tests require TEST_DATABASE_URL — see operator/tests/common/mod.rs.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: chimera
+          POSTGRES_PASSWORD: chimera_test
+          POSTGRES_DB: chimera_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U chimera -d chimera_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
-      DATABASE_URL: sqlite:./data/chimera.db
+      TEST_DATABASE_URL: postgres://chimera:chimera_test@localhost:5432/chimera_test
     steps:
       - uses: actions/checkout@v4
 
@@ -90,20 +106,19 @@ jobs:
           restore-keys: |
             \${{ runner.os }}-cargo-
 
-      - name: Set up database for SQLx
-        working-directory: operator
-        run: |
-          mkdir -p data
-          # Create SQLite database and apply schema
-          sqlite3 data/chimera.db < ../database/schema.sql || echo "Schema may have been applied"
-
       - name: Run unit tests
         working-directory: operator
         run: cargo test --lib --bins
-      
+
+      - name: Compile all test targets (fail on any compile error)
+        working-directory: operator
+        run: |
+          cargo test --test unit --no-run
+          cargo test --test integration --no-run
+
       - name: Run integration tests
         working-directory: operator
-        run: cargo test --test '*'
+        run: cargo test --test '*' -- --test-threads=1
 
   # ==========================================================================
   # PYTHON QUALITY CHECKS

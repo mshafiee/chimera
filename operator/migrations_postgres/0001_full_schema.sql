@@ -4,6 +4,17 @@
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+-- btree_gin provides the default GIN operator class for text columns used by
+-- plain `USING GIN (col)` indexes below (present on production; without it a
+-- fresh database fails with "data type text has no default operator class
+-- for access method gin").
+CREATE EXTENSION IF NOT EXISTS "btree_gin";
+
+-- NOTE: Table COMMENT statements were moved to migration 0006.
+-- They originally preceded their CREATE TABLE statements here, which
+-- made this migration un-runnable on a fresh database (relation does
+-- not exist). Do not re-add COMMENTs above their CREATEs.
+
 
 
 -- =============================================================================
@@ -34,7 +45,6 @@ $$ LANGUAGE plpgsql;
 -- =============================================================================
 
 -- Schema migration tracking (idempotent guard for migration files)
-COMMENT ON TABLE schema_migrations IS 'Schema migration tracking (idempotent guard for migration files)';
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version TEXT PRIMARY KEY,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -45,7 +55,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 -- =============================================================================
 
 -- Primary record of all trading signals received
-COMMENT ON TABLE trades IS 'Primary record of all trading signals received';
 CREATE TABLE IF NOT EXISTS trades (
     id BIGSERIAL PRIMARY KEY,
     trade_uuid TEXT NOT NULL UNIQUE,
@@ -91,7 +100,6 @@ CREATE TRIGGER trades_updated_at
 -- =============================================================================
 
 -- Active positions being tracked
-COMMENT ON TABLE positions IS 'Active positions being tracked';
 CREATE TABLE IF NOT EXISTS positions (
     id BIGSERIAL PRIMARY KEY,
     trade_uuid TEXT NOT NULL UNIQUE,
@@ -135,7 +143,6 @@ CREATE TRIGGER positions_updated_at
 -- =============================================================================
 
 -- Tracked wallets with WQS scores (managed by Scout)
-COMMENT ON TABLE wallets IS 'Tracked wallets with WQS scores (managed by Scout)';
 CREATE TABLE IF NOT EXISTS wallets (
     id BIGSERIAL PRIMARY KEY,
     address TEXT NOT NULL UNIQUE,
@@ -176,7 +183,6 @@ CREATE TRIGGER wallets_updated_at
 -- =============================================================================
 
 -- Failed operations for analysis/retry
-COMMENT ON TABLE dead_letter_queue IS 'Failed operations for analysis/retry';
 CREATE TABLE IF NOT EXISTS dead_letter_queue (
     id BIGSERIAL PRIMARY KEY,
     trade_uuid TEXT,
@@ -198,7 +204,6 @@ CREATE INDEX IF NOT EXISTS idx_dlq_received ON dead_letter_queue (received_at DE
 -- =============================================================================
 
 -- Track all configuration changes
-COMMENT ON TABLE config_audit IS 'Track all configuration changes';
 CREATE TABLE IF NOT EXISTS config_audit (
     id BIGSERIAL PRIMARY KEY,
     key TEXT NOT NULL,
@@ -217,7 +222,6 @@ CREATE INDEX IF NOT EXISTS idx_config_audit_changed ON config_audit (changed_at 
 -- =============================================================================
 
 -- Single-row table written synchronously before returning from kill-switch API handler
-COMMENT ON TABLE kill_switch_state IS 'Single-row table written synchronously before returning from kill-switch API handler';
 CREATE TABLE IF NOT EXISTS kill_switch_state (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     state TEXT NOT NULL DEFAULT 'INACTIVE' CHECK(state IN ('ACTIVE', 'INACTIVE')),
@@ -231,7 +235,6 @@ CREATE TABLE IF NOT EXISTS kill_switch_state (
 -- =============================================================================
 
 -- Single-row table read on startup to restore circuit breaker state
-COMMENT ON TABLE circuit_breaker_state IS 'Single-row table read on startup to restore circuit breaker state';
 CREATE TABLE IF NOT EXISTS circuit_breaker_state (
     id INTEGER PRIMARY KEY,
     state TEXT NOT NULL DEFAULT 'Active',
@@ -248,7 +251,6 @@ ON CONFLICT (id) DO NOTHING;
 -- =============================================================================
 
 -- Authorization for API access
-COMMENT ON TABLE admin_wallets IS 'Authorization for API access';
 CREATE TABLE IF NOT EXISTS admin_wallets (
     wallet_address TEXT PRIMARY KEY,
     role TEXT NOT NULL DEFAULT 'readonly' CHECK(role IN ('admin', 'operator', 'readonly')),
@@ -262,7 +264,6 @@ CREATE TABLE IF NOT EXISTS admin_wallets (
 -- =============================================================================
 
 -- For dynamic tip calculation (cold start persistence)
-COMMENT ON TABLE jito_tip_history IS 'For dynamic tip calculation (cold start persistence)';
 CREATE TABLE IF NOT EXISTS jito_tip_history (
     id BIGSERIAL PRIMARY KEY,
     tip_amount_sol NUMERIC(30) NOT NULL,
@@ -280,7 +281,6 @@ CREATE INDEX IF NOT EXISTS idx_jito_tip_created_brin ON jito_tip_history USING B
 -- =============================================================================
 
 -- Compare DB state vs on-chain state
-COMMENT ON TABLE reconciliation_log IS 'Compare DB state vs on-chain state';
 CREATE TABLE IF NOT EXISTS reconciliation_log (
     id BIGSERIAL PRIMARY KEY,
     trade_uuid TEXT NOT NULL,
@@ -304,7 +304,6 @@ CREATE INDEX IF NOT EXISTS idx_reconciliation_trade ON reconciliation_log (trade
 -- =============================================================================
 
 -- Backups tracking
-COMMENT ON TABLE backups IS 'Backups tracking';
 CREATE TABLE IF NOT EXISTS backups (
     id BIGSERIAL PRIMARY KEY,
     path TEXT NOT NULL,
@@ -319,7 +318,6 @@ CREATE TABLE IF NOT EXISTS backups (
 -- =============================================================================
 
 -- Historical liquidity data for backtesting and validation
-COMMENT ON TABLE historical_liquidity IS 'Historical liquidity data for backtesting and validation';
 CREATE TABLE IF NOT EXISTS historical_liquidity (
     id BIGSERIAL PRIMARY KEY,
     token_address TEXT NOT NULL,
@@ -340,7 +338,6 @@ CREATE INDEX IF NOT EXISTS idx_historical_liquidity_brin ON historical_liquidity
 -- =============================================================================
 
 -- Track webhook subscriptions and polling state
-COMMENT ON TABLE wallet_monitoring IS 'Track webhook subscriptions and polling state';
 CREATE TABLE IF NOT EXISTS wallet_monitoring (
     wallet_address TEXT PRIMARY KEY,
     helius_webhook_id TEXT,
@@ -375,7 +372,6 @@ CREATE TRIGGER wallet_monitoring_updated_at
 -- =============================================================================
 
 -- Position-level profit targets and stops
-COMMENT ON TABLE exit_targets IS 'Position-level profit targets and stops';
 CREATE TABLE IF NOT EXISTS exit_targets (
     id BIGSERIAL PRIMARY KEY,
     trade_uuid TEXT NOT NULL UNIQUE,
@@ -408,7 +404,6 @@ CREATE TRIGGER exit_targets_updated_at
 -- =============================================================================
 
 -- Multi-wallet signal tracking
-COMMENT ON TABLE signal_aggregation IS 'Multi-wallet signal tracking';
 CREATE TABLE IF NOT EXISTS signal_aggregation (
     id BIGSERIAL PRIMARY KEY,
     token_address TEXT NOT NULL,
@@ -432,7 +427,6 @@ CREATE INDEX IF NOT EXISTS idx_signal_aggregation_consensus ON signal_aggregatio
 -- =============================================================================
 
 -- Per-wallet copy trading metrics
-COMMENT ON TABLE wallet_copy_performance IS 'Per-wallet copy trading metrics';
 CREATE TABLE IF NOT EXISTS wallet_copy_performance (
     wallet_address TEXT PRIMARY KEY,
     copy_pnl_7d NUMERIC(30) DEFAULT '0.0',
@@ -452,7 +446,6 @@ CREATE INDEX IF NOT EXISTS idx_wallet_copy_performance_pnl ON wallet_copy_perfor
 -- =============================================================================
 
 -- Credit usage and rate tracking
-COMMENT ON TABLE rate_limit_metrics IS 'Credit usage and rate tracking';
 CREATE TABLE IF NOT EXISTS rate_limit_metrics (
     id BIGSERIAL PRIMARY KEY,
     metric_type TEXT NOT NULL,
@@ -469,7 +462,6 @@ CREATE INDEX IF NOT EXISTS idx_rate_limit_metrics_time ON rate_limit_metrics (ti
 -- =============================================================================
 
 -- Track webhook registration and health
-COMMENT ON TABLE webhook_lifecycle_audit IS 'Track webhook registration and health';
 CREATE TABLE IF NOT EXISTS webhook_lifecycle_audit (
     id BIGSERIAL PRIMARY KEY,
     wallet_address TEXT NOT NULL,
@@ -492,7 +484,6 @@ CREATE INDEX IF NOT EXISTS idx_webhook_lifecycle_audit_status ON webhook_lifecyc
 -- =============================================================================
 
 -- Track configuration changes for URL change detection
-COMMENT ON TABLE webhook_configuration IS 'Track configuration changes for URL change detection';
 CREATE TABLE IF NOT EXISTS webhook_configuration (
     id BIGSERIAL PRIMARY KEY,
     config_key TEXT NOT NULL UNIQUE,
@@ -506,7 +497,6 @@ CREATE TABLE IF NOT EXISTS webhook_configuration (
 -- =============================================================================
 
 -- WQS-to-PnL correlation for predictive power analysis
-COMMENT ON TABLE wqs_pnl_correlation IS 'WQS-to-PnL correlation for predictive power analysis';
 CREATE TABLE IF NOT EXISTS wqs_pnl_correlation (
     wallet_address TEXT PRIMARY KEY,
     wqs_score_at_promotion NUMERIC(10) NOT NULL,
