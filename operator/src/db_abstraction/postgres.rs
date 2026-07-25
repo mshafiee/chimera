@@ -2354,6 +2354,7 @@ impl Database for PostgresBackend {
             ON CONFLICT(wallet_address) DO UPDATE SET
                 helius_webhook_id = $2,
                 monitoring_enabled = $3,
+                rpc_polling_active = $3,
                 webhook_status = CASE
                     WHEN $2 IS NOT NULL THEN 'active'
                     ELSE 'orphaned'
