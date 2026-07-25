@@ -2242,6 +2242,29 @@ async fn main() -> anyhow::Result<()> {
         config.position_sizing.use_kelly_sizing
     );
 
+    // B1: Unified selection engine shared by both ingress paths (direct
+    // webhook + Helius monitoring). Built once with every capability the two
+    // handlers collectively need so both run the identical decision pipeline.
+    let selection_service = Arc::new(crate::engine::SelectionService::new(
+        db_pool.clone(),
+        token_parser.clone(),
+        Some(portfolio_heat.clone()),
+        Some(signal_aggregator.clone()),
+        Some(market_regime_detector.clone()),
+        helius_client.clone(),
+        Some(position_sizer.clone()),
+        crate::engine::SelectionConfig {
+            total_capital_sol: config.position_sizing.total_capital_sol,
+            max_position_sol: config.position_sizing.max_size_sol,
+            shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
+            spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
+            shield_percent: config.strategy.shield_percent,
+            spear_percent: config.strategy.spear_percent,
+            min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+            min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        },
+    ));
+
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
         engine: _engine_handle.clone(),
@@ -2260,6 +2283,7 @@ async fn main() -> anyhow::Result<()> {
         spear_percent: config.strategy.spear_percent,
         min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
         min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        selection: selection_service.clone(),
     });
 
     // Build HMAC secrets for webhook verification
@@ -2357,6 +2381,7 @@ async fn main() -> anyhow::Result<()> {
             .with_token_parser(token_parser.clone())
             .with_portfolio_heat(portfolio_heat.clone())
             .with_exit_detector(exit_detector.clone())
+            .with_selection(selection_service.clone())
     }) {
         Ok(monitoring_state) => {
             let monitoring_state_arc = Arc::new(monitoring_state);

@@ -66,6 +66,9 @@ pub struct MonitoringState {
     /// Prevents processing the same transaction delivered by multiple
     /// orphaned webhooks.
     pub processed_signatures: Arc<parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>>,
+    /// Unified selection engine (B1): shared BUY/SELL decision pipeline used
+    /// by both this monitoring path and the direct webhook handler.
+    pub selection: Option<Arc<crate::engine::SelectionService>>,
 }
 
 impl MonitoringState {
@@ -154,6 +157,7 @@ impl MonitoringState {
             processed_signatures: Arc::new(parking_lot::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            selection: None,
         })
     }
 
@@ -178,6 +182,12 @@ impl MonitoringState {
     /// Attach an exit detector (for shared state with polling task)
     pub fn with_exit_detector(mut self, ed: Arc<ExitDetector>) -> Self {
         self.exit_detector = ed;
+        self
+    }
+
+    /// Attach the unified selection engine (B1)
+    pub fn with_selection(mut self, s: Arc<crate::engine::SelectionService>) -> Self {
+        self.selection = Some(s);
         self
     }
 }

@@ -188,160 +188,51 @@ pub async fn helius_webhook_handler(
                         Action::Sell
                     };
 
-                    // Determine strategy based on wallet WQS.
-                    // High-WQS wallets (≥80) → Shield (conservative).
-                    // Medium-WQS wallets (70–79) → Spear.
-                    // Low-WQS wallets (<70) → Dropped entirely (hard WQS quality gate).
-                    let wallet_wqs = wallet
-                        .wqs_score
-                        .and_then(|s| s.to_f64())
-                        .unwrap_or(0.0);
-
-                    if direction == Action::Buy && wallet_wqs < 70.0 {
-                        tracing::info!(
-                            wallet = %wallet_address,
-                            wqs = wallet_wqs,
-                            "Skipping BUY signal for wallet with low WQS (<70.0) — rejecting low-quality copy trade"
-                        );
-                        continue;
-                    }
-
-                    let strategy = if wallet_wqs >= 80.0 {
-                        Strategy::Shield
-                    } else {
-                        Strategy::Spear
-                    };
-
+                    // B1: Unified decision pipeline — same SelectionService as the
+                    // direct webhook path. The copied wallet's swap amount is
+                    // telemetry only; PositionSizer governs all BUY sizes.
                     let target_token = if direction == Action::Buy {
                         swap.token_out.clone()
                     } else {
                         swap.token_in.clone()
                     };
 
-                    // Skip stablecoins and wrapped SOL for BUY signals.
-                    // These tokens cannot generate profit from price movement,
-                    // so every trade is a guaranteed loss from Jito tips + DEX fees.
-                    if direction == Action::Buy
-                        && crate::token::is_non_speculative(&target_token)
-                    {
-                        tracing::info!(
-                            wallet = %wallet_address,
-                            token = %target_token,
-                            "Skipping non-speculative token BUY (stablecoin/WSOL) — no profit potential"
-                        );
-                        continue;
-                    }
-
-                    // Skip pump.fun bonding-curve tokens for BUY signals.
-                    // These tokens have $0 DEX liquidity — they only trade on pump.fun's
-                    // internal AMM. Copy-trading them is a guaranteed loss from Jito tips.
-                    if direction == Action::Buy
-                        && crate::token::is_pumpfun_token(&target_token)
-                    {
-                        tracing::info!(
-                            wallet = %wallet_address,
-                            token = %target_token,
-                            "Skipping pump.fun bonding-curve token BUY — no DEX exit liquidity"
-                        );
-                        continue;
-                    }
-
-                    // FIX 1: Token fast_check before queuing (BUY only)
-                    if direction == Action::Buy {
-                        if let Some(ref tp) = state.token_parser {
-                            match tp.fast_check(&target_token, strategy).await {
-                                Ok(result) if !result.safe => {
-                                    let reason = result
-                                        .rejection_reason
-                                        .unwrap_or_else(|| "Token failed safety check".to_string());
-                                    tracing::warn!(
-                                        wallet = %wallet_address,
-                                        token = %target_token,
-                                        reason = %reason,
-                                        "Helius webhook token rejected by fast-path safety check"
-                                    );
-                                    continue; // Skip this event, but continue processing others
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        token = %target_token,
-                                        error = %e,
-                                        "Helius webhook token fast-check failed; proceeding to slow path"
-                                    );
-                                }
-                                Ok(_) => {} // safe — continue
-                            }
+                    let selection = match state.selection.as_ref() {
+                        Some(s) => s,
+                        None => {
+                            tracing::error!(
+                                wallet = %wallet_address,
+                                "SelectionService not configured — cannot process signal"
+                            );
+                            continue;
                         }
-
-                        // FIX 1: Check portfolio heat before queuing BUY signals
-                        if let Some(ref ph) = state.portfolio_heat {
-                            match ph.can_open_position(swap.amount_in).await {
-                                Ok(false) => {
-                                    tracing::warn!(
-                                        wallet = %wallet_address,
-                                        token = %target_token,
-                                        "Helius webhook BUY rejected: portfolio heat limit reached"
-                                    );
-                                    continue; // Skip this event, but continue processing others
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Portfolio heat check failed for Helius webhook; allowing"
-                                    );
-                                }
-                                Ok(true) => {} // heat OK — continue
-                            }
-                        }
-                    }
-
-                    // For SELL (exit) signals, only proceed if we hold an active
-                    // position for this token. Copy-trading: we can only exit
-                    // positions we actually opened. Without this check, every SELL
-                    // from the copied wallet creates a FAILED trade ("No active
-                    // position for SELL") that pollutes the DLQ and retry loop.
-                    if direction == Action::Sell {
-                        match state
-                            .db
-                            .get_active_position_by_wallet_token(&wallet_address, &target_token)
-                            .await
-                        {
-                            Ok(Some(_)) => {} // have position — proceed to close it
-                            Ok(None) => {
-                                tracing::debug!(
-                                    wallet = %wallet_address,
-                                    token = %target_token,
-                                    "Skipping SELL signal: no active position to close"
-                                );
-                                continue;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    wallet = %wallet_address,
-                                    token = %target_token,
-                                    error = %e,
-                                    "Position lookup failed for SELL; skipping to avoid noise FAILED trade"
-                                );
-                                continue;
-                            }
-                        }
-                    }
-
-                    // Compute trade amount: use bot's configured position sizing,
-                    // not the copied wallet's swap amount.
-                    let trade_amount_sol = if direction == Action::Buy {
-                        let max_pos = state.config.strategy.max_position_sol;
-                        let min_pos = state.config.strategy.min_position_sol;
-                        if swap.amount_in > max_pos {
-                            max_pos
-                        } else if swap.amount_in < min_pos {
-                            min_pos
-                        } else {
-                            swap.amount_in
-                        }
-                    } else {
-                        swap.amount_in
                     };
+
+                    let req = crate::engine::SelectionRequest {
+                        wallet_address: wallet_address.clone(),
+                        token_address: target_token.clone(),
+                        action: direction,
+                        source_amount_sol: swap.amount_in,
+                        ingress: crate::engine::Ingress::Helius,
+                        source_slot: None, // ParsedSwap doesn't carry slot; future: parse from tx
+                        exit_fraction: None,
+                    };
+                    let decision = selection.decide(&req).await;
+
+                    if !decision.admitted {
+                        tracing::info!(
+                            wallet = %wallet_address,
+                            token = %target_token,
+                            code = decision.rejection_code.unwrap_or("REJECTED"),
+                            reason = decision.rejection_reason.as_deref().unwrap_or("rejected"),
+                            "Monitoring signal rejected by selection service"
+                        );
+                        continue;
+                    }
+
+                    let trade_amount_sol =
+                        decision.size_sol.unwrap_or(swap.amount_in);
+                    let strategy = decision.strategy.unwrap_or(Strategy::Spear);
 
                     // Generate a time-bucketed trade UUID for monitoring signals.
                     // Unlike webhook signals (which use a pure hash for permanent dedup),
@@ -434,8 +325,8 @@ pub async fn helius_webhook_handler(
                         }
                     }
 
-                    // Queue signal with wallet WQS
-                    let wallet_wqs = wallet.wqs_score.map(|s| s.to_f64().unwrap_or(0.0));
+                    // Queue signal with the real WQS from the decision (B1).
+                    let wallet_wqs = decision.wqs;
                     let signal_uuid = signal.trade_uuid.clone();
                     if let Err(e) = state.engine.queue_signal(signal, wallet_wqs).await {
                         tracing::error!(

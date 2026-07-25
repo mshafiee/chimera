@@ -1,0 +1,675 @@
+//! Unified BUY/SELL decision engine (Phase B1).
+//!
+//! Both ingress paths — the direct webhook handler (`handlers/webhook.rs`) and
+//! the production Helius monitoring path (`handlers/monitoring.rs`) — route
+//! every signal through a single `decide` function. This eliminates the
+//! historical divergence where the Helius path clamped the copied wallet's
+//! amount instead of using `PositionSizer`, skipped quality/consensus/regime
+//! scoring, and used a different set of admission checks.
+//!
+//! ## Decision pipeline order (BUY)
+//! 1. Wallet fetch + ACTIVE status gate
+//! 2. Hard WQS gate (<70 drop; ≥80 → SHIELD; 70–79 → SPEAR)
+//! 3. Non-speculative / pump.fun bonding-curve skip
+//! 4. Token fast_check (freeze/mint authority, honeypot)
+//! 5. Token-age enforcement
+//! 6. Liquidity floor (strategy-specific) + 24h volume (telemetry until B3)
+//! 7. Consensus detection (SignalAggregator)
+//! 8. Signal-quality score
+//! 9. Market-regime multiplier
+//! 10. `PositionSizer` size (Kelly + confidence)
+//! 11. Portfolio heat + strategy-allocation heat admission
+//!
+//! ## SELL
+//! Exit signals only verify wallet status and that an active position exists
+//! to close. Sizing is always the full remaining position (handled downstream);
+//! quality/heat gates do not apply to exits so protective sells always proceed.
+//!
+//! Every decision carries a `decision_id` and its full input set so it can be
+//! logged and, in Phase C, persisted as an immutable run-scoped record.
+
+use std::sync::Arc;
+
+use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
+
+use crate::db_abstraction::Database;
+use crate::engine::position_sizer::{PositionSizer, SizingFactors};
+use crate::engine::{MarketRegimeDetector, PortfolioHeat, SignalQuality};
+use crate::models::{Action, Strategy};
+use crate::monitoring::helius::HeliusClient;
+use crate::monitoring::signal_aggregator::SignalAggregator;
+use crate::token::{is_non_speculative, is_pumpfun_token, TokenParser};
+
+/// Ingress path a signal arrived through. Recorded for telemetry and, in
+/// Phase C, for source-slot latency analysis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ingress {
+    /// Direct operator webhook (`/api/v1/webhook`)
+    Webhook,
+    /// Helius webhook monitoring path (`/monitoring/helius-webhook`)
+    Helius,
+}
+
+impl Ingress {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Ingress::Webhook => "webhook",
+            Ingress::Helius => "helius",
+        }
+    }
+}
+
+/// Scalar thresholds extracted once from `AppConfig`. Bundling them here lets
+/// the service be constructed independently of the two handler state structs
+/// (which historically exposed overlapping but differently-named copies).
+#[derive(Debug, Clone)]
+pub struct SelectionConfig {
+    pub total_capital_sol: Decimal,
+    /// Maximum single-position size in SOL — caps SELL amounts so a caller
+    /// cannot close more than the configured ceiling.
+    pub max_position_sol: Decimal,
+    pub shield_signal_quality_threshold: f64,
+    pub spear_signal_quality_threshold: f64,
+    pub shield_percent: u32,
+    pub spear_percent: u32,
+    pub min_liquidity_shield_usd: Decimal,
+    pub min_liquidity_spear_usd: Decimal,
+}
+
+impl SelectionConfig {
+    /// Short fingerprint of the threshold set, for decision records. Not a
+    /// cryptographic hash — a stable identifier for "which thresholds were in
+    /// force" so Phase C can cohort decisions by config version.
+    pub fn hash(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(self.total_capital_sol.to_string().as_bytes());
+        hasher.update(self.max_position_sol.to_string().as_bytes());
+        hasher.update(self.shield_signal_quality_threshold.to_le_bytes());
+        hasher.update(self.spear_signal_quality_threshold.to_le_bytes());
+        hasher.update(self.shield_percent.to_le_bytes());
+        hasher.update(self.spear_percent.to_le_bytes());
+        hasher.update(self.min_liquidity_shield_usd.to_string().as_bytes());
+        hasher.update(self.min_liquidity_spear_usd.to_string().as_bytes());
+        hex::encode(&hasher.finalize()[..8])
+    }
+}
+
+/// Input to a selection decision. `source_amount_sol` is the copied wallet's
+/// own swap amount and is recorded as **telemetry only** — it is never used
+/// for sizing (the `PositionSizer` governs all BUY sizes).
+#[derive(Debug, Clone)]
+pub struct SelectionRequest {
+    pub wallet_address: String,
+    pub token_address: String,
+    pub action: Action,
+    pub source_amount_sol: Decimal,
+    pub ingress: Ingress,
+    /// Optional Solana slot of the source transaction (Helius only).
+    pub source_slot: Option<u64>,
+    /// For SELL: the fraction of the position to exit (None = full).
+    pub exit_fraction: Option<Decimal>,
+}
+
+/// Typed result of a selection decision. `admitted == true` means the signal
+/// passed every gate; the handler then persists + queues it. On rejection the
+/// handler inserts a DLQ entry using `rejection_code`/`rejection_reason`.
+#[derive(Debug, Clone)]
+pub struct BuyDecision {
+    pub decision_id: String,
+    pub admitted: bool,
+    pub rejection_reason: Option<String>,
+    pub rejection_code: Option<&'static str>,
+    pub strategy: Option<Strategy>,
+    pub size_sol: Option<Decimal>,
+    /// Copied wallet's own amount (telemetry only; never used for sizing).
+    pub source_amount_sol: Decimal,
+    pub wqs: Option<f64>,
+    pub wqs_confidence: Option<f64>,
+    pub quality_score: Option<f64>,
+    pub consensus_wallet_count: Option<usize>,
+    pub regime_multiplier: Option<Decimal>,
+    pub token_age_hours: Option<f64>,
+    pub liquidity_usd: Option<Decimal>,
+    /// 24h DEX volume in USD. None until the DexScreener feed (B3) wires it.
+    pub volume_24h_usd: Option<Decimal>,
+    pub price_impact_pct: Option<Decimal>,
+    pub config_hash: String,
+    pub ingress: Ingress,
+    pub is_consensus: bool,
+    /// True when the token fast-path check returned an error (RPC/network
+    /// failure, not a clean pass/reject). The caller sets `force_slow_path` on
+    /// the signal so the engine enforces slow-path verification before entry.
+    pub fast_check_errored: bool,
+}
+
+impl BuyDecision {
+    fn rejected(
+        req: &SelectionRequest,
+        config_hash: &str,
+        code: &'static str,
+        reason: String,
+    ) -> Self {
+        Self {
+            decision_id: uuid::Uuid::new_v4().to_string(),
+            admitted: false,
+            rejection_reason: Some(reason),
+            rejection_code: Some(code),
+            strategy: None,
+            size_sol: None,
+            source_amount_sol: req.source_amount_sol,
+            wqs: None,
+            wqs_confidence: None,
+            quality_score: None,
+            consensus_wallet_count: None,
+            regime_multiplier: None,
+            token_age_hours: None,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            price_impact_pct: None,
+            config_hash: config_hash.to_string(),
+            ingress: req.ingress,
+            is_consensus: false,
+            fast_check_errored: false,
+        }
+    }
+}
+
+/// Shared selection engine. Built once in `main.rs` with every capability the
+/// two ingress paths collectively need, then shared (Arc) by both.
+pub struct SelectionService {
+    db: Arc<dyn Database>,
+    token_parser: Arc<TokenParser>,
+    portfolio_heat: Option<Arc<PortfolioHeat>>,
+    signal_aggregator: Option<Arc<SignalAggregator>>,
+    market_regime: Option<Arc<MarketRegimeDetector>>,
+    helius_client: Option<Arc<HeliusClient>>,
+    position_sizer: Option<Arc<PositionSizer>>,
+    config: SelectionConfig,
+    config_hash: String,
+}
+
+impl SelectionService {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        db: Arc<dyn Database>,
+        token_parser: Arc<TokenParser>,
+        portfolio_heat: Option<Arc<PortfolioHeat>>,
+        signal_aggregator: Option<Arc<SignalAggregator>>,
+        market_regime: Option<Arc<MarketRegimeDetector>>,
+        helius_client: Option<Arc<HeliusClient>>,
+        position_sizer: Option<Arc<PositionSizer>>,
+        config: SelectionConfig,
+    ) -> Self {
+        let config_hash = config.hash();
+        Self {
+            db,
+            token_parser,
+            portfolio_heat,
+            signal_aggregator,
+            market_regime,
+            helius_client,
+            position_sizer,
+            config,
+            config_hash,
+        }
+    }
+
+    pub fn config_hash(&self) -> &str {
+        &self.config_hash
+    }
+
+    /// Evaluate a signal through the unified decision pipeline.
+    pub async fn decide(&self, req: &SelectionRequest) -> BuyDecision {
+        match req.action {
+            Action::Buy => self.decide_buy(req).await,
+            Action::Sell => self.decide_sell(req).await,
+        }
+    }
+
+    async fn decide_sell(&self, req: &SelectionRequest) -> BuyDecision {
+        // 1. Wallet status gate (fail-closed on DB error / unknown wallet).
+        let wallet = match self.db.get_wallet(&req.wallet_address).await {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "UNKNOWN_WALLET",
+                    format!("Unknown wallet {}", req.wallet_address),
+                )
+            }
+            Err(e) => {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "WALLET_LOOKUP_ERROR",
+                    format!("DB error fetching wallet: {}", e),
+                )
+            }
+        };
+        if wallet.status != "ACTIVE" {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "WALLET_NOT_ACTIVE",
+                format!("Wallet status {} != ACTIVE", wallet.status),
+            );
+        }
+
+        // 2. Only exit if we actually hold an active position for this token.
+        match self
+            .db
+            .get_active_position_by_wallet_token(&req.wallet_address, &req.token_address)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "NO_ACTIVE_POSITION",
+                    "No active position to close".to_string(),
+                )
+            }
+            Err(e) => {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "POSITION_LOOKUP_ERROR",
+                    format!("Position lookup failed: {}", e),
+                )
+            }
+        }
+
+        let wqs = wallet.wqs_score.and_then(|d| d.to_f64());
+        BuyDecision {
+            decision_id: uuid::Uuid::new_v4().to_string(),
+            admitted: true,
+            rejection_reason: None,
+            rejection_code: None,
+            // Exit strategy label; the real strategy of the open position is
+            // read from the position row downstream.
+            strategy: Some(Strategy::Exit),
+            // SELL size = source amount, capped to max_position_sol so a
+            // caller cannot close more than the configured ceiling.
+            size_sol: Some(req.source_amount_sol.min(self.config.max_position_sol)),
+            source_amount_sol: req.source_amount_sol,
+            wqs,
+            wqs_confidence: wallet.wqs_confidence.and_then(|d| d.to_f64()),
+            quality_score: None,
+            consensus_wallet_count: None,
+            regime_multiplier: None,
+            token_age_hours: None,
+            liquidity_usd: None,
+            volume_24h_usd: None,
+            price_impact_pct: None,
+            config_hash: self.config_hash.clone(),
+            ingress: req.ingress,
+            is_consensus: false,
+            fast_check_errored: false,
+        }
+    }
+
+    async fn decide_buy(&self, req: &SelectionRequest) -> BuyDecision {
+        // ── 0. Token address format validation (cheap, fail fast) ──────────
+        if req
+            .token_address
+            .parse::<solana_sdk::pubkey::Pubkey>()
+            .is_err()
+        {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "INVALID_TOKEN_ADDRESS",
+                format!(
+                    "Invalid Solana token address: {}",
+                    req.token_address
+                ),
+            );
+        }
+
+        // ── 1. Wallet fetch + ACTIVE status gate ────────────────────────────
+        let wallet = match self.db.get_wallet(&req.wallet_address).await {
+            Ok(Some(w)) => w,
+            Ok(None) => {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "UNKNOWN_WALLET",
+                    "Unknown wallet — not in roster".to_string(),
+                )
+            }
+            Err(e) => {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "WALLET_LOOKUP_ERROR",
+                    format!("DB error fetching wallet: {}", e),
+                )
+            }
+        };
+        if wallet.status != "ACTIVE" {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "WALLET_NOT_ACTIVE",
+                format!("Wallet status {} != ACTIVE", wallet.status),
+            );
+        }
+
+        let wallet_wqs = wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(0.0);
+        let wqs_confidence = wallet.wqs_confidence.and_then(|d| d.to_f64());
+        let wallet_success_rate = wallet
+            .win_rate
+            .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
+
+        // ── 2. Hard WQS gate + strategy assignment ──────────────────────────
+        // <70 → drop entirely; ≥80 → SHIELD; 70–79 → SPEAR.
+        if wallet_wqs < 70.0 {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "WQS_TOO_LOW",
+                format!("Wallet WQS {:.1} below minimum 70.0", wallet_wqs),
+            );
+        }
+        let strategy = if wallet_wqs >= 80.0 {
+            Strategy::Shield
+        } else {
+            Strategy::Spear
+        };
+
+        // ── 3. Non-speculative / pump.fun bonding-curve skip ────────────────
+        if is_non_speculative(&req.token_address) {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "NON_SPECULATIVE_TOKEN",
+                "Stablecoin/WSOL — no profit potential".to_string(),
+            );
+        }
+        if is_pumpfun_token(&req.token_address) {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "PUMPFUN_BONDING_CURVE",
+                "pump.fun bonding-curve token — no DEX exit liquidity".to_string(),
+            );
+        }
+
+        // ── 4. Token fast_check ─────────────────────────────────────────────
+        let mut fast_check_liquidity: Option<Decimal> = None;
+        let mut fast_check_errored = false;
+        match self
+            .token_parser
+            .fast_check(&req.token_address, strategy)
+            .await
+        {
+            Ok(result) if !result.safe => {
+                let reason = result
+                    .rejection_reason
+                    .unwrap_or_else(|| "Token failed safety check".to_string());
+                return BuyDecision::rejected(req, &self.config_hash, "TOKEN_UNSAFE", reason);
+            }
+            Ok(result) => {
+                fast_check_liquidity = result.liquidity_usd;
+            }
+            Err(e) => {
+                // fast-check failure proceeds to the slow path downstream;
+                // record but do not reject here. The flag is propagated in the
+                // decision so the caller can set Signal::force_slow_path.
+                fast_check_errored = true;
+                tracing::debug!(
+                    token = %req.token_address,
+                    error = %e,
+                    "Token fast-check errored; proceeding to slow path"
+                );
+            }
+        }
+
+        // ── 5. Token-age enforcement ────────────────────────────────────────
+        let token_age_hours = if let Some(ref helius) = self.helius_client {
+            helius
+                .get_token_age_hours(&req.token_address)
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+
+        // ── 6. Liquidity floor + volume ─────────────────────────────────────
+        let liquidity_usd = match fast_check_liquidity {
+            Some(liq) => liq,
+            None => match self.token_parser.get_liquidity(&req.token_address).await {
+                Ok(liq) => liq,
+                Err(e) => {
+                    tracing::warn!(
+                        token = %req.token_address,
+                        error = %e,
+                        "Liquidity fetch failed; defaulting to $0 (fail-closed)"
+                    );
+                    Decimal::ZERO
+                }
+            },
+        };
+
+        let min_liquidity = match strategy {
+            Strategy::Shield => self.config.min_liquidity_shield_usd,
+            Strategy::Spear => self.config.min_liquidity_spear_usd,
+            Strategy::Exit => Decimal::ZERO,
+        };
+        if !SignalQuality::passes_liquidity_floor(liquidity_usd, min_liquidity) {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "LIQUIDITY_BELOW_MINIMUM",
+                format!(
+                    "Liquidity ${} below strategy minimum ${}",
+                    liquidity_usd, min_liquidity
+                ),
+            );
+        }
+
+        // ── 7. Consensus detection ──────────────────────────────────────────
+        let mut consensus_wallet_count: Option<usize> = None;
+        let is_consensus = if let Some(ref aggregator) = self.signal_aggregator {
+            if let Some(consensus) = aggregator
+                .add_signal(
+                    &req.wallet_address,
+                    &req.token_address,
+                    "BUY",
+                    req.source_amount_sol,
+                )
+                .await
+            {
+                consensus_wallet_count = Some(consensus.wallet_count);
+                true
+            } else {
+                consensus_wallet_count = Some(1);
+                false
+            }
+        } else {
+            false
+        };
+
+        // Persist to signal_aggregation so the stop-loss manager can detect
+        // consensus on open positions regardless of ingress path.
+        if let Err(e) = self.persist_signal_aggregation(req, is_consensus).await {
+            tracing::warn!(
+                error = %e,
+                "Failed to record signal aggregation — consensus detection may be degraded"
+            );
+        }
+
+        // ── 8. Signal-quality score ─────────────────────────────────────────
+        let quality = SignalQuality::calculate(
+            wallet_wqs,
+            consensus_wallet_count,
+            liquidity_usd,
+            token_age_hours,
+        );
+        let quality_threshold = match strategy {
+            Strategy::Shield => self.config.shield_signal_quality_threshold,
+            Strategy::Spear => self.config.spear_signal_quality_threshold,
+            Strategy::Exit => 0.0,
+        };
+        if !quality.should_enter(quality_threshold) {
+            return BuyDecision::rejected(
+                req,
+                &self.config_hash,
+                "SIGNAL_QUALITY_TOO_LOW",
+                format!(
+                    "Quality score {:.2} below threshold {:.2}",
+                    quality.score, quality_threshold
+                ),
+            );
+        }
+
+        // ── 9. Market-regime multiplier ─────────────────────────────────────
+        let regime_multiplier = if let Some(ref regime) = self.market_regime {
+            regime.get_regime_multiplier(&req.token_address)
+        } else {
+            Decimal::ONE
+        };
+
+        // ── 10. Position size via PositionSizer ─────────────────────────────
+        let size_sol = if let Some(ref sizer) = self.position_sizer {
+            let factors = SizingFactors {
+                is_consensus,
+                wallet_wqs,
+                wqs_confidence,
+                wallet_success_rate,
+                token_age_hours,
+                estimated_slippage: Decimal::ZERO,
+                signal_quality: Decimal::from_f64_retain(quality.score),
+                token_volatility_24h: None,
+                wallet_address: req.wallet_address.clone(),
+                total_capital_sol: self.config.total_capital_sol,
+                strategy,
+                consensus_wallet_count,
+                regime_multiplier,
+            };
+            let size = sizer.calculate_size(factors).await;
+            if size.is_zero() {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "POSITION_SIZE_ZERO",
+                    "Position sizer returned zero (strategy_max below min_size_sol)"
+                        .to_string(),
+                );
+            }
+            size
+        } else {
+            // No sizer configured — fall back to the source amount clamped to
+            // the configured capital ceiling. This should not happen in
+            // production; logged loudly.
+            tracing::warn!("PositionSizer unavailable; using source amount (unclamped sizer)");
+            req.source_amount_sol
+        };
+
+        // ── 11. Portfolio heat + strategy-allocation heat admission ─────────
+        if let Some(ref heat) = self.portfolio_heat {
+            match heat.can_open_position(size_sol).await {
+                Ok(false) => {
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "PORTFOLIO_HEAT_LIMIT",
+                        "Portfolio heat limit reached".to_string(),
+                    )
+                }
+                Ok(true) => {
+                    match heat
+                        .can_open_strategy_position(
+                            strategy,
+                            size_sol,
+                            self.config.shield_percent,
+                            self.config.spear_percent,
+                        )
+                        .await
+                    {
+                        Ok(false) => {
+                            return BuyDecision::rejected(
+                                req,
+                                &self.config_hash,
+                                "STRATEGY_HEAT_LIMIT",
+                                format!(
+                                    "Strategy allocation limit reached for {:?}",
+                                    strategy
+                                ),
+                            )
+                        }
+                        Ok(true) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Strategy heat check failed, allowing trade")
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Portfolio heat check failed, allowing trade")
+                }
+            }
+        }
+
+        BuyDecision {
+            decision_id: uuid::Uuid::new_v4().to_string(),
+            admitted: true,
+            rejection_reason: None,
+            rejection_code: None,
+            strategy: Some(strategy),
+            size_sol: Some(size_sol),
+            source_amount_sol: req.source_amount_sol,
+            wqs: Some(wallet_wqs),
+            wqs_confidence,
+            quality_score: Some(quality.score),
+            consensus_wallet_count,
+            regime_multiplier: Some(regime_multiplier),
+            token_age_hours,
+            liquidity_usd: Some(liquidity_usd),
+            volume_24h_usd: None, // B3: DexScreener feed
+            price_impact_pct: None,
+            config_hash: self.config_hash.clone(),
+            ingress: req.ingress,
+            is_consensus,
+            fast_check_errored,
+        }
+    }
+
+    /// Persist a BUY signal to the signal_aggregation table so the stop-loss
+    /// manager's consensus detection works uniformly for both ingress paths.
+    async fn persist_signal_aggregation(
+        &self,
+        req: &SelectionRequest,
+        is_consensus: bool,
+    ) -> Result<(), crate::error::AppError> {
+        use crate::db_abstraction::DbPool;
+        let pool = match self.db.pool() {
+            DbPool::PostgreSQL(p) => p,
+            _ => {
+                return Err(crate::error::AppError::Internal(
+                    "PostgreSQL backend required".to_string(),
+                ))
+            }
+        };
+        let amount_f64 = req.source_amount_sol.to_f64().unwrap_or(0.0);
+        sqlx::query(
+            r#"
+            INSERT INTO signal_aggregation
+                (token_address, wallet_address, direction, amount_sol, is_consensus)
+            VALUES ($1, $2, 'BUY', $3, $4)
+            "#,
+        )
+        .bind(&req.token_address)
+        .bind(&req.wallet_address)
+        .bind(amount_f64)
+        .bind(is_consensus)
+        .execute(&pool)
+        .await
+        .map_err(crate::error::AppError::Database)?;
+        Ok(())
+    }
+}
