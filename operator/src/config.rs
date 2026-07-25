@@ -1106,13 +1106,13 @@ pub struct MonitoringConfig {
     /// Enforce mode for Helius webhook auth header.
     /// `false` (default) = dry-run / fail-open: log `auth_ok` / `auth_mismatch`
     /// but always accept.  `true` = reject non-matching requests with HTTP 401.
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub helius_auth_enforce: bool,
     /// Enforce mode for RPC signature verification.
     /// `false` (default) = dry-run / fail-open: log `rpc_verify_ok` /
     /// `rpc_verify_failed` but always accept.  `true` = drop events whose
     /// on-chain deltas do not match the webhook claim.
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub rpc_verify_enforce: bool,
 }
 
@@ -1256,8 +1256,8 @@ impl Default for MonitoringConfig {
             websocket_health_timeout_secs: default_websocket_health_timeout(),
             websocket_commitment: default_websocket_commitment(),
             helius_webhook_auth_header: None,
-            helius_auth_enforce: false,
-            rpc_verify_enforce: false,
+            helius_auth_enforce: true,
+            rpc_verify_enforce: true,
         }
     }
 }
