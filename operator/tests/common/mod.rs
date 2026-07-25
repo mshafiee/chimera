@@ -55,9 +55,10 @@ pub async fn create_test_pg_db() -> (Arc<dyn Database>, TempDir) {
 
     admin_pool.close().await;
 
-    // Connect to the new test database
+    // Connect to the NEW test database (not the original TEST_DATABASE_URL,
+    // which would cause concurrent tests to share a single database).
     let test_db_url = format!("{}/{}", base_url, db_name);
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
+    let config = DatabaseConfig::postgres(test_db_url);
     let db = create_database(&config).await.unwrap();
     db.run_migrations().await.unwrap();
 

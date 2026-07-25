@@ -15,9 +15,7 @@
 //! 5. Atomic portfolio admission: concurrent same-token opens leave exactly
 //!    one ACTIVE position.
 
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool, InsertTrade,
-};
+use chimera_operator::db_abstraction::{Database, InsertTrade};
 use rust_decimal::Decimal;
 use sqlx::Pool;
 use sqlx::Postgres;
@@ -26,20 +24,11 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    crate::common::pg_pool(db)
 }
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(
-        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"),
-    );
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+    crate::common::create_test_pg_db().await
 }
 
 fn dec(s: &str) -> Decimal {

@@ -1,13 +1,14 @@
 //! Reconciliation Tests
 //!
-//! Tests the daily reconciliation process:
-//! - On-chain vs DB state comparison
-//! - Auto-resolution of discrepancies
-//! - Epsilon tolerance for dust amounts
-//! - Reconciliation log entries
+//! Tests the daily reconciliation process against the real PostgreSQL schema and the
+//! real [`run_reconciliation`] runner:
+//! - On-chain vs DB state comparison (signature-based)
+//! - Auto-resolution of *confirmed exits* (the only auto-resolution the runner does)
+//! - Reconciliation log entries (real `discrepancy` kinds)
+//! - Stuck-position recovery via the RPC-free `get_stuck_positions` query
 //!
-//! The `runner_*` tests exercise the real [`run_reconciliation`] runner against a
-//! full-schema SQLite database using a stub on-chain checker.
+//! The `runner_*` tests exercise the real [`run_reconciliation`] runner against an
+//! isolated PostgreSQL database using a stub on-chain checker.
 
 mod common;
 
@@ -21,6 +22,8 @@ use chimera_operator::engine::reconciliation::{
 };
 use chimera_operator::metrics::MetricsState;
 use rust_decimal::Decimal;
+use sqlx::Pool;
+use sqlx::Postgres;
 use std::sync::Arc;
 
 /// Stub on-chain checker: signatures in `found` → Found, in `not_found` → NotFound,
@@ -75,6 +78,24 @@ async fn seed_position(db: &Arc<dyn Database>, uuid: &str, entry_sig: &str) {
     .unwrap();
 }
 
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
+    common::pg_pool(db)
+}
+
+/// Age `opened_at` past the entry-finalization grace window so a missing entry becomes
+/// actionable. Binds a `DateTime<Utc>` (never an RFC3339 string — `opened_at` is
+/// `TIMESTAMPTZ`).
+async fn age_opened_at(db: &Arc<dyn Database>, uuid: &str, seconds_ago: i64) {
+    let pool = pg_pool(db);
+    let old = chrono::Utc::now() - chrono::Duration::seconds(seconds_ago);
+    sqlx::query("UPDATE positions SET opened_at = $1 WHERE trade_uuid = $2")
+        .bind(old)
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn runner_logs_confirmed_entry_for_active_position() {
     let (db, _temp) = common::create_test_db().await;
@@ -107,14 +128,7 @@ async fn runner_flags_missing_entry_transaction() {
     seed_position(&db, "uuid-missing", "entry-sig-missing").await;
 
     // Age past the entry-finalization grace window so a missing entry is actionable.
-    let pool = common::pg_pool(&db);
-    let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
-    sqlx::query("UPDATE positions SET opened_at = ? WHERE trade_uuid = ?")
-        .bind(old)
-        .bind("uuid-missing")
-        .execute(&pool)
-        .await
-        .unwrap();
+    age_opened_at(&db, "uuid-missing", 120).await;
 
     let checker = StubChecker {
         found: vec![],
@@ -172,14 +186,7 @@ async fn runner_auto_resolves_confirmed_exit() {
     .unwrap();
 
     // Age the position past the confirmation grace window so the exit is checked.
-    let pool = common::pg_pool(&db);
-    let old = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
-    sqlx::query("UPDATE positions SET opened_at = ? WHERE trade_uuid = ?")
-        .bind(old)
-        .bind(uuid)
-        .execute(&pool)
-        .await
-        .unwrap();
+    age_opened_at(&db, uuid, 120).await;
 
     let checker = StubChecker {
         found: vec![
@@ -239,129 +246,120 @@ async fn runner_treats_missing_exit_as_pending() {
     assert!(exiting.iter().any(|p| p.trade_uuid == uuid));
 }
 
+// =============================================================================
+// Scenario tests — real schema, real API, isolated DBs.
+//
+// These pin the *actual* reconciliation behavior. The runner is signature-based and
+// amount-agnostic: it flags a `MISSING_TX`/`TX_CHECK_ERROR` entry discrepancy and
+// auto-resolves only *confirmed exits*. It does NOT implement amount/epsilon
+// auto-resolution or auto-`FAILED` on a missing entry (those phantom behaviors are
+// out of scope here — see the plan's "Consequence" note).
+// =============================================================================
+
 #[cfg(test)]
 mod tests {
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-    use sqlx::Postgres;
-    use std::str::FromStr;
-    use tempfile::TempDir;
+    use super::common::{create_test_db, pg_pool};
+    use super::{metrics, seed_position, StubChecker};
+    use chimera_operator::db_abstraction::types::UpdatePosition;
+    use chimera_operator::db_abstraction::Database;
+    use chimera_operator::engine::reconciliation::run_reconciliation;
+    use rust_decimal::Decimal;
+    use std::sync::Arc;
 
-    async fn create_test_db() -> (sqlx::Pool<Postgres>, TempDir) {
-        let temp_dir = TempDir::new().unwrap();
-        let db_url = std::env::var("TEST_DATABASE_URL")
-            .expect("TEST_DATABASE_URL must be set for reconciliation tests");
-
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&db_url)
-            .await
-            .unwrap();
-
-        // Create reconciliation schema
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS positions (
-                id SERIAL PRIMARY KEY,
-                trade_uuid VARCHAR UNIQUE,
-                entry_tx_signature TEXT,
-                exit_tx_signature TEXT,
-                entry_amount_sol REAL,
-                state TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
+    /// Seed an `EXITING` position (entry + exit confirmed on the DB side) for the
+    /// stuck-position recovery tests.
+    async fn seed_exiting(db: &Arc<dyn Database>, uuid: &str, entry_sig: &str, exit_sig: &str) {
+        seed_position(db, uuid, entry_sig).await;
+        db.update_position(&UpdatePosition {
+            trade_uuid: uuid.to_string(),
+            current_price: Some(Decimal::from(20)),
+            unrealized_pnl_sol: None,
+            unrealized_pnl_percent: None,
+            state: Some("EXITING".to_string()),
+            exit_price: Some(Decimal::from(20)),
+            exit_tx_signature: Some(exit_sig.to_string()),
+            realized_pnl_sol: None,
+            realized_pnl_usd: None,
+        })
         .await
         .unwrap();
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS reconciliation_log (
-                id SERIAL PRIMARY KEY,
-                trade_uuid TEXT,
-                discrepancy_type TEXT,
-                db_value TEXT,
-                on_chain_value TEXT,
-                resolved INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        (pool, temp_dir)
     }
 
+    /// Plant a controlled `last_updated` on a position. The `positions_updated_at`
+    /// BEFORE-UPDATE trigger force-resets `last_updated = CURRENT_TIMESTAMP` on every
+    /// UPDATE, so it must be disabled around the timestamp write (then re-enabled).
+    async fn set_last_updated(db: &Arc<dyn Database>, uuid: &str, seconds_ago: i64) {
+        let pool = pg_pool(db);
+        sqlx::query("ALTER TABLE positions DISABLE TRIGGER positions_updated_at")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let ts = chrono::Utc::now() - chrono::Duration::seconds(seconds_ago);
+        sqlx::query("UPDATE positions SET last_updated = $1 WHERE trade_uuid = $2")
+            .bind(ts)
+            .bind(uuid)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("ALTER TABLE positions ENABLE TRIGGER positions_updated_at")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // 1. On-chain entry discrepancy detection (signature-based).
     #[tokio::test]
     async fn test_on_chain_discrepancy_detection() {
-        // Test that discrepancies between DB and on-chain are detected
         let (db, _temp) = create_test_db().await;
+        let uuid = "uuid-disc-det";
+        seed_position(&db, uuid, "entry-sig-disc").await;
 
-        // Insert position in DB
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, entry_tx_signature, entry_amount_sol, state) 
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind("test-uuid-1")
-        .bind("db-signature-123")
-        .bind(0.5)
-        .bind("ACTIVE")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Simulate on-chain check (in real scenario, this would query Solana RPC)
-        // For test, we'll simulate finding a different signature
-        let db_signature: Option<String> =
-            sqlx::query_scalar("SELECT entry_tx_signature FROM positions WHERE trade_uuid = ?")
-                .bind("test-uuid-1")
-                .fetch_optional(&db)
-                .await
-                .unwrap();
-
-        // Simulate on-chain has different signature (discrepancy)
-        let on_chain_signature = Some("on-chain-signature-456".to_string());
-
-        if db_signature != on_chain_signature {
-            // Log discrepancy
-            sqlx::query(
-                "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, db_value, on_chain_value) 
-                 VALUES (?, ?, ?, ?)"
-            )
-            .bind("test-uuid-1")
-            .bind("SIGNATURE_MISMATCH")
-            .bind(db_signature.as_deref().unwrap_or("NULL"))
-            .bind(on_chain_signature.as_deref().unwrap_or("NULL"))
-            .execute(&db)
+        // Age opened_at past the entry-finalization grace window.
+        let pool = pg_pool(&db);
+        let old = chrono::Utc::now() - chrono::Duration::seconds(120);
+        sqlx::query("UPDATE positions SET opened_at = $1 WHERE trade_uuid = $2")
+            .bind(old)
+            .bind(uuid)
+            .execute(&pool)
             .await
             .unwrap();
-        }
 
-        // Verify discrepancy was logged
-        let count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM reconciliation_log WHERE trade_uuid = 'test-uuid-1'",
+        let checker = StubChecker {
+            found: vec![],
+            not_found: vec!["entry-sig-disc".to_string()],
+        };
+
+        let result = run_reconciliation(db.as_ref(), &checker, &metrics()).await;
+
+        assert_eq!(result.checked_count, 1);
+        assert_eq!(result.discrepancies, 1, "missing entry should be a discrepancy");
+
+        // A MISSING_TX reconciliation_log row was recorded for this position.
+        let (cnt,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM reconciliation_log \
+             WHERE trade_uuid = $1 AND discrepancy = 'MISSING_TX'",
         )
-        .fetch_one(&db)
+        .bind(uuid)
+        .fetch_one(&pool)
         .await
         .unwrap();
-
-        assert_eq!(count.0, 1, "Discrepancy should be logged");
+        assert_eq!(cnt, 1, "a MISSING_TX discrepancy row should be logged");
     }
 
+    // 2. Epsilon tolerance for dust — pure math, no DB. (Kept unchanged.)
+    //
+    // NOTE: epsilon/amount tolerance is NOT part of real reconciliation, which is
+    // signature-based and amount-agnostic. This test only documents the math.
     #[tokio::test]
     async fn test_epsilon_tolerance_for_dust() {
-        // Test that small amount differences within epsilon are ignored
         let epsilon = 0.0001; // 0.01% tolerance
 
-        // Test cases
         let test_cases: Vec<(f64, f64, bool)> = vec![
-            (0.5, 0.50001, true),   // Within epsilon - should be considered equal
-            (0.5, 0.5001, false),   // Outside epsilon - should be considered different
-            (1.0, 1.00001, true),   // Within epsilon
-            (1.0, 1.001, false),    // Outside epsilon
-            (0.01, 0.010001, true), // Small amounts within epsilon
+            (0.5, 0.50001, true),
+            (0.5, 0.5001, false),
+            (1.0, 1.00001, true),
+            (1.0, 1.001, false),
+            (0.01, 0.010001, true),
         ];
 
         for (db_amount, on_chain_amount, should_match) in test_cases {
@@ -377,444 +375,221 @@ mod tests {
         }
     }
 
+    // 3. A missing entry transaction is a MISSING_TX discrepancy and the position is
+    //    NOT auto-failed (the runner has no auto-FAILED path) — it stays ACTIVE.
     #[tokio::test]
     async fn test_auto_resolution_missing_transaction() {
-        // Test that missing on-chain transactions trigger auto-resolution
         let (db, _temp) = create_test_db().await;
+        let uuid = "uuid-missing-entry";
+        seed_position(&db, uuid, "entry-sig-missing").await;
 
-        // Insert position with signature
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, entry_tx_signature, entry_amount_sol, state) 
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind("test-uuid-2")
-        .bind("missing-signature-123")
-        .bind(0.5)
-        .bind("ACTIVE")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Simulate on-chain check: transaction not found
-        let on_chain_found = false;
-
-        if !on_chain_found {
-            // Auto-resolve: mark position as failed (transaction never confirmed)
-            sqlx::query("UPDATE positions SET state = 'FAILED' WHERE trade_uuid = ?")
-                .bind("test-uuid-2")
-                .execute(&db)
-                .await
-                .unwrap();
-
-            // Log resolution
-            sqlx::query(
-                "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, db_value, on_chain_value, resolved) 
-                 VALUES (?, ?, ?, ?, ?)"
-            )
-            .bind("test-uuid-2")
-            .bind("MISSING_TRANSACTION")
-            .bind("missing-signature-123")
-            .bind("NOT_FOUND")
-            .bind(1) // resolved
-            .execute(&db)
+        let pool = pg_pool(&db);
+        let old = chrono::Utc::now() - chrono::Duration::seconds(120);
+        sqlx::query("UPDATE positions SET opened_at = $1 WHERE trade_uuid = $2")
+            .bind(old)
+            .bind(uuid)
+            .execute(&pool)
             .await
             .unwrap();
-        }
 
-        // Verify position was updated
-        let state: Option<String> =
-            sqlx::query_scalar("SELECT state FROM positions WHERE trade_uuid = 'test-uuid-2'")
-                .fetch_optional(&db)
-                .await
-                .unwrap();
-
-        assert_eq!(
-            state,
-            Some("FAILED".to_string()),
-            "Position should be marked as FAILED"
-        );
-
-        // Verify resolution was logged
-        let resolved_count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM reconciliation_log WHERE trade_uuid = 'test-uuid-2' AND resolved = 1"
-        )
-        .fetch_one(&db)
-        .await
-        .unwrap();
-
-        assert_eq!(resolved_count.0, 1, "Resolution should be logged");
-    }
-
-    #[tokio::test]
-    async fn test_auto_resolution_amount_mismatch() {
-        // Test that amount mismatches within epsilon are auto-resolved
-        let (db, _temp) = create_test_db().await;
-        let epsilon = 0.0001;
-
-        // Insert position
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, entry_tx_signature, entry_amount_sol, state) 
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind("test-uuid-3")
-        .bind("signature-123")
-        .bind(0.5)
-        .bind("ACTIVE")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Simulate on-chain has slightly different amount (within epsilon)
-        let db_amount: f64 = 0.5;
-        let on_chain_amount = 0.50001; // Very small difference
-
-        let diff = (db_amount - on_chain_amount).abs();
-        let max_amount = db_amount.max(on_chain_amount);
-        let relative_diff = if max_amount > 0.0 {
-            diff / max_amount
-        } else {
-            0.0
+        let checker = StubChecker {
+            found: vec![],
+            not_found: vec!["entry-sig-missing".to_string()],
         };
 
-        if relative_diff <= epsilon {
-            // Within tolerance - auto-resolve by updating DB to match on-chain
-            sqlx::query("UPDATE positions SET entry_amount_sol = ? WHERE trade_uuid = ?")
-                .bind(on_chain_amount)
-                .bind("test-uuid-3")
-                .execute(&db)
-                .await
-                .unwrap();
+        let result = run_reconciliation(db.as_ref(), &checker, &metrics()).await;
 
-            // Log as resolved
-            sqlx::query(
-                "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, db_value, on_chain_value, resolved) 
-                 VALUES (?, ?, ?, ?, ?)"
-            )
-            .bind("test-uuid-3")
-            .bind("AMOUNT_MISMATCH")
-            .bind(db_amount.to_string())
-            .bind(on_chain_amount.to_string())
-            .bind(1) // resolved
-            .execute(&db)
-            .await
-            .unwrap();
-        }
+        assert_eq!(result.discrepancies, 1, "missing entry is a MISSING_TX discrepancy");
 
-        // Verify amount was updated
-        let updated_amount: Option<f64> = sqlx::query_scalar(
-            "SELECT entry_amount_sol FROM positions WHERE trade_uuid = 'test-uuid-3'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap();
-
+        // The position is NOT auto-failed — it remains ACTIVE.
+        let active = db.get_positions(Some("ACTIVE")).await.unwrap();
         assert!(
-            (updated_amount.unwrap() - on_chain_amount).abs() < 0.00001,
-            "Amount should be updated to match on-chain"
+            active.iter().any(|p| p.trade_uuid == uuid),
+            "missing entry must not auto-fail the position (stays ACTIVE)"
         );
     }
 
+    // 4. Amount-agnosticism: amounts do not affect reconciliation. A found entry
+    //    signature yields no discrepancy regardless of stored amounts.
+    //
+    // NOTE: there is no epsilon/amount-mismatch auto-resolution implemented in
+    // production reconciliation; this pins that behavior.
+    #[tokio::test]
+    async fn test_auto_resolution_amount_mismatch() {
+        let (db, _temp) = create_test_db().await;
+        let uuid = "uuid-amount-agnostic";
+        seed_position(&db, uuid, "entry-sig-found").await;
+
+        let checker = StubChecker {
+            found: vec!["entry-sig-found".to_string()],
+            not_found: vec![],
+        };
+
+        let result = run_reconciliation(db.as_ref(), &checker, &metrics()).await;
+
+        assert_eq!(result.checked_count, 1);
+        assert_eq!(
+            result.discrepancies, 0,
+            "found entry sig → no discrepancy, regardless of amounts"
+        );
+
+        let pool = pg_pool(&db);
+        let (non_none,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM reconciliation_log \
+             WHERE trade_uuid = $1 AND discrepancy != 'NONE'",
+        )
+        .bind(uuid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(non_none, 0, "no non-NONE discrepancy rows for a found entry");
+    }
+
+    // 5. Reconciliation log captures the real discrepancy kinds via the real API.
     #[tokio::test]
     async fn test_reconciliation_log_entries() {
-        // Test that reconciliation log captures all discrepancy types
         let (db, _temp) = create_test_db().await;
+        let kinds = ["MISSING_TX", "TX_CHECK_ERROR", "AUTO_RESOLVE_FAILED", "NONE"];
 
-        let discrepancy_types = vec![
-            "SIGNATURE_MISMATCH",
-            "MISSING_TRANSACTION",
-            "AMOUNT_MISMATCH",
-            "STATE_MISMATCH",
-        ];
-
-        for (idx, disc_type) in discrepancy_types.iter().enumerate() {
-            sqlx::query(
-                "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, db_value, on_chain_value) 
-                 VALUES (?, ?, ?, ?)"
+        for (idx, kind) in kinds.iter().enumerate() {
+            db.insert_reconciliation_log(
+                &format!("uuid-log-{idx}"),
+                "ACTIVE",
+                Some("FOUND"),
+                kind,
+                Some("sig"),
+                Some("note"),
             )
-            .bind(format!("test-uuid-{}", idx))
-            .bind(*disc_type)
-            .bind("db-value")
-            .bind("on-chain-value")
-            .execute(&db)
             .await
             .unwrap();
         }
 
-        // Verify all types were logged
-        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM reconciliation_log")
-            .fetch_one(&db)
+        let pool = pg_pool(&db);
+
+        let (total,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM reconciliation_log")
+            .fetch_one(&pool)
             .await
             .unwrap();
+        assert_eq!(total, kinds.len() as i64, "one row per kind");
 
-        assert_eq!(count.0, discrepancy_types.len() as i64);
-
-        // Verify each type exists
-        for disc_type in &discrepancy_types {
-            let type_count: (i64,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM reconciliation_log WHERE discrepancy_type = ?",
-            )
-            .bind(*disc_type)
-            .fetch_one(&db)
-            .await
-            .unwrap();
-
-            assert_eq!(
-                type_count.0, 1,
-                "Each discrepancy type should be logged once"
-            );
+        for kind in &kinds {
+            let (c,): (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM reconciliation_log WHERE discrepancy = $1")
+                    .bind(kind)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(c, 1, "kind {kind} logged exactly once");
         }
     }
 
+    // 6. Unresolved discrepancies are surfaced (resolved_at IS NULL) and resolve via
+    //    the real `resolve_discrepancy` API.
     #[tokio::test]
     async fn test_unresolved_discrepancies_alert() {
-        // Test that unresolved discrepancies are flagged for alerting
         let (db, _temp) = create_test_db().await;
 
-        // Create resolved and unresolved discrepancies
-        sqlx::query(
-            "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, resolved) 
-             VALUES ('uuid-1', 'SIGNATURE_MISMATCH', 1)",
+        // Two unresolved rows (resolved_at defaults to NULL on insert).
+        let id1 = db
+            .insert_reconciliation_log(
+                "uuid-unres-1",
+                "ACTIVE",
+                Some("MISSING"),
+                "MISSING_TX",
+                Some("sig1"),
+                Some("note"),
+            )
+            .await
+            .unwrap();
+        db.insert_reconciliation_log(
+            "uuid-unres-2",
+            "ACTIVE",
+            Some("MISSING"),
+            "MISSING_TX",
+            Some("sig2"),
+            Some("note"),
         )
-        .execute(&db)
         .await
         .unwrap();
 
-        sqlx::query(
-            "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, resolved) 
-             VALUES ('uuid-2', 'MISSING_TRANSACTION', 0)",
-        )
-        .execute(&db)
-        .await
-        .unwrap();
+        // Resolve one via the real API.
+        db.resolve_discrepancy(id1, "AUTO", "resolved in test")
+            .await
+            .unwrap();
 
-        sqlx::query(
-            "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, resolved) 
-             VALUES ('uuid-3', 'AMOUNT_MISMATCH', 0)",
-        )
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Query unresolved discrepancies
-        let unresolved: Vec<(String, String)> = sqlx::query_as(
-            "SELECT trade_uuid, discrepancy_type FROM reconciliation_log WHERE resolved = 0",
-        )
-        .fetch_all(&db)
-        .await
-        .unwrap();
-
-        assert_eq!(
-            unresolved.len(),
-            2,
-            "Should have 2 unresolved discrepancies"
-        );
-        assert!(unresolved.iter().any(|(uuid, _)| uuid == "uuid-2"));
-        assert!(unresolved.iter().any(|(uuid, _)| uuid == "uuid-3"));
-    }
-
-    #[tokio::test]
-    async fn test_reconciliation_handles_null_values() {
-        // Test that reconciliation handles NULL values gracefully
-        let (db, _temp) = create_test_db().await;
-
-        // Insert position with NULL exit signature (position still active)
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, entry_tx_signature, exit_tx_signature, state) 
-             VALUES (?, ?, ?, ?)",
-        )
-        .bind("test-uuid-4")
-        .bind("entry-sig-123")
-        .bind::<Option<String>>(None)
-        .bind("ACTIVE")
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Simulate on-chain check: position still active (no exit signature)
-        let on_chain_exit_sig: Option<String> = None;
-
-        // Should not create discrepancy for NULL values when both are NULL
-        let db_exit_sig: Option<String> = sqlx::query_scalar(
-            "SELECT exit_tx_signature FROM positions WHERE trade_uuid = 'test-uuid-4'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap()
-        .flatten();
-
-        // Both NULL - no discrepancy
-        if db_exit_sig.is_none() && on_chain_exit_sig.is_none() {
-            // No discrepancy to log
-            // placeholder — implementation pending
-        }
-    }
-
-    #[tokio::test]
-    async fn test_stuck_state_recovery_exiting_timeout() {
-        // Test stuck state recovery: EXITING state > 60 seconds
-        // 1. Create position in EXITING state with old timestamp
-        // 2. Simulate blockhash expiration check
-        // 3. Verify state reverted to ACTIVE
-
-        let (db, _temp) = create_test_db().await;
-
-        // Add last_updated timestamp column if not exists
-        sqlx::query(
-            "ALTER TABLE positions ADD COLUMN last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        )
-        .execute(&db)
-        .await
-        .ok(); // Ignore error if column already exists
-
-        // Insert position in EXITING state with old timestamp (> 60s ago)
-        let old_timestamp = chrono::Utc::now() - chrono::Duration::seconds(120);
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, entry_tx_signature, exit_tx_signature, state, last_updated) 
-             VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind("test-stuck-uuid")
-        .bind("entry-sig-123")
-        .bind("exit-sig-456")
-        .bind("EXITING")
-        .bind(old_timestamp)
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Simulate recovery check: blockhash expired
-        let now = chrono::Utc::now();
-        let last_updated: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT last_updated FROM positions WHERE trade_uuid = 'test-stuck-uuid'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap()
-        .flatten();
-
-        if let Some(last_update) = last_updated {
-            let age_seconds = (now - last_update).num_seconds();
-
-            // If position has been EXITING for > 60 seconds, revert to ACTIVE
-            if age_seconds > 60 {
-                // Simulate blockhash expiration check
-                let blockhash_expired = true; // In real scenario, check via RPC
-
-                if blockhash_expired {
-                    // Revert state to ACTIVE
-                    sqlx::query(
-                        "UPDATE positions SET state = 'ACTIVE', exit_tx_signature = NULL, last_updated = ? 
-                         WHERE trade_uuid = 'test-stuck-uuid'"
-                    )
-                    .bind(now)
-                    .execute(&db)
-                    .await
-                    .unwrap();
-
-                    // Log recovery action
-                    sqlx::query(
-                        "INSERT INTO reconciliation_log (trade_uuid, discrepancy_type, db_value, on_chain_value, resolved) 
-                         VALUES (?, ?, ?, ?, ?)"
-                    )
-                    .bind("test-stuck-uuid")
-                    .bind("STUCK_STATE_RECOVERY")
-                    .bind("EXITING")
-                    .bind("ACTIVE")
-                    .bind(1) // resolved
-                    .execute(&db)
-                    .await
-                    .unwrap();
-                }
-            }
-        }
-
-        // Verify state was reverted
-        let state: Option<String> =
-            sqlx::query_scalar("SELECT state FROM positions WHERE trade_uuid = 'test-stuck-uuid'")
-                .fetch_optional(&db)
+        let pool = pg_pool(&db);
+        let (unresolved,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM reconciliation_log WHERE resolved_at IS NULL")
+                .fetch_one(&pool)
                 .await
                 .unwrap();
+        assert_eq!(unresolved, 1, "exactly one discrepancy remains unresolved");
+    }
+
+    // 7. A NULL exit signature on an ACTIVE position with a found entry is not a
+    //    discrepancy — the run logs a NONE row.
+    #[tokio::test]
+    async fn test_reconciliation_handles_null_values() {
+        let (db, _temp) = create_test_db().await;
+        let uuid = "uuid-null-exit";
+        // seed_position leaves exit_tx_signature NULL.
+        seed_position(&db, uuid, "entry-sig-null-exit").await;
+
+        let checker = StubChecker {
+            found: vec!["entry-sig-null-exit".to_string()],
+            not_found: vec![],
+        };
+
+        let result = run_reconciliation(db.as_ref(), &checker, &metrics()).await;
 
         assert_eq!(
-            state,
-            Some("ACTIVE".to_string()),
-            "Stuck EXITING position should be reverted to ACTIVE"
+            result.discrepancies, 0,
+            "active position with found entry and NULL exit → no discrepancy"
         );
 
-        // Verify exit signature was cleared
-        let exit_sig: Option<String> = sqlx::query_scalar(
-            "SELECT exit_tx_signature FROM positions WHERE trade_uuid = 'test-stuck-uuid'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap()
-        .flatten();
+        let pool = pg_pool(&db);
+        let (disc,): (String,) =
+            sqlx::query_as("SELECT discrepancy FROM reconciliation_log WHERE trade_uuid = $1")
+                .bind(uuid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(disc, "NONE");
+    }
 
+    // 8. Stuck-position recovery: an EXITING position stale past the threshold is
+    //    reported by the RPC-free `get_stuck_positions` query. (Full revert-to-ACTIVE
+    //    needs an RPC check and is out of scope; this tests the real DB query.)
+    #[tokio::test]
+    async fn test_stuck_state_recovery_exiting_timeout() {
+        let (db, _temp) = create_test_db().await;
+        let uuid = "uuid-stuck-old";
+        seed_exiting(&db, uuid, "entry-sig-stuck", "exit-sig-stuck").await;
+
+        // Plant a stale last_updated (120s ago) past the 60s threshold.
+        set_last_updated(&db, uuid, 120).await;
+
+        let stuck = db.get_stuck_positions(60).await.unwrap();
         assert!(
-            exit_sig.is_none(),
-            "Exit signature should be cleared after recovery"
+            stuck.iter().any(|p| p.trade_uuid == uuid),
+            "EXITING position stale by 120s should be reported stuck"
         );
     }
 
+    // 9. A recent EXITING position (within the threshold) is NOT reported stuck.
     #[tokio::test]
     async fn test_stuck_state_recovery_recent_exiting() {
-        // Test that recent EXITING positions (< 60s) are not recovered
         let (db, _temp) = create_test_db().await;
+        let uuid = "uuid-stuck-recent";
+        seed_exiting(&db, uuid, "entry-sig-recent", "exit-sig-recent").await;
 
-        // Add last_updated timestamp column if not exists
-        sqlx::query(
-            "ALTER TABLE positions ADD COLUMN last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        )
-        .execute(&db)
-        .await
-        .ok();
+        // last_updated only 30s ago — within the 60s threshold.
+        set_last_updated(&db, uuid, 30).await;
 
-        // Insert position in EXITING state with recent timestamp (< 60s ago)
-        let recent_timestamp = chrono::Utc::now() - chrono::Duration::seconds(30);
-        sqlx::query(
-            "INSERT INTO positions (trade_uuid, entry_tx_signature, exit_tx_signature, state, last_updated) 
-             VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind("test-recent-exiting")
-        .bind("entry-sig-123")
-        .bind("exit-sig-456")
-        .bind("EXITING")
-        .bind(recent_timestamp)
-        .execute(&db)
-        .await
-        .unwrap();
-
-        // Simulate recovery check
-        let now = chrono::Utc::now();
-        let last_updated: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT last_updated FROM positions WHERE trade_uuid = 'test-recent-exiting'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap()
-        .flatten();
-
-        if let Some(last_update) = last_updated {
-            let age_seconds = (now - last_update).num_seconds();
-
-            // Recent position should NOT be recovered
-            if age_seconds <= 60 {
-                // Do not revert - position is still valid
-                // placeholder — implementation pending
-            }
-        }
-
-        // Verify state remains EXITING
-        let state: Option<String> = sqlx::query_scalar(
-            "SELECT state FROM positions WHERE trade_uuid = 'test-recent-exiting'",
-        )
-        .fetch_optional(&db)
-        .await
-        .unwrap();
-
-        assert_eq!(
-            state,
-            Some("EXITING".to_string()),
-            "Recent EXITING position should remain EXITING"
+        let stuck = db.get_stuck_positions(60).await.unwrap();
+        assert!(
+            !stuck.iter().any(|p| p.trade_uuid == uuid),
+            "EXITING position only 30s old should NOT be reported stuck"
         );
     }
 }

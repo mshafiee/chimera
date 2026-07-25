@@ -322,20 +322,15 @@ async fn test_unique_uuid_for_different_inputs() {
 /// Test duplicate trade_uuid rejection
 #[tokio::test]
 async fn test_duplicate_trade_uuid_rejection() {
-    use chimera_operator::db_abstraction::{create_database, DatabaseConfig, InsertTrade};
+    use chimera_operator::db_abstraction::InsertTrade;
     use rust_decimal::Decimal;
     use std::str::FromStr;
-
-    use tempfile::TempDir;
 
     // This test verifies that the idempotency check works
     // by checking if trade_uuid_exists correctly identifies duplicates
 
-    // Create a test database
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
+    // Create an isolated test database (avoids shared-DB duplicate-key residue).
+    let (db, _temp_dir) = crate::common::create_test_pg_db().await;
 
     // Insert a trade with a specific UUID
     let test_uuid = "test-duplicate-uuid-12345";

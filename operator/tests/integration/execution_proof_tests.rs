@@ -10,9 +10,7 @@
 //! - Bonus: Profitable close records correct positive PnL
 
 use chimera_operator::config::ProfitManagementConfig;
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool, InsertTrade,
-};
+use chimera_operator::db_abstraction::{Database, InsertTrade};
 use chimera_operator::engine::stop_loss::{StopLossAction, StopLossManager};
 use chimera_operator::price_cache::{PriceCache, PriceSource};
 use rust_decimal::Decimal;
@@ -23,27 +21,20 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    crate::common::pg_pool(db)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+    crate::common::create_test_pg_db().await
 }
 
 async fn insert_wallet(db: &Arc<dyn Database>, address: &str, wqs: f64) {
     let pool = pg_pool(db);
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
-         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+         VALUES ($1, 'ACTIVE', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(address)
     .bind(wqs)
@@ -151,13 +142,13 @@ async fn test_stop_loss_fires_and_closes_position_with_correct_pnl() {
 
     // Step 3: Verify realized PnL = (150−200)/200 × 1.0 = −0.25 SOL
     let pool = pg_pool(&db);
-    let (state, pnl_str): (String, String) =
-        sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
-            .bind(UUID)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let pnl: f64 = pnl_str.parse().unwrap_or(0.0);
+    let (state, pnl): (String, f64) = sqlx::query_as(
+        "SELECT state, COALESCE(realized_pnl_sol, 0)::FLOAT8 FROM positions WHERE trade_uuid = $1",
+    )
+    .bind(UUID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_eq!(
         state, "CLOSED",
@@ -231,13 +222,13 @@ async fn test_profit_capture_positive_pnl_recorded() {
     .unwrap();
 
     let pool = pg_pool(&db);
-    let (state, pnl_str): (String, String) =
-        sqlx::query_as("SELECT state, realized_pnl_sol FROM positions WHERE trade_uuid = $1")
-            .bind(UUID)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let pnl: f64 = pnl_str.parse().unwrap_or(0.0);
+    let (state, pnl): (String, f64) = sqlx::query_as(
+        "SELECT state, COALESCE(realized_pnl_sol, 0)::FLOAT8 FROM positions WHERE trade_uuid = $1",
+    )
+    .bind(UUID)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_eq!(
         state, "CLOSED",

@@ -4,6 +4,8 @@
 //! Rust's test runner will discover this file and run the tests
 //! in the integration subdirectory.
 
+mod common;
+
 #[path = "integration/api_tests.rs"]
 mod api_tests;
 
@@ -71,3 +73,8 @@ mod parallel_execution_test;
 
 #[path = "integration/jupiter_v2_integration_tests.rs"]
 mod jupiter_v2_integration_tests;
+
+// ── Profitability verdict gate tests (Phase C4 go/no-go) ──────────────────────
+
+#[path = "integration/profitability_verdict_tests.rs"]
+mod profitability_verdict_tests;

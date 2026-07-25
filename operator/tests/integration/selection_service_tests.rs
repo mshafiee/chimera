@@ -100,6 +100,7 @@ fn build_selection_service(
         spear_percent: 40,
         min_liquidity_shield_usd: dec("10000"),
         min_liquidity_spear_usd: dec("10000"),
+        min_token_age_hours: 1.0,
     };
     let service = SelectionService::new(
         db,

@@ -7,9 +7,7 @@
 //! - Circuit-breaker trip blocks new trades at DB level
 //! - Closing an already-CLOSED position is idempotent
 
-use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, DbPool, InsertTrade, UpdateTradeStatus,
-};
+use chimera_operator::db_abstraction::{Database, InsertTrade, UpdateTradeStatus};
 use rust_decimal::Decimal;
 use sqlx::Pool;
 use sqlx::Postgres;
@@ -18,20 +16,13 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
-    match db.pool() {
-        DbPool::PostgreSQL(pool) => pool,
-        _ => panic!("test requires PostgreSQL backend"),
-    }
+    crate::common::pg_pool(db)
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 async fn create_test_db() -> (Arc<dyn Database>, TempDir) {
-    let temp_dir = TempDir::new().unwrap();
-    let config = DatabaseConfig::postgres(std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL must be set"));
-    let db = create_database(&config).await.unwrap();
-    db.run_migrations().await.unwrap();
-    (db, temp_dir)
+    crate::common::create_test_pg_db().await
 }
 
 // ─── Test 90 (plan) ── duplicate BUY creates only one position ────────────────
@@ -129,9 +120,8 @@ async fn test_close_position_no_active_position_is_noop() {
         result.is_ok(),
         "Closing non-existent position should not error"
     );
-    assert_eq!(
-        result.unwrap(),
-        false,
+    assert!(
+        !result.unwrap(),
         "No active position was closed"
     );
 
@@ -203,13 +193,13 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     .await
     .unwrap();
 
-    let (realized_pnl_str,): (String,) =
-        sqlx::query_as("SELECT realized_pnl_sol FROM positions WHERE trade_uuid = $1")
-            .bind(uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let realized_pnl: f64 = realized_pnl_str.parse().unwrap_or(0.0);
+    let (realized_pnl,): (f64,) = sqlx::query_as(
+        "SELECT COALESCE(realized_pnl_sol, 0)::FLOAT8 FROM positions WHERE trade_uuid = $1",
+    )
+    .bind(uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     // Expected: (110 - 100) / 100 × 1.0 = +0.1 SOL
     assert!(
@@ -234,13 +224,13 @@ async fn test_pnl_calculation_accuracy_with_fees() {
 
     db.update_trade_net_pnl(uuid, net).await.unwrap();
 
-    let (net_stored_str,): (String,) =
-        sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = $1")
-            .bind(uuid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    let net_stored: f64 = net_stored_str.parse().unwrap_or(0.0);
+    let (net_stored,): (f64,) = sqlx::query_as(
+        "SELECT COALESCE(net_pnl_sol, 0)::FLOAT8 FROM trades WHERE trade_uuid = $1",
+    )
+    .bind(uuid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert!(
         (net_stored - 0.0983).abs() < 1e-9,

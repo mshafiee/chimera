@@ -99,13 +99,13 @@ pub struct CompletenessGate {
 }
 
 /// Row from the outcome join (decision_records ⨝ trades).
-struct Outcome {
-    net_pnl_sol: f64,
-    size_sol: f64,
-    strategy: Option<String>,
-    liquidity_usd: Option<f64>,
-    price_impact_pct: Option<f64>,
-    decided_at: chrono::DateTime<chrono::Utc>,
+pub struct Outcome {
+    pub net_pnl_sol: f64,
+    pub size_sol: f64,
+    pub strategy: Option<String>,
+    pub liquidity_usd: Option<f64>,
+    pub price_impact_pct: Option<f64>,
+    pub decided_at: chrono::DateTime<chrono::Utc>,
 }
 
 const SAMPLE_THRESHOLD: i64 = 60;
@@ -148,19 +148,43 @@ pub async fn profitability_verdict(
     let invalid_pnl = count_invalid_pnl(&pool, &run_id).await?;
 
     // ── Completeness: DecisionRecorder counters (current run only) ──
-    let (completeness_rate, completeness_status) = match &state.decision_recorder {
+    let (completeness_rate, completeness_ok) = match &state.decision_recorder {
         Some(recorder) => {
             let rate = recorder.completeness();
-            let status = if rate >= COMPLETENESS_THRESHOLD {
-                "PASS"
-            } else {
-                "FAIL"
-            };
-            (rate, status.to_string())
+            (rate, rate >= COMPLETENESS_THRESHOLD)
         }
-        None => (1.0, "PASS".to_string()), // no recorder → no evidence of loss
+        None => (1.0, true), // no recorder → no evidence of loss
     };
 
+    let (gates, verdict) = evaluate_gates(
+        outcomes,
+        missing_outcomes,
+        invalid_pnl,
+        completeness_rate,
+        completeness_ok,
+        total_capital_sol,
+    );
+
+    Ok(Json(VerdictResponse {
+        verdict: verdict.to_string(),
+        run_id,
+        gates,
+        computed_at: chrono::Utc::now(),
+    }))
+}
+
+/// Evaluate all 8 gates against pre-fetched outcomes and integrity/completeness
+/// counters. Returns the per-gate results and the overall verdict string.
+///
+/// Pure function: no DB, no state. Testable in isolation.
+pub fn evaluate_gates(
+    outcomes: Vec<Outcome>,
+    missing_outcomes: i64,
+    invalid_pnl: i64,
+    completeness_rate: f64,
+    completeness_ok: bool,
+    total_capital_sol: f64,
+) -> (VerdictGates, &'static str) {
     let sample_size = outcomes.len() as i64;
     let sample_status = if sample_size >= SAMPLE_THRESHOLD {
         "PASS"
@@ -226,6 +250,7 @@ pub async fn profitability_verdict(
 
     let integrity_fail = missing_outcomes > 0 || invalid_pnl > 0;
     let integrity_status = if integrity_fail { "FAIL" } else { "PASS" };
+    let completeness_status = if completeness_ok { "PASS" } else { "FAIL" };
 
     // ── Overall verdict ──
     let verdict = if integrity_fail || completeness_status == "FAIL" {
@@ -243,10 +268,8 @@ pub async fn profitability_verdict(
         "GO"
     };
 
-    Ok(Json(VerdictResponse {
-        verdict: verdict.to_string(),
-        run_id,
-        gates: VerdictGates {
+    (
+        VerdictGates {
             sample_size: GateValue {
                 status: sample_status.to_string(),
                 value: sample_size,
@@ -286,28 +309,28 @@ pub async fn profitability_verdict(
                 missing_outcomes,
             },
             completeness: CompletenessGate {
-                status: completeness_status,
+                status: completeness_status.to_string(),
                 rate: completeness_rate,
                 threshold: COMPLETENESS_THRESHOLD,
             },
         },
-        computed_at: chrono::Utc::now(),
-    }))
+        verdict,
+    )
 }
 
-async fn fetch_outcomes(
+pub async fn fetch_outcomes(
     pool: &sqlx::Pool<sqlx::Postgres>,
     run_id: &str,
 ) -> Result<Vec<Outcome>, AppError> {
     let rows = sqlx::query_as::<_, OutcomeRow>(
         r#"
         SELECT
-            t.net_pnl_sol       AS "net_pnl_sol!",
-            dr.size_sol         AS "size_sol!",
-            dr.strategy         AS "strategy",
-            dr.liquidity_usd    AS "liquidity_usd",
-            dr.price_impact_pct AS "price_impact_pct",
-            dr.decided_at       AS "decided_at!"
+            t.net_pnl_sol::DOUBLE PRECISION       AS "net_pnl_sol",
+            dr.size_sol::DOUBLE PRECISION         AS "size_sol",
+            dr.strategy                           AS "strategy",
+            dr.liquidity_usd::DOUBLE PRECISION    AS "liquidity_usd",
+            dr.price_impact_pct::DOUBLE PRECISION AS "price_impact_pct",
+            dr.decided_at                         AS "decided_at"
         FROM decision_records dr
         JOIN trades t ON t.trade_uuid = dr.trade_uuid
         WHERE dr.admitted = TRUE
@@ -346,7 +369,7 @@ struct OutcomeRow {
     decided_at: chrono::DateTime<chrono::Utc>,
 }
 
-async fn count_missing_outcomes(
+pub async fn count_missing_outcomes(
     pool: &sqlx::Pool<sqlx::Postgres>,
     run_id: &str,
 ) -> Result<i64, AppError> {
@@ -367,7 +390,7 @@ async fn count_missing_outcomes(
     Ok(n)
 }
 
-async fn count_invalid_pnl(
+pub async fn count_invalid_pnl(
     pool: &sqlx::Pool<sqlx::Postgres>,
     run_id: &str,
 ) -> Result<i64, AppError> {
@@ -554,6 +577,43 @@ mod tests {
     fn max_drawdown_monotonic_increase_is_zero() {
         let outcomes = vec![outcome(0.5, 1, None), outcome(0.5, 2, None)];
         assert_eq!(max_drawdown(&outcomes), 0.0);
+    }
+
+    // ── Pure evaluate_gates verdict precedence ──
+
+    #[test]
+    fn evaluate_gates_stop_precedence() {
+        // integrity failure (missing outcome) overrides everything, even a
+        // tiny sample that would otherwise be INCONCLUSIVE.
+        let outcomes: Vec<Outcome> = Vec::new();
+        let (gates, verdict) = evaluate_gates(outcomes, 1, 0, 1.0, true, 1.0);
+        assert_eq!(verdict, "STOP");
+        assert_eq!(gates.integrity.status, "FAIL");
+    }
+
+    #[test]
+    fn evaluate_gates_inconclusive_when_sample_small() {
+        // 59 positive outcomes: numeric gates would pass, but sample < 60 →
+        // INCONCLUSIVE (never GO until sample threshold is met).
+        let outcomes: Vec<Outcome> = (0..59).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 1.0, true, 1.0);
+        assert_eq!(verdict, "INCONCLUSIVE");
+        assert_eq!(gates.sample_size.status, "FAIL");
+        assert_eq!(gates.net_return.status, "PASS");
+    }
+
+    #[test]
+    fn evaluate_gates_go() {
+        // 60 positive outcomes, single positive cohort, no bias/loss/drawdown,
+        // integrity & completeness clean → GO.
+        let outcomes: Vec<Outcome> = (0..60).map(|i| outcome(0.01, i, Some("SHIELD"))).collect();
+        let (gates, verdict) = evaluate_gates(outcomes, 0, 0, 1.0, true, 1.0);
+        assert_eq!(verdict, "GO");
+        assert_eq!(gates.sample_size.status, "PASS");
+        assert_eq!(gates.net_return.status, "PASS");
+        assert_eq!(gates.cohort_positivity.status, "PASS");
+        assert_eq!(gates.integrity.status, "PASS");
+        assert_eq!(gates.completeness.status, "PASS");
     }
 }
 
