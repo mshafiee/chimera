@@ -55,7 +55,12 @@ impl RunContext {
         );
         Self {
             run_id,
-            code_revision: env!("GIT_HASH").to_string(),
+            // GIT_HASH is emitted by build.rs (cargo:rustc-env). Use option_env!
+            // so a build without build.rs (e.g. a stripped Docker context) falls
+            // back to "unknown" instead of failing to compile.
+            code_revision: option_env!("GIT_HASH")
+                .unwrap_or("unknown")
+                .to_string(),
             config_hash,
             roster_hash: Self::hash_roster(roster_addresses),
             started_at,

@@ -20,6 +20,7 @@ WORKDIR /build
 
 # Copy Cargo files first for better caching
 COPY Cargo.toml Cargo.lock ./
+COPY build.rs ./
 COPY src ./src
 COPY migrations_postgres ./migrations_postgres
 
