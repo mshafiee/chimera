@@ -2,9 +2,14 @@
 Training Data Loader for Scout ML Models
 
 Loads and prepares training data from multiple sources including:
-- SQLite database (wallets, trades, positions tables)
+- Database (wallets, trades, positions tables)
 - Feature store CSV files
 - Correlation reader for actual PnL data
+
+NOTE (SQLite decommissioning): this is offline ML training tooling. It still
+imports `sqlite3` for local scratch caches; the authoritative source of trade
+and PnL data is PostgreSQL. Phase C of the profitability roadmap replaces the
+correlation reader it depends on with a PostgreSQL-native implementation.
 
 Usage:
     loader = TrainingDataLoader(db_path="data/chimera.db")

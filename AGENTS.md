@@ -94,7 +94,7 @@ pub async fn init_pool(config: &DatabaseConfig) -> AppResult<DbPool> {
 
 **Types:** Use `rust_decimal::Decimal` for all financial values. Define type aliases for complex types.
 ```rust
-pub type DbPool = Pool<Sqlite>;
+pub type DbPool = Pool<Postgres>;  // PostgreSQL only — SQLite was decommissioned 2026-07
 pub type AppResult<T> = Result<T, AppError>;
 ```
 

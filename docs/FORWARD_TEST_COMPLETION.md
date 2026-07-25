@@ -1,5 +1,13 @@
 # 21-Day Live Forward Test Implementation - Complete ✅
 
+> **⚠️ SUPERSEDED (2026-07):** This document describes the SQLite-era live
+> forward-test infrastructure, including `experiment_trades`/`experiment_manifest`
+> tables and live-capital tracer trades. The profitability remediation roadmap
+> (Phase C) supersedes it with paper-only shadow calibration and
+> PostgreSQL-native decision records. Live tracer trades are out of scope of
+> the active plan. Treat the SQLite commands and live-tracer sections below as
+> historical reference only.
+
 ## Executive Summary
 
 The entire 21-day live forward test infrastructure has been successfully implemented and validated. All core components, integration points, monitoring systems, and validation frameworks are now production-ready. The system is designed to prove/disprove profitability using tracer trades, control arms, and statistical verdict evaluation on a $49 Helius Developer Plan budget.

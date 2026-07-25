@@ -10,6 +10,11 @@ COMPREHENSIVE ENHANCEMENTS:
 - Optimized database queries with connection pooling
 - Parallel candidate ranking with batch processing
 - Comprehensive performance monitoring and tuning
+
+NOTE (SQLite decommissioning): the `import sqlite3` here backs the module's own
+local persistence layer (discovery delta cache). It is offline-tooling state,
+not the system of record — trade/PnL accounting lives in PostgreSQL. Tracked
+for migration to the shared PostgreSQL store separately.
 - Resource utilization optimization
 
 Architecture:

@@ -696,21 +696,14 @@ impl Database for PostgresBackend {
     }
 
     async fn merge_roster(&self, _roster_db_path: &str) -> AppResult<u32> {
-        // Intentionally SQLite-only by design.
-        //
-        // Roster merging is a scout -> operator ETL step that relies on SQLite's
-        // `ATTACH DATABASE` primitive to read scout's wallet roster file directly
-        // (see sqlite.rs `merge_roster`). PostgreSQL has no equivalent of
-        // ATTACH DATABASE, so the SQLite path cannot be ported. Postgres
-        // deployments ingest scout data through the standalone migration tool
-        // (`migrate_sqlite_to_postgres.py`) instead of an in-process ATTACH.
-        //
-        // If this is reached on a Postgres backend, the caller is using the wrong
-        // ingestion path — route roster data through the migration tool.
+        // Roster merging via SQLite's `ATTACH DATABASE` was a scout -> operator
+        // ETL step from the SQLite era (decommissioned 2026-07). Scout roster
+        // data is ingested through the shared PostgreSQL `wallets` table now.
+        // If this is reached, the caller is using a retired ingestion path.
         Err(AppError::Internal(
-            "merge_roster is not supported on the PostgreSQL backend: it is a \
-             SQLite-only scout ETL operation that depends on ATTACH DATABASE. \
-             Ingest scout roster data via tools/migrate_sqlite_to_postgres.py instead."
+            "merge_roster is not supported: SQLite ATTACH DATABASE roster ingestion \
+             was decommissioned. Scout roster data flows through the shared \
+             PostgreSQL wallets table."
                 .to_string(),
         ))
     }

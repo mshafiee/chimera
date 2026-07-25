@@ -236,7 +236,8 @@ fn default_functional_health_check() -> bool {
 /// Database configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct DatabaseConfig {
-    /// Path to SQLite database file
+    /// Path component retained for legacy config compatibility (PostgreSQL
+    /// backend connects via `url`); ignored in production.
     #[serde(default = "default_db_path")]
     pub path: PathBuf,
     /// PostgreSQL connection URL (for production)

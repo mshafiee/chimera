@@ -131,10 +131,11 @@ MAILTO=""
 0 */12 * * * $CHIMERA_USER cd $CHIMERA_HOME/scout && flock -n /tmp/scout_daily.lock -c "python3 main.py --output $CHIMERA_HOME/data/roster_new.db >> /var/log/chimera/scout.log 2>&1" || echo "Scout daily run skipped (already running)" >> /var/log/chimera/scout.log 2>&1
 
 # Prune old Jito tip history (keep 7 days) - daily at 3:30 AM
-30 3 * * * $CHIMERA_USER sqlite3 $CHIMERA_HOME/data/chimera.db "DELETE FROM jito_tip_history WHERE created_at < datetime('now', '-7 days');" 2>/dev/null
+# PostgreSQL-only: runs against the Compose chimera-postgres container.
+30 3 * * * root docker exec chimera-postgres psql -U chimera -d chimera -c "DELETE FROM jito_tip_history WHERE created_at < NOW() - INTERVAL '7 days';" >> /var/log/chimera/db-maintenance.log 2>&1
 
 # Prune old dead letter queue entries (keep 30 days) - daily at 3:35 AM
-35 3 * * * $CHIMERA_USER sqlite3 $CHIMERA_HOME/data/chimera.db "DELETE FROM dead_letter_queue WHERE received_at < datetime('now', '-30 days');" 2>/dev/null
+35 3 * * * root docker exec chimera-postgres psql -U chimera -d chimera -c "DELETE FROM dead_letter_queue WHERE received_at < NOW() - INTERVAL '30 days';" >> /var/log/chimera/db-maintenance.log 2>&1
 
 # Secret rotation check (webhook: every 30 days, RPC: every 90 days) - daily at 5:00 AM
 0 5 * * * $CHIMERA_USER $CHIMERA_HOME/ops/rotate-secrets.sh >> /var/log/chimera/secret-rotation.log 2>&1

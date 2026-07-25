@@ -1,7 +1,8 @@
 //! Database abstraction layer
 //!
-//! Provides a unified interface for SQLite and PostgreSQL backends.
-//! Select backend via CHIMERA_DB_MODE environment variable (sqlite | postgres).
+//! PostgreSQL is the only supported backend (SQLite was decommissioned 2026-07).
+//! The `DbPool`/`DatabaseBackend` enum shapes are retained for API stability
+//! but always resolve to PostgreSQL.
 
 pub mod export;
 pub mod postgres;

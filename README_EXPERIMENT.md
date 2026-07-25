@@ -1,5 +1,13 @@
 # 21-Day Live Forward Test - Quick Start Guide
 
+> **⚠️ SUPERSEDED (2026-07):** This runbook describes the SQLite-era live
+> forward-test harness. The profitability remediation roadmap (Phase C) replaces
+> it with paper-only shadow calibration, run-scoped decision records, and
+> statistical go/no-go gates — see
+> `.kilo/plans/1784844684275-paper-trade-profitability-plan.md`. Live-capital
+> tracer trades are explicitly out of scope of that plan. Treat the SQLite
+> commands and live-tracer instructions below as historical reference only.
+
 ## Overview
 This infrastructure enables a 21-day live forward test with 0.02 SOL tracer trades, control arms, and statistical verdict evaluation to prove/disprove profitability on a $49 Helius Developer Plan.
 

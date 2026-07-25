@@ -8,6 +8,13 @@ This module implements intelligent multi-level caching to reduce Helius API usag
 - Cache warming and preloading
 - Intelligent cache invalidation
 - Hit rate tracking and optimization
+
+NOTE (SQLite decommissioning): the L3 layer here is a local file cache, NOT the
+system of record. It is intentionally retained as a documented exception: it
+neither participates in trade/PnL accounting nor shares the operator's
+PostgreSQL store. A future migration to move L3 onto Redis or the shared
+PostgreSQL store is tracked separately; until then this local cache must not be
+read as authoritative for any persisted trade state.
 """
 
 import os

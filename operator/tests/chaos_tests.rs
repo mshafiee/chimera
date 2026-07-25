@@ -313,9 +313,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_database_lock_retry() {
-        // Test that database operations retry on lock
-        // Note: retry_sqlite is private, so we test the behavior indirectly
-        // by testing that SQLite operations handle locks gracefully
+        // Test that concurrent PostgreSQL writes do not deadlock
+        // (PostgreSQL MVCC + the per-key advisory lock on position opens)
 
         let (db, _temp) = create_test_db().await;
         let pool = pg_pool(&db);
@@ -326,14 +325,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Test that we can write even if there's contention
-        // (SQLite WAL mode allows concurrent reads/writes)
+        // Test that we can write even under contention
         let mut handles = vec![];
         for i in 0..5 {
             let pool_clone = pool.clone();
             let handle = tokio::spawn(async move {
                 for j in 0..10 {
-                    sqlx::query("INSERT INTO test_lock (value) VALUES (?)")
+                    sqlx::query("INSERT INTO test_lock (value) VALUES ($1)")
                         .bind(format!("task-{}-{}", i, j))
                         .execute(&pool_clone)
                         .await
@@ -355,6 +353,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(count.0, 50, "All concurrent writes should succeed");
+
+        sqlx::query("DROP TABLE IF EXISTS test_lock")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -411,8 +414,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_sqlite_concurrent_writes() {
-        // Test concurrent database writes don't deadlock
+    async fn test_concurrent_writes() {
+        // Test concurrent database writes don't deadlock (PostgreSQL)
         let (db, _temp) = create_test_db().await;
         let pool = pg_pool(&db);
 
@@ -433,7 +436,7 @@ mod tests {
             let pool_clone = pool.clone();
             let handle = tokio::spawn(async move {
                 for j in 0..10 {
-                    sqlx::query("INSERT INTO test_concurrent (value) VALUES (?)")
+                    sqlx::query("INSERT INTO test_concurrent (value) VALUES ($1)")
                         .bind(format!("task-{}-write-{}", i, j))
                         .execute(&pool_clone)
                         .await
@@ -455,11 +458,17 @@ mod tests {
             .unwrap();
 
         assert_eq!(count.0, 100, "All concurrent writes should succeed");
+
+        sqlx::query("DROP TABLE IF EXISTS test_concurrent")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    async fn test_sqlite_vacuum_operation() {
-        // Test that VACUUM operations don't block other queries
+    async fn test_vacuum_operation() {
+        // Test that VACUUM operations don't block other queries (PostgreSQL
+        // MVCC: plain VACUUM never blocks readers/writers)
         let (db, _temp) = create_test_db().await;
         let pool = pg_pool(&db);
 
@@ -476,7 +485,7 @@ mod tests {
 
         // Insert some data
         for i in 0..100 {
-            sqlx::query("INSERT INTO test_vacuum (data) VALUES (?)")
+            sqlx::query("INSERT INTO test_vacuum (data) VALUES ($1)")
                 .bind(format!("data-{}", i))
                 .execute(&pool)
                 .await
@@ -486,12 +495,12 @@ mod tests {
         // Run VACUUM in background
         let pool_vacuum = pool.clone();
         let vacuum_handle =
-            tokio::spawn(async move { sqlx::query("VACUUM").execute(&pool_vacuum).await });
+            tokio::spawn(async move { sqlx::query("VACUUM test_vacuum").execute(&pool_vacuum).await });
 
         // While VACUUM is running, try to read
         let pool_read = pool.clone();
         let read_handle = tokio::spawn(async move {
-            // Should be able to read even during VACUUM (WAL mode)
+            // MVCC guarantees readers are never blocked by VACUUM
             let result: Result<Vec<(i64, String)>, _> =
                 sqlx::query_as("SELECT id, data FROM test_vacuum LIMIT 10")
                     .fetch_all(&pool_read)
@@ -500,15 +509,20 @@ mod tests {
             result
         });
 
-        // Both should complete (VACUUM may take time, but reads should work)
+        // Both should complete
         let read_result = read_handle.await.unwrap();
         assert!(
             read_result.is_ok(),
-            "Reads should work during VACUUM in WAL mode"
+            "Reads must work during VACUUM (PostgreSQL MVCC)"
         );
 
         // Wait for VACUUM (may timeout, but that's OK for this test)
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), vacuum_handle).await;
+
+        sqlx::query("DROP TABLE IF EXISTS test_vacuum")
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

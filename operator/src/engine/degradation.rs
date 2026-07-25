@@ -1,18 +1,17 @@
 //! Graceful Degradation Handlers
 //!
 //! Implements automatic recovery and degradation strategies for various failure modes:
-//! - SQLite lock retry with backoff
 //! - Memory pressure monitoring and load shedding
 //! - Disk space monitoring and log pruning
 //! - RPC rate limit handling with exponential backoff
+//!
+//! Note: SQLite lock-retry helpers were removed when SQLite was decommissioned
+//! (2026-07); PostgreSQL uses its own transaction/serialization handling.
 
 use crate::error::{AppError, AppResult};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::time::sleep;
-
-/// Maximum retry attempts for SQLite operations
-const MAX_SQLITE_RETRIES: u32 = 3;
 
 /// Initial backoff delay in milliseconds
 const INITIAL_BACKOFF_MS: u64 = 100;
@@ -31,122 +30,6 @@ static MEMORY_PRESSURE: AtomicBool = AtomicBool::new(false);
 
 /// Global RPC rate limit backoff multiplier
 static RPC_BACKOFF_MULTIPLIER: AtomicU64 = AtomicU64::new(1);
-
-/// Retry SQLite operation with exponential backoff
-///
-/// This handles SQLite lock errors by retrying with increasing delays.
-pub async fn retry_sqlite<F, T, E>(operation: F) -> Result<T, E>
-where
-    F: Fn() -> Result<T, E> + Send + Sync,
-    E: std::fmt::Display + Send + Sync,
-{
-    let mut attempt = 0;
-    let mut backoff_ms = INITIAL_BACKOFF_MS;
-
-    loop {
-        match operation() {
-            Ok(result) => {
-                // Reset backoff on success
-                RPC_BACKOFF_MULTIPLIER.store(1, Ordering::Relaxed);
-                return Ok(result);
-            }
-            Err(e) => {
-                let error_str = e.to_string().to_lowercase();
-
-                // Check if it's a lock error
-                if error_str.contains("locked")
-                    || error_str.contains("database is locked")
-                    || error_str.contains("busy")
-                {
-                    attempt += 1;
-
-                    if attempt >= MAX_SQLITE_RETRIES {
-                        tracing::error!(
-                            attempt = attempt,
-                            error = %e,
-                            "SQLite operation failed after max retries"
-                        );
-                        return Err(e);
-                    }
-
-                    tracing::warn!(
-                        attempt = attempt,
-                        backoff_ms = backoff_ms,
-                        error = %e,
-                        "SQLite lock detected, retrying with backoff"
-                    );
-
-                    sleep(Duration::from_millis(backoff_ms)).await;
-
-                    // Exponential backoff: double the delay, cap at max
-                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
-                } else {
-                    // Not a lock error, return immediately
-                    return Err(e);
-                }
-            }
-        }
-    }
-}
-
-/// Retry async SQLite operation with exponential backoff
-///
-/// This is designed for SQLx async operations that might encounter lock contention.
-pub async fn retry_sqlite_async<F, Fut, T, E>(operation: F) -> Result<T, E>
-where
-    F: Fn() -> Fut + Send + Sync,
-    Fut: std::future::Future<Output = Result<T, E>> + Send,
-    E: std::fmt::Display + Send + Sync,
-{
-    let mut attempt = 0;
-    let mut backoff_ms = INITIAL_BACKOFF_MS;
-
-    loop {
-        match operation().await {
-            Ok(result) => {
-                // Reset backoff on success
-                RPC_BACKOFF_MULTIPLIER.store(1, Ordering::Relaxed);
-                return Ok(result);
-            }
-            Err(e) => {
-                let error_str = e.to_string().to_lowercase();
-
-                // Check if it's a lock error
-                if error_str.contains("locked")
-                    || error_str.contains("database is locked")
-                    || error_str.contains("busy")
-                    || error_str.contains("database is busy")
-                {
-                    attempt += 1;
-
-                    if attempt >= MAX_SQLITE_RETRIES {
-                        tracing::error!(
-                            attempt = attempt,
-                            error = %e,
-                            "Async SQLite operation failed after max retries"
-                        );
-                        return Err(e);
-                    }
-
-                    tracing::warn!(
-                        attempt = attempt,
-                        backoff_ms = backoff_ms,
-                        error = %e,
-                        "Async SQLite lock detected, retrying with backoff"
-                    );
-
-                    sleep(Duration::from_millis(backoff_ms)).await;
-
-                    // Exponential backoff: double the delay, cap at max
-                    backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
-                } else {
-                    // Not a lock error, return immediately
-                    return Err(e);
-                }
-            }
-        }
-    }
-}
 
 /// Check memory pressure and return current usage percentage
 pub async fn check_memory_pressure() -> AppResult<f64> {
@@ -324,39 +207,6 @@ pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn test_retry_sqlite_success() {
-        use std::sync::{Arc, Mutex};
-        let attempts = Arc::new(Mutex::new(0));
-        let attempts_clone = attempts.clone();
-        let result = retry_sqlite(move || {
-            let mut count = attempts_clone.lock().unwrap();
-            *count += 1;
-            if *count == 1 {
-                Err("database is locked")
-            } else {
-                Ok(42)
-            }
-        })
-        .await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 42);
-        assert_eq!(*attempts.lock().unwrap(), 2);
-    }
-
-    #[tokio::test]
-    async fn test_retry_sqlite_max_retries() {
-        let result = retry_sqlite(|| Err::<i32, _>("database is locked")).await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_retry_sqlite_non_lock_error() {
-        let result = retry_sqlite(|| Err::<i32, _>("other error")).await;
-        assert!(result.is_err());
-    }
 
     #[test]
     fn test_memory_pressure_flag() {

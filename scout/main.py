@@ -28,7 +28,6 @@ import logging
 import logging.handlers
 import math
 import os
-import sqlite3
 import sys
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1501,38 +1500,38 @@ def _write_exit_recommendations(exit_recs: List[Dict[str, Any]]) -> None:
     except Exception as e:
         print(f"[Scout] Failed to write exit recommendations: {e}")
 
-    # Also write to chimera.db with enhanced schema
-    db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
+    # Also write to PostgreSQL with enhanced schema
     conn = None
     try:
-        conn = sqlite3.connect(db_path, timeout=10.0)
-        conn.execute("PRAGMA journal_mode=WAL;")
+        from core.db import get_connection
+        conn = get_connection()
+        cursor = conn.cursor()
 
-        conn.execute("""
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS exit_recommendations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 wallet_address TEXT NOT NULL,
                 reason TEXT,
                 recommended_action TEXT NOT NULL DEFAULT 'EXIT_ALL',
-                confidence REAL NOT NULL DEFAULT 0.5,
+                confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5,
                 priority TEXT NOT NULL DEFAULT 'MEDIUM',
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                acknowledged INTEGER NOT NULL DEFAULT 0,
-                processed INTEGER NOT NULL DEFAULT 0
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+                processed BOOLEAN NOT NULL DEFAULT FALSE
             )
         """)
 
         for rec in enhanced_recs:
-            conn.execute(
+            cursor.execute(
                 """INSERT INTO exit_recommendations
                    (wallet_address, reason, recommended_action, confidence, priority)
-                   VALUES (?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s)""",
                 (rec.get("wallet"), rec.get("reason"), rec.get("recommended_action", "EXIT_ALL"),
                  rec.get("confidence", 0.5), rec.get("priority", "MEDIUM")),
             )
 
         conn.commit()
-        print(f"[Scout] Wrote {len(enhanced_recs)} exit recommendations to {db_path} (exit_recommendations table)")
+        print(f"[Scout] Wrote {len(enhanced_recs)} exit recommendations to PostgreSQL (exit_recommendations table)")
 
         high_conf = sum(1 for r in enhanced_recs if r.get("confidence", 0) >= 0.7)
         print(f"[Scout] Exit summary: {len(enhanced_recs)} total, {high_conf} high confidence")

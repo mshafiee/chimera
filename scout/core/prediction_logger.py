@@ -20,13 +20,12 @@ Usage:
 
 import json
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from .db import get_connection, _is_sqlite, _translate_pg_to_sqlite
+from .db import get_connection
 
 logger = logging.getLogger(__name__)
 
@@ -98,9 +97,7 @@ class PredictionLogger:
 
     @staticmethod
     def _exec(cursor, query, params=None):
-        """Execute a query with automatic %s → ? translation for SQLite."""
-        if _is_sqlite():
-            query = _translate_pg_to_sqlite(query)
+        """Execute a query (PostgreSQL dialect, %s placeholders)."""
         cursor.execute(query, params or ())
 
     def __init__(
@@ -125,12 +122,8 @@ class PredictionLogger:
         self._ensure_schema()
 
     def _get_connection(self):
-        """Get a database connection with row factory."""
-        if not self.db_path.exists():
-            logger.warning(f"Database not found at {self.db_path}")
-
-        conn = get_connection(str(self.db_path))
-        return conn
+        """Get a pooled PostgreSQL connection."""
+        return get_connection(str(self.db_path))
 
     def _ensure_schema(self):
         """Ensure the ml_predictions table exists.
@@ -259,10 +252,15 @@ class PredictionLogger:
             logger.debug(f"Logged prediction {prediction_id} for {wallet_address} using {model_type}")
             return prediction_id
 
-        except sqlite3.IntegrityError:
-            logger.warning(f"Duplicate prediction for {wallet_address} at {now} with model {model_type}")
-            return None
         except Exception as e:
+            try:
+                from psycopg.errors import UniqueViolation
+                is_dupe = isinstance(e, UniqueViolation)
+            except ImportError:
+                is_dupe = "duplicate key" in str(e).lower()
+            if is_dupe:
+                logger.warning(f"Duplicate prediction for {wallet_address} at {now} with model {model_type}")
+                return None
             logger.error(f"Failed to log prediction: {e}")
             return None
 
