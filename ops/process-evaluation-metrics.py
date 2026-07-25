@@ -16,7 +16,6 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import sqlite3
 import sys
@@ -344,6 +343,10 @@ class EvaluationMetricsProcessor:
     ) -> bool:
         """Process all metrics in the specified directory.
 
+        Only the files matching the current collection ``timestamp`` are
+        processed — older files (which may be empty from failed fetches on a
+        previous cycle) are ignored to avoid spurious JSON-parse crashes.
+
         Args:
             day_number: Day number
             hour_number: Hour number
@@ -356,13 +359,20 @@ class EvaluationMetricsProcessor:
         success = True
 
         try:
-            # Find operator metrics file
+            # Find files matching the *current* timestamp only. The entrypoint
+            # names files ``operator-metrics-<timestamp>.txt`` etc., so we match
+            # on the exact timestamp suffix to avoid processing stale/empty
+            # files left over from earlier failed collection cycles.
+            ts_suffix = timestamp
+
             operator_metrics_file = None
             scout_metrics_file = None
             docker_stats_file = None
             health_status_file = None
 
             for file in metrics_dir.glob("*.txt"):
+                if ts_suffix not in file.name:
+                    continue
                 if 'operator-metrics' in file.name:
                     operator_metrics_file = file
                 elif 'scout-metrics' in file.name:
@@ -370,37 +380,40 @@ class EvaluationMetricsProcessor:
                 elif 'docker-stats' in file.name:
                     docker_stats_file = file
 
-            # Look for health status JSON
+            # Look for health status JSON (also scoped to current timestamp)
             for file in metrics_dir.glob("*.json"):
-                if 'health-status' in file.name:
+                if ts_suffix in file.name and 'health-status' in file.name:
                     health_status_file = file
 
             # Parse operator metrics
             operator_metrics = {}
-            if operator_metrics_file:
+            if operator_metrics_file and operator_metrics_file.stat().st_size > 0:
                 operator_metrics = self.parse_prometheus_metrics(operator_metrics_file)
                 print(f"Parsed {len(operator_metrics)} operator metrics")
             else:
-                print("Warning: Operator metrics file not found")
+                print("Warning: Operator metrics file not found or empty")
 
             # Parse scout metrics
             scout_metrics = {}
-            if scout_metrics_file:
+            if scout_metrics_file and scout_metrics_file.stat().st_size > 0:
                 scout_metrics = self.parse_prometheus_metrics(scout_metrics_file)
                 print(f"Parsed {len(scout_metrics)} scout metrics")
 
             # Parse docker stats
             system_stats = {}
-            if docker_stats_file:
+            if docker_stats_file and docker_stats_file.stat().st_size > 0:
                 system_stats = self.extract_container_stats(docker_stats_file)
                 print(f"Parsed stats for {len(system_stats)} containers")
 
-            # Parse health status
+            # Parse health status — tolerate empty/corrupt files gracefully
             health_status = {}
-            if health_status_file:
-                with open(health_status_file, 'r') as f:
-                    health_status = json.load(f)
-                print("Parsed health status")
+            if health_status_file and health_status_file.stat().st_size > 0:
+                try:
+                    with open(health_status_file, 'r') as f:
+                        health_status = json.load(f)
+                    print("Parsed health status")
+                except (json.JSONDecodeError, ValueError) as e:
+                    print(f"Warning: Health status file is not valid JSON: {e}")
 
             # Store evaluation snapshot
             snapshot_id = self.store_evaluation_snapshot(
