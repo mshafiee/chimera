@@ -4,6 +4,7 @@
 //! signal processing, and intelligent trade detection.
 
 pub mod exit_detector;
+pub mod dexscreener;
 pub mod helius;
 pub mod helius_wss;
 pub mod helius_wss_health;
@@ -19,6 +20,7 @@ pub mod webhook_health_task;
 pub mod webhook_lifecycle;
 
 pub use exit_detector::ExitDetector;
+pub use dexscreener::{DexScreenerClient, TokenMarketData};
 pub use helius::HeliusClient;
 pub use helius_wss::{ConnectionState, LaserStreamClient, LaserStreamConfig, ReconnectConfig};
 pub use helius_wss_health::{HealthMetrics, WebSocketHealth};

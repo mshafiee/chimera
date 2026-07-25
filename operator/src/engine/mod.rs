@@ -296,6 +296,8 @@ impl Engine {
             None, // portfolio_heat
             None, // state_registry
             None, // write_queue
+            None, // wallet_performance
+            None, // toxic_detector
         )
     }
 
@@ -313,6 +315,8 @@ impl Engine {
         portfolio_heat: Option<Arc<PortfolioHeat>>,
         state_registry: Option<Arc<StateRegistry>>,
         write_queue: Option<Arc<AsyncWriteQueue>>,
+        wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
+        toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
             config,
@@ -326,6 +330,8 @@ impl Engine {
             portfolio_heat,
             state_registry,
             write_queue,
+            wallet_performance,
+            toxic_detector,
         )
     }
 
@@ -338,7 +344,7 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, None, None, None, None, None, None,
+            config, db, notifier, metrics, ws_state, None, None, None, None, None, None, None, None,
         )
     }
 
@@ -356,6 +362,8 @@ impl Engine {
         portfolio_heat: Option<Arc<PortfolioHeat>>,
         state_registry: Option<Arc<StateRegistry>>,
         write_queue: Option<Arc<AsyncWriteQueue>>,
+        wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
+        toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
         let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
@@ -413,6 +421,18 @@ impl Engine {
             write_queue.clone(),
         )
         .with_worker_id("sequential".to_string()); // Set worker ID for sequential processing
+
+        // B3: Wire wallet performance tracker and toxic detector
+        let signal_processor = if let Some(ref wp) = wallet_performance {
+            signal_processor.with_wallet_performance(wp.clone())
+        } else {
+            signal_processor
+        };
+        let signal_processor = if let Some(ref td) = toxic_detector {
+            signal_processor.with_toxic_detector(td.clone())
+        } else {
+            signal_processor
+        };
 
         // Add execution lock to signal processor if enabled
         let signal_processor = if let Some(ref lock) = execution_lock {

@@ -51,6 +51,12 @@ pub struct SignalProcessor {
     admission_locks: Arc<dashmap::DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Worker ID for lock attribution (set by worker pool or engine)
     worker_id: String,
+    /// Wallet copy-performance tracker (B3): called on every confirmed SELL
+    /// to update WQS and trigger auto-demotion.
+    wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
+    /// Toxic-flow detector (B3): called on every confirmed SELL to record
+    /// ROI-dropping wallet behaviour.
+    toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
 }
 
 impl SignalProcessor {
@@ -83,6 +89,8 @@ impl SignalProcessor {
             execution_lock: None, // Set via with_execution_lock()
             admission_locks: Arc::new(dashmap::DashMap::new()),
             worker_id: "sequential".to_string(), // Default worker ID
+            wallet_performance: None,
+            toxic_detector: None,
         }
     }
 
@@ -95,6 +103,24 @@ impl SignalProcessor {
     /// Set the worker ID for this signal processor
     pub fn with_worker_id(mut self, worker_id: String) -> Self {
         self.worker_id = worker_id;
+        self
+    }
+
+    /// Attach the wallet copy-performance tracker (B3).
+    pub fn with_wallet_performance(
+        mut self,
+        tracker: Arc<crate::monitoring::WalletPerformanceTracker>,
+    ) -> Self {
+        self.wallet_performance = Some(tracker);
+        self
+    }
+
+    /// Attach the toxic-flow detector (B3).
+    pub fn with_toxic_detector(
+        mut self,
+        detector: Arc<crate::experiment::ToxicFlowDetector>,
+    ) -> Self {
+        self.toxic_detector = Some(detector);
         self
     }
 
@@ -963,6 +989,71 @@ impl SignalProcessor {
                                 .await
                             {
                                 tracing::error!(error = %e, "Failed to update sell trade status");
+                            }
+
+                            // B3: Wire trade-close outcome to WalletPerformanceTracker
+                            // and ToxicFlowDetector (only on confirmed CLOSED).
+                            if final_status == "CLOSED" {
+                                let wallet = &signal.payload.wallet_address;
+                                // Query the trade for its net PnL.
+                                let pnl_sol = self
+                                    .db
+                                    .get_trade_by_uuid(&trade_uuid)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|t| t.net_pnl_sol)
+                                    .unwrap_or(Decimal::ZERO);
+
+                                if let Some(ref wp) = self.wallet_performance {
+                                    if let Err(e) =
+                                        wp.record_trade_result(wallet, pnl_sol).await
+                                    {
+                                        tracing::warn!(
+                                            wallet = %wallet,
+                                            error = %e,
+                                            "WalletPerformanceTracker: record_trade_result failed"
+                                        );
+                                    }
+                                }
+
+                                if let Some(ref td) = self.toxic_detector {
+                                    // is_local_top is unknown without price-history
+                                    // analysis; conservatively set false. The ROI-drop
+                                    // detection (the primary toxic signal) still works.
+                                    let roi_f64 = pnl_sol.to_f64().unwrap_or(0.0);
+                                    match td
+                                        .record_entry(wallet.clone(), false, roi_f64)
+                                        .await
+                                    {
+                                        Ok(Some(reason)) => {
+                                            tracing::warn!(
+                                                wallet = %wallet,
+                                                ?reason,
+                                                "ToxicFlowDetector: wallet flagged as toxic"
+                                            );
+                                            // Persist immediately on detection
+                                            use crate::db_abstraction::DbPool;
+                                            if let DbPool::PostgreSQL(pool) = self.db.pool() {
+                                                let run_id = format!(
+                                                    "v{}",
+                                                    env!("CARGO_PKG_VERSION")
+                                                );
+                                                let _ = td
+                                                    .persist_to_database(&pool, &run_id)
+                                                    .await;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                wallet = %wallet,
+                                                error = %e,
+                                                "ToxicFlowDetector: record_entry failed"
+                                            );
+                                        }
+                                        _ => {}
+                                    }
+                                }
                             }
                         }
                         Err(e) => {

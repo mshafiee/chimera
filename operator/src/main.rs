@@ -359,9 +359,22 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
-    // Initialize volume cache for liquidity drop detection
-    let _volume_cache = Arc::new(engine::volume_cache::VolumeCache::new());
-    tracing::info!("✓ Volume Cache initialized for liquidity monitoring");
+    // Shared VolumeCache — fed by DexScreener client (B3), consumed by
+    // MomentumExit for volume-drop detection and SelectionService.
+    let shared_volume_cache = Arc::new(engine::volume_cache::VolumeCache::new());
+    tracing::info!("✓ Volume Cache initialized (shared) for liquidity monitoring");
+
+    // DexScreener client (B3) — feeds the shared VolumeCache with 24h volume samples.
+    let dexscreener_rate_limiter = Arc::new(
+        chimera_operator::monitoring::rate_limiter::RateLimiter::new(5, 1),
+    );
+    let dexscreener_client = Arc::new(
+        chimera_operator::monitoring::dexscreener::DexScreenerClient::new(
+            dexscreener_rate_limiter,
+            shared_volume_cache.clone(),
+        ),
+    );
+    tracing::info!("✓ DexScreener client initialized (shared volume cache)");
 
     // Validate webhook URL reachability if monitoring is enabled
     if let Some(ref monitoring_config) = config.monitoring {
@@ -584,6 +597,18 @@ async fn main() -> anyhow::Result<()> {
         "Portfolio heat manager initialized with registry fast path"
     );
 
+    // B3: Wallet performance tracker + toxic flow detector
+    let wallet_performance_tracker = Arc::new(
+        chimera_operator::monitoring::WalletPerformanceTracker::new(db_pool.clone()),
+    );
+    let toxic_flow_detector = Arc::new(
+        chimera_operator::experiment::ToxicFlowDetector::new(config.experiment.clone()),
+    );
+    tracing::info!(
+        toxic_threshold = config.experiment.toxic_threshold_percent,
+        "Toxic flow detector + wallet performance tracker initialized"
+    );
+
     // Create engine
     let (engine, _engine_handle) =
         engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
@@ -598,6 +623,8 @@ async fn main() -> anyhow::Result<()> {
             Some(portfolio_heat.clone()),
             Some(state_registry.clone()), // state_registry for fast portfolio heat
             None, // write_queue
+            Some(wallet_performance_tracker.clone()),
+            Some(toxic_flow_detector.clone()),
         );
     tracing::info!("Engine created");
 
@@ -1231,7 +1258,7 @@ async fn main() -> anyhow::Result<()> {
         stop_loss_mgr
             .set_signal_aggregator(signal_aggregator.clone())
             .await;
-        let volume_cache = Arc::new(VolumeCache::new());
+        let volume_cache = shared_volume_cache.clone();
         let momentum_exit = Arc::new(MomentumExit::with_volume_cache(
             db_pool.clone(),
             price_cache.clone(),
@@ -1553,6 +1580,52 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("RPC polling disabled in configuration");
     }
 
+    // B3: Background volume-polling task — fetches DexScreener data for tokens
+    // with open ACTIVE positions every 60s, feeding the shared VolumeCache so
+    // MomentumExit's volume-drop detection has fresh samples.
+    {
+        let vol_db = db_pool.clone();
+        let vol_dex = dexscreener_client.clone();
+        let vol_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // consume first immediate tick
+            loop {
+                tokio::select! {
+                    _ = vol_token.cancelled() => {
+                        tracing::info!("Volume polling task shutting down");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let tokens = match vol_db.get_active_positions_with_entry().await {
+                            Ok(positions) => {
+                                let set: std::collections::HashSet<String> = positions
+                                    .iter()
+                                    .map(|p| p.token_address.clone())
+                                    .collect();
+                                set
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Volume polling: DB query failed");
+                                continue;
+                            }
+                        };
+                        for token in &tokens {
+                            let _ = vol_dex.get_market_data(token).await;
+                        }
+                        if !tokens.is_empty() {
+                            tracing::debug!(
+                                tokens_checked = tokens.len(),
+                                "Volume polling: refreshed DexScreener data for open positions"
+                            );
+                        }
+                    }
+                }
+            }
+        });
+        tracing::info!("Volume polling task started (60s interval)");
+    }
+
     // Start Helius LaserStream WebSocket if enabled
     if config
         .monitoring
@@ -1826,6 +1899,7 @@ async fn main() -> anyhow::Result<()> {
         helius_client: helius_client.clone(),
         webhook_rate_limiter: Some(webhook_api_rate_limiter.clone()),
         price_cache: price_cache.clone(),
+        toxic_detector: Some(toxic_flow_detector.clone()),
     });
 
     // Run startup webhook management check
@@ -2254,25 +2328,30 @@ async fn main() -> anyhow::Result<()> {
     // B1: Unified selection engine shared by both ingress paths (direct
     // webhook + Helius monitoring). Built once with every capability the two
     // handlers collectively need so both run the identical decision pipeline.
-    let selection_service = Arc::new(crate::engine::SelectionService::new(
-        db_pool.clone(),
-        token_parser.clone(),
-        Some(portfolio_heat.clone()),
-        Some(signal_aggregator.clone()),
-        Some(market_regime_detector.clone()),
-        helius_client.clone(),
-        Some(position_sizer.clone()),
-        crate::engine::SelectionConfig {
-            total_capital_sol: config.position_sizing.total_capital_sol,
-            max_position_sol: config.position_sizing.max_size_sol,
-            shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
-            spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
-            shield_percent: config.strategy.shield_percent,
-            spear_percent: config.strategy.spear_percent,
-            min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
-            min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
-        },
-    ));
+    let selection_service = Arc::new(
+        crate::engine::SelectionService::new(
+            db_pool.clone(),
+            token_parser.clone(),
+            Some(portfolio_heat.clone()),
+            Some(signal_aggregator.clone()),
+            Some(market_regime_detector.clone()),
+            helius_client.clone(),
+            Some(position_sizer.clone()),
+            crate::engine::SelectionConfig {
+                total_capital_sol: config.position_sizing.total_capital_sol,
+                max_position_sol: config.position_sizing.max_size_sol,
+                shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
+                spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
+                shield_percent: config.strategy.shield_percent,
+                spear_percent: config.strategy.spear_percent,
+                min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+                min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+                min_token_age_hours: config.token_safety.min_token_age_hours,
+            },
+        )
+        .with_dexscreener(dexscreener_client.clone())
+        .with_toxic_detector(toxic_flow_detector.clone()),
+    );
 
     let webhook_state = Arc::new(WebhookState {
         db: db_pool.clone(),
@@ -2510,6 +2589,41 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%addr, "Starting server with FULL router");
 
+    // B3: Load previously-detected toxic wallets from database on startup
+    {
+        use chimera_operator::db_abstraction::DbPool;
+        if let DbPool::PostgreSQL(pg_pool) = db_pool.pool() {
+            if let Err(e) = toxic_flow_detector.load_from_database(&pg_pool).await {
+                tracing::warn!(error = %e, "Failed to load toxic wallets on startup");
+            }
+        }
+    }
+
+    // B3: Periodic toxic-wallet persistence (every 5 minutes)
+    {
+        let persist_detector = toxic_flow_detector.clone();
+        let persist_db = db_pool.clone();
+        let persist_token = cancel_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+            interval.tick().await; // consume first immediate tick
+            loop {
+                tokio::select! {
+                    _ = persist_token.cancelled() => break,
+                    _ = interval.tick() => {
+                        use chimera_operator::db_abstraction::DbPool;
+                        if let DbPool::PostgreSQL(pg_pool) = persist_db.pool() {
+                            let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
+                            if let Err(e) = persist_detector.persist_to_database(&pg_pool, &run_id).await {
+                                tracing::warn!(error = %e, "Periodic toxic wallet persist failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     let shutdown_token = cancel_token.clone();
     let server_handle = tokio::spawn(async move {
         let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -2546,6 +2660,19 @@ async fn main() -> anyhow::Result<()> {
     for handle in task_handles {
         if let Err(e) = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await {
             tracing::warn!(error = %e, "Background task did not complete within 5s shutdown window");
+        }
+    }
+
+    // B3: Final toxic-wallet persistence on shutdown
+    {
+        use chimera_operator::db_abstraction::DbPool;
+        if let DbPool::PostgreSQL(pg_pool) = db_pool.pool() {
+            let run_id = format!("v{}", env!("CARGO_PKG_VERSION"));
+            if let Err(e) = toxic_flow_detector.persist_to_database(&pg_pool, &run_id).await {
+                tracing::warn!(error = %e, "Final toxic wallet persist failed on shutdown");
+            } else {
+                tracing::info!("Toxic wallet state persisted on shutdown");
+            }
         }
     }
 

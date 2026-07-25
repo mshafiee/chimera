@@ -53,6 +53,9 @@ pub struct ApiState {
     pub webhook_rate_limiter: Option<Arc<crate::monitoring::rate_limiter::RateLimiter>>,
     /// Price cache for performance monitoring
     pub price_cache: Arc<crate::price_cache::PriceCache>,
+    /// Toxic flow detector (B3): called on wallet promotion to register
+    /// selection ROI baseline for post-promotion performance monitoring.
+    pub toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
 }
 
 // =============================================================================
@@ -270,6 +273,20 @@ pub async fn update_wallet(
             .as_ref()
             .and_then(|w| w.wqs_score.and_then(|d| d.to_f64()))
             .unwrap_or(0.0);
+
+        // B3: Register promotion with toxic detector for baseline tracking
+        if let Some(ref td) = state.toxic_detector {
+            if let Err(e) = td
+                .register_wallet_promotion(address.clone(), wqs_score)
+                .await
+            {
+                tracing::warn!(
+                    wallet = %address,
+                    error = %e,
+                    "ToxicFlowDetector: register_wallet_promotion failed"
+                );
+            }
+        }
 
         // Check notification rules before sending
         let config = state.config.read().await;

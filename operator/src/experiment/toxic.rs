@@ -148,15 +148,15 @@ impl ToxicFlowDetector {
     }
 
     pub async fn persist_to_database(&self, pool: &sqlx::Pool<sqlx::Postgres>, run_id: &str) -> AppResult<()> {
-        let wallets = self.wallets.read().await;
-        
+        let wallets = self.wallets.write().await;
+
         for wallet in wallets.values() {
             let toxic_reason_str = match wallet.toxic_reason {
                 Some(ToxicReason::RoiDrop) => Some("roi_drop".to_string()),
                 Some(ToxicReason::LocalTopSqueeze) => Some("local_top_squeeze".to_string()),
                 None => None,
             };
-            
+
             sqlx::query(
                 r#"
                 INSERT INTO toxic_wallets (
@@ -180,15 +180,61 @@ impl ToxicFlowDetector {
             .bind(wallet.post_promotion_roi)
             .bind(wallet.local_top_entries as i64)
             .bind(wallet.total_entries as i64)
-            .bind(wallet.is_toxic as i32)
+            .bind(wallet.is_toxic)
             .bind(toxic_reason_str)
-            .bind(wallet.detected_at.map(|dt| dt.to_rfc3339()))
+            .bind(wallet.detected_at)
             .bind(run_id)
             .execute(pool)
             .await?;
         }
-        
+
         info!("Persisted {} toxic wallet records to database", wallets.len());
+        Ok(())
+    }
+
+    /// Load previously-detected toxic wallet state from the database on startup.
+    /// Only loads wallets marked toxic — non-toxic tracking starts fresh.
+    pub async fn load_from_database(&self, pool: &sqlx::Pool<sqlx::Postgres>) -> AppResult<()> {
+        let rows = sqlx::query_as::<_, ToxicWalletRow>(
+            r#"
+            SELECT wallet_address, selection_roi, post_promotion_roi,
+                   local_top_entries, total_entries, is_toxic,
+                   toxic_reason, detected_at
+            FROM toxic_wallets
+            WHERE is_toxic = TRUE
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let mut wallets = self.wallets.write().await;
+        let count = rows.len();
+        for row in rows {
+            let toxic_reason = row.toxic_reason.as_deref().map(|r| match r {
+                "roi_drop" => ToxicReason::RoiDrop,
+                "local_top_squeeze" => ToxicReason::LocalTopSqueeze,
+                _ => ToxicReason::RoiDrop,
+            });
+
+            wallets.insert(
+                row.wallet_address.clone(),
+                ToxicWallet {
+                    address: row.wallet_address,
+                    selection_roi: row.selection_roi,
+                    post_promotion_roi: row.post_promotion_roi,
+                    local_top_entries: row.local_top_entries as u32,
+                    total_entries: row.total_entries as u32,
+                    is_toxic: true,
+                    toxic_reason,
+                    detected_at: row.detected_at,
+                },
+            );
+        }
+
+        if count > 0 {
+            warn!("Loaded {} toxic wallets from database on startup", count);
+        }
+
         Ok(())
     }
 
@@ -221,6 +267,34 @@ pub struct ToxicStatistics {
     pub total_entries: u32,
     pub local_top_entries: u32,
     pub toxic_rate: f64,
+}
+
+/// Row mapping for `load_from_database`.
+struct ToxicWalletRow {
+    wallet_address: String,
+    selection_roi: f64,
+    post_promotion_roi: f64,
+    local_top_entries: i64,
+    total_entries: i64,
+    is_toxic: bool,
+    toxic_reason: Option<String>,
+    detected_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ToxicWalletRow {
+    fn from_row(row: &'r sqlx::postgres::PgRow) -> Result<Self, sqlx::Error> {
+        use sqlx::Row;
+        Ok(Self {
+            wallet_address: row.try_get("wallet_address")?,
+            selection_roi: row.try_get::<f64, _>("selection_roi").unwrap_or(0.0),
+            post_promotion_roi: row.try_get::<f64, _>("post_promotion_roi").unwrap_or(0.0),
+            local_top_entries: row.try_get::<i64, _>("local_top_entries").unwrap_or(0),
+            total_entries: row.try_get::<i64, _>("total_entries").unwrap_or(0),
+            is_toxic: row.try_get("is_toxic").unwrap_or(false),
+            toxic_reason: row.try_get("toxic_reason").ok().flatten(),
+            detected_at: row.try_get("detected_at").ok().flatten(),
+        })
+    }
 }
 
 impl std::fmt::Display for ToxicStatistics {

@@ -75,6 +75,9 @@ pub struct SelectionConfig {
     pub spear_percent: u32,
     pub min_liquidity_shield_usd: Decimal,
     pub min_liquidity_spear_usd: Decimal,
+    /// Minimum token age in hours. Tokens younger than this are rejected.
+    /// Unknown age (API failure): rejected for SPEAR, warned-and-allowed for SHIELD.
+    pub min_token_age_hours: f64,
 }
 
 impl SelectionConfig {
@@ -92,6 +95,7 @@ impl SelectionConfig {
         hasher.update(self.spear_percent.to_le_bytes());
         hasher.update(self.min_liquidity_shield_usd.to_string().as_bytes());
         hasher.update(self.min_liquidity_spear_usd.to_string().as_bytes());
+        hasher.update(self.min_token_age_hours.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -186,6 +190,8 @@ pub struct SelectionService {
     market_regime: Option<Arc<MarketRegimeDetector>>,
     helius_client: Option<Arc<HeliusClient>>,
     position_sizer: Option<Arc<PositionSizer>>,
+    dexscreener: Option<Arc<crate::monitoring::dexscreener::DexScreenerClient>>,
+    toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -211,9 +217,29 @@ impl SelectionService {
             market_regime,
             helius_client,
             position_sizer,
+            dexscreener: None,
+            toxic_detector: None,
             config,
             config_hash,
         }
+    }
+
+    /// Attach the DexScreener client (B3) for volume data.
+    pub fn with_dexscreener(
+        mut self,
+        client: Arc<crate::monitoring::dexscreener::DexScreenerClient>,
+    ) -> Self {
+        self.dexscreener = Some(client);
+        self
+    }
+
+    /// Attach the ToxicFlowDetector (B3) for toxic-wallet gating.
+    pub fn with_toxic_detector(
+        mut self,
+        detector: Arc<crate::experiment::ToxicFlowDetector>,
+    ) -> Self {
+        self.toxic_detector = Some(detector);
+        self
     }
 
     pub fn config_hash(&self) -> &str {
@@ -359,6 +385,19 @@ impl SelectionService {
             );
         }
 
+        // B3: Toxic-wallet gate — reject signals from wallets flagged toxic.
+        if let Some(ref detector) = self.toxic_detector {
+            if detector.is_wallet_toxic(&req.wallet_address).await {
+                return BuyDecision::rejected(
+                    req,
+                    &self.config_hash,
+                    "TOXIC_WALLET",
+                    "Wallet flagged as toxic — post-promotion ROI deterioration"
+                        .to_string(),
+                );
+            }
+        }
+
         let wallet_wqs = wallet.wqs_score.and_then(|d| d.to_f64()).unwrap_or(0.0);
         let wqs_confidence = wallet.wqs_confidence.and_then(|d| d.to_f64());
         let wallet_success_rate = wallet
@@ -440,6 +479,40 @@ impl SelectionService {
             None
         };
 
+        let min_age = self.config.min_token_age_hours;
+        if min_age > 0.0 {
+            match token_age_hours {
+                Some(age) if age < min_age => {
+                    return BuyDecision::rejected(
+                        req,
+                        &self.config_hash,
+                        "TOKEN_TOO_NEW",
+                        format!(
+                            "Token age {:.1}h below minimum {:.1}h",
+                            age, min_age
+                        ),
+                    );
+                }
+                None => {
+                    // Unknown age — policy: reject SPEAR, allow SHIELD.
+                    if strategy == Strategy::Spear {
+                        return BuyDecision::rejected(
+                            req,
+                            &self.config_hash,
+                            "TOKEN_AGE_UNKNOWN",
+                            "Token age unknown — rejected for SPEAR (conservative policy)"
+                                .to_string(),
+                        );
+                    }
+                    tracing::warn!(
+                        token = %req.token_address,
+                        "Token age unknown — allowed for SHIELD (warn-and-allow policy)"
+                    );
+                }
+                _ => {} // age known and above threshold — proceed
+            }
+        }
+
         // ── 6. Liquidity floor + volume ─────────────────────────────────────
         let liquidity_usd = match fast_check_liquidity {
             Some(liq) => liq,
@@ -472,6 +545,13 @@ impl SelectionService {
                 ),
             );
         }
+
+        // ── 6b. 24h volume via DexScreener (B3, fail-open) ─────────────────
+        let volume_24h_usd = if let Some(ref dex) = self.dexscreener {
+            dex.get_volume_24h(&req.token_address).await
+        } else {
+            None
+        };
 
         // ── 7. Consensus detection ──────────────────────────────────────────
         let mut consensus_wallet_count: Option<usize> = None;
@@ -630,7 +710,7 @@ impl SelectionService {
             regime_multiplier: Some(regime_multiplier),
             token_age_hours,
             liquidity_usd: Some(liquidity_usd),
-            volume_24h_usd: None, // B3: DexScreener feed
+            volume_24h_usd, // B3: DexScreener feed
             price_impact_pct: None,
             config_hash: self.config_hash.clone(),
             ingress: req.ingress,
