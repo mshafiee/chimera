@@ -475,12 +475,18 @@ impl HeliusClient {
                 let client = client.clone();
                 let registration = registration.clone();
                 async move {
+                    let body = serde_json::to_string(&registration)
+                        .context("Failed to serialize webhook registration")?;
+                    tracing::debug!(url = %url, body = %body, "Registering webhook");
+
                     let response = client
                         .post(&url)
                         .json(&registration)
                         .send()
                         .await
                         .context("Failed to send webhook registration request")?;
+
+                    tracing::debug!(status = %response.status(), "Webhook registration response status");
 
                     if !response.status().is_success() {
                         let status = response.status().as_u16();
@@ -489,10 +495,14 @@ impl HeliusClient {
                             .context(format!("Webhook registration failed: {}", error_text)));
                     }
 
-                    let webhook_response: WebhookResponse = response
-                        .json()
+                    let response_text = response
+                        .text()
                         .await
-                        .context("Failed to parse webhook response")?;
+                        .context("Failed to read webhook registration response")?;
+                    tracing::debug!(response = %response_text, "Webhook registration response body");
+
+                    let webhook_response: WebhookResponse = serde_json::from_str(&response_text)
+                        .context(format!("Failed to parse webhook response: {}", response_text))?;
 
                     Ok(webhook_response.webhook_id)
                 }
