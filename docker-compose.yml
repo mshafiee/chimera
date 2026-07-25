@@ -108,6 +108,11 @@ services:
     build:
       context: ./operator
       dockerfile: Dockerfile
+      args:
+        # Stamp the real git commit hash into the binary so decision_records /
+        # promotion_episodes carry an accurate code_revision. Resolve from the
+        # host env at build time; falls back to "unknown" (build.rs handles it).
+        GIT_HASH: ${GIT_HASH:-unknown}
     container_name: chimera-operator
     restart: unless-stopped
     expose:

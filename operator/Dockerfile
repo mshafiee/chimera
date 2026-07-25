@@ -18,6 +18,12 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 # Set working directory
 WORKDIR /build
 
+# Allow stamping the real git commit hash into the binary. Passed via
+# --build-arg GIT_HASH=$(git rev-parse HEAD) on the host; defaults to
+# "unknown" when not provided (build.rs resolves it / falls back).
+ARG GIT_HASH=unknown
+ENV GIT_HASH=${GIT_HASH}
+
 # Copy Cargo files first for better caching
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
