@@ -10,7 +10,7 @@ use crate::monitoring::HeliusWebhookPayload;
 use crate::monitoring::MonitoringState;
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
 };
 use rust_decimal::prelude::*;
@@ -20,8 +20,35 @@ use std::sync::Arc;
 /// Helius webhook endpoint
 pub async fn helius_webhook_handler(
     State(state): State<Arc<MonitoringState>>,
+    headers: HeaderMap,
     Json(payload): Json<Vec<HeliusWebhookPayload>>,
 ) -> StatusCode {
+    // ── Auth header verification (B2, staged) ───────────────────────────
+    //
+    // When `helius_auth_header` is configured, Helius echoes it in the
+    // `Authorization` header of every delivery. In dry-run mode
+    // (`helius_auth_enforce=false`) we log the result but always accept;
+    // in enforce mode we reject non-matching requests with HTTP 401.
+    if let Some(expected) = &state.helius_auth_header {
+        let received = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if received == expected {
+            tracing::debug!("auth_ok: Helius webhook Authorization header matches");
+        } else if state.helius_auth_enforce {
+            tracing::warn!(
+                received_header = %received,
+                "auth_rejected: Helius webhook Authorization header mismatch (enforce mode)"
+            );
+            return StatusCode::UNAUTHORIZED;
+        } else {
+            tracing::warn!(
+                received_header = %received,
+                "auth_mismatch: Helius webhook Authorization header does not match (dry-run, accepting)"
+            );
+        }
+    }
     // Process each event in the array
     for event in payload {
         // Rate limit webhook processing (non-blocking check)
@@ -55,6 +82,51 @@ pub async fn helius_webhook_handler(
             transaction_type = %event.transaction_type,
             "Received Helius webhook event"
         );
+
+        // ── RPC signature verification (B2, staged) ──────────────────────
+        //
+        // Fetch the transaction by signature from trusted Solana RPC (via
+        // Helius) and confirm it exists. In dry-run mode (`rpc_verify_enforce
+        // = false`) we log the result but always accept; in enforce mode we
+        // drop events whose signature cannot be confirmed.
+        match state.helius_client.verify_signature_exists(&event.signature).await {
+            Ok(true) => {
+                tracing::debug!(
+                    signature = %event.signature,
+                    "rpc_verify_ok: transaction confirmed on-chain"
+                );
+            }
+            Ok(false) => {
+                if state.rpc_verify_enforce {
+                    tracing::warn!(
+                        signature = %event.signature,
+                        "rpc_verify_rejected: transaction not found on-chain (enforce mode)"
+                    );
+                    continue;
+                } else {
+                    tracing::warn!(
+                        signature = %event.signature,
+                        "rpc_verify_failed: transaction not found on-chain (dry-run, accepting)"
+                    );
+                }
+            }
+            Err(e) => {
+                if state.rpc_verify_enforce {
+                    tracing::warn!(
+                        signature = %event.signature,
+                        error = %e,
+                        "rpc_verify_rejected: RPC fetch failed (enforce mode)"
+                    );
+                    continue;
+                } else {
+                    tracing::warn!(
+                        signature = %event.signature,
+                        error = %e,
+                        "rpc_verify_error: RPC fetch failed (dry-run, accepting)"
+                    );
+                }
+            }
+        }
 
         // Resolve tracked wallet address: match userAccount entries against ACTIVE wallets
         let tracked_wallet = {
@@ -531,7 +603,15 @@ pub async fn enable_wallet_monitoring(
     let wallets = vec![wallet_address.clone()];
     let webhook_id = match state
         .helius_client
-        .register_webhook(&wallets, webhook_url)
+        .register_webhook(
+            &wallets,
+            webhook_url,
+            state
+                .config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.helius_webhook_auth_header.as_deref()),
+        )
         .await
     {
         Ok(id) => id,

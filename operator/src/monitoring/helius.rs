@@ -93,6 +93,8 @@ struct WebhookRegistration {
     account_addresses: Vec<String>,
     #[serde(rename = "webhookType")]
     webhook_type: String,
+    #[serde(rename = "authHeader", skip_serializing_if = "Option::is_none")]
+    auth_header: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +197,46 @@ impl HeliusClient {
             retried_requests: 0,    // Not actively tracked without additional state
             failed_requests: 0,     // Not actively tracked without additional state
         }
+    }
+
+    /// Verify that a transaction signature exists on-chain via Helius RPC.
+    ///
+    /// Returns `Ok(true)` if the transaction was found, `Ok(false)` if not
+    /// found, or `Err` on RPC failure. Used by the webhook receipt handler's
+    /// staged RPC signature verification (B2).
+    pub async fn verify_signature_exists(&self, signature: &str) -> Result<bool> {
+        let url = format!("{}/?api-key={}", self.base_url, self.api_key);
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [signature, {"maxSupportedTransactionVersion": 0}]
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("RPC getTransaction request failed")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("RPC error: HTTP {}", resp.status());
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse getTransaction response")?;
+
+        // If `result` is null, the transaction was not found on-chain
+        let found = json
+            .get("result")
+            .map(|r| !r.is_null())
+            .unwrap_or(false);
+
+        Ok(found)
     }
 
     /// Get cache statistics for monitoring
@@ -376,6 +418,7 @@ impl HeliusClient {
         &self,
         wallets: Vec<String>,
         webhook_url: &str,
+        auth_header: Option<&str>,
         rate_limiter: Arc<RateLimiter>,
         batch_size: usize,
         batch_delay_ms: u64,
@@ -389,7 +432,7 @@ impl HeliusClient {
                 .await;
 
             let webhook_id = self
-                .register_webhook(chunk, webhook_url)
+                .register_webhook(chunk, webhook_url, auth_header)
                 .await
                 .context("Failed to register webhook batch")?;
 
@@ -408,12 +451,18 @@ impl HeliusClient {
     }
 
     /// Register a single webhook for multiple wallets
-    pub async fn register_webhook(&self, wallets: &[String], webhook_url: &str) -> Result<String> {
+    pub async fn register_webhook(
+        &self,
+        wallets: &[String],
+        webhook_url: &str,
+        auth_header: Option<&str>,
+    ) -> Result<String> {
         let registration = WebhookRegistration {
             webhook_url: webhook_url.to_string(),
             transaction_types: vec!["SWAP".to_string()],
             account_addresses: wallets.to_vec(),
             webhook_type: "enhanced".to_string(),
+            auth_header: auth_header.map(|s| s.to_string()),
         };
 
         let url = format!("{}/webhooks?api-key={}", self.base_url, self.api_key);

@@ -25,6 +25,9 @@ pub struct WebhookLifecycleConfig {
     pub max_registration_retries: u32,
     pub webhook_url: String,
     pub helius_dry_run: bool,
+    /// Optional shared secret sent as `authHeader` on every Helius webhook
+    /// create/update. None disables auth on new webhooks.
+    pub auth_header: Option<String>,
 }
 
 /// Webhook registration result
@@ -187,7 +190,11 @@ impl WebhookLifecycleManager {
         // Register webhook with Helius
         match self
             .helius_client
-            .register_webhook(&[wallet.to_string()], &self.config.webhook_url)
+            .register_webhook(
+                &[wallet.to_string()],
+                &self.config.webhook_url,
+                self.config.auth_header.as_deref(),
+            )
             .await
         {
             Ok(webhook_id) => {
@@ -382,7 +389,11 @@ impl WebhookLifecycleManager {
                     webhook_url: Some(new_url.clone()),
                     transaction_types: None,
                     account_addresses: None,
-                    auth_header: None,
+                    auth_header: self
+                        .config
+                        .auth_header
+                        .as_ref()
+                        .map(|h| serde_json::Value::String(h.clone())),
                 },
             )
             .await

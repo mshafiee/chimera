@@ -1790,6 +1790,7 @@ async fn main() -> anyhow::Result<()> {
                         webhook_url: webhook_url.clone(),
                         helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                         auto_cleanup_enabled: webhook_lifecycle_config.auto_cleanup_enabled,
+                        auth_header: monitoring_config.helius_webhook_auth_header.clone(),
                     };
 
                     tokio::spawn(async move {
@@ -1856,6 +1857,10 @@ async fn main() -> anyhow::Result<()> {
                         webhook_url: startup_webhook_url,
                         helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                         auto_cleanup_enabled: webhook_lifecycle_config.auto_cleanup_enabled,
+                        auth_header: config
+                            .monitoring
+                            .as_ref()
+                            .and_then(|m| m.helius_webhook_auth_header.clone()),
                     };
 
                     tracing::info!("Running startup webhook check...");
@@ -1906,6 +1911,10 @@ async fn main() -> anyhow::Result<()> {
                             webhook_url: reconcile_webhook_url,
                             helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                             auto_cleanup_enabled: webhook_lifecycle_config.auto_cleanup_enabled,
+                            auth_header: config
+                                .monitoring
+                                .as_ref()
+                                .and_then(|m| m.helius_webhook_auth_header.clone()),
                         };
 
                         tokio::spawn(async move {

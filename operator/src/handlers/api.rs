@@ -299,6 +299,10 @@ pub async fn update_wallet(
                 .as_ref()
                 .and_then(|m| m.helius_webhook_url.clone())
                 .unwrap_or_default();
+            let auth_header = config
+                .monitoring
+                .as_ref()
+                .and_then(|m| m.helius_webhook_auth_header.clone());
 
             let address_clone = address.clone();
 
@@ -317,6 +321,7 @@ pub async fn update_wallet(
                         max_registration_retries: 3,
                         webhook_url: webhook_url.clone(),
                         helius_dry_run: true,
+                        auth_header: auth_header.clone(),
                     };
 
                     let manager =
@@ -389,6 +394,7 @@ pub async fn update_wallet(
                         max_registration_retries: 3,
                         webhook_url: webhook_url.clone(),
                         helius_dry_run: true,
+                        auth_header: None,
                     };
 
                     let manager =

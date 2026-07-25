@@ -1097,6 +1097,23 @@ pub struct MonitoringConfig {
     /// Commitment level for WebSocket subscriptions (processed, confirmed, finalized)
     #[serde(default = "default_websocket_commitment")]
     pub websocket_commitment: String,
+    /// Shared secret sent in the `authHeader` field of every Helius webhook
+    /// registration/update. Helius echoes it back in the `Authorization`
+    /// header on each delivery. When `None`, no auth header is set and the
+    /// receipt handler accepts all events (legacy behaviour).
+    #[serde(default)]
+    pub helius_webhook_auth_header: Option<String>,
+    /// Enforce mode for Helius webhook auth header.
+    /// `false` (default) = dry-run / fail-open: log `auth_ok` / `auth_mismatch`
+    /// but always accept.  `true` = reject non-matching requests with HTTP 401.
+    #[serde(default = "default_false")]
+    pub helius_auth_enforce: bool,
+    /// Enforce mode for RPC signature verification.
+    /// `false` (default) = dry-run / fail-open: log `rpc_verify_ok` /
+    /// `rpc_verify_failed` but always accept.  `true` = drop events whose
+    /// on-chain deltas do not match the webhook claim.
+    #[serde(default = "default_false")]
+    pub rpc_verify_enforce: bool,
 }
 
 /// WebSocket reconnection configuration
@@ -1238,6 +1255,9 @@ impl Default for MonitoringConfig {
             websocket_reconnect: None,
             websocket_health_timeout_secs: default_websocket_health_timeout(),
             websocket_commitment: default_websocket_commitment(),
+            helius_webhook_auth_header: None,
+            helius_auth_enforce: false,
+            rpc_verify_enforce: false,
         }
     }
 }

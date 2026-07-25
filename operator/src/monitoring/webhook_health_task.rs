@@ -21,6 +21,7 @@ pub struct WebhookHealthConfig {
     pub webhook_url: String,
     pub helius_dry_run: bool,
     pub auto_cleanup_enabled: bool,
+    pub auth_header: Option<String>,
 }
 
 /// Start the webhook health monitoring task
@@ -48,6 +49,7 @@ pub async fn start_webhook_health_task(
         max_registration_retries: 3,
         webhook_url: config.webhook_url.clone(),
         helius_dry_run: config.helius_dry_run,
+        auth_header: config.auth_header.clone(),
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -143,6 +145,7 @@ pub async fn manual_reconcile_webhooks(
         max_registration_retries: 3,
         webhook_url: webhook_url.to_string(),
         helius_dry_run: true,
+        auth_header: None,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -186,6 +189,7 @@ pub async fn manual_health_check(
         max_registration_retries: 3,
         webhook_url: webhook_url.to_string(),
         helius_dry_run: true,
+        auth_header: None,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -269,6 +273,7 @@ pub async fn run_startup_webhook_check(
         max_registration_retries: 3,
         webhook_url: config.webhook_url.clone(),
         helius_dry_run: config.helius_dry_run,
+        auth_header: config.auth_header.clone(),
     };
 
     let manager =
@@ -418,6 +423,7 @@ pub async fn reconcile_helius_webhooks_async(
         max_registration_retries: 3,
         webhook_url: config.webhook_url.clone(),
         helius_dry_run: config.helius_dry_run,
+        auth_header: config.auth_header.clone(),
     };
 
     let manager = WebhookLifecycleManager::new(db, helius_client, rate_limiter, lifecycle_config);
@@ -451,6 +457,7 @@ mod tests {
             webhook_url: "https://example.com/webhook".to_string(),
             helius_dry_run: true,
             auto_cleanup_enabled: false,
+            auth_header: None,
         };
 
         assert_eq!(config.check_interval_secs, 3600);

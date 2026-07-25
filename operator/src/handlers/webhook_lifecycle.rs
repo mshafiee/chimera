@@ -44,6 +44,15 @@ fn get_helius_dry_run(state: &MonitoringState) -> bool {
         .unwrap_or(true) // Default to dry-run for safety
 }
 
+/// Helper to get the webhook auth header from monitoring config
+fn get_auth_header(state: &MonitoringState) -> Option<String> {
+    state
+        .config
+        .monitoring
+        .as_ref()
+        .and_then(|m| m.helius_webhook_auth_header.clone())
+}
+
 /// Webhook statistics response
 #[derive(Debug, Serialize)]
 pub struct WebhookStatsResponse {
@@ -146,6 +155,7 @@ pub async fn bulk_register_webhooks(
 
     let webhook_url = get_webhook_url(&state);
     let helius_dry_run = get_helius_dry_run(&state);
+    let auth_header = get_auth_header(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -154,6 +164,7 @@ pub async fn bulk_register_webhooks(
         max_registration_retries: 3,
         webhook_url,
         helius_dry_run,
+        auth_header,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -201,6 +212,7 @@ pub async fn bulk_cleanup_webhooks(
 
     let webhook_url = get_webhook_url(&state);
     let helius_dry_run = get_helius_dry_run(&state);
+    let auth_header = get_auth_header(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -209,6 +221,7 @@ pub async fn bulk_cleanup_webhooks(
         max_registration_retries: 3,
         webhook_url,
         helius_dry_run,
+        auth_header,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -380,6 +393,7 @@ pub async fn retry_webhook_registration(
 
     let webhook_url = get_webhook_url(&state);
     let helius_dry_run = get_helius_dry_run(&state);
+    let auth_header = get_auth_header(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -388,6 +402,7 @@ pub async fn retry_webhook_registration(
         max_registration_retries: 3,
         webhook_url,
         helius_dry_run,
+        auth_header,
     };
 
     let manager = WebhookLifecycleManager::new(
@@ -442,6 +457,7 @@ pub async fn toggle_wallet_webhook(
 
     let webhook_url = get_webhook_url(&state);
     let helius_dry_run = get_helius_dry_run(&state);
+    let auth_header = get_auth_header(&state);
     let lifecycle_config = crate::monitoring::webhook_lifecycle::WebhookLifecycleConfig {
         auto_register_enabled: true,
         auto_cleanup_enabled: true,
@@ -450,6 +466,7 @@ pub async fn toggle_wallet_webhook(
         max_registration_retries: 3,
         webhook_url,
         helius_dry_run,
+        auth_header,
     };
 
     let manager = WebhookLifecycleManager::new(

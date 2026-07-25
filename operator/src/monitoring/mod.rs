@@ -69,6 +69,14 @@ pub struct MonitoringState {
     /// Unified selection engine (B1): shared BUY/SELL decision pipeline used
     /// by both this monitoring path and the direct webhook handler.
     pub selection: Option<Arc<crate::engine::SelectionService>>,
+    /// Shared secret expected in the `Authorization` header of Helius webhook
+    /// deliveries. `None` = auth header not configured (accept all).
+    pub helius_auth_header: Option<String>,
+    /// Enforce mode: `false` (dry-run/fail-open) = log mismatches but accept;
+    /// `true` = reject with HTTP 401.
+    pub helius_auth_enforce: bool,
+    /// Enforce mode for RPC signature verification (B2, staged).
+    pub rpc_verify_enforce: bool,
 }
 
 impl MonitoringState {
@@ -140,6 +148,29 @@ impl MonitoringState {
             auto_demote_enabled,
         ));
 
+        let helius_auth_header = config
+            .monitoring
+            .as_ref()
+            .and_then(|m| m.helius_webhook_auth_header.clone())
+            .map(|h| {
+                if h.starts_with("${") {
+                    std::env::var("HELIUS_WEBHOOK_AUTH").unwrap_or_default()
+                } else {
+                    h
+                }
+            })
+            .filter(|h| !h.is_empty());
+        let helius_auth_enforce = config
+            .monitoring
+            .as_ref()
+            .map(|m| m.helius_auth_enforce)
+            .unwrap_or(false);
+        let rpc_verify_enforce = config
+            .monitoring
+            .as_ref()
+            .map(|m| m.rpc_verify_enforce)
+            .unwrap_or(false);
+
         Ok(Self {
             db,
             engine,
@@ -158,6 +189,9 @@ impl MonitoringState {
                 std::collections::HashMap::new(),
             )),
             selection: None,
+            helius_auth_header,
+            helius_auth_enforce,
+            rpc_verify_enforce,
         })
     }
 
