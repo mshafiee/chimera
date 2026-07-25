@@ -58,6 +58,8 @@ async fn poll_wallets_by_tier(
     exit_detector: Arc<ExitDetector>,
     pending_exits: Arc<RwLock<Vec<super::ExitSignal>>>,
 ) {
+    tracing::info!(tier = ?tier, "poll_wallets_by_tier invoked");
+
     let interval = match tier {
         crate::config::ConvictionTier::High => polling_cfg.high_conviction_interval_secs.unwrap_or(polling_cfg.interval_secs),
         crate::config::ConvictionTier::Regular => polling_cfg.regular_conviction_interval_secs.unwrap_or(polling_cfg.interval_secs),
@@ -189,6 +191,7 @@ async fn spawn_tier_loop(
     exit_detector: Arc<ExitDetector>,
     pending_exits: Arc<RwLock<Vec<super::ExitSignal>>>,
 ) -> tokio::task::JoinHandle<()> {
+    tracing::info!(tier = ?tier, interval_secs = interval_secs, "spawn_tier_loop starting");
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -203,6 +206,7 @@ async fn spawn_tier_loop(
                     break;
                 }
                 _ = interval.tick() => {
+                    tracing::debug!(tier = ?tier, "tier interval tick fired");
                     poll_wallets_by_tier(
                         db.clone(),
                         engine.clone(),
