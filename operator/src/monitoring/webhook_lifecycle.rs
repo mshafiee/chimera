@@ -1014,7 +1014,7 @@ impl WebhookLifecycleManager {
 
         // Check if webhook is active and URL matches
         let is_active = webhook
-            .get("isActive")
+            .get("active")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let webhook_url = webhook.get("webhookURL").and_then(|v| v.as_str());

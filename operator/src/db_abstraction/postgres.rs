@@ -2363,7 +2363,19 @@ impl Database for PostgresBackend {
                     ELSE wallet_monitoring.webhook_registered_at
                 END,
                 last_monitored_at = CURRENT_TIMESTAMP,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = CURRENT_TIMESTAMP,
+                registration_attempts = CASE
+                    WHEN $2 IS NOT NULL THEN 0
+                    ELSE wallet_monitoring.registration_attempts
+                END,
+                last_registration_error = CASE
+                    WHEN $2 IS NOT NULL THEN NULL
+                    ELSE wallet_monitoring.last_registration_error
+                END,
+                webhook_health_status = CASE
+                    WHEN $2 IS NOT NULL THEN 'unknown'
+                    ELSE wallet_monitoring.webhook_health_status
+                END
             "#,
         )
         .bind(wallet_address)
