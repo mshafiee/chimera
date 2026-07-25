@@ -261,6 +261,11 @@ pub async fn webhook_handler(
         })
         .await?;
 
+    // C1: link the persisted decision record to its trade (fire-and-forget).
+    if let Some(recorder) = state.selection.decision_recorder() {
+        recorder.link_trade(decision.decision_id.clone(), signal.trade_uuid.clone());
+    }
+
     tracing::info!(
         trade_uuid = %signal.trade_uuid,
         strategy = %signal.payload.strategy,

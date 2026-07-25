@@ -372,7 +372,18 @@ pub async fn helius_webhook_handler(
                         })
                         .await
                     {
-                        Ok(_) => {}
+                        Ok(_) => {
+                            // C1: link the persisted decision record to its
+                            // trade (fire-and-forget). The Helius trade_uuid is
+                            // derived from the decision size, so it is linked
+                            // here after insert rather than at decide time.
+                            if let Some(recorder) = selection.decision_recorder() {
+                                recorder.link_trade(
+                                    decision.decision_id.clone(),
+                                    signal.trade_uuid.clone(),
+                                );
+                            }
+                        }
                         Err(e) => {
                             let err_str = e.to_string();
                             if err_str.contains("duplicate key") {

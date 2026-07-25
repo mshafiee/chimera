@@ -471,7 +471,11 @@ def parse_args() -> argparse.Namespace:
 
 
 from core.in_sample import compute_in_sample_metrics
-from core.correlation_backfill import backfill_correlation_pnl, write_correlation_record
+from core.correlation_backfill import (
+    backfill_correlation_pnl,
+    write_correlation_record,
+    write_promotion_episode,
+)
 from core.degradation import check_performance_degradation
 
 
@@ -1303,17 +1307,31 @@ async def analyze_wallets(
         except Exception as e:
             print(f"[Scout] Cross-wallet correlation skipped ({e})")
     
-    # Step 3c: Write correlation records for promoted ACTIVE wallets
+    # Step 3c: Write correlation records for promoted ACTIVE wallets and
+    # append-only promotion episodes (C2). Shadow episodes are written for
+    # near-threshold rejections (WQS within ±5 of the ACTIVE promotion
+    # threshold) so WQS-to-PnL feedback captures borderline candidates, not
+    # just clean promotions.
+    SHADOW_BAND = 5.0
     for res in results:
-        if not res or res.get('status') != "ACTIVE":
+        if not res:
             continue
         wallet_addr = res['address']
         components = res.get('components')
-        strategy = res.get('strategy', 'SHIELD')
-        if components:
-            write_correlation_record(
-                wallet_addr, res['wqs'],
-                components.components_json, strategy
+        wqs = res['wqs']
+        wqs_confidence = res.get('confidence')
+        components_json = components.components_json if components else None
+        status = res.get('status')
+        if status == "ACTIVE":
+            strategy = res.get('strategy', 'SHIELD')
+            if components:
+                write_correlation_record(wallet_addr, wqs, components_json, strategy)
+            write_promotion_episode(
+                wallet_addr, wqs, wqs_confidence, components_json, decision="promoted"
+            )
+        elif abs(wqs - min_wqs_active) <= SHADOW_BAND:
+            write_promotion_episode(
+                wallet_addr, wqs, wqs_confidence, components_json, decision="shadow"
             )
     
     # Step 5b: Write exit recommendations to JSON file

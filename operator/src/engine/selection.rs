@@ -192,6 +192,9 @@ pub struct SelectionService {
     position_sizer: Option<Arc<PositionSizer>>,
     dexscreener: Option<Arc<crate::monitoring::dexscreener::DexScreenerClient>>,
     toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
+    decision_recorder: Option<Arc<crate::engine::DecisionRecorder>>,
+    quote_client: Option<Arc<crate::engine::transaction_builder::TransactionBuilder>>,
+    latency_tracker: Option<Arc<crate::engine::LatencyTracker>>,
     config: SelectionConfig,
     config_hash: String,
 }
@@ -219,6 +222,9 @@ impl SelectionService {
             position_sizer,
             dexscreener: None,
             toxic_detector: None,
+            decision_recorder: None,
+            quote_client: None,
+            latency_tracker: None,
             config,
             config_hash,
         }
@@ -242,16 +248,100 @@ impl SelectionService {
         self
     }
 
+    /// Attach the DecisionRecorder (C1) for fire-and-forget decision persistence.
+    pub fn with_decision_recorder(
+        mut self,
+        recorder: Arc<crate::engine::DecisionRecorder>,
+    ) -> Self {
+        self.decision_recorder = Some(recorder);
+        self
+    }
+
+    /// Attach a Jupiter quote client + latency tracker (C3) for shadow-fill
+    /// calibration. When present, admitted decisions spawn a fire-and-forget
+    /// task that captures a decision-time quote and a delayed requote to model
+    /// realistic paper fill prices.
+    pub fn with_shadow_fill(
+        mut self,
+        quote_client: Arc<crate::engine::transaction_builder::TransactionBuilder>,
+        latency_tracker: Arc<crate::engine::LatencyTracker>,
+    ) -> Self {
+        self.quote_client = Some(quote_client);
+        self.latency_tracker = Some(latency_tracker);
+        self
+    }
+
+    /// Optional variant: attach shadow-fill only if the quote client built
+    /// successfully. A `None` quote client disables calibration (decisions are
+    /// still recorded; `quote_json` stays NULL).
+    pub fn with_shadow_fill_opt(
+        mut self,
+        quote_client: Option<Arc<crate::engine::transaction_builder::TransactionBuilder>>,
+        latency_tracker: Arc<crate::engine::LatencyTracker>,
+    ) -> Self {
+        if let Some(qc) = quote_client {
+            self.quote_client = Some(qc);
+            self.latency_tracker = Some(latency_tracker);
+        }
+        self
+    }
+
     pub fn config_hash(&self) -> &str {
         &self.config_hash
     }
 
+    /// Access the attached DecisionRecorder, if any. Handlers use this to
+    /// link a persisted decision to its trade (`link_trade`) and to attach
+    /// Jupiter quotes (`update_quote`).
+    pub fn decision_recorder(&self) -> Option<&Arc<crate::engine::DecisionRecorder>> {
+        self.decision_recorder.as_ref()
+    }
+
     /// Evaluate a signal through the unified decision pipeline.
+    ///
+    /// When a [`DecisionRecorder`] is attached, every decision (admitted or
+    /// rejected) is persisted fire-and-forget as the last step before
+    /// returning, so the full admission funnel is captured for the run.
     pub async fn decide(&self, req: &SelectionRequest) -> BuyDecision {
-        match req.action {
+        let received_at = chrono::Utc::now();
+        let decision = match req.action {
             Action::Buy => self.decide_buy(req).await,
             Action::Sell => self.decide_sell(req).await,
+        };
+        if let Some(ref recorder) = self.decision_recorder {
+            // trade_uuid is linked by the caller after the trade row is
+            // inserted (the Helius path derives it from the decision size, so
+            // it is not available here). See DecisionRecorder::link_trade.
+            recorder.record(&decision, req, None, received_at);
         }
+        // C3: shadow-fill calibration for admitted decisions (fire-and-forget).
+        if decision.admitted
+            && decision.size_sol.is_some()
+            && self.quote_client.is_some()
+            && self.latency_tracker.is_some()
+            && self.decision_recorder.is_some()
+        {
+            let decided_at = chrono::Utc::now();
+            let decide_latency_us = decided_at
+                .signed_duration_since(received_at)
+                .num_microseconds()
+                .unwrap_or(0)
+                .max(0) as u64;
+            let size_sol = decision.size_sol.and_then(|d| d.to_f64()).unwrap_or(0.0);
+            if size_sol > 0.0 {
+                tokio::spawn(crate::engine::shadow_fill::capture_and_model_fill(
+                    self.quote_client.clone().unwrap(),
+                    self.latency_tracker.clone().unwrap(),
+                    self.decision_recorder.clone().unwrap(),
+                    decision.decision_id.clone(),
+                    req.token_address.clone(),
+                    size_sol,
+                    decide_latency_us,
+                    matches!(req.action, Action::Buy),
+                ));
+            }
+        }
+        decision
     }
 
     async fn decide_sell(&self, req: &SelectionRequest) -> BuyDecision {

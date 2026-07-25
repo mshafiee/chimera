@@ -56,6 +56,10 @@ pub struct ApiState {
     /// Toxic flow detector (B3): called on wallet promotion to register
     /// selection ROI baseline for post-promotion performance monitoring.
     pub toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
+    /// Run-scoped identity (C1) for the profitability verdict endpoint.
+    pub run_context: Option<Arc<crate::engine::RunContext>>,
+    /// Decision recorder (C1) exposing the completeness counter (C4 gate).
+    pub decision_recorder: Option<Arc<crate::engine::DecisionRecorder>>,
 }
 
 // =============================================================================

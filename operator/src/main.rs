@@ -326,6 +326,44 @@ async fn main() -> anyhow::Result<()> {
     db_pool.recover_executing_trades().await?;
     tracing::info!("Database initialized");
 
+    // C1: Run-scoped evidence. Build the admission threshold config once, then
+    // derive the RunContext (unique per process run) and the DecisionRecorder
+    // (fire-and-forget decision persistence). Constructed early so both the
+    // /health endpoint and the selection engine share the same run identity.
+    let selection_config = crate::engine::SelectionConfig {
+        total_capital_sol: config.position_sizing.total_capital_sol,
+        max_position_sol: config.position_sizing.max_size_sol,
+        shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
+        spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
+        shield_percent: config.strategy.shield_percent,
+        spear_percent: config.strategy.spear_percent,
+        min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
+        min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        min_token_age_hours: config.token_safety.min_token_age_hours,
+    };
+    let roster_addresses: Vec<String> = db_pool
+        .get_active_wallets()
+        .await
+        .map(|ws| ws.iter().map(|w| w.address.clone()).collect())
+        .unwrap_or_default();
+    let run_context = Arc::new(chimera_operator::engine::RunContext::new(
+        selection_config.hash(),
+        &roster_addresses,
+        Utc::now(),
+    ));
+    let decision_recorder = Arc::new(chimera_operator::engine::DecisionRecorder::new(
+        db_pool.clone(),
+        run_context.clone(),
+    ));
+    tracing::info!(
+        run_id = %run_context.run_id,
+        code_revision = %run_context.code_revision,
+        config_hash = %run_context.config_hash,
+        roster_hash = %run_context.roster_hash,
+        roster_size = roster_addresses.len(),
+        "Run context initialized (C1 evidence)"
+    );
+
     run_preflight(&config).await?;
 
     let cancel_token = CancellationToken::new();
@@ -1826,6 +1864,7 @@ async fn main() -> anyhow::Result<()> {
         circuit_breaker: circuit_breaker.clone(),
         price_cache: price_cache.clone(),
         trade_mode: config.trade_mode.to_string().to_lowercase(),
+        run_context: Some(run_context.clone()),
     });
 
     // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
@@ -1900,6 +1939,8 @@ async fn main() -> anyhow::Result<()> {
         webhook_rate_limiter: Some(webhook_api_rate_limiter.clone()),
         price_cache: price_cache.clone(),
         toxic_detector: Some(toxic_flow_detector.clone()),
+        run_context: Some(run_context.clone()),
+        decision_recorder: Some(decision_recorder.clone()),
     });
 
     // Run startup webhook management check
@@ -2134,6 +2175,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/scout/budget", get(get_budget_status))
         .route("/scout/cache", get(get_cache_stats))
         .route("/scout/conviction", get(get_conviction_allocation))
+        // C4: Pre-registered profitability go/no-go verdict (paper-only)
+        .route(
+            "/profitability/verdict",
+            get(chimera_operator::handlers::profitability_verdict),
+        )
         .with_state(api_state.clone())
         .layer(tower_http::limit::RequestBodyLimitLayer::new(
             2 * 1024 * 1024,
@@ -2325,9 +2371,35 @@ async fn main() -> anyhow::Result<()> {
         config.position_sizing.use_kelly_sizing
     );
 
+    // C3: Shadow-fill calibration. Build a dedicated TransactionBuilder for
+    // Jupiter quote capture (the selection engine only needs the quote path,
+    // not the executor's signed-swap path). The LatencyTracker records
+    // decide() latency percentiles so delayed requotes are scheduled at a
+    // realistic offset. Both are shared with SelectionService below.
+    let latency_tracker = Arc::new(chimera_operator::engine::LatencyTracker::new(2048));
+    let shadow_quote_client = {
+        let rpc = solana_client::nonblocking::rpc_client::RpcClient::new(
+            config.rpc.primary_url.clone(),
+        );
+        chimera_operator::engine::transaction_builder::TransactionBuilder::new(
+            Arc::new(rpc),
+            Arc::new(config.clone()),
+        )
+        .map(Arc::new)
+        .map_err(|e| {
+            tracing::warn!(error = %e, "Shadow-fill quote client build failed — paper PnL calibration disabled");
+        })
+        .ok()
+    };
+    if shadow_quote_client.is_some() {
+        tracing::info!("✓ Shadow-fill quote client initialized (C3 paper PnL calibration)");
+    }
+
     // B1: Unified selection engine shared by both ingress paths (direct
     // webhook + Helius monitoring). Built once with every capability the two
     // handlers collectively need so both run the identical decision pipeline.
+    // C1: the shared selection_config + decision_recorder were built right
+    // after db init so /health and selection share one run identity.
     let selection_service = Arc::new(
         crate::engine::SelectionService::new(
             db_pool.clone(),
@@ -2337,20 +2409,12 @@ async fn main() -> anyhow::Result<()> {
             Some(market_regime_detector.clone()),
             helius_client.clone(),
             Some(position_sizer.clone()),
-            crate::engine::SelectionConfig {
-                total_capital_sol: config.position_sizing.total_capital_sol,
-                max_position_sol: config.position_sizing.max_size_sol,
-                shield_signal_quality_threshold: config.strategy.shield_signal_quality_threshold,
-                spear_signal_quality_threshold: config.strategy.spear_signal_quality_threshold,
-                shield_percent: config.strategy.shield_percent,
-                spear_percent: config.strategy.spear_percent,
-                min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
-                min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
-                min_token_age_hours: config.token_safety.min_token_age_hours,
-            },
+            selection_config,
         )
         .with_dexscreener(dexscreener_client.clone())
-        .with_toxic_detector(toxic_flow_detector.clone()),
+        .with_toxic_detector(toxic_flow_detector.clone())
+        .with_decision_recorder(decision_recorder.clone())
+        .with_shadow_fill_opt(shadow_quote_client.clone(), latency_tracker.clone()),
     );
 
     let webhook_state = Arc::new(WebhookState {

@@ -1,141 +1,217 @@
 """
-Tests for _backfill_correlation_pnl in main.py.
+Tests for scout.core.correlation_backfill (C2 rewrite).
 
-Validates that the backfill function correctly bridges the gap between the
-wallets table (populated by the Operator) and wqs_pnl_correlation (read by
-the Scout for adaptive weight calibration).
+The backfill now computes ACTUAL copy PnL from Chimera's `trades` table
+(status='CLOSED', pnl_data_valid=TRUE, side='SELL') instead of the circular
+`wallets.realized_pnl_30d_sol`. write_correlation_record is insert-only
+(ON CONFLICT DO NOTHING) and write_promotion_episode appends an immutable row.
+
+These tests mock the db abstraction (Connection / execute_query /
+execute_update) so they run without a live PostgreSQL instance.
 """
 
 import os
-import sqlite3
 import sys
-import tempfile
 import unittest
-from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from scout.core.correlation_backfill import backfill_correlation_pnl
+from scout.core import correlation_backfill as cb
+
+
+class _FakeCursor:
+    """Minimal cursor stub: stores execute query/params and yields fetch rows."""
+
+    def __init__(self):
+        self.last_query = None
+        self.last_params = None
+        self._rows = []
+
+    def execute(self, query, params=None):
+        self.last_query = query
+        self.last_params = params
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _FakeConn:
+    """Connection context manager that returns a single shared cursor."""
+
+    def __init__(self):
+        self.cursor = _FakeCursor()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
 
 
 class TestBackfillCorrelationPnl(unittest.TestCase):
-
     def setUp(self):
-        """Create a temporary SQLite database with both tables."""
-        self.temp_fd, self.db_path = tempfile.mkstemp(suffix='.db')
-        conn = sqlite3.connect(self.db_path)
+        # Patch Connection so execute_query operates on a fake cursor.
+        self.conn = _FakeConn()
+        self._conn_patch = mock.patch.object(
+            cb, "Connection", side_effect=lambda *a, **k: self.conn
+        )
+        self._conn_patch.start()
 
-        conn.execute("""
-            CREATE TABLE wallets (
-                address TEXT PRIMARY KEY,
-                status TEXT DEFAULT 'CANDIDATE',
-                realized_pnl_30d_sol REAL,
-                trade_count_30d INTEGER
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE wqs_pnl_correlation (
-                wallet_address TEXT PRIMARY KEY,
-                wqs_score_at_promotion REAL NOT NULL,
-                actual_copy_pnl_7d_sol TEXT,
-                actual_copy_pnl_30d_sol TEXT,
-                actual_copy_pnl_all_sol TEXT,
-                copy_trade_count_7d INTEGER DEFAULT 0,
-                copy_trade_count_30d INTEGER DEFAULT 0,
-                strategy TEXT DEFAULT 'SHIELD',
-                wqs_components_json TEXT,
-                promoted_at TEXT NOT NULL,
-                last_updated_at TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-        conn.close()
+        # Track execute_update calls (write_correlation_record / write_promotion_episode).
+        self.update_calls = []
+        self._update_patch = mock.patch.object(
+            cb,
+            "execute_update",
+            side_effect=lambda q, p=None, **k: self.update_calls.append((q, p)) or 0,
+        )
+        self._update_patch.start()
+
+        # Track execute_query calls (the backfill SELECTs).
+        self.query_calls = []
+        self._query_patch = mock.patch.object(
+            cb,
+            "execute_query",
+            side_effect=self._fake_execute_query,
+        )
+        self._query_patch.start()
 
     def tearDown(self):
-        os.close(self.temp_fd)
-        os.unlink(self.db_path)
+        mock.patch.stopall()
 
-    def _insert_wallet(self, conn, address, realized_pnl=0.5, trade_count=10):
-        conn.execute(
-            "INSERT INTO wallets (address, realized_pnl_30d_sol, trade_count_30d) "
-            "VALUES (?, ?, ?)",
-            (address, realized_pnl, trade_count),
-        )
+    def _fake_execute_query(self, conn, query, params=None, cursor=None):
+        self.query_calls.append((query, params))
+        # Return the fake cursor; the test sets conn.cursor._rows before the
+        # call that should populate them.
+        return conn.cursor
 
-    def _insert_correlation(self, conn, address, days_ago=8):
-        timestamp = (datetime.utcnow() - timedelta(days=days_ago)).isoformat()
-        conn.execute(
-            "INSERT INTO wqs_pnl_correlation "
-            "(wallet_address, wqs_score_at_promotion, promoted_at, last_updated_at, strategy) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (address, 75.0, timestamp, timestamp, "SHIELD"),
-        )
+    def test_backfill_computes_pnl_from_trades_not_wallets(self):
+        """Backfill reads from trades, not wallets.realized_pnl_30d_sol."""
+        # First execute_query: the flagged-correlation SELECT returns one wallet.
+        # Second execute_query: the trades-aggregation SELECT returns its PnL.
+        self.conn.cursor._rows = [{"wallet_address": "wallet_abc"}]
 
-    def test_backfill_populates_null_pnl(self):
-        """Happy path: wallet with PnL gets backfilled."""
-        conn = sqlite3.connect(self.db_path)
-        self._insert_wallet(conn, "wallet_abc", realized_pnl=0.5, trade_count=10)
-        self._insert_correlation(conn, "wallet_abc", days_ago=8)
-        conn.commit()
-        conn.close()
+        # Make the SECOND fetchall return trades-based PnL by swapping rows
+        # after the first fetchall consumes them.
+        original_fetchall = self.conn.cursor.fetchall
 
-        updated = backfill_correlation_pnl(self.db_path)
+        call_count = {"n": 0}
+
+        def fetchall():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return [{"wallet_address": "wallet_abc"}]
+            # Second call: aggregated copy PnL from trades
+            return [{
+                "wallet_address": "wallet_abc",
+                "copy_pnl_7d": 0.1,
+                "copy_pnl_30d": 0.5,
+                "copy_pnl_all": 0.7,
+                "count_7d": 2,
+                "count_30d": 5,
+                "count_all": 8,
+            }]
+
+        self.conn.cursor.fetchall = fetchall
+
+        updated = cb.backfill_correlation_pnl("../data/chimera.db")
 
         self.assertEqual(updated, 1)
+        # The trades-aggregation query must reference the trades table, not wallets.
+        trades_queries = [q for q, _ in self.query_calls if "FROM trades" in q]
+        self.assertTrue(trades_queries, "backfill must query the trades table")
+        self.assertFalse(
+            any("FROM wallets" in q for q, _ in self.query_calls),
+            "backfill must not read from the wallets table (circular PnL)",
+        )
+        # The UPDATE must populate copy_trade_count_all.
+        updates = [q for q, _ in self.query_calls if "UPDATE wqs_pnl_correlation" in q]
+        self.assertTrue(updates)
+        self.assertIn("copy_trade_count_all", updates[0])
+        original_fetchall  # silence unused
 
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            "SELECT actual_copy_pnl_30d_sol, copy_trade_count_30d "
-            "FROM wqs_pnl_correlation WHERE wallet_address = ?",
-            ("wallet_abc",),
-        ).fetchone()
-        conn.close()
+    def test_backfill_skips_wallets_with_no_closed_trades(self):
+        """A flagged wallet with no closed copy-trades is skipped (kept NULL)."""
+        call_count = {"n": 0}
 
-        self.assertIsNotNone(row)
-        self.assertAlmostEqual(float(row["actual_copy_pnl_30d_sol"]), 0.5)
-        self.assertEqual(row["copy_trade_count_30d"], 10)
+        def fetchall():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return [{"wallet_address": "wallet_none"}]
+            return []  # no trades aggregation rows
 
-    def test_backfill_skips_recently_promoted(self):
-        """Wallets promoted <7 days ago are not backfilled."""
-        conn = sqlite3.connect(self.db_path)
-        self._insert_wallet(conn, "wallet_xyz", realized_pnl=0.3, trade_count=5)
-        self._insert_correlation(conn, "wallet_xyz", days_ago=2)
-        conn.commit()
-        conn.close()
-
-        updated = backfill_correlation_pnl(self.db_path)
-
+        self.conn.cursor.fetchall = fetchall
+        updated = cb.backfill_correlation_pnl("../data/chimera.db")
         self.assertEqual(updated, 0)
 
-    def test_backfill_skips_wallet_not_in_wallets_table(self):
-        """Correlation record with no matching wallet address is skipped."""
-        conn = sqlite3.connect(self.db_path)
-        self._insert_correlation(conn, "orphan_wallet", days_ago=10)
-        conn.commit()
-        conn.close()
-
-        updated = backfill_correlation_pnl(self.db_path)
-
+    def test_backfill_no_flagged_records(self):
+        """No correlation rows with NULL PnL → no work, returns 0."""
+        self.conn.cursor.fetchall = lambda: []
+        updated = cb.backfill_correlation_pnl("../data/chimera.db")
         self.assertEqual(updated, 0)
 
-    def test_backfill_skips_null_pnl_in_wallets(self):
-        """Wallet exists but realized_pnl_30d_sol is NULL — skip."""
-        conn = sqlite3.connect(self.db_path)
-        self._insert_wallet(conn, "wallet_null_pnl", realized_pnl=None, trade_count=0)
-        self._insert_correlation(conn, "wallet_null_pnl", days_ago=8)
-        conn.commit()
-        conn.close()
 
-        updated = backfill_correlation_pnl(self.db_path)
+class TestWriteCorrelationRecord(unittest.TestCase):
+    def setUp(self):
+        self.update_calls = []
+        self._patch = mock.patch.object(
+            cb,
+            "execute_update",
+            side_effect=lambda q, p=None, **k: self.update_calls.append((q, p)) or 0,
+        )
+        self._patch.start()
 
-        self.assertEqual(updated, 0)
+    def tearDown(self):
+        mock.patch.stopall()
 
-    def test_backfill_handles_missing_db(self):
-        """Non-existent database path returns 0 without crashing."""
-        updated = backfill_correlation_pnl("/nonexistent/path/chimera.db")
-        self.assertEqual(updated, 0)
+    def test_is_insert_only_with_do_nothing(self):
+        """Upsert must NOT overwrite — ON CONFLICT DO NOTHING."""
+        cb.write_correlation_record("wallet_abc", 75.0, "{}", "SHIELD")
+        self.assertEqual(len(self.update_calls), 1)
+        query, _ = self.update_calls[0]
+        self.assertIn("INSERT INTO wqs_pnl_correlation", query)
+        self.assertIn("ON CONFLICT (wallet_address) DO NOTHING", query)
+        self.assertNotIn("DO UPDATE", query)
+
+
+class TestWritePromotionEpisode(unittest.TestCase):
+    def setUp(self):
+        self.update_calls = []
+        self._patch = mock.patch.object(
+            cb,
+            "execute_update",
+            side_effect=lambda q, p=None, **k: self.update_calls.append((q, p)) or 0,
+        )
+        self._patch.start()
+
+    def tearDown(self):
+        mock.patch.stopall()
+
+    def test_inserts_promoted_episode(self):
+        cb.write_promotion_episode("wallet_abc", 80.0, 0.9, "{}", decision="promoted")
+        self.assertEqual(len(self.update_calls), 1)
+        query, params = self.update_calls[0]
+        self.assertIn("INSERT INTO promotion_episodes", query)
+        self.assertEqual(params[0], "wallet_abc")
+        self.assertEqual(params[1], 80.0)
+        self.assertEqual(params[4], "promoted")
+
+    def test_inserts_shadow_episode(self):
+        cb.write_promotion_episode("wallet_abc", 73.0, 0.6, None, decision="shadow")
+        query, params = self.update_calls[0]
+        self.assertEqual(params[4], "shadow")
+        self.assertIsNone(params[3])
+
+    def test_code_revision_falls_back_to_unknown(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GIT_HASH", None)
+            cb.write_promotion_episode("w", 70.0, 0.5, "{}")
+            _, params = self.update_calls[0]
+            self.assertEqual(params[6], "unknown")
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 """
-WQS-to-Actual-PnL Correlation Reader (Phase 3a)
+WQS-to-Actual-PnL Correlation Reader (Phase 3a / C2 rewrite)
 
-Reads the wqs_pnl_correlation table (written by the Rust Operator when it
-closes copy-trade positions) and computes:
+Reads the wqs_pnl_correlation table (written by Scout when promoting wallets)
+and computes:
 
 - Per-wallet: actual vs predicted profitability
 - Per-WQS-component: which signals correlate with profit
@@ -10,16 +10,17 @@ closes copy-trade positions) and computes:
 - Per-strategy: Shield vs Spear effectiveness
 
 Used by Phase 3b (adaptive weights) and the calibration dashboard.
+
+PostgreSQL-only: uses the shared Connection / execute_query abstraction from
+`scout.core.db` with `%s` placeholders and `information_schema.tables` for
+existence checks. SQLite and local-path branches were decommissioned (2026-07).
 """
 
 import json
-import os
-import sqlite3
 from dataclasses import dataclass
 from typing import Dict, List, Optional
-from pathlib import Path
 
-from .db import get_connection
+from .db import Connection, execute_query
 
 
 @dataclass
@@ -56,87 +57,99 @@ class CorrelationReader:
     Reads wqs_pnl_correlation data and computes aggregated statistics.
 
     Usage:
-        reader = CorrelationReader(db_path="data/chimera.db")
+        reader = CorrelationReader()
         stats = reader.get_correlation_stats()
         top_predictors = reader.get_top_component_predictors()
     """
 
     def __init__(self, db_path: Optional[str] = None):
-        if db_path is None:
-            db_path = os.getenv("CHIMERA_DB_PATH", "../data/chimera.db")
-        self.db_path = Path(db_path)
-
-    def _get_connection(self):
-        if not self.db_path.exists():
-            return None
-        conn = get_connection(str(self.db_path))
-        return conn
+        # db_path is retained for call-site compatibility but ignored — the
+        # shared PostgreSQL pool (DATABASE_URL) is the only supported backend.
+        self.db_path = db_path
 
     def table_exists(self) -> bool:
-        conn = self._get_connection()
-        if conn is None:
-            return False
+        """Check wqs_pnl_correlation existence via information_schema (PG only)."""
         try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT table_name FROM information_schema.tables
-                WHERE table_name = 'wqs_pnl_correlation'
-                UNION
-                SELECT name FROM sqlite_master WHERE type='table' AND name='wqs_pnl_correlation'
-            """)
-            result = cursor.fetchone()
-            return result is not None
+            with Connection(self.db_path) as conn:
+                cursor = execute_query(
+                    conn,
+                    """SELECT 1 FROM information_schema.tables
+                       WHERE table_schema = 'public'
+                         AND table_name = 'wqs_pnl_correlation'
+                       LIMIT 1""",
+                    None,
+                )
+                return cursor.fetchone() is not None
         except Exception:
             return False
-        finally:
-            conn.close()
 
     def get_all_records(
         self,
         strategy: Optional[str] = None,
         min_trades: int = 0,
     ) -> List[WqsCorrelationRecord]:
-        conn = self._get_connection()
-        if conn is None:
-            return []
         try:
-            cursor = conn.cursor()
-            if strategy:
-                cursor.execute(
-                    """SELECT * FROM wqs_pnl_correlation
-                       WHERE strategy = ? AND copy_trade_count_all >= ?
-                       ORDER BY promoted_at DESC""",
-                    (strategy, min_trades),
-                )
-            else:
-                cursor.execute(
-                    """SELECT * FROM wqs_pnl_correlation
-                       WHERE copy_trade_count_all >= ?
-                       ORDER BY promoted_at DESC""",
-                    (min_trades,),
-                )
-            rows = cursor.fetchall()
-            records = []
-            for row in rows:
-                records.append(WqsCorrelationRecord(
-                    wallet_address=row["wallet_address"],
-                    wqs_score_at_promotion=row["wqs_score_at_promotion"],
-                    actual_copy_pnl_7d_sol=row["actual_copy_pnl_7d_sol"],
-                    actual_copy_pnl_30d_sol=row["actual_copy_pnl_30d_sol"],
-                    actual_copy_pnl_all_sol=row["actual_copy_pnl_all_sol"],
-                    copy_trade_count_7d=row["copy_trade_count_7d"] or 0,
-                    copy_trade_count_30d=row["copy_trade_count_30d"] or 0,
-                    copy_trade_count_all=row["copy_trade_count_all"] or 0,
-                    strategy=row["strategy"],
-                    wqs_components_json=row["wqs_components_json"],
-                    promoted_at=row["promoted_at"],
-                    last_updated_at=row["last_updated_at"],
-                ))
-            return records
-        except sqlite3.OperationalError:
+            with Connection(self.db_path) as conn:
+                if strategy:
+                    cursor = execute_query(
+                        conn,
+                        """SELECT wallet_address,
+                                  wqs_score_at_promotion,
+                                  actual_copy_pnl_7d_sol,
+                                  actual_copy_pnl_30d_sol,
+                                  actual_copy_pnl_all_sol,
+                                  copy_trade_count_7d,
+                                  copy_trade_count_30d,
+                                  copy_trade_count_all,
+                                  strategy,
+                                  wqs_components_json,
+                                  promoted_at,
+                                  last_updated_at
+                           FROM wqs_pnl_correlation
+                           WHERE strategy = %s AND copy_trade_count_all >= %s
+                           ORDER BY promoted_at DESC""",
+                        (strategy, min_trades),
+                    )
+                else:
+                    cursor = execute_query(
+                        conn,
+                        """SELECT wallet_address,
+                                  wqs_score_at_promotion,
+                                  actual_copy_pnl_7d_sol,
+                                  actual_copy_pnl_30d_sol,
+                                  actual_copy_pnl_all_sol,
+                                  copy_trade_count_7d,
+                                  copy_trade_count_30d,
+                                  copy_trade_count_all,
+                                  strategy,
+                                  wqs_components_json,
+                                  promoted_at,
+                                  last_updated_at
+                           FROM wqs_pnl_correlation
+                           WHERE copy_trade_count_all >= %s
+                           ORDER BY promoted_at DESC""",
+                        (min_trades,),
+                    )
+                rows = cursor.fetchall()
+                records = []
+                for row in rows:
+                    records.append(WqsCorrelationRecord(
+                        wallet_address=row["wallet_address"],
+                        wqs_score_at_promotion=row["wqs_score_at_promotion"],
+                        actual_copy_pnl_7d_sol=row["actual_copy_pnl_7d_sol"],
+                        actual_copy_pnl_30d_sol=row["actual_copy_pnl_30d_sol"],
+                        actual_copy_pnl_all_sol=row["actual_copy_pnl_all_sol"],
+                        copy_trade_count_7d=row["copy_trade_count_7d"] or 0,
+                        copy_trade_count_30d=row["copy_trade_count_30d"] or 0,
+                        copy_trade_count_all=row["copy_trade_count_all"] or 0,
+                        strategy=row["strategy"],
+                        wqs_components_json=row["wqs_components_json"],
+                        promoted_at=row["promoted_at"],
+                        last_updated_at=row["last_updated_at"],
+                    ))
+                return records
+        except Exception:
             return []
-        finally:
-            conn.close()
 
     def get_correlation_stats(
         self, strategy: Optional[str] = None

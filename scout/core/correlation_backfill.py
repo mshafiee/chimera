@@ -1,14 +1,17 @@
 """
-Database backfill: bridges wallets table (Operator) with wqs_pnl_correlation (Scout).
+Database backfill: bridges closed Chimera trades with wqs_pnl_correlation
+(Scout) and writes append-only promotion_episodes (C2).
 
-The backfill reads realized PnL from the wallets table and writes it into
-the correlation table so adaptive weights calibration can compute
-WQS-to-PnL correlations.
+The backfill computes ACTUAL copy PnL from the Operator's `trades` table
+(not the source wallet's realized_pnl in `wallets`, which was circular — it
+measured the source wallet's own skill, not Chimera's copy performance).
 
 Uses the db.py abstraction (Connection / execute_query / execute_update) to
 run against the configured PostgreSQL backend.
 """
 
+import os
+import traceback
 from datetime import timedelta
 
 from .db import Connection, execute_query, execute_update
@@ -17,12 +20,15 @@ from .utils import utcnow
 
 def backfill_correlation_pnl(db_path: str) -> int:
     """
-    Backfill actual copy PnL from wallets table into wqs_pnl_correlation.
+    Backfill actual copy PnL from Chimera `trades` into `wqs_pnl_correlation`.
 
-    The Operator writes realized_pnl_30d_sol to the wallets table but never
-    writes actual_copy_pnl_* to wqs_pnl_correlation. This function bridges
-    that gap: for any correlation record promoted >=7 days ago that still
-    has NULL PnL, it reads the wallets table and updates the correlation row.
+    For any correlation record promoted >=7 days ago that still has NULL
+    actual_copy_pnl_30d_sol, computes copy PnL from closed Chimera trades:
+
+    - actual_copy_pnl_7d_sol  (last 7 days of closed SELLs)
+    - actual_copy_pnl_30d_sol (last 30 days)
+    - actual_copy_pnl_all_sol (all time)
+    - copy_trade_count_7d, copy_trade_count_30d, copy_trade_count_all
 
     Returns the number of records updated.
     """
@@ -41,35 +47,70 @@ def backfill_correlation_pnl(db_path: str) -> int:
             rows = cursor.fetchall()
             if not rows:
                 return 0
+
+            # Batch-compute copy PnL from Chimera trades for all flagged wallets
+            addresses = tuple(r["wallet_address"] for r in rows)
+            # psycopg expects an explicit tuple for a single-element IN;
+            # handle len==1 by doubling to a 2-tuple so the driver sees a tuple.
+            if len(addresses) == 1:
+                addresses = (addresses[0], addresses[0])
+
+            pnl_cursor = execute_query(
+                conn,
+                """SELECT
+                       t.wallet_address,
+                       SUM(t.net_pnl_sol) FILTER (WHERE t.created_at >= NOW() - INTERVAL '7 days') AS copy_pnl_7d,
+                       SUM(t.net_pnl_sol) FILTER (WHERE t.created_at >= NOW() - INTERVAL '30 days') AS copy_pnl_30d,
+                       SUM(t.net_pnl_sol) AS copy_pnl_all,
+                       COUNT(*) FILTER (WHERE t.created_at >= NOW() - INTERVAL '7 days') AS count_7d,
+                       COUNT(*) FILTER (WHERE t.created_at >= NOW() - INTERVAL '30 days') AS count_30d,
+                       COUNT(*) AS count_all
+                   FROM trades t
+                   WHERE t.status = 'CLOSED'
+                     AND t.pnl_data_valid = TRUE
+                     AND t.side = 'SELL'
+                     AND t.wallet_address IN %s
+                   GROUP BY t.wallet_address""",
+                (addresses,),
+            )
+            pnl_rows = {r["wallet_address"]: r for r in pnl_cursor.fetchall()}
+
             for row in rows:
                 addr = row["wallet_address"]
-                w_cursor = execute_query(
-                    conn,
-                    """SELECT realized_pnl_30d_sol, trade_count_30d
-                       FROM wallets WHERE address = %s""",
-                    (addr,),
-                )
-                w = w_cursor.fetchone()
-                if w is None:
+                pnl = pnl_rows.get(addr)
+                if pnl is None:
+                    # No closed copy-trades yet — skip; correlation keeps NULL.
                     continue
-                realized_pnl = w["realized_pnl_30d_sol"]
-                trade_count = w["trade_count_30d"]
-                if realized_pnl is not None:
-                    execute_query(
-                        conn,
-                        """UPDATE wqs_pnl_correlation
-                           SET actual_copy_pnl_30d_sol = %s,
-                               copy_trade_count_30d = %s,
-                               last_updated_at = %s
-                           WHERE wallet_address = %s""",
-                        (realized_pnl, trade_count or 0, utcnow().isoformat(), addr),
-                    )
-                    updated += 1
-            # Connection context manager commits on clean exit
+                if pnl["copy_pnl_30d"] is None and pnl["copy_pnl_all"] is None:
+                    continue
+                execute_query(
+                    conn,
+                    """UPDATE wqs_pnl_correlation
+                       SET actual_copy_pnl_7d_sol = %s,
+                           actual_copy_pnl_30d_sol = %s,
+                           actual_copy_pnl_all_sol = %s,
+                           copy_trade_count_7d = %s,
+                           copy_trade_count_30d = %s,
+                           copy_trade_count_all = %s,
+                           last_updated_at = %s
+                       WHERE wallet_address = %s""",
+                    (
+                        pnl["copy_pnl_7d"],
+                        pnl["copy_pnl_30d"],
+                        pnl["copy_pnl_all"],
+                        pnl["count_7d"] or 0,
+                        pnl["count_30d"] or 0,
+                        pnl["count_all"] or 0,
+                        utcnow().isoformat(),
+                        addr,
+                    ),
+                )
+                updated += 1
         if updated:
-            print(f"[Scout] Backfilled PnL for {updated} wallets")
+            print(f"[Scout] Backfilled PnL for {updated} wallets (from trades)")
     except Exception as e:
         print(f"[Scout] PnL backfill skipped: {e}")
+        traceback.print_exc()
     return updated
 
 
@@ -80,11 +121,12 @@ def write_correlation_record(
     strategy: str,
 ) -> None:
     """
-    Upsert into wqs_pnl_correlation table in the MAIN database.
+    Insert into wqs_pnl_correlation table in the MAIN database.
 
-    Writes the fields the Scout owns: wallet_address, wqs_score_at_promotion,
-    wqs_components_json, promoted_at, strategy, last_updated_at.
-    Actual PnL fields (actual_copy_pnl_*) are backfilled later by backfill_correlation_pnl().
+    Insert-only with `ON CONFLICT DO NOTHING`: if a row already exists for the
+    wallet, the first promotion record is preserved. The table keeps the FIRST
+    promotion snapshot; subsequent re-evaluations append to promotion_episodes
+    instead of overwriting this row.
     """
     now = utcnow().isoformat()
     try:
@@ -93,13 +135,39 @@ def write_correlation_record(
                (wallet_address, wqs_score_at_promotion, wqs_components_json,
                 promoted_at, strategy, last_updated_at)
                VALUES (%s, %s, %s, %s, %s, %s)
-               ON CONFLICT (wallet_address) DO UPDATE SET
-                   wqs_score_at_promotion = EXCLUDED.wqs_score_at_promotion,
-                   wqs_components_json = EXCLUDED.wqs_components_json,
-                   promoted_at = EXCLUDED.promoted_at,
-                   strategy = EXCLUDED.strategy,
-                   last_updated_at = EXCLUDED.last_updated_at""",
+               ON CONFLICT (wallet_address) DO NOTHING""",
             (wallet_address, wqs_score, components_json_str, now, strategy, now),
         )
     except Exception as e:
         print(f"[Scout] Failed to write correlation record: {e}")
+        traceback.print_exc()
+
+
+def write_promotion_episode(
+    wallet_address: str,
+    wqs: float,
+    wqs_confidence: float | None,
+    components_json: str | None,
+    decision: str = "promoted",
+) -> None:
+    """
+    Append an immutable promotion episode (C2).
+
+    Called from the promotion flow in main.py Step 3c. Every promotion or
+    shadow decision inserts a row into promotion_episodes (never updates), so
+    WQS-to-PnL feedback is honest and re-evaluation never erases the original
+    promotion-time features.
+    """
+    policy_version = os.getenv("SCOUT_PROMOTION_POLICY_VERSION", "default")
+    code_revision = os.getenv("GIT_HASH", "unknown")
+    try:
+        execute_update(
+            """INSERT INTO promotion_episodes
+               (wallet_address, promoted_at, wqs, wqs_confidence,
+                components_json, decision, policy_version, code_revision)
+               VALUES (%s, NOW(), %s, %s, %s, %s, %s, %s)""",
+            (wallet_address, wqs, wqs_confidence, components_json, decision, policy_version, code_revision),
+        )
+    except Exception as e:
+        print(f"[Scout] Failed to write promotion episode: {e}")
+        traceback.print_exc()

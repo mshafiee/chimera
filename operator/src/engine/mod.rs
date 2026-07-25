@@ -4,6 +4,7 @@
 
 mod channel;
 mod degradation;
+pub mod decision_recorder;
 pub mod dex_comparator;
 pub mod executor;
 mod execution_lock;
@@ -19,7 +20,9 @@ pub mod recovery;
 pub mod reconciliation;
 mod rent_scavenger;
 pub mod rpc_cache;
+pub mod run_context;
 pub mod selection;
+pub mod shadow_fill;
 pub mod signal_pipeline;
 pub mod signal_quality;
 pub mod slippage;
@@ -33,6 +36,7 @@ pub mod worker_pool;
 
 pub use channel::*;
 pub use degradation::*;
+pub use decision_recorder::DecisionRecorder;
 pub use dex_comparator::{DexComparator, RouteSelection};
 pub use executor::*;
 pub use execution_lock::{ExecutionLock, ExecutionLockConfig, LockGuard, LockInfo};
@@ -46,7 +50,9 @@ pub use profit_targets::{ProfitTargetAction, ProfitTargetManager};
 pub use recovery::RecoveryManager;
 pub use rent_scavenger::{RentScavenger, RentScavengerConfig};
 pub use rpc_cache::{CacheStats, RpcCache};
+pub use run_context::RunContext;
 pub use selection::{BuyDecision, Ingress, SelectionConfig, SelectionRequest, SelectionService};
+pub use shadow_fill::LatencyTracker;
 pub use signal_quality::{QualityCategory, SignalFactors, SignalQuality};
 pub use stop_loss::{StopLossAction, StopLossManager};
 pub use tips::TipManager;

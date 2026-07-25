@@ -36,6 +36,15 @@ pub struct HealthResponse {
     /// Time spent in fallback mode (if applicable)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_duration_secs: Option<i64>,
+    /// Unique identifier of this process run (C1 evidence)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Git commit hash of the running build (C1 evidence)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_revision: Option<String>,
+    /// Admission-threshold config hash in force (C1 evidence)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_hash: Option<String>,
 }
 
 /// Health status enum
@@ -90,6 +99,9 @@ pub struct AppState {
     pub price_cache: Arc<PriceCache>,
     /// Current trade mode
     pub trade_mode: String,
+    /// Run-scoped identity (C1). Optional so health still works if the run
+    /// context was not constructed (e.g. tests).
+    pub run_context: Option<Arc<crate::engine::RunContext>>,
 }
 
 /// Health check handler
@@ -196,6 +208,12 @@ pub async fn health_check(
         price_cache: price_cache_health,
         trade_mode: state.trade_mode.clone(),
         fallback_duration_secs,
+        run_id: state.run_context.as_ref().map(|rc| rc.run_id.clone()),
+        code_revision: state
+            .run_context
+            .as_ref()
+            .map(|rc| rc.code_revision.clone()),
+        config_hash: state.run_context.as_ref().map(|rc| rc.config_hash.clone()),
     };
 
     (status_code, Json(response))

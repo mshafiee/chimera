@@ -822,10 +822,11 @@ impl TransactionBuilder {
     }
 
     /// Get a single (unrestricted) Jupiter quote. Used for paper/devnet price
-    /// discovery where multi-DEX comparison is unnecessary.
+    /// discovery where multi-DEX comparison is unnecessary, and by the C3
+    /// shadow-fill model to capture decision-time and delayed requotes.
     ///
     /// `dexes`, when set, restricts routing (used by route comparison).
-    async fn get_jupiter_quote(
+    pub async fn get_jupiter_quote(
         &self,
         input_mint: Pubkey,
         output_mint: Pubkey,
