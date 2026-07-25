@@ -142,6 +142,38 @@ impl WebhookLifecycleManager {
                     // This catches stale IDs left over from manual deletion or prior cleanups.
                     match self.helius_client.get_webhook_typed(webhook_id).await {
                         Ok(_) => {
+                            // Webhook exists in Helius. Proactively sync the auth
+                            // header so a stale/wrong value (e.g. a literal
+                            // "${VAR}" registered before env-var resolution was
+                            // added) is corrected on every registration cycle
+                            // rather than persisting until manual deletion.
+                            let needs_auth_sync = self.config.auth_header.is_some();
+                            if needs_auth_sync {
+                                let auth = self.config.auth_header.clone().unwrap();
+                                let update = crate::monitoring::helius::WebhookUpdate {
+                                    webhook_url: None,
+                                    transaction_types: None,
+                                    account_addresses: None,
+                                    auth_header: Some(serde_json::Value::String(auth)),
+                                };
+                                match self.helius_client.update_webhook(webhook_id, update).await {
+                                    Ok(()) => {
+                                        info!(
+                                            wallet = %wallet,
+                                            webhook_id = %webhook_id,
+                                            "Webhook auth header synced on existing webhook"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            wallet = %wallet,
+                                            webhook_id = %webhook_id,
+                                            error = %e,
+                                            "Failed to sync auth header on existing webhook (webhook remains registered)"
+                                        );
+                                    }
+                                }
+                            }
                             info!(
                                 wallet = %wallet,
                                 webhook_id = %webhook_id,
