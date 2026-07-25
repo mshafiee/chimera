@@ -612,16 +612,17 @@ pub async fn enable_wallet_monitoring(
 
     // Register Helius webhook for this wallet
     let wallets = vec![wallet_address.clone()];
+    let resolved_auth_header = state
+        .config
+        .monitoring
+        .as_ref()
+        .and_then(|m| m.resolved_helius_auth_header());
     let webhook_id = match state
         .helius_client
         .register_webhook(
             &wallets,
             webhook_url,
-            state
-                .config
-                .monitoring
-                .as_ref()
-                .and_then(|m| m.helius_webhook_auth_header.as_deref()),
+            resolved_auth_header.as_deref(),
         )
         .await
     {

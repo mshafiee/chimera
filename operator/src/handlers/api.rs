@@ -323,7 +323,7 @@ pub async fn update_wallet(
             let auth_header = config
                 .monitoring
                 .as_ref()
-                .and_then(|m| m.helius_webhook_auth_header.clone());
+                .and_then(|m| m.resolved_helius_auth_header());
 
             let address_clone = address.clone();
 

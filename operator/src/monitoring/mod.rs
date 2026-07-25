@@ -153,15 +153,7 @@ impl MonitoringState {
         let helius_auth_header = config
             .monitoring
             .as_ref()
-            .and_then(|m| m.helius_webhook_auth_header.clone())
-            .map(|h| {
-                if h.starts_with("${") {
-                    std::env::var("HELIUS_WEBHOOK_AUTH").unwrap_or_default()
-                } else {
-                    h
-                }
-            })
-            .filter(|h| !h.is_empty());
+            .and_then(|m| m.resolved_helius_auth_header());
         let helius_auth_enforce = config
             .monitoring
             .as_ref()

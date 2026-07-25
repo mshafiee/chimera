@@ -1116,6 +1116,23 @@ pub struct MonitoringConfig {
     pub rpc_verify_enforce: bool,
 }
 
+impl MonitoringConfig {
+    /// Resolve the Helius webhook auth header, expanding `${VAR}` placeholders
+    /// from the environment. Returns `None` when unset or empty.
+    pub fn resolved_helius_auth_header(&self) -> Option<String> {
+        self.helius_webhook_auth_header
+            .as_deref()
+            .map(|h| {
+                if h.starts_with("${") {
+                    std::env::var("HELIUS_WEBHOOK_AUTH").unwrap_or_default()
+                } else {
+                    h.to_string()
+                }
+            })
+            .filter(|h| !h.is_empty())
+    }
+}
+
 /// WebSocket reconnection configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebSocketReconnectConfig {

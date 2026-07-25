@@ -1591,6 +1591,7 @@ async fn main() -> anyhow::Result<()> {
             rpc_url: config.rpc.primary_url.clone(),
             rate_limit,
             exit_detection_delay_secs,
+            min_position_sol: config.strategy.min_position_sol,
         };
 
         let polling_db = db_pool.clone();
@@ -1902,7 +1903,7 @@ async fn main() -> anyhow::Result<()> {
                         webhook_url: webhook_url.clone(),
                         helius_dry_run: webhook_lifecycle_config.helius_dry_run,
                         auto_cleanup_enabled: webhook_lifecycle_config.auto_cleanup_enabled,
-                        auth_header: monitoring_config.helius_webhook_auth_header.clone(),
+                        auth_header: monitoring_config.resolved_helius_auth_header(),
                     };
 
                     tokio::spawn(async move {
@@ -1975,7 +1976,7 @@ async fn main() -> anyhow::Result<()> {
                         auth_header: config
                             .monitoring
                             .as_ref()
-                            .and_then(|m| m.helius_webhook_auth_header.clone()),
+                            .and_then(|m| m.resolved_helius_auth_header()),
                     };
 
                     tracing::info!("Running startup webhook check...");
@@ -2029,7 +2030,7 @@ async fn main() -> anyhow::Result<()> {
                             auth_header: config
                                 .monitoring
                                 .as_ref()
-                                .and_then(|m| m.helius_webhook_auth_header.clone()),
+                                .and_then(|m| m.resolved_helius_auth_header()),
                         };
 
                         tokio::spawn(async move {

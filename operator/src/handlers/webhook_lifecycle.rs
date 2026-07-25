@@ -50,7 +50,7 @@ fn get_auth_header(state: &MonitoringState) -> Option<String> {
         .config
         .monitoring
         .as_ref()
-        .and_then(|m| m.helius_webhook_auth_header.clone())
+        .and_then(|m| m.resolved_helius_auth_header())
 }
 
 /// Webhook statistics response

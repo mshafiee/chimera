@@ -40,6 +40,8 @@ pub struct PollingConfig {
     pub rate_limit: u32,
     /// Delay (seconds) before treating a SELL as a position exit
     pub exit_detection_delay_secs: u64,
+    /// Minimum position size in SOL — dust trades below this are skipped
+    pub min_position_sol: rust_decimal::Decimal,
 }
 
 /// Poll wallets for a specific conviction tier
@@ -47,7 +49,7 @@ async fn poll_wallets_by_tier(
     db: Arc<dyn Database>,
     engine: EngineHandle,
     tier: crate::config::ConvictionTier,
-    config: &PollingConfig,
+    polling_cfg: &PollingConfig,
     rpc_client: Arc<RpcClient>,
     rate_limiter: Arc<RateLimiter>,
     polling_state: Arc<RpcPollingState>,
@@ -57,9 +59,9 @@ async fn poll_wallets_by_tier(
     pending_exits: Arc<RwLock<Vec<super::ExitSignal>>>,
 ) {
     let interval = match tier {
-        crate::config::ConvictionTier::High => config.high_conviction_interval_secs.unwrap_or(config.interval_secs),
-        crate::config::ConvictionTier::Regular => config.regular_conviction_interval_secs.unwrap_or(config.interval_secs),
-        crate::config::ConvictionTier::Emerging => config.emerging_conviction_interval_secs.unwrap_or(config.interval_secs),
+        crate::config::ConvictionTier::High => polling_cfg.high_conviction_interval_secs.unwrap_or(polling_cfg.interval_secs),
+        crate::config::ConvictionTier::Regular => polling_cfg.regular_conviction_interval_secs.unwrap_or(polling_cfg.interval_secs),
+        crate::config::ConvictionTier::Emerging => polling_cfg.emerging_conviction_interval_secs.unwrap_or(polling_cfg.interval_secs),
     };
 
     // Query wallets for this tier
@@ -117,7 +119,7 @@ async fn poll_wallets_by_tier(
         &rpc_client,
         &monitored_wallets,
         interval,
-        config.batch_size,
+        polling_cfg.batch_size,
         rate_limiter.clone(),
         polling_state.clone(),
         Some(db.as_ref()),
@@ -154,7 +156,8 @@ async fn poll_wallets_by_tier(
                 &token_parser,
                 &exit_detector,
                 &pending_exits,
-                config.exit_detection_delay_secs,
+                polling_cfg.exit_detection_delay_secs,
+                polling_cfg.min_position_sol,
             ),
         )
         .await;
@@ -437,6 +440,7 @@ pub async fn start_polling_task(
                                 &exit_detector,
                                 &pending_exits,
                                 config.exit_detection_delay_secs,
+                                config.min_position_sol,
                             ),
                         )
                         .await;
@@ -473,6 +477,7 @@ async fn process_transaction(
     exit_detector: &ExitDetector,
     pending_exits: &Arc<RwLock<Vec<super::ExitSignal>>>,
     exit_detection_delay_secs: u64,
+    min_position_sol: rust_decimal::Decimal,
 ) -> Result<()> {
     // Gate 1: circuit breaker — same check as webhook handler
     if !circuit_breaker.is_trading_allowed() {
@@ -531,6 +536,17 @@ async fn process_transaction(
             return Ok(());
         }
     };
+
+    if direction == Action::Buy && amount_sol < min_position_sol {
+        tracing::debug!(
+            signature = %tx.signature,
+            wallet = %tx.wallet_address,
+            amount_sol = %amount_sol,
+            min_position_sol = %min_position_sol,
+            "Polling trade amount below minimum — skipping dust signal"
+        );
+        return Ok(());
+    }
 
     // For SELL transactions, check if this is an exit from a tracked position
     if matches!(direction, Action::Sell) {
