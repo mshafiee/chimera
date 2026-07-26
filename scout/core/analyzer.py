@@ -3454,6 +3454,26 @@ class WalletAnalyzer:
                 return "events_empty"
             return "no_token_transfers"
 
+        # Strategy: Identify wallet-owned accounts through SOL flows
+        # In routing transactions, the wallet may have temporary accounts that receive/send tokens
+        # but don't appear in fromUserAccount/toUserAccount. We can identify these by SOL flows.
+        
+        wallet_owned_accounts = set([wallet_address])
+        
+        # Identify accounts that send/receive SOL to/from the wallet
+        native_transfers = tx.get("nativeTransfers") or []
+        for nt in native_transfers:
+            from_acc = nt.get("fromUserAccount")
+            to_acc = nt.get("toUserAccount")
+            user_acc = nt.get("userAccount")
+            amount = float(nt.get("amount", 0))
+            
+            if amount > 1e-6:  # Only significant SOL transfers
+                if from_acc == wallet_address or (user_acc == wallet_address and from_acc == wallet_address):
+                    wallet_owned_accounts.add(to_acc)  # Account receiving SOL is likely wallet-owned
+                if to_acc == wallet_address or (user_acc == wallet_address and to_acc == wallet_address):
+                    wallet_owned_accounts.add(from_acc)  # Account sending SOL is likely wallet-owned
+        
         # Check for primary token availability
         token_deltas: Dict[str, float] = {}
         all_individual_transfers = []  # Track all individual transfers for logging
@@ -3517,6 +3537,9 @@ class WalletAnalyzer:
             print(f"  tokenTransfers: {len(token_transfers)} items")
             print(f"  All individual transfers: {len(all_individual_transfers)}")
             print(f"  Non-SOL mints with non-zero net delta: {non_sol_mints}")
+            print(f"  Wallet-owned accounts: {wallet_owned_accounts}")
+            wallet_transfers = [(t["mint"], t["from"], t["to"]) for t in all_individual_transfers if t["from"] in wallet_owned_accounts or t["to"] in wallet_owned_accounts]
+            print(f"  Wallet-owned account transfers: {wallet_transfers}")
             print(f"  All token transfers: {all_individual_transfers}")
             print()
             return "no_primary_token"
