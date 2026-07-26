@@ -3193,8 +3193,8 @@ class HeliusClient:
                     if abs(delta) > abs(outflow[1]):
                         outflow = (mint, delta)
 
-            # Strategy B: Multi-token swap detection (Jupiter routing, Orca whirlpools, OKX, DFlow)
-            if len(all_inflows) >= 1 and len(all_outflows) >= 1:
+        # Strategy B: Multi-token swap detection (Jupiter routing, Orca whirlpools, OKX, DFlow)
+        if len(all_inflows) >= 1 and len(all_outflows) >= 1:
             # Sort by absolute delta to find the most significant tokens
             all_inflows.sort(key=lambda x: abs(x[1]), reverse=True)
             all_outflows.sort(key=lambda x: abs(x[1]), reverse=True)
@@ -3241,7 +3241,7 @@ class HeliusClient:
                 # Calculate USD spent (wSOL converted to USD)
                 if spent_any and received_any and stable_received is not None and stable_spent is not None:
                     # Multi-sided swap with both stablecoin and wSOL
-                    usd_spent = stable_spent + (stable_received * 0.0 or 0.0)
+                    usd_spent = stable_spent + (stable_received * current_sol_price or 0.0)
                     price_usd = usd_spent / token_amount if token_amount > 0 else None
                 elif spent_any and stable_spent is not None:
                     # Spending stablecoin or wSOL only
@@ -3277,7 +3277,7 @@ class HeliusClient:
                 # Calculate USD received (wSOL converted to USD)
                 if spent_any and received_any and stable_received is not None and stable_spent is not None:
                     # Multi-sided swap
-                    usd_received = stable_received + (stable_spent * 0.0 or 0.0)
+                    usd_received = stable_received + (stable_spent * current_sol_price or 0.0)
                     price_usd = usd_received / token_amount if token_amount > 0 else None
                 elif received_any and stable_received is not None:
                     # Receiving stablecoin or wSOL only
