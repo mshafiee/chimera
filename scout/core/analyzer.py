@@ -3456,18 +3456,55 @@ class WalletAnalyzer:
 
         # Check for primary token availability
         token_deltas: Dict[str, float] = {}
+        all_individual_transfers = []  # Track all individual transfers for logging
+
         for tr in token_transfers:
             mint = tr.get("mint", "")
             if not mint:
                 continue
             amt = self.helius_client._parse_ui_token_amount(tr)
+            
+            from_acc = tr.get("fromUserAccount")
+            to_acc = tr.get("toUserAccount")
+            user_acc = tr.get("userAccount")
+            
+            # Track individual transfer details
+            all_individual_transfers.append({
+                "mint": mint,
+                "amount": amt,
+                "from": from_acc,
+                "to": to_acc,
+                "user": user_acc,
+                "sign": "OUT" if (from_acc == wallet_address or (user_acc == wallet_address and from_acc == wallet_address)) else 
+                        "IN" if (to_acc == wallet_address or (user_acc == wallet_address and to_acc == wallet_address)) else "NEUTRAL"
+            })
+            
+            # Calculate net delta
             if tr.get("fromUserAccount") == wallet_address:
                 token_deltas[mint] = token_deltas.get(mint, 0.0) - amt
             if tr.get("toUserAccount") == wallet_address:
                 token_deltas[mint] = token_deltas.get(mint, 0.0) + amt
 
+        # Detailed logging for parse failures
+        non_sol_mints = [m for m in token_deltas if m != "So11111111111111111111111111111111111111112"]
+        
+        # Build failure details for logging
+        failure_details = {
+            "token_transfers_count": len(token_transfers),
+            "token_deltas": {k: round(v, 6) for k, v in token_deltas.items()},
+            "non_sol_mints": non_sol_mints,
+            "all_individual_transfers": all_individual_transfers
+        }
+
         has_non_sol = any(m != "So11111111111111111111111111111111111111112" for m in token_deltas)
         if not has_non_sol:
+            print(f"\n[Parse Fail] no_primary_token")
+            print(f"  Signature: {tx.get('signature', 'N/A')[:20]}")
+            print(f"  tokenTransfers: {len(token_transfers)} items")
+            print(f"  All individual transfers: {len(all_individual_transfers)}")
+            print(f"  Non-SOL mints with non-zero net delta: {non_sol_mints}")
+            print(f"  All token transfers: {all_individual_transfers}")
+            print()
             return "no_primary_token"
 
         # Check for direction ambiguities
@@ -3479,12 +3516,20 @@ class WalletAnalyzer:
             if nt.get("toUserAccount") == wallet_address:
                 sol_delta += Decimal(str(nt.get("amount", 0)))
 
-        non_sol_mints = [m for m in token_deltas if m != "So11111111111111111111111111111111111111112"]
         has_positive = any(token_deltas[m] > 0 for m in non_sol_mints)
         has_negative = any(token_deltas[m] < 0 for m in non_sol_mints)
         has_sol_movement = abs(sol_delta) > Decimal('0.001')
 
         if not has_sol_movement and (not has_positive or not has_negative):
+            print(f"\n[Parse Fail] direction_ambiguous")
+            print(f"  Signature: {tx.get('signature', 'N/A')[:20]}")
+            print(f"  tokenTransfers: {len(token_transfers)} items")
+            print(f"  SOL net delta: {sol_delta}")
+            print(f"  Non-SOL mints: {non_sol_mints}")
+            print(f"  Has positive delta: {has_positive}")
+            print(f"  Has negative delta: {has_negative}")
+            print(f"  All token transfers: {all_individual_transfers}")
+            print()
             return "direction_ambiguous"
 
         return "unknown"

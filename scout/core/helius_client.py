@@ -3234,6 +3234,14 @@ class HeliusClient:
                 if other_mint and abs(other_delta) >= 1e-12:
                     usd_amount = abs(stable_delta)
                     token_amount = abs(other_delta)
+                # DEBUG: Log direction detection for token->token swaps
+                    print("[Parser] DEBUG: Token->token swap found")
+                    print(f"  SOL delta: {sol_delta}")
+                    print(f"  Stablecoin: {stable_mint_used} @ {stable_delta}")
+                    print(f"  Primary token by abs delta: {primary_mint} @ {primary_delta}")
+                    print(f"  Token deltas: {token_deltas_for_primary}")
+                    print(f"  All transfers: {all_non_sol_transfers}")
+                    print()
                     price_usd = (usd_amount / token_amount) if token_amount > 0 else 0.0
 
                     if stable_delta < 0 and other_delta > 0:
