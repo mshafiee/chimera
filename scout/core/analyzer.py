@@ -3557,7 +3557,7 @@ class WalletAnalyzer:
         has_negative = any(token_deltas[m] < 0 for m in non_sol_mints)
         has_sol_movement = abs(sol_delta) > Decimal('0.001')
 
-        if not has_sol_movement and (not has_positive or not has_negative):
+        if not has_sol_movement and (not has_positive and not has_negative):
             print(f"\n[Parse Fail] direction_ambiguous")
             print(f"  Signature: {tx.get('signature', 'N/A')[:20]}")
             print(f"  tokenTransfers: {len(token_transfers)} items")
