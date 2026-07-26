@@ -3269,14 +3269,26 @@ class HeliusClient:
                         "net_token_delta": net_token_delta,
                     }
 
-            # COMPREHENSIVE ENHANCEMENT: Advanced token→token swap parsing
-            # Handle multi-token swaps, routing transactions, and complex DEX patterns
+        # COMPREHENSIVE ENHANCEMENT: Advanced token→token swap parsing
+        # Handle multi-token swaps, routing transactions, and complex DEX patterns
 
-            # Strategy A: Identify the two largest non-SOL token deltas (one inflow, one outflow)
-            inflow = (None, 0.0)   # (mint, delta) for delta > 0
-            outflow = (None, 0.0)  # (mint, delta) for delta < 0
-            all_inflows = []  # Track all inflows for multi-token swaps
-            all_outflows = []  # Track all outflows for multi-token swaps
+        # Strategy A: Identify the two largest non-SOL token deltas (one inflow, one outflow)
+        inflow = (None, 0.0)   # (mint, delta) for delta > 0
+        outflow = (None, 0.0)  # (mint, delta) for delta < 0
+        all_inflows = []  # Track all inflows for multi-token swaps
+        all_outflows = []  # Track all outflows for multi-token swaps
+        # Initialize before use to avoid NameError in stablecoin swap logic
+        for mint, delta in token_deltas.items():
+            if mint == sol_mint:
+                continue
+            if delta > 0:
+                all_inflows.append((mint, delta))
+                if delta > inflow[1]:
+                    inflow = (mint, delta)
+            elif delta < 0:
+                all_outflows.append((mint, delta))
+                if abs(delta) > abs(outflow[1]):
+                    outflow = (mint, delta)
 
             for mint, delta in token_deltas.items():
                 if mint == sol_mint:
