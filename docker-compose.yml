@@ -17,7 +17,7 @@ services:
       - POSTGRES_EFFECTIVE_CACHE_SIZE=1GB
       - POSTGRES_MAINTENANCE_WORK_MEM=64MB
       - POSTGRES_WORK_MEM=16MB
-      - POSTGRES_MAX_CONNECTIONS=100
+      - POSTGRES_MAX_CONNECTIONS=200
       # WAL configuration for backup/recovery
       - POSTGRES_WAL_LEVEL=replica
       - POSTGRES_MAX_WAL_SENDERS=3
@@ -35,7 +35,7 @@ services:
     command:
       - "postgres"
       - "-c"
-      - "max_connections=100"
+      - "max_connections=200"
       - "-c"
       - "shared_buffers=256MB"
       - "-c"
@@ -208,6 +208,9 @@ services:
       # Database configuration
       - CHIMERA_DB_MODE=${CHIMERA_DB_MODE:-postgres}
       - DATABASE_URL=${DATABASE_URL:-postgresql://chimera:changeme_asap@postgres:5432/chimera}
+      # DB connection pool sizing (psycopg3) — prevents "couldn't get a connection after 10s"
+      - SCOUT_DB_POOL_MAX_SIZE=30
+      - SCOUT_DB_POOL_TIMEOUT=15
       # Redis configuration
       - REDIS_ENABLED=${REDIS_ENABLED:-true}
       - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}

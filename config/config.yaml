@@ -19,7 +19,7 @@ rpc:
 
 database:
   url: "postgresql://chimera:changeme_asap@postgres:5432/chimera"
-  max_connections: 5
+  max_connections: 15
 
 security:
   # Overridden by CHIMERA_SECURITY__WEBHOOK_SECRET
