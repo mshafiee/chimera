@@ -3083,11 +3083,64 @@ class HeliusClient:
         # Helper to identify if a mint is a stablecoin
         def is_stable(m): return m in stable_mints
 
-        # Choose primary (non-SOL) token by absolute delta
+        # Choose primary (non-SOL) token by largest absolute transfer amount
+        # This handles cases where net delta is zero but there are large individual transfers
+        primary_mint = None
+        primary_amount = 0.0
+        largest_transfer_mint = None
+        largest_transfer_amount = 0.0
+        
+        # Track all non-SOL transfers for analysis
+        all_non_sol_transfers = []
+        
+        for tr in tx.get("tokenTransfers", []) or []:
+            if not isinstance(tr, dict):
+                continue
+            mint = tr.get("mint", "")
+            if not mint:
+                continue
+            amt_ui = self._parse_ui_token_amount(tr)
+            
+            if mint == sol_mint:
+                continue
+                
+            # Track largest individual transfer
+            if abs(amt_ui) > largest_transfer_amount:
+                largest_transfer_amount = abs(amt_ui)
+                largest_transfer_mint = mint
+            
+            all_non_sol_transfers.append({
+                'mint': mint,
+                'amount': amt_ui,
+                'from': tr.get("fromUserAccount"),
+                'to': tr.get("toUserAccount"),
+                'user': tr.get("userAccount")
+            })
+        
+        # Strategy 1: Use net delta if there's a clear winner
+        token_deltas_for_primary: Dict[str, float] = {}
+        for tr in tx.get("tokenTransfers", []) or []:
+            if not isinstance(tr, dict):
+                continue
+            mint = tr.get("mint", "")
+            if not mint:
+                continue
+            amt_ui = self._parse_ui_token_amount(tr)
+            
+            from_acc = tr.get("fromUserAccount")
+            to_acc = tr.get("toUserAccount")
+            user_acc = tr.get("userAccount")
+            
+            if from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address):
+                token_deltas_for_primary[mint] = token_deltas_for_primary.get(mint, 0.0) - amt_ui
+            if to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address):
+                token_deltas_for_primary[mint] = token_deltas_for_primary.get(mint, 0.0) + amt_ui
+        
+        # Check for primary token by net delta (existing logic)
         primary_mint = None
         primary_delta = 0.0
         
-        for mint, delta in token_deltas.items():
+        for mint, delta in token_deltas_for_primary.items():
             if mint == sol_mint:
                 continue
             if is_stable(mint):
@@ -3095,19 +3148,55 @@ class HeliusClient:
             if abs(delta) > abs(primary_delta):
                 primary_delta = delta
                 primary_mint = mint
-
+        
+        # Strategy 2: If no primary token found by net delta, use largest individual transfer
+        if not primary_mint and largest_transfer_mint:
+            primary_mint = largest_transfer_mint
+            primary_amount = largest_transfer_amount
+            # Determine direction based on transfer direction
+            for tr in all_non_sol_transfers:
+                if tr['mint'] == primary_mint:
+                    from_acc = tr.get("fromUserAccount")
+                    to_acc = tr.get("toUserAccount")
+                    user_acc = tr.get("userAccount")
+                    
+                    if (from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address)):
+                        primary_delta = -primary_amount
+                    elif (to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address)):
+                        primary_delta = primary_amount
+                    break
+        
         if not primary_mint:
             # If no volatile token found, check if it's just a SOL <-> Stable swap
             for mint, delta in token_deltas.items():
                 if is_stable(mint) and abs(delta) > 0:
                     primary_mint = mint
+                    primary_amount = abs(delta)
                     primary_delta = delta
                     break
             
             if not primary_mint:
-                # Debug log why parse failed
-                # print(f"[Parser] No primary token found. sol_delta={sol_delta}, token_deltas={len(token_deltas)}")
-                return None
+                # If still no token found, use largest transfer if it's significant
+                if largest_transfer_mint and largest_transfer_amount > 0:
+                    primary_mint = largest_transfer_mint
+                    primary_amount = largest_transfer_amount
+                    primary_delta = largest_transfer_amount
+                    
+                    # Try to determine direction from transfers
+                    for tr in all_non_sol_transfers:
+                        if tr['mint'] == primary_mint:
+                            from_acc = tr.get("fromUserAccount")
+                            to_acc = tr.get("toUserAccount")
+                            user_acc = tr.get("userAccount")
+                            
+                            if (from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address)):
+                                primary_delta = -primary_amount
+                            elif (to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address)):
+                                primary_delta = primary_amount
+                            break
+                
+                if not primary_mint:
+                    return None
 
         # If we have no SOL leg, try to value token->token swaps using a stablecoin quote.
         if abs(sol_delta) < 1e-12:
