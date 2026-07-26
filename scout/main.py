@@ -347,127 +347,103 @@ def _calibration_report(records: List[WalletRecord], stats: Dict[str, Any]) -> N
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Chimera Scout - Wallet Intelligence Layer",
+        description="Scout - Wallet Intelligence Layer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py                       # Run with default config
+  python main.py --dry-run            # Analyze without writing to DB
+  python main.py --skip-backtest      # Skip backtest validation (faster)
+  python main.py --walk-forward-min-trades 12
+        """
     )
     
-    parser.add_argument(
-        "--output", "-o",
-        default=DEFAULT_OUTPUT_PATH,
-        help=f"Output path for roster_new.db (default: {DEFAULT_OUTPUT_PATH})"
-    )
-    
+    # Basic parameters
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Analyze wallets without writing to database"
+        help="Analyze wallets but don't write to database"
     )
     
     parser.add_argument(
         "--skip-backtest",
         action="store_true",
-        help="Skip backtest validation (faster, but less accurate)"
+        help="Skip backtest validation (faster, less accurate)"
+    )
+    
+    parser.add_argument(
+        "--walk-forward-min-trades",
+        type=int,
+        default=10,
+        help="Minimum number of close trades required for walk-forward validation (default: 10)"
     )
     
     parser.add_argument(
         "--min-wqs-active",
         type=float,
-        default=float(os.getenv("SCOUT_MIN_WQS_ACTIVE", str(DEFAULT_MIN_WQS_ACTIVE))),
-        help=f"Minimum WQS score for ACTIVE status (default: {DEFAULT_MIN_WQS_ACTIVE}, or SCOUT_MIN_WQS_ACTIVE)"
+        default=25.0,
+        help="Minimum WQS score for ACTIVE status (default: 25.0)"
     )
     
     parser.add_argument(
         "--min-wqs-candidate",
         type=float,
-        default=float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", str(DEFAULT_MIN_WQS_CANDIDATE))),
-        help=f"Minimum WQS score for CANDIDATE status (default: {DEFAULT_MIN_WQS_CANDIDATE}, or SCOUT_MIN_WQS_CANDIDATE)"
+        default=10.0,
+        help="Minimum WQS score for CANDIDATE status (default: 10.0)"
     )
     
     parser.add_argument(
         "--min-liquidity-shield",
         type=float,
-        default=10000.0,
-        help="Minimum liquidity (USD) for Shield strategy (default: 10000)"
+        default=5000.0,
+        help="Minimum total liquidity in shield tokens for wallet to be considered (default: 5000.0)"
     )
     
     parser.add_argument(
         "--min-liquidity-spear",
         type=float,
-        default=5000.0,
-        help="Minimum liquidity (USD) for Spear strategy (default: 5000)"
-    )
-
-    parser.add_argument(
-        "--min-closes-required",
-        type=int,
-        default=int(os.getenv("SCOUT_MIN_CLOSES_REQUIRED", "10")),
-        help="Minimum realized closes (SELLs with PnL) required for promotion (default: 10, or SCOUT_MIN_CLOSES_REQUIRED)",
-    )
-
-    parser.add_argument(
-        "--walk-forward-min-trades",
-        type=int,
-        default=int(os.getenv("SCOUT_WALK_FORWARD_MIN_TRADES", "5")),
-        help="Minimum realized closes required in walk-forward holdout window (default: 5, or SCOUT_WALK_FORWARD_MIN_TRADES)",
+        default=2500.0,
+        help="Minimum total liquidity in spear tokens for wallet to be considered (default: 2500.0)"
     )
     
-    parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose output"
-    )
-
-    parser.add_argument(
-        "--max-wallets",
-        type=int,
-        default=int(os.getenv("SCOUT_MAX_WALLETS", "250")),
-        help="Max wallets to analyze (default: 250, or SCOUT_MAX_WALLETS env var; set to 200-500 for paid Helius plans)",
-    )
-
-    parser.add_argument(
-        "--discovery-hours",
-        type=int,
-        default=int(os.getenv("SCOUT_DISCOVERY_HOURS", str(DEFAULT_DISCOVERY_HOURS))),
-        help=f"Wallet discovery lookback window in hours (default: {DEFAULT_DISCOVERY_HOURS}, or SCOUT_DISCOVERY_HOURS)",
-    )
-
-    parser.add_argument(
-        "--wallet-tx-limit",
-        type=int,
-        default=int(os.getenv("SCOUT_WALLET_TX_LIMIT", str(DEFAULT_WALLET_TX_LIMIT))),
-        help=f"Max SWAP transactions to fetch per wallet (default: {DEFAULT_WALLET_TX_LIMIT}, or SCOUT_WALLET_TX_LIMIT)",
-    )
-
-    parser.add_argument(
-        "--wallet-tx-max-pages",
-        type=int,
-        default=int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", str(DEFAULT_WALLET_TX_MAX_PAGES))),
-        help=f"Max pagination pages per wallet tx fetch (default: {DEFAULT_WALLET_TX_MAX_PAGES}, or SCOUT_WALLET_TX_MAX_PAGES)",
-    )
-
     parser.add_argument(
         "--priority-fee-sol",
         type=float,
-        default=float(os.getenv("SCOUT_PRIORITY_FEE_SOL", str(DEFAULT_PRIORITY_FEE_SOL))),
-        help=f"Priority fee cost per swap in SOL (default: {DEFAULT_PRIORITY_FEE_SOL}, or SCOUT_PRIORITY_FEE_SOL)",
+        default=0.0001,
+        help="Priority fee per trade in SOL (default: 0.0001)"
     )
-
+    
     parser.add_argument(
         "--jito-tip-sol",
         type=float,
-        default=float(os.getenv("SCOUT_JITO_TIP_SOL", str(DEFAULT_JITO_TIP_SOL))),
-        help=f"Jito tip cost per swap in SOL (default: {DEFAULT_JITO_TIP_SOL}, or SCOUT_JITO_TIP_SOL)",
-    )
-
-    parser.add_argument(
-        "--calibration-report",
-        action="store_true",
-        help="Print calibration percentiles and suggested thresholds",
+        default=0.0001,
+        help="Jito tip per trade in SOL (default: 0.0001)"
     )
     
     return parser.parse_args()
+
+def _load_promotion_criteria(args) -> PromotionCriteria:
+    return PromotionCriteria(
+        min_wqs_score=args.min_wqs_active,
+        min_confidence=float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70")),
+        min_trades=int(os.getenv("SCOUT_PROMOTION_MIN_TRADES", "5")),
+        min_close_ratio=float(os.getenv("SCOUT_MIN_CLOSE_RATIO", "0.20")),
+        momentum_boost=float(os.getenv("SCOUT_MOMENTUM_BOOST", "5.0")),
+        max_rejection_rate=float(os.getenv("SCOUT_MAX_REJECTION_RATE", "0.5")),
+        max_pnl_reduction_percent=float(os.getenv("SCOUT_MAX_PNL_REDUCTION_PCT", "80.0")),
+        max_drawdown_fraction=float(os.getenv("SCOUT_MAX_DRAWDOWN_FRACTION", "0.5")),
+        walk_forward_enabled=os.getenv("SCOUT_WALK_FORWARD_ENABLED", "true").lower() == "true",
+        walk_forward_holdout_fraction=float(os.getenv("SCOUT_WALK_FORWARD_HOLDOUT_FRACTION", "0.3")),
+        walk_forward_min_trades=int(os.getenv("SCOUT_WALK_FORWARD_MIN_TRADES", str(args.walk_forward_min_trades))),
+        walk_forward_fallback_penalty=float(os.getenv("SCOUT_WALK_FORWARD_FALLBACK_PENALTY", "5.0")),
+        min_holdout_pnl_sol=float(os.getenv("SCOUT_MIN_HOLDOUT_PNL_SOL", "0.01")),
+        forbidden_archetypes=set(
+            os.getenv("SCOUT_FORBIDDEN_ARCHETYPES", "SNIPER").split(",")
+        ),
+        min_avg_hold_time_hours=float(os.getenv("SCOUT_MIN_AVG_HOLD_HOURS", "2.0")),
+        enforce_low_churn=os.getenv("SCOUT_ENFORCE_LOW_CHURN", "true").lower() == "true",
+    )
 
 
 from core.in_sample import compute_in_sample_metrics
@@ -1924,15 +1900,17 @@ async def main_async():
             backtest_config = BacktestConfig(
                 min_liquidity_shield_usd=args.min_liquidity_shield,
                 min_liquidity_spear_usd=args.min_liquidity_spear,
-                dex_fee_percent=0.003,
-                max_slippage_percent=0.05,
-                min_trades_required=5,
+                dex_fee_percent=Decimal(os.getenv("SCOUT_DEX_FEE_PCT", "0.003")),
+                max_slippage_percent=Decimal(os.getenv("SCOUT_MAX_SLIPPAGE_PCT", "0.05")),
+                min_trades_required=int(os.getenv("SCOUT_BT_MIN_TRADES_REQUIRED", "5")),
                 priority_fee_sol_per_trade=args.priority_fee_sol,
                 jito_tip_sol_per_trade=args.jito_tip_sol,
                 enforce_current_liquidity=os.getenv("SCOUT_ENFORCE_CURRENT_LIQUIDITY", "true").lower() == "true",  # Default True for promotion safety
                 simulate_at_size_sol=Decimal(os.getenv("SCOUT_COPIER_SIZE_SOL", "0.5")),
                 entry_delay_slippage_pct=Decimal(os.getenv("SCOUT_ENTRY_DELAY_SLIPPAGE_PCT", "0.015")),
                 exit_delay_slippage_pct=Decimal(os.getenv("SCOUT_EXIT_DELAY_SLIPPAGE_PCT", "0.010")),
+                mev_penalty_pct=Decimal(os.getenv("SCOUT_MEV_PENALTY_PCT", "0.002")),
+                lookback_days=int(os.getenv("SCOUT_LOOKBACK_DAYS", "30")),
             )
 
             # Fetch dynamic fees from Helius if available (overrides static values)
@@ -1962,23 +1940,7 @@ async def main_async():
                             await fee_estimator.close()
                         except Exception:
                             pass  # Non-critical
-            promotion_criteria = PromotionCriteria(
-                # Keep WQS threshold aligned with ACTIVE gate (validator only runs for ACTIVE candidates)
-                # Note: min_wqs_score should match min_wqs_active (rescaled 0-100 range)
-                min_wqs_score=args.min_wqs_active,
-                # Mirror the classification confidence gate so the validator does not
-                # re-impose a stricter hardcoded threshold than the roster builder.
-                min_confidence=float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70")),
-                min_trades=5,  # Minimum raw swap events
-                min_close_ratio=0.4,  # At least 40% of trades must be SELLs with PnL
-                walk_forward_enabled=True,
-                walk_forward_holdout_fraction=0.3,
-                walk_forward_min_trades=args.walk_forward_min_trades,
-                # Low-churn filter (env overrides)
-                forbidden_archetypes=set(os.getenv("SCOUT_FORBIDDEN_ARCHETYPES", "SNIPER,SCALPER").split(",")),
-                min_avg_hold_time_hours=float(os.getenv("SCOUT_MIN_AVG_HOLD_HOURS", "2.0")),
-                enforce_low_churn=os.getenv("SCOUT_ENFORCE_LOW_CHURN", "true").lower() == "true",
-            )
+            promotion_criteria = _load_promotion_criteria(args)
             validator = PrePromotionValidator(
                 liquidity_provider=liquidity_provider,
                 backtest_config=backtest_config,
@@ -1988,7 +1950,9 @@ async def main_async():
             print("[Scout] Backtest validation enabled")
             print(f"  Min liquidity (Shield): ${args.min_liquidity_shield:,.0f}")
             print(f"  Min liquidity (Spear): ${args.min_liquidity_spear:,.0f}")
-            print("  Min close ratio: 0.4 (40% of trades must be SELLs with PnL)")
+            print(f"  Min close ratio: {os.getenv('SCOUT_MIN_CLOSE_RATIO', '0.20')} (configurable)")
+            print(f"  Forbidden archetypes: {os.getenv('SCOUT_FORBIDDEN_ARCHETYPES', 'SNIPER')}")
+            print(f"  Min confidence: {os.getenv('SCOUT_MIN_CONFIDENCE_ACTIVE', '0.70')}")
             print(f"  Walk-forward min closes: {args.walk_forward_min_trades}")
         except Exception as e:
             print(f"[Scout] WARNING: Failed to initialize validator: {e}")

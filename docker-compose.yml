@@ -195,10 +195,23 @@ services:
       # Parse health exit threshold (lowered from 40 to reduce false cron alerts)
       - SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT=25
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
-      - SCOUT_MIN_CONFIDENCE_ACTIVE=0.45
+      - SCOUT_MIN_CONFIDENCE_ACTIVE=0.30
       # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
       - SCOUT_REVALIDATE_CANDIDATES=true
-      - SCOUT_REVALIDATE_CANDIDATES_LIMIT=5
+      - SCOUT_REVALIDATE_CANDIDATES_LIMIT=20
+      # Validation gate parameters (all configurable)
+      - SCOUT_FORBIDDEN_ARCHETYPES=SNIPER
+      - SCOUT_MIN_CLOSE_RATIO=0.20
+      - SCOUT_PROMOTION_MIN_TRADES=5
+      - SCOUT_WALK_FORWARD_ENABLED=true
+      - SCOUT_WALK_FORWARD_HOLDOUT_FRACTION=0.3
+      - SCOUT_WALK_FORWARD_FALLBACK_PENALTY=5.0
+      - SCOUT_MAX_REJECTION_RATE=0.5
+      - SCOUT_MAX_PNL_REDUCTION_PCT=80.0
+      - SCOUT_MAX_DRAWDOWN_FRACTION=0.5
+      - SCOUT_MIN_AVG_HOLD_HOURS=2.0
+      - SCOUT_ENFORCE_LOW_CHURN=true
+      - SCOUT_MOMENTUM_BOOST=5.0
       # Parse failure debug: completed data collection (2142 files captured)
       # Backtest cost calibration — match production Jito tip (default 0.0001 is 30x too low).
       # Production charges 0.0012-0.0055 SOL tips; 0.003 is the median observed tip.
