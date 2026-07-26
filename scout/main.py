@@ -380,6 +380,12 @@ Examples:
     )
     
     parser.add_argument(
+        "--calibration-report",
+        action="store_true",
+        help="Print calibration percentiles and suggested thresholds",
+    )
+    
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Analyze wallets but don't write to database"
