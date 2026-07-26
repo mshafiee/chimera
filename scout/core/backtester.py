@@ -730,7 +730,7 @@ class BacktestSimulator:
                 # DIAGNOSTIC LOGGING FOR THE PROBLEMATIC WALLET
                 # Log details for ALL SELL trades to understand cost breakdown
                 logger.info(
-                    f"[PnL_Detailed] Wallet {wallet_address[:8]}... SELL {trade.token_symbol}:"
+                    f"[PnL_Detailed] {trade.token_symbol}:"
                     f" trade_size_sol={trade_size_sol:.6f}, "
                     f"total_cost={total_cost:.6f}, "
                     f"slippage_cost={slippage_cost:.6f}, "
@@ -746,8 +746,8 @@ class BacktestSimulator:
                 )
                 if simulated_pnl < 0:
                     logger.warning(
-                        f"[PnL_BUG] Wallet {wallet_address[:8]}... SELL {trade.token_symbol}: "
-                        f"Negative PnL despite on-chain data. "
+                        f"[PnL_NEGATIVE] {trade.token_symbol}: "
+                        f"Negative PnL. "
                         f"simulated_pnl={simulated_pnl:.6f} SOL, "
                         f"net_sol_received={net_sol_received:.6f} SOL, "
                         f"allocated_cost_basis={allocated_cost_basis:.6f} SOL, "
