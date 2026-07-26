@@ -361,6 +361,19 @@ Examples:
     
     # Basic parameters
     parser.add_argument(
+        "--output", "-o",
+        default=DEFAULT_OUTPUT_PATH,
+        help=f"Output path for roster_new.db (default: {DEFAULT_OUTPUT_PATH})"
+    )
+    
+    parser.add_argument(
+        "--max-wallets",
+        type=int,
+        default=int(os.getenv("SCOUT_MAX_WALLETS", "250")),
+        help="Max wallets to analyze (default: 250, or SCOUT_MAX_WALLETS env var; set to 200-500 for paid Helius plans)",
+    )
+    
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Analyze wallets but don't write to database"
@@ -419,6 +432,27 @@ Examples:
         type=float,
         default=0.0001,
         help="Jito tip per trade in SOL (default: 0.0001)"
+    )
+    
+    parser.add_argument(
+        "--discovery-hours",
+        type=int,
+        default=int(os.getenv("SCOUT_DISCOVERY_HOURS", str(DEFAULT_DISCOVERY_HOURS))),
+        help=f"Wallet discovery lookback window in hours (default: {DEFAULT_DISCOVERY_HOURS}, or SCOUT_DISCOVERY_HOURS)",
+    )
+    
+    parser.add_argument(
+        "--wallet-tx-limit",
+        type=int,
+        default=int(os.getenv("SCOUT_WALLET_TX_LIMIT", str(DEFAULT_WALLET_TX_LIMIT))),
+        help=f"Max SWAP transactions to fetch per wallet (default: {DEFAULT_WALLET_TX_LIMIT}, or SCOUT_WALLET_TX_LIMIT)",
+    )
+    
+    parser.add_argument(
+        "--wallet-tx-max-pages",
+        type=int,
+        default=int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", str(DEFAULT_WALLET_TX_MAX_PAGES))),
+        help=f"Max pagination pages per wallet tx fetch (default: {DEFAULT_WALLET_TX_MAX_PAGES}, or SCOUT_WALLET_TX_MAX_PAGES)",
     )
     
     return parser.parse_args()
