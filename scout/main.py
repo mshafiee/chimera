@@ -493,8 +493,8 @@ async def analyze_wallets(
     Analyze wallets in parallel and generate roster records.
     """
     # Configurable confidence threshold for ACTIVE promotion.
-    # Lower this (e.g. 0.30) to expand the monitored wallet pool.
-    min_confidence_active = float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.30"))
+    # Lower this (e.g. 0.50) in paper mode to expand the monitored wallet pool.
+    min_confidence_active = float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70"))
 
     # Macro kill switch: emergency pause prevents all new promotions
     if os.getenv("SCOUT_EMERGENCY_PAUSE", "false").lower() == "true":
@@ -1968,7 +1968,7 @@ async def main_async():
                 min_wqs_score=args.min_wqs_active,
                 # Mirror the classification confidence gate so the validator does not
                 # re-impose a stricter hardcoded threshold than the roster builder.
-                min_confidence=min_confidence_active,
+                min_confidence=float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.70")),
                 min_trades=5,  # Minimum raw swap events
                 min_close_ratio=0.4,  # At least 40% of trades must be SELLs with PnL
                 walk_forward_enabled=True,
