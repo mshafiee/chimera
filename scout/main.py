@@ -374,6 +374,12 @@ Examples:
     )
     
     parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose output"
+    )
+    
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Analyze wallets but don't write to database"
