@@ -18,6 +18,8 @@ import math
 import os
 import logging
 import time
+import asyncio
+import concurrent.futures
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -217,6 +219,17 @@ class LiquidityProvider:
             with self._rate_limit_lock:
                 self._last_request_time = time.time()
 
+    def _run_async_coro(self, coro):
+        """Run an async coroutine from synchronous code.
+
+        Handles both contexts: with and without a running event loop.
+        """
+        try:
+            return asyncio.run(coro)
+        except RuntimeError:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(asyncio.run, coro).result(timeout=30)
+
     def get_current_liquidity(self, token_address: str) -> Optional[LiquidityData]:
         """
         Get current liquidity for a token using multi-source ranking.
@@ -266,7 +279,9 @@ class LiquidityProvider:
         if self.jupiter_client:
             try:
                 self._rate_limit()
-                jupiter_data = self.jupiter_client.get_current_liquidity(token_address)
+                jupiter_data = self._run_async_coro(
+                    self.jupiter_client.get_current_liquidity(token_address)
+                )
                 if jupiter_data:
                     candidates.append(jupiter_data)
             except Exception as e:
