@@ -3327,58 +3327,58 @@ class HeliusClient:
                     "swap_type": "token_to_token_multi",
                 }
         elif any(mint in stable_mints for mint, _ in all_outflows) or (sol_mint in token_deltas and abs(token_deltas[sol_mint]) > 0):
-                    # We're selling tokens for stablecoins -> SELL
-                    token_mint = primary_out_mint
-                    token_amount = abs(primary_out_delta)
-                    direction = "SELL"
-                    stable_received = sum(abs(delta) for mint, delta in all_inflows if mint in stable_mints)
-                    return {
-                        "signature": signature,
-                        "timestamp": timestamp,
-                        "wallet": wallet_address,
-                        "token_mint": token_mint,
-                        "token_amount": token_amount,
-                        "sol_amount": None,
-                        "direction": direction,
-                        "price_sol": None,
-                        "price_usd": stable_received / token_amount if token_amount > 0 else None,
-                        "usd_amount": stable_received,
-                        "quote_mint": next(mint for mint, _ in all_inflows if mint in stable_mints),
-                        "net_sol_delta": 0.0,
-                        "net_token_delta": primary_out_delta,
-                        "swap_type": "token_to_token_multi",
-                    }
-                elif inflow[0] and outflow[0]:
-                    # Pure token-to-token swap (no stablecoins involved)
-                    # Use the token received as the primary (we're buying it)
-                    token_mint = inflow[0]
-                    token_amount = abs(inflow[1])
-                    direction = "BUY"
-                    return {
-                        "signature": signature,
-                        "timestamp": timestamp,
-                        "wallet": wallet_address,
-                        "token_mint": token_mint,
-                        "token_amount": token_amount,
-                        "sol_amount": None,
-                        "direction": direction,
-                        "price_sol": None,
-                        "price_usd": None,
-                        "usd_amount": None,
-                        "quote_mint": outflow[0],  # Track what we sold
-                        "net_sol_delta": 0.0,
-                        "net_token_delta": inflow[1],
-                        "swap_type": "token_to_token_pure",
-                    }
+                # We're selling tokens for stablecoins -> SELL
+                token_mint = primary_out_mint
+                token_amount = abs(primary_out_delta)
+                direction = "SELL"
+                stable_received = sum(abs(delta) for mint, delta in all_inflows if mint in stable_mints)
+                return {
+                "signature": signature,
+                "timestamp": timestamp,
+                "wallet": wallet_address,
+                "token_mint": token_mint,
+                "token_amount": token_amount,
+                "sol_amount": None,
+                "direction": direction,
+                "price_sol": None,
+                "price_usd": stable_received / token_amount if token_amount > 0 else None,
+                "usd_amount": stable_received,
+                "quote_mint": next(mint for mint, _ in all_inflows if mint in stable_mints),
+                "net_sol_delta": 0.0,
+                "net_token_delta": primary_out_delta,
+                "swap_type": "token_to_token_multi",
+                }
+        elif inflow[0] and outflow[0]:
+                # Pure token-to-token swap (no stablecoins involved)
+                # Use the token received as the primary (we're buying it)
+                token_mint = inflow[0]
+                token_amount = abs(inflow[1])
+                direction = "BUY"
+                return {
+                "signature": signature,
+                "timestamp": timestamp,
+                "wallet": wallet_address,
+                "token_mint": token_mint,
+                "token_amount": token_amount,
+                "sol_amount": None,
+                "direction": direction,
+                "price_sol": None,
+                "price_usd": None,
+                "usd_amount": None,
+                "quote_mint": outflow[0],  # Track what we sold
+                "net_sol_delta": 0.0,
+                "net_token_delta": inflow[1],
+                "swap_type": "token_to_token_pure",
+                }
+        # Strategy C: Instruction-level pattern recognition for complex swaps
+        # Strategy C: Instruction-level pattern recognition for complex swaps
+        # This handles cases where tokenTransfers don't capture the full picture
+        if not inflow[0] or not outflow[0]:
+            instruction_result = self._parse_from_instruction_level(tx, wallet_address, token_deltas)
+            if instruction_result:
+                return instruction_result
 
-            # Strategy C: Instruction-level pattern recognition for complex swaps
-            # This handles cases where tokenTransfers don't capture the full picture
-            if not inflow[0] or not outflow[0]:
-                instruction_result = self._parse_from_instruction_level(tx, wallet_address, token_deltas)
-                if instruction_result:
-                    return instruction_result
-
-            # Could not value without SOL, stable, or clear token pair
+        # Could not value without SOL, stable, or clear token pair
             return None
 
         # IMPROVED: Direction Logic
