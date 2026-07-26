@@ -418,6 +418,7 @@ class WalletAnalyzer:
                 "no_primary_token": 0,
                 "direction_ambiguous": 0,
                 "not_involved": 0,
+                "unknown": 0,
                 "other": 0,
             },
             "token_creation_fetched": 0,
@@ -1248,7 +1249,7 @@ class WalletAnalyzer:
                 parse_failures += 1
                 self._parse_stats["parse_failures_total"] += 1
                 reason = self._categorize_parse_failure(tx, address)
-                self._parse_stats["parse_failures_by_reason"][reason] += 1
+                self._parse_stats["parse_failures_by_reason"][reason] = self._parse_stats["parse_failures_by_reason"].get(reason, 0) + 1
                 # Log first few failures for debugging
                 if parse_failures <= 3:
                     tx_type = tx.get("type", "unknown")
