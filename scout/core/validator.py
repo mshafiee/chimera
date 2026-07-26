@@ -61,6 +61,10 @@ class PromotionCriteria:
     # Default 0.4 means at least 40% of trades must be SELLs with computed PnL.
     # This replaces the old fixed min_closes_required (10) which contradicted min_trades (5).
     min_close_ratio: float = 0.20
+    # Archetype-specific close ratio thresholds (lower for SCALPER due to high turnover patterns)
+    min_close_ratio_scalper: float = 0.10  # SCALPER: 10% (fast trades, fewer full closes)
+    min_close_ratio_swing: float = 0.30   # SWING: 30% (fewer trades, more complete closes)
+    min_close_ratio_whale: float = 0.25   # WHALE: 25% (large trades, mixed patterns)
     max_rejection_rate: float = 0.5  # Max 50% of trades can be rejected
     require_positive_simulated_pnl: bool = True
     max_pnl_reduction_percent: float = 80.0  # Max 80% reduction allowed
@@ -93,7 +97,7 @@ class PromotionCriteria:
 
     def __post_init__(self):
         if self.forbidden_archetypes is None:
-            self.forbidden_archetypes = {"SNIPER", "SCALPER"}
+            self.forbidden_archetypes = {"SNIPER"}  # Removed SCALPER - they're our top performers
 
 
 class PrePromotionValidator:
@@ -168,6 +172,31 @@ class PrePromotionValidator:
 
         threshold = archetype_thresholds.get(archetype_upper)
         return threshold if threshold is not None else self.criteria.min_wqs_score
+
+    def _get_close_ratio_threshold(self, archetype: Optional[str]) -> float:
+        """
+        Get the close ratio threshold for a specific archetype.
+
+        SCALPER wallets require lower close ratios because they have high turnover
+        and don't always fully close positions (quick scalps vs. swing trades).
+
+        Args:
+            archetype: Trader archetype string (SCALPER, SWING, WHALE, etc.)
+
+        Returns:
+            Close ratio threshold to use for this archetype
+        """
+        if archetype is None:
+            return self.criteria.min_close_ratio
+
+        archetype_upper = archetype.upper()
+        archetype_thresholds = {
+            "WHALE": self.criteria.min_close_ratio_whale,
+            "SWING": self.criteria.min_close_ratio_swing,
+            "SCALPER": self.criteria.min_close_ratio_scalper,
+        }
+        threshold = archetype_thresholds.get(archetype_upper)
+        return threshold if threshold is not None else self.criteria.min_close_ratio
 
     def _apply_momentum_boost(self, wqs_score: float, trajectory: Optional[str]) -> float:
         """
@@ -363,11 +392,16 @@ class PrePromotionValidator:
         close_trades = [
             t for t in trades if getattr(t.action, "value", str(t.action)) == "SELL" and t.pnl_sol is not None
         ]
-        min_closes = max(3, int(len(trades) * self.criteria.min_close_ratio))
+
+        # Use archetype-specific close ratio threshold
+        archetype = getattr(metrics, 'archetype', None)
+        close_ratio_threshold = self._get_close_ratio_threshold(archetype)
+        min_closes = max(3, int(len(trades) * close_ratio_threshold))
+
         if len(close_trades) < min_closes:
             logger.info(
                 f"Wallet failed close count check: {len(close_trades)} < {min_closes} "
-                f"({self.criteria.min_close_ratio*100:.0f}% of {len(trades)} trades)"
+                f"({close_ratio_threshold*100:.0f}% of {len(trades)} trades, archetype={archetype})"
             )
             return ValidationResult(
                 wallet_address=wallet_address,
