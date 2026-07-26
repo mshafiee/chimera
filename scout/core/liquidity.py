@@ -219,6 +219,26 @@ class LiquidityProvider:
             with self._rate_limit_lock:
                 self._last_request_time = time.time()
 
+    def _cleanup_async_client_session(self, client):
+        """Close and clear an async client's session to prevent resource leaks.
+
+        Async clients (Birdeye, Jupiter) create aiohttp sessions that are
+        tied to the event loop they were created in. When called from
+        synchronous code via _run_async_coro (which creates a fresh event
+        loop each time), the session's connector leaks across loop
+        boundaries. Close it after each call.
+        """
+        if client is None:
+            return
+        session = getattr(client, '_session', None)
+        if session is not None and not getattr(session, 'closed', True):
+            try:
+                self._run_async_coro(client._close_session())
+            except Exception:
+                pass
+            client._session = None
+            client._own_session = False
+
     def _run_async_coro(self, coro):
         """Run an async coroutine from synchronous code.
 
@@ -259,11 +279,15 @@ class LiquidityProvider:
         if self.birdeye_client:
             try:
                 self._rate_limit()
-                birdeye_data = self.birdeye_client.get_current_liquidity(token_address)
+                birdeye_data = self._run_async_coro(
+                    self.birdeye_client.get_current_liquidity(token_address)
+                )
                 if birdeye_data and birdeye_data.liquidity_usd > 0:
                     candidates.append(birdeye_data)
             except Exception as e:
                 logger.debug(f"Birdeye failed for {token_address[:8]}...: {e}")
+            finally:
+                self._cleanup_async_client_session(self.birdeye_client)
         
         # 2. DexScreener
         if self.dexscreener_client:
@@ -286,6 +310,8 @@ class LiquidityProvider:
                     candidates.append(jupiter_data)
             except Exception as e:
                 logger.debug(f"Jupiter failed for {token_address[:8]}...: {e}")
+            finally:
+                self._cleanup_async_client_session(self.jupiter_client)
         
         # Deterministic ranking: pick best candidate
         liquidity_data = self._rank_liquidity_sources(candidates, token_address)
