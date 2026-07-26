@@ -205,7 +205,7 @@ impl HeliusClient {
     /// found, or `Err` on RPC failure. Used by the webhook receipt handler's
     /// staged RPC signature verification (B2).
     pub async fn verify_signature_exists(&self, signature: &str) -> Result<bool> {
-        let url = format!("{}/?api-key={}", self.base_url, self.api_key);
+        let url = crate::utils::helius_rpc_url(&self.api_key);
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,

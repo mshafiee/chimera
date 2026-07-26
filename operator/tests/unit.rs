@@ -67,3 +67,6 @@ mod jupiter_error_handling_tests;
 
 #[path = "unit/tiered_polling_tests.rs"]
 mod tiered_polling_tests;
+
+#[path = "unit/helius_rpc_verify_tests.rs"]
+mod helius_rpc_verify_tests;
