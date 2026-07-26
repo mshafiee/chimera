@@ -3277,6 +3277,9 @@ class HeliusClient:
         outflow = (None, 0.0)  # (mint, delta) for delta < 0
         all_inflows = []  # Track all inflows for multi-token swaps
         all_outflows = []  # Track all outflows for multi-token swaps
+        primary_in_mint, primary_in_delta = None, 0.0
+        primary_out_mint, primary_out_delta = None, 0.0
+
         # Initialize before use to avoid NameError in stablecoin swap logic
         for mint, delta in token_deltas.items():
             if mint == sol_mint:
@@ -3289,18 +3292,6 @@ class HeliusClient:
                 all_outflows.append((mint, delta))
                 if abs(delta) > abs(outflow[1]):
                     outflow = (mint, delta)
-
-            for mint, delta in token_deltas.items():
-                if mint == sol_mint:
-                    continue
-                if delta > 0:
-                    all_inflows.append((mint, delta))
-                    if delta > inflow[1]:
-                        inflow = (mint, delta)
-                elif delta < 0:
-                    all_outflows.append((mint, delta))
-                    if abs(delta) > abs(outflow[1]):
-                        outflow = (mint, delta)
 
         # Strategy B: Multi-token swap detection (Jupiter routing, Orca whirlpools, OKX, DFlow)
         if len(all_inflows) >= 1 and len(all_outflows) >= 1:
