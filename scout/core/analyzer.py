@@ -2321,17 +2321,15 @@ class WalletAnalyzer:
                         )
                         print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — keeping all trades (escape hatch)")
                     else:
-                        print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — dropping wallet (capital-protective)")
-                        return None
+                        print(f"  [{address[:8]}] RugCheck circuit breaker triggered ({risky_ratio*100:.0f}% risky) — filtering risky tokens (capital-protective)")
                 else:
                     if risky_ratio > 0.5:
                         print(f"  [{address[:8]}] Skipping circuit breaker (only {len(token_list)} unique token(s) < {RUGCHECK_MIN_CIRCUIT_BREAKER_TOKENS} min) — filtering risky tokens individually")
                     else:
                         print(f"  [{address[:8]}] Filtered {len(risky_tokens)} risky tokens ({risky_ratio*100:.0f}% of unique tokens)")
-                    # Filter trades to only those with safe tokens
-                    trades = [t for t in trades if t.token_address in safe_tokens]
-                    if not trades:
-                        print(f"  [{address[:8]}] All trades filtered as risky — continuing with empty trade set")
+                trades = [t for t in trades if t.token_address in safe_tokens]
+                if not trades:
+                    print(f"  [{address[:8]}] All trades filtered as risky — continuing with empty trade set")
             else:
                 print(f"  [{address[:8]}] All {len(safe_tokens)} tokens passed RugCheck")
         else:

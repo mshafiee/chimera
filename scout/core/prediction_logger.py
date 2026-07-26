@@ -228,6 +228,7 @@ class PredictionLogger:
                     features_json, strategy, wqs_score_at_prediction,
                     wqs_components_json, status, created_at, updated_at
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'PENDING', %s, %s)
+                RETURNING id
                 """,
                 (
                     wallet_address,
@@ -245,8 +246,9 @@ class PredictionLogger:
                 )
             )
 
+            row = cursor.fetchone()
+            prediction_id = row[0] if row else None
             conn.commit()
-            prediction_id = cursor.lastrowid
             conn.close()
 
             logger.debug(f"Logged prediction {prediction_id} for {wallet_address} using {model_type}")
