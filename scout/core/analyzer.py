@@ -3480,6 +3480,20 @@ class WalletAnalyzer:
             })
             
             # Calculate net delta
+            # Calculate net delta - check userAccount for delegated accounts
+            if tr.get("fromUserAccount") == wallet_address:
+                token_deltas[mint] = token_deltas.get(mint, 0.0) - amt
+            if tr.get("toUserAccount") == wallet_address:
+                token_deltas[mint] = token_deltas.get(mint, 0.0) + amt
+            # Also check userAccount (common for delegated wallets)
+            user_acc = tr.get("userAccount")
+            if user_acc == wallet_address:
+                # Check if this is an OUT transfer
+                if tr.get("fromUserAccount") != wallet_address:
+                    token_deltas[mint] = token_deltas.get(mint, 0.0) - amt
+                # Check if this is an IN transfer
+                elif tr.get("toUserAccount") != wallet_address:
+                    token_deltas[mint] = token_deltas.get(mint, 0.0) + amt
             if tr.get("fromUserAccount") == wallet_address:
                 token_deltas[mint] = token_deltas.get(mint, 0.0) - amt
             if tr.get("toUserAccount") == wallet_address:

@@ -3130,14 +3130,14 @@ class HeliusClient:
             from_acc = tr.get("fromUserAccount")
             to_acc = tr.get("toUserAccount")
             user_acc = tr.get("userAccount")
+            user_acc = tr.get("userAccount")
             
-            if from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address):
+            # Check all account fields for wallet involvement
+            # Wallet may be in userAccount instead of from/to fields
+            if from_acc == wallet_address or (user_acc == wallet_address and from_acc == wallet_address):
                 token_deltas_for_primary[mint] = token_deltas_for_primary.get(mint, 0.0) - amt_ui
-            if to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address):
+            if to_acc == wallet_address or (user_acc == wallet_address and to_acc == wallet_address):
                 token_deltas_for_primary[mint] = token_deltas_for_primary.get(mint, 0.0) + amt_ui
-        
-        # Check for primary token by net delta (existing logic)
-        primary_mint = None
         primary_delta = 0.0
         
         for mint, delta in token_deltas_for_primary.items():
