@@ -345,7 +345,7 @@ class PrePromotionValidator:
                 )
                 # If significant portion of trades involve risky tokens, reject
                 risky_ratio = len(risky_tokens) / len(trades) if trades else 0
-                if risky_ratio > 0.3:  # More than 30% risky tokens
+                if risky_ratio > 0.5:  # More than 50% risky tokens
                     return ValidationResult(
                         wallet_address=wallet_address,
                         status=ValidationStatus.FAILED_LIQUIDITY,  # Reuse status for security failure
