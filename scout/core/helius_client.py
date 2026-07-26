@@ -3193,183 +3193,183 @@ class HeliusClient:
                     if abs(delta) > abs(outflow[1]):
                         outflow = (mint, delta)
 
-                    # Strategy B: Multi-token swap detection (Jupiter routing, Orca whirlpools, OKX, DFlow)
-                    if len(all_inflows) >= 1 and len(all_outflows) >= 1:
-                            # Sort by absolute delta to find the most significant tokens
-                            all_inflows.sort(key=lambda x: abs(x[1]), reverse=True)
-                            all_outflows.sort(key=lambda x: abs(x[1]), reverse=True)
+        # Strategy B: Multi-token swap detection (Jupiter routing, Orca whirlpools, OKX, DFlow)
+        if len(all_inflows) >= 1 and len(all_outflows) >= 1:
+            # Sort by absolute delta to find the most significant tokens
+            all_inflows.sort(key=lambda x: abs(x[1]), reverse=True)
+            all_outflows.sort(key=lambda x: abs(x[1]), reverse=True)
 
-                            # Primary tokens are the largest inflow and outflow
-                            primary_in_mint, primary_in_delta = all_inflows[0]
-                            primary_out_mint, primary_out_delta = all_outflows[0]
+            # Primary tokens are the largest inflow and outflow
+            primary_in_mint, primary_in_delta = all_inflows[0]
+            primary_out_mint, primary_out_delta = all_outflows[0]
 
-                            # Determine direction based on stablecoin or wSOL involvement
-                            # If we're spending stablecoins or wSOL, it's a BUY
-                            # If we're receiving stablecoins or wSOL, it's a SELL
-                            spent_any = False
-                            received_any = False
+            # Determine direction based on stablecoin or wSOL involvement
+            # If we're spending stablecoins or wSOL, it's a BUY
+            # If we're receiving stablecoins or wSOL, it's a SELL
+            spent_any = False
+            received_any = False
 
-                            # Check for stablecoins in outflows
-                            spent_any = any(mint in stable_mints for mint, _ in all_outflows)
+            # Check for stablecoins in outflows
+            spent_any = any(mint in stable_mints for mint, _ in all_outflows)
 
-                            # Check for wSOL in outflows (common in DEX swaps)
-                            for mint, delta in all_outflows:
-                            if mint == sol_mint and abs(delta) > 0:
-                            spent_any = True
-                            # If only wSOL was spent, use that for direction determination
-                            stable_spent = abs(delta)
-                            break
+            # Check for wSOL in outflows (common in DEX swaps)
+            for mint, delta in all_outflows:
+                if mint == sol_mint and abs(delta) > 0:
+                    spent_any = True
+                    # If only wSOL was spent, use that for direction determination
+                    stable_spent = abs(delta)
+                    break
 
-                            # Check for stablecoins in inflows
-                            received_any = any(mint in stable_mints for mint, _ in all_inflows)
+            # Check for stablecoins in inflows
+            received_any = any(mint in stable_mints for mint, _ in all_inflows)
 
-                            # Check for wSOL in inflows
-                            for mint, delta in all_inflows:
-                            if mint == sol_mint and abs(delta) > 0:
-                            received_any = True
-                            # If only wSOL was received, use that for direction determination
-                            stable_received = abs(delta)
-                            break
+            # Check for wSOL in inflows
+            for mint, delta in all_inflows:
+                if mint == sol_mint and abs(delta) > 0:
+                    received_any = True
+                    # If only wSOL was received, use that for direction determination
+                    stable_received = abs(delta)
+                    break
 
-                            # Prioritize stablecoin/wSOL detection over random tokens
-                            if spent_any:
-                            # We're spending stablecoins or wSOL to get tokens -> BUY
-                            token_mint = primary_in_mint
-                            token_amount = abs(primary_in_delta)
-                            direction = "BUY"
+            # Prioritize stablecoin/wSOL detection over random tokens
+            if spent_any:
+                # We're spending stablecoins or wSOL to get tokens -> BUY
+                token_mint = primary_in_mint
+                token_amount = abs(primary_in_delta)
+                direction = "BUY"
 
-                            # Calculate USD spent (wSOL converted to USD)
-                            if spent_any and received_any and stable_received is not None and stable_spent is not None:
-                            # Multi-sided swap with both stablecoin and wSOL
-                            usd_spent = stable_spent + (stable_received * 0.0 or 0.0)
-                            price_usd = usd_spent / token_amount if token_amount > 0 else None
-                            elif spent_any and stable_spent is not None:
-                            # Spending stablecoin or wSOL only
-                            usd_spent = stable_spent
-                            price_usd = usd_spent / token_amount if token_amount > 0 else None
-                            else:
-                            price_usd = None
+                # Calculate USD spent (wSOL converted to USD)
+                if spent_any and received_any and stable_received is not None and stable_spent is not None:
+                    # Multi-sided swap with both stablecoin and wSOL
+                    usd_spent = stable_spent + (stable_received * current_sol_price or 0.0)
+                    price_usd = usd_spent / token_amount if token_amount > 0 else None
+                elif spent_any and stable_spent is not None:
+                    # Spending stablecoin or wSOL only
+                    usd_spent = stable_spent
+                    price_usd = usd_spent / token_amount if token_amount > 0 else None
+                else:
+                    price_usd = None
 
-                            quote_mint = next(mint for mint, _ in all_outflows if mint in stable_mints or mint == sol_mint)
+                quote_mint = next(mint for mint, _ in all_outflows if mint in stable_mints or mint == sol_mint)
 
-                            return {
-                            "signature": signature,
-                            "timestamp": timestamp,
-                            "wallet": wallet_address,
-                            "token_mint": token_mint,
-                            "token_amount": token_amount,
-                            "sol_amount": None,
-                            "direction": direction,
-                            "price_sol": None,
-                            "price_usd": price_usd,
-                            "usd_amount": usd_spent if spent_any else None,
-                            "quote_mint": quote_mint,
-                            "net_sol_delta": 0.0,
-                            "net_token_delta": primary_in_delta,
-                            "swap_type": "token_to_token_multi",
-                            }
-                            elif received_any:
-                            # We're receiving stablecoins or wSOL from tokens -> SELL
-                            token_mint = primary_out_mint
-                            token_amount = abs(primary_out_delta)
-                            direction = "SELL"
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": token_mint,
+                    "token_amount": token_amount,
+                    "sol_amount": None,
+                    "direction": direction,
+                    "price_sol": None,
+                    "price_usd": price_usd,
+                    "usd_amount": usd_spent if spent_any else None,
+                    "quote_mint": quote_mint,
+                    "net_sol_delta": 0.0,
+                    "net_token_delta": primary_in_delta,
+                    "swap_type": "token_to_token_multi",
+                }
+            elif received_any:
+                # We're receiving stablecoins or wSOL from tokens -> SELL
+                token_mint = primary_out_mint
+                token_amount = abs(primary_out_delta)
+                direction = "SELL"
 
-                            # Calculate USD received (wSOL converted to USD)
-                            if spent_any and received_any and stable_received is not None and stable_spent is not None:
-                            # Multi-sided swap
-                            usd_received = stable_received + (stable_spent * 0.0 or 0.0)
-                            price_usd = usd_received / token_amount if token_amount > 0 else None
-                            elif received_any and stable_received is not None:
-                            # Receiving stablecoin or wSOL only
-                            usd_received = stable_received
-                            price_usd = usd_received / token_amount if token_amount > 0 else None
-                            else:
-                            price_usd = None
+                # Calculate USD received (wSOL converted to USD)
+                if spent_any and received_any and stable_received is not None and stable_spent is not None:
+                    # Multi-sided swap
+                    usd_received = stable_received + (stable_spent * current_sol_price or 0.0)
+                    price_usd = usd_received / token_amount if token_amount > 0 else None
+                elif received_any and stable_received is not None:
+                    # Receiving stablecoin or wSOL only
+                    usd_received = stable_received
+                    price_usd = usd_received / token_amount if token_amount > 0 else None
+                else:
+                    price_usd = None
 
-                            quote_mint = next(mint for mint, _ in all_inflows if mint in stable_mints or mint == sol_mint)
+                quote_mint = next(mint for mint, _ in all_inflows if mint in stable_mints or mint == sol_mint)
 
-                            return {
-                            "signature": signature,
-                            "timestamp": timestamp,
-                            "wallet": wallet_address,
-                            "token_mint": token_mint,
-                            "token_amount": token_amount,
-                            "sol_amount": None,
-                            "direction": direction,
-                            "price_sol": None,
-                            "price_usd": price_usd,
-                            "usd_amount": usd_received if received_any else None,
-                            "quote_mint": quote_mint,
-                            "net_sol_delta": 0.0,
-                            "net_token_delta": -primary_out_delta,
-                            "swap_type": "token_to_token_multi",
-                            }
-                            else:
-                            # No stablecoin/wSOL involvement - fall back to simpler direction
-                            # Use the primary token from the larger side of the transaction
-                            if abs(primary_in_delta) > abs(primary_out_delta):
-                            direction = "BUY"
-                            else:
-                            direction = "SELL"
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": token_mint,
+                    "token_amount": token_amount,
+                    "sol_amount": None,
+                    "direction": direction,
+                    "price_sol": None,
+                    "price_usd": price_usd,
+                    "usd_amount": usd_received if received_any else None,
+                    "quote_mint": quote_mint,
+                    "net_sol_delta": 0.0,
+                    "net_token_delta": -primary_out_delta,
+                    "swap_type": "token_to_token_multi",
+                }
+            else:
+                # No stablecoin/wSOL involvement - fall back to simpler direction
+                # Use the primary token from the larger side of the transaction
+                if abs(primary_in_delta) > abs(primary_out_delta):
+                    direction = "BUY"
+                else:
+                    direction = "SELL"
 
-                            return {
-                            "signature": signature,
-                            "timestamp": timestamp,
-                            "wallet": wallet_address,
-                            "token_mint": primary_in_mint if direction == "BUY" else primary_out_mint,
-                            "token_amount": abs(primary_in_delta) if direction == "BUY" else abs(primary_out_delta),
-                            "sol_amount": None,
-                            "direction": direction,
-                            "price_sol": None,
-                            "price_usd": None,
-                            "usd_amount": None,
-                            "quote_mint": None,
-                            "net_sol_delta": 0.0,
-                            "net_token_delta": primary_in_delta if direction == "BUY" else -primary_out_delta,
-                            "swap_type": "token_to_token_multi",
-                            }
-                            elif any(mint in stable_mints for mint, _ in all_outflows) or (sol_mint in token_deltas and abs(token_deltas[sol_mint]) > 0):
-                            # We're selling tokens for stablecoins -> SELL
-                            token_mint = primary_out_mint
-                            token_amount = abs(primary_out_delta)
-                            direction = "SELL"
-                            stable_received = sum(abs(delta) for mint, delta in all_inflows if mint in stable_mints)
-                            return {
-                            "signature": signature,
-                            "timestamp": timestamp,
-                            "wallet": wallet_address,
-                            "token_mint": token_mint,
-                            "token_amount": token_amount,
-                            "sol_amount": None,
-                            "direction": direction,
-                            "price_sol": None,
-                            "price_usd": stable_received / token_amount if token_amount > 0 else None,
-                            "usd_amount": stable_received,
-                            "quote_mint": next(mint for mint, _ in all_inflows if mint in stable_mints),
-                            "net_sol_delta": 0.0,
-                            "net_token_delta": primary_out_delta,
-                            "swap_type": "token_to_token_multi",
-                            }
-                            elif inflow[0] and outflow[0]:
-                            # Pure token-to-token swap (no stablecoins involved)
-                            # Use the token received as the primary (we're buying it)
-                            token_mint = inflow[0]
-                            token_amount = abs(inflow[1])
-                            direction = "BUY"
-                            return {
-                            "signature": signature,
-                            "timestamp": timestamp,
-                            "wallet": wallet_address,
-                            "token_mint": token_mint,
-                            "token_amount": token_amount,
-                            "sol_amount": None,
-                            "direction": direction,
-                            "price_sol": None,
-                            "price_usd": None,
-                            "usd_amount": None,
-                            "quote_mint": outflow[0],  # Track what we sold
-                            "net_sol_delta": 0.0,
-                            "net_token_delta": inflow[1],
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": primary_in_mint if direction == "BUY" else primary_out_mint,
+                    "token_amount": abs(primary_in_delta) if direction == "BUY" else abs(primary_out_delta),
+                    "sol_amount": None,
+                    "direction": direction,
+                    "price_sol": None,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": None,
+                    "net_sol_delta": 0.0,
+                    "net_token_delta": primary_in_delta if direction == "BUY" else -primary_out_delta,
+                    "swap_type": "token_to_token_multi",
+                }
+        elif any(mint in stable_mints for mint, _ in all_outflows) or (sol_mint in token_deltas and abs(token_deltas[sol_mint]) > 0):
+                # We're selling tokens for stablecoins -> SELL
+                token_mint = primary_out_mint
+                token_amount = abs(primary_out_delta)
+                direction = "SELL"
+                stable_received = sum(abs(delta) for mint, delta in all_inflows if mint in stable_mints)
+                return {
+                "signature": signature,
+                "timestamp": timestamp,
+                "wallet": wallet_address,
+                "token_mint": token_mint,
+                "token_amount": token_amount,
+                "sol_amount": None,
+                "direction": direction,
+                "price_sol": None,
+                "price_usd": stable_received / token_amount if token_amount > 0 else None,
+                "usd_amount": stable_received,
+                "quote_mint": next(mint for mint, _ in all_inflows if mint in stable_mints),
+                "net_sol_delta": 0.0,
+                "net_token_delta": primary_out_delta,
+                "swap_type": "token_to_token_multi",
+                }
+        elif inflow[0] and outflow[0]:
+                # Pure token-to-token swap (no stablecoins involved)
+                # Use the token received as the primary (we're buying it)
+                token_mint = inflow[0]
+                token_amount = abs(inflow[1])
+                direction = "BUY"
+                return {
+                "signature": signature,
+                "timestamp": timestamp,
+                "wallet": wallet_address,
+                "token_mint": token_mint,
+                "token_amount": token_amount,
+                "sol_amount": None,
+                "direction": direction,
+                "price_sol": None,
+                "price_usd": None,
+                "usd_amount": None,
+                "quote_mint": outflow[0],  # Track what we sold
+                "net_sol_delta": 0.0,
+                "net_token_delta": inflow[1],
                 "swap_type": "token_to_token_pure",
                 }
         # Strategy C: Instruction-level pattern recognition for complex swaps
