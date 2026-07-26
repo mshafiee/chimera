@@ -906,6 +906,17 @@ class LiquidityProvider:
         except Exception as e:
             logger.debug(f"Direct Jupiter API call failed: {e}")
 
+        # Fallback: try all liquidity sources (Birdeye, DexScreener, Jupiter)
+        # for the native SOL mint as a price proxy
+        try:
+            sol_mint = "So11111111111111111111111111111111111111112"
+            liq_data = self.get_current_liquidity(sol_mint)
+            if liq_data and liq_data.price_usd and liq_data.price_usd > 0:
+                self._sol_price_cache = (float(liq_data.price_usd), utcnow())
+                return float(liq_data.price_usd)
+        except Exception as e:
+            logger.debug(f"SOL price from liquidity sources failed: {e}")
+
         # Fallback estimate (only if all else fails)
         logger.warning("Using fallback SOL price estimate: 150.0 USD")
         return 150.0
