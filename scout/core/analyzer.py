@@ -434,6 +434,27 @@ class WalletAnalyzer:
             "wallets_with_no_trades": 0,
         }
 
+    async def close(self):
+        """Close all resources (clients, sessions, etc.)."""
+        # Close Helius client
+        if hasattr(self, 'helius_client'):
+            try:
+                await self.helius_client.close()
+            except Exception as e:
+                logger.warning(f"Failed to close Helius client: {e}")
+        # Close liquidity provider
+        if hasattr(self, 'liquidity_provider'):
+            try:
+                await self.liquidity_provider.close()
+            except Exception as e:
+                logger.warning(f"Failed to close liquidity provider: {e}")
+        # Close RugCheck client
+        if hasattr(self, 'rugcheck_client') and self.rugcheck_client:
+            try:
+                await self.rugcheck_client.close()
+            except Exception as e:
+                logger.warning(f"Failed to close RugCheck client: {e}")
+
     def can_spend_budget(self, estimated_credits: int = 100, category: Optional[str] = None) -> tuple[bool, str]:
         """
         Check if we have enough budget for an operation.
