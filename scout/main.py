@@ -2295,7 +2295,7 @@ async def main_async():
                 print(f"[Scout] Feature store skipped: {e}")
 
     # Print parse health dashboard (always in verbose/dry-run, otherwise only if >0 failures)
-    if args.verbose or args.dry_run or stats["total"] > 0:
+    if args.verbose or args.dry_run or (stats is not None and stats.get("total", 0) > 0):
         analyzer.print_parse_health_dashboard()
 
     # Write wallets to database BEFORE the parse-rate health check.

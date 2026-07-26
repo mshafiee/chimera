@@ -176,7 +176,7 @@ async fn poll_wallets_by_tier(
 /// Each tier gets its own interval, so high-conviction polling is never
 /// blocked by slow batches on other tiers.
 #[allow(clippy::too_many_arguments)]
-async fn spawn_tier_loop(
+fn spawn_tier_loop(
     tier: crate::config::ConvictionTier,
     cancel_token: CancellationToken,
     interval_secs: u64,
