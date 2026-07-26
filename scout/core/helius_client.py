@@ -80,7 +80,9 @@ class DiscoveryError(Exception):
 
 class HeliusClient:
     """Client for Helius API to discover wallets and fetch transactions."""
-    
+
+    logger = logging.getLogger(__name__)
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -208,7 +210,7 @@ class HeliusClient:
             except Exception as e:
                 print(f"[Helius] Warning: Failed to initialize activity cache: {e}")
 
-    @staticmethod
+            return None
     def _redact_api_key(s: str) -> str:
         """
         Redact api-key query parameter values to avoid leaking secrets in logs.
@@ -2934,7 +2936,7 @@ class HeliusClient:
             if result:
                 return result
         except Exception as e:
-            logger.debug("Strategy 1 delta parser failed: %s", e)
+            HeliusClient.logger.debug("Strategy 1 delta parser failed: %s", e)
 
         # Strategy 2: swap events (newer Helius enriched format)
         try:
@@ -2942,7 +2944,7 @@ class HeliusClient:
             if result:
                 return result
         except Exception as e:
-            logger.debug("Strategy 2 events parser failed: %s", e)
+            HeliusClient.logger.debug("Strategy 2 events parser failed: %s", e)
 
         # Strategy 3: raw accountData balance changes (fallback)
         try:
