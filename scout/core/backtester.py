@@ -728,20 +728,30 @@ class BacktestSimulator:
                 simulated_pnl = net_sol_received - allocated_cost_basis
                 
                 # DIAGNOSTIC LOGGING FOR THE PROBLEMATIC WALLET
-                wallet_id = wallet_address if wallet_address else "unknown"
-                # Log details when simulated PnL is negative (indicating the bug)
+                # Log details for ALL SELL trades to understand cost breakdown
+                logger.info(
+                    f"[PnL_Detailed] Wallet {wallet_address[:8]}... SELL {trade.token_symbol}:"
+                    f" trade_size_sol={trade_size_sol:.6f}, "
+                    f"total_cost={total_cost:.6f}, "
+                    f"slippage_cost={slippage_cost:.6f}, "
+                    f"fee_cost={fee_cost:.6f}, "
+                    f"execution_cost={execution_cost:.6f}, "
+                    f"delay_slippage={delay_slippage:.6f}, "
+                    f"mev_penalty={mev_penalty:.6f}, "
+                    f"allocated_cost_basis={allocated_cost_basis:.6f}, "
+                    f"simulated_pnl={simulated_pnl:.6f}, "
+                    f"position_qty={position['qty']:.6f}, "
+                    f"sell_qty={sell_qty:.6f}, "
+                    f"avg_cost={avg_cost_per_token:.6f}"
+                )
                 if simulated_pnl < 0:
-                    logger.info(
-                        f"[PnL_BUG] Wallet {wallet_id[:8]}... SELL PnL discrepancy:"
-                        f" net_sol_received={net_sol_received:.6f} SOL, "
-                        f"allocated_cost_basis={allocated_cost_basis:.6f} SOL, "
+                    logger.warning(
+                        f"[PnL_BUG] Wallet {wallet_address[:8]}... SELL {trade.token_symbol}: "
+                        f"Negative PnL despite on-chain data. "
                         f"simulated_pnl={simulated_pnl:.6f} SOL, "
-                        f"trade_size_sol={trade_size_sol:.6f} SOL, "
-                        f"total_cost={total_cost:.6f} SOL, "
-                        f"avg_cost_per_token={avg_cost_per_token:.6f}, "
-                        f"sell_qty={sell_qty}, "
-                        f"position_qty={position['qty']}, "
-                        f"token_symbol={trade.token_symbol}"
+                        f"net_sol_received={net_sol_received:.6f} SOL, "
+                        f"allocated_cost_basis={allocated_cost_basis:.6f} SOL, "
+                        f"original_trade_pnl={trade.pnl_sol if trade.pnl_sol else 'None'}"
                     )
                 
                 # Reduce position
