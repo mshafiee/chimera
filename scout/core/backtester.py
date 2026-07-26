@@ -727,6 +727,23 @@ class BacktestSimulator:
                 # Realized PnL = proceeds - allocated cost basis
                 simulated_pnl = net_sol_received - allocated_cost_basis
                 
+                # DIAGNOSTIC LOGGING FOR THE PROBLEMATIC WALLET
+                wallet_id = wallet_address if wallet_address else "unknown"
+                # Log details when simulated PnL is negative (indicating the bug)
+                if simulated_pnl < 0:
+                    logger.info(
+                        f"[PnL_BUG] Wallet {wallet_id[:8]}... SELL PnL discrepancy:"
+                        f" net_sol_received={net_sol_received:.6f} SOL, "
+                        f"allocated_cost_basis={allocated_cost_basis:.6f} SOL, "
+                        f"simulated_pnl={simulated_pnl:.6f} SOL, "
+                        f"trade_size_sol={trade_size_sol:.6f} SOL, "
+                        f"total_cost={total_cost:.6f} SOL, "
+                        f"avg_cost_per_token={avg_cost_per_token:.6f}, "
+                        f"sell_qty={sell_qty}, "
+                        f"position_qty={position['qty']}, "
+                        f"token_symbol={trade.token_symbol}"
+                    )
+                
                 # Reduce position
                 position["qty"] -= sell_qty
                 position["cost_basis_sol"] -= allocated_cost_basis
