@@ -28,6 +28,7 @@ import random
 from .utils import utcnow
 
 from .models import LiquidityData
+from .db import translate_ddl
 
 # Import source clients
 try:
@@ -676,7 +677,7 @@ class LiquidityProvider:
             cursor = conn.cursor()
 
             # Ensure table exists
-            cursor.execute("""
+            cursor.execute(translate_ddl("""
                 CREATE TABLE IF NOT EXISTS historical_liquidity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     token_address TEXT NOT NULL,
@@ -688,7 +689,7 @@ class LiquidityProvider:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(token_address, timestamp)
                 )
-            """)
+            """))
             
             cursor.execute(
                 """
@@ -741,7 +742,7 @@ class LiquidityProvider:
             cursor = conn.cursor()
 
             # Ensure table exists
-            cursor.execute("""
+            cursor.execute(translate_ddl("""
                 CREATE TABLE IF NOT EXISTS historical_liquidity (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     token_address TEXT NOT NULL,
@@ -753,7 +754,7 @@ class LiquidityProvider:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(token_address, timestamp)
                 )
-            """)
+            """))
             
             stored_count = 0
             for liquidity_data in liquidity_data_list:
