@@ -192,6 +192,8 @@ services:
       # WQS Thresholds (relaxed for paper trading)
       - SCOUT_MIN_WQS_ACTIVE=25.0
       - SCOUT_MIN_WQS_CANDIDATE=10.0
+      # Parse health exit threshold (lowered from 40 to reduce false cron alerts)
+      - SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT=25
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
       - SCOUT_MIN_CONFIDENCE_ACTIVE=0.45
       # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
