@@ -3,9 +3,14 @@
 //! The verification method must POST `getTransaction` to the Solana JSON-RPC
 //! host (`mainnet.helius-rpc.com`), NOT to the DAS/Enhanced API host
 //! (`api.helius.xyz/v0`). The latter returns HTTP 404 for JSON-RPC methods.
+//!
+//! `verify_signature_exists` uses `helius_rpc_url()` for the request URL. The
+//! rest of `HeliusClient` uses `self.base_url` (from `helius_api_base_url()`)
+//! for DAS endpoints. These two helpers must never resolve to the same host.
 
-use chimera_operator::utils::helius_rpc_url;
+use chimera_operator::utils::{helius_api_base_url, helius_rpc_url};
 
+/// Pin the JSON-RPC URL format: must target mainnet.helius-rpc.com with API key.
 #[test]
 fn helius_rpc_url_targets_mainnet_rpc_host_not_das_api() {
     let url = helius_rpc_url("test-key-123");
@@ -23,23 +28,17 @@ fn helius_rpc_url_targets_mainnet_rpc_host_not_das_api() {
     );
 }
 
-use chimera_operator::monitoring::helius::HeliusClient;
-use parking_lot::RwLock;
-use std::collections::HashMap;
-use std::sync::Arc;
-
+/// The RPC and DAS helpers must produce different hosts. If they ever converge
+/// (e.g. someone overrides both env vars to the same value, or changes the
+/// defaults), `verify_signature_exists` would silently start hitting the DAS
+/// endpoint and every webhook would be rejected with HTTP 404.
 #[test]
-fn helius_client_base_url_is_das_api_not_rpc() {
-    // The HeliusClient's base_url SHOULD be the DAS API (api.helius.xyz/v0)
-    // for enhanced endpoints. But verify_signature_exists must NOT use it
-    // for JSON-RPC calls — it must use helius_rpc_url() instead.
-    let cache = Arc::new(RwLock::new(HashMap::new()));
-    let client = HeliusClient::new("test-key".to_string(), cache).unwrap();
-    // base_url is the DAS endpoint (used for /tokens, /webhooks, etc.)
-    // We can't access base_url directly (private), but we verify the client
-    // was constructed without error.
+fn rpc_url_and_das_base_url_target_different_hosts() {
+    let rpc_url = helius_rpc_url("key");
+    let das_base = helius_api_base_url();
     assert!(
-        client.get_cache_stats().2 == 0,
-        "New client should have empty cache"
+        !rpc_url.starts_with(&das_base),
+        "RPC URL ({rpc_url}) must NOT share the DAS base host ({das_base}); \
+         verify_signature_exists requires a different host than DAS endpoints"
     );
 }

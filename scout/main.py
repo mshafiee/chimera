@@ -2188,12 +2188,12 @@ async def main_async():
     try:
         cr = CorrelationReader()
         if cr.table_exists():
-            stats = cr.get_correlation_stats()
+            corr_stats = cr.get_correlation_stats()
             print(f"\n[Scout] === Outcome Summary ===")
-            print(f"  Wallets with PnL data: {stats.wallets_with_pnl}/{stats.total_wallets}")
-            if stats.wallets_with_pnl > 0:
-                print(f"  Mean copy PnL (30d): {stats.mean_pnl_30d_sol:.4f} SOL")
-                print(f"  Mean WQS at promotion: {stats.mean_wqs_at_promotion:.1f}")
+            print(f"  Wallets with PnL data: {corr_stats.wallets_with_pnl}/{corr_stats.total_wallets}")
+            if corr_stats.wallets_with_pnl > 0:
+                print(f"  Mean copy PnL (30d): {corr_stats.mean_pnl_30d_sol:.4f} SOL")
+                print(f"  Mean WQS at promotion: {corr_stats.mean_wqs_at_promotion:.1f}")
 
                 # WQS-to-PnL predictiveness check (Pearson correlation)
                 records = cr.get_all_records(min_trades=1)
@@ -2210,8 +2210,8 @@ async def main_async():
                     print(f"  WQS-PnL correlation: r={r:.3f}, n={n}")
                     if metrics:
                         metrics.update_pnl_correlation_metrics(
-                            wallets_with_pnl=stats.wallets_with_pnl,
-                            mean_pnl_30d=stats.mean_pnl_30d_sol,
+                            wallets_with_pnl=corr_stats.wallets_with_pnl,
+                            mean_pnl_30d=corr_stats.mean_pnl_30d_sol,
                             correlation_r=r,
                         )
 
@@ -2226,12 +2226,12 @@ async def main_async():
                     print(f"  WQS-PnL correlation: insufficient data ({len(pairs)} pairs, need 5+)")
                     if metrics:
                         metrics.update_pnl_correlation_metrics(
-                            wallets_with_pnl=stats.wallets_with_pnl,
-                            mean_pnl_30d=stats.mean_pnl_30d_sol,
+                            wallets_with_pnl=corr_stats.wallets_with_pnl,
+                            mean_pnl_30d=corr_stats.mean_pnl_30d_sol,
                             correlation_r=None,
                         )
 
-                for strat, data in stats.strategy_breakdown.items():
+                for strat, data in corr_stats.strategy_breakdown.items():
                     mean_pnl = data.get('mean_pnl', 0) or 0
                     print(f"  {strat}: {data.get('count', 0)} wallets, "
                           f"mean PnL={mean_pnl:.4f} SOL")
