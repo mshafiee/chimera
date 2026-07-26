@@ -79,11 +79,8 @@ class JupiterLiquidityClient:
                 response.raise_for_status()
                 data = await response.json() or {}
 
-                # v3 response format: {"data": {"token_address": {"usdPrice": ...}}}
-                price_data = (
-                    data.get("data", {})
-                    .get(token_address, {})
-                )
+                # v3 response format: {"token_address": {"usdPrice": ..., ...}}
+                price_data = data.get(token_address, {})
 
                 price = price_data.get("usdPrice")
                 if price is None:

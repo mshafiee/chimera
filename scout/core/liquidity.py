@@ -154,6 +154,7 @@ class LiquidityProvider:
         # In-memory cache (fallback)
         self._cache: Dict[str, Tuple[LiquidityData, datetime]] = {}
         self._sol_price_cache: Optional[Tuple[float, datetime]] = None
+        self._last_known_sol_price: Optional[float] = None
 
         # Historical SOL price window for market regime classification
         self._sol_price_history: List[Tuple[datetime, float]] = []
@@ -162,6 +163,9 @@ class LiquidityProvider:
         self._rate_limit_lock = threading.Lock()
         self._last_request_time = 0.0
         self._rate_limit_delay = float(os.getenv("SCOUT_LIQUIDITY_RATE_LIMIT_MS", "100")) / 1000.0  # Default 100ms
+
+        # Configurable SOL fallback price
+        self._sol_fallback_price = float(os.getenv("SCOUT_SOL_FALLBACK_PRICE_USD", "100"))
 
         # Redis client (if enabled)
         self.redis_client = None
@@ -921,14 +925,14 @@ class LiquidityProvider:
                     resp.raise_for_status()
                     data = await resp.json() or {}
             price = (
-                data.get("data", {})
-                .get("So11111111111111111111111111111111111111112", {})
-                .get("price")
+                data.get("So11111111111111111111111111111111111111112", {})
+                .get("usdPrice")
             )
             if price is not None:
                 price_f = float(price)
                 if price_f > 0:
                     self._sol_price_cache = (price_f, utcnow())
+                    self._last_known_sol_price = price_f
                     return price_f
         except Exception as e:
             logger.debug(f"Direct Jupiter API call failed: {e}")
@@ -945,8 +949,15 @@ class LiquidityProvider:
             logger.debug(f"SOL price from liquidity sources failed: {e}")
 
         # Fallback estimate (only if all else fails)
-        logger.warning("Using fallback SOL price estimate: 150.0 USD")
-        return 150.0
+        if self._last_known_sol_price is not None:
+            logger.warning(
+                f"All SOL price sources failed; using last-known-good ${self._last_known_sol_price}"
+            )
+            return self._last_known_sol_price
+        logger.warning(
+            f"All SOL price sources failed; using fallback ${self._sol_fallback_price}"
+        )
+        return self._sol_fallback_price
 
     def get_sol_price_usd_sync(self) -> float:
         """Synchronous wrapper for get_sol_price_usd using the in-memory cache.
@@ -959,7 +970,9 @@ class LiquidityProvider:
             price, cached_at = self._sol_price_cache
             if (utcnow() - cached_at).total_seconds() < 300:
                 return price
-        return 150.0  # Conservative fallback; corrected on next async refresh
+        if self._last_known_sol_price is not None:
+            return self._last_known_sol_price
+        return self._sol_fallback_price
 
     def cache_historical_sol_price(self, ts: datetime, price: float):
         """Record a historical SOL price observation for market regime classification.

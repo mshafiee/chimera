@@ -267,11 +267,10 @@ class PortfolioTracker:
                         response.raise_for_status()
                         data = await response.json()
                 
-                        # Jupiter returns: {"data": {"token_address": {"price": 0.123, ...}, ...}}
-                        price_data = data.get("data", {})
+                        # Jupiter returns: {"token_address": {"usdPrice": ..., ...}}
                         for token_addr in batch:
-                            token_info = price_data.get(token_addr, {})
-                            price = token_info.get("price")
+                            token_info = data.get(token_addr, {})
+                            price = token_info.get("usdPrice")
                             if price is not None:
                                 try:
                                     prices[token_addr] = float(price)
@@ -1956,9 +1955,9 @@ class WalletAnalyzer:
     async def _get_sol_price_usd(self) -> float:
         """
         Get current SOL price in USD.
-        
+
         Returns:
-            SOL price in USD, or 1.0 as fallback
+            SOL price in USD, or the liquidity-provider fallback
         """
         async with self._sol_price_lock:
             if self._sol_price_usd is not None:
@@ -1979,7 +1978,10 @@ class WalletAnalyzer:
             except Exception as e:
                 logger.debug(f"Failed to fetch SOL price: {e}")
 
-            return 1.0
+            try:
+                return self.liquidity_provider.get_sol_price_usd_sync()
+            except Exception:
+                return float(os.getenv("SCOUT_SOL_FALLBACK_PRICE_USD", "100"))
     
     def determine_archetype(
         self, 

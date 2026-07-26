@@ -33,44 +33,44 @@ def _make_liquidity_data(
     )
 
 
-def test_sol_fallback_price_150_when_cache_stale():
+def test_sol_fallback_uses_configurable_constant_when_no_cache():
     """
-    Test 69 / 82 (plan): get_sol_price_usd_sync() returns $150 when the cache is
-    stale (> 5 minutes old). If real SOL = $200, this causes a 25% underestimate in
+    Test: get_sol_price_usd_sync() returns the configurable fallback ($100) when the cache is
+    stale (> 5 minutes old). If real SOL = $200, this causes a 50% underestimate in
     USD-denominated trade size calculations.
 
-    Example: 10 SOL trade → $2000 real, $1500 estimated → slippage model sees
-    $1500/$6000 pool = 25% impact, not $2000/$6000 = 33% impact → wrong rejection.
+    Example: 10 SOL trade → $2000 real, $1000 estimated → slippage model sees
+    $1000/$6000 pool = 16.7% impact, not $2000/$6000 = 33% impact → wrong rejection.
 
-    This test documents the stale-cache fallback value and verifies it returns
-    exactly 150.0 when no fresh cache entry exists.
+    This test documents the configurable fallback value and verifies it returns
+    the configured value when no fresh cache entry exists.
     """
     provider = LiquidityProvider(mode="simulated")
 
     # With no prior get_sol_price_usd() async call, the internal cache is empty.
-    # get_sol_price_usd_sync() must return the 150.0 fallback.
+    # get_sol_price_usd_sync() must return the configurable fallback (default 100.0).
     price = provider.get_sol_price_usd_sync()
 
-    assert price == 150.0, (
-        f"Expected conservative fallback $150.0 when cache is empty, got ${price}. "
-        "If SOL is really $200, this is a 25% underestimate on all USD calculations."
+    assert price == 100.0, (
+        f"Expected configurable fallback $100.0 when cache is empty, got ${price}. "
+        "If SOL is really $200, this is a 50% underestimate on all USD calculations."
     )
 
 
 def test_sol_fallback_causes_measurable_underestimate_on_10_sol_trade():
     """
-    Test 82 extension (plan): Quantify the USD underestimate from the $150 fallback.
+    Test: Quantify the USD underestimate from the $100 fallback.
 
-    For a 10 SOL trade: $200 real - $150 fallback = $50 underestimate per 10 SOL.
-    A $6k pool with $1.5k apparent impact (using $150) gives 25% pool impact estimate.
+    For a 10 SOL trade: $200 real - $100 fallback = $100 underestimate per 10 SOL.
+    A $6k pool with $1.0k apparent impact (using $100) gives 16.7% pool impact estimate.
     With the real $200/SOL, the impact is $2k/$6k = 33%.
 
-    The difference (8 percentage points) can cause a trade to pass the slippage
+    The difference (16.3 percentage points) can cause a trade to pass the slippage
     filter when it should be rejected.
     """
     provider = LiquidityProvider(mode="simulated")
 
-    stale_price = provider.get_sol_price_usd_sync()  # Returns 150.0 (fallback)
+    stale_price = provider.get_sol_price_usd_sync()  # Returns 100.0 (fallback)
     real_price = 200.0  # Hypothetical real SOL price
 
     trade_sol = 10.0
@@ -81,10 +81,10 @@ def test_sol_fallback_causes_measurable_underestimate_on_10_sol_trade():
 
     underestimate_pp = real_impact_pct - stale_impact_pct
 
-    assert underestimate_pp > 0, "Stale $150 price must underestimate real impact"
+    assert underestimate_pp > 0, "Stale $100 price must underestimate real impact"
     assert underestimate_pp >= 5.0, (
-        f"For $200 real SOL vs $150 fallback on 10-SOL/$6k pool trade, "
-        f"expected ≥5pp underestimate, got {underestimate_pp:.1f}pp. "
+        f"For $200 real SOL vs $100 fallback on 10-SOL/$6k pool trade, "
+        f"expected ≥16.3pp underestimate, got {underestimate_pp:.1f}pp. "
         "Stale price fallback causes material slippage calculation error."
     )
 
@@ -220,8 +220,8 @@ def test_sol_price_cache_freshness_threshold_is_300_seconds():
     provider._sol_price_cache = (injected_price, stale_time)
 
     stale_price = provider.get_sol_price_usd_sync()
-    assert stale_price == 150.0, (
-        f"Stale cache (301s old) must return fallback $150.0, got ${stale_price}. "
+    assert stale_price == 100.0, (
+        f"Stale cache (301s old) must return fallback $100.0, got ${stale_price}. "
         "Cache TTL boundary is 300s."
     )
 
