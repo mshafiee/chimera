@@ -203,13 +203,15 @@ pub async fn poll_wallet_transactions(
 
         // Parse signature string to Signature type
         if let Ok(sig) = sig_str.parse::<solana_sdk::signature::Signature>() {
+            let tx_config = solana_client::rpc_config::RpcTransactionConfig {
+                encoding: Some(solana_transaction_status::UiTransactionEncoding::Json),
+                max_supported_transaction_version: Some(0),
+                ..Default::default()
+            };
             let tx_result = crate::metrics::timed_rpc(
                 "polling",
                 "getTransaction",
-                rpc_client.get_transaction(
-                    &sig,
-                    solana_transaction_status::UiTransactionEncoding::Json,
-                ),
+                rpc_client.get_transaction_with_config(&sig, tx_config),
             )
             .await;
             match tx_result {
