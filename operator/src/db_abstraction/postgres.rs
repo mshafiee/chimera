@@ -4345,61 +4345,42 @@ impl PostgresBackend {
     }
 
     fn row_to_wallet(&self, row: sqlx::postgres::PgRow) -> AppResult<Wallet> {
+        // Helper to safely get Optional Decimal fields that may be stored as DOUBLE PRECISION
+        let get_opt_decimal = |col: &str| -> Option<Decimal> {
+            // Try as Decimal first (preferred), fall back to f64 -> Decimal conversion
+            row.try_get::<Option<Decimal>, _>(col)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    row.try_get::<Option<f64>, _>(col)
+                        .ok()
+                        .flatten()
+                        .map(|f| Decimal::from_f64_retain(f).unwrap_or(Decimal::ZERO))
+                })
+        };
+
         Ok(Wallet {
             id: row.try_get("id").unwrap_or(0),
             address: row.try_get("address").unwrap_or_default(),
             status: row.try_get("status").unwrap_or_default(),
-            wqs_score: row
-                .try_get::<Option<Decimal>, _>("wqs_score")
-                .ok()
-                .flatten(),
-            wqs_confidence: row
-                .try_get::<Option<Decimal>, _>("wqs_confidence")
-                .ok()
-                .flatten(),
-            roi_7d: row.try_get::<Option<Decimal>, _>("roi_7d").ok().flatten(),
-            roi_30d: row
-                .try_get::<Option<Decimal>, _>("roi_30d")
-                .ok()
-                .flatten(),
+            wqs_score: get_opt_decimal("wqs_score"),
+            wqs_confidence: get_opt_decimal("wqs_confidence"),
+            roi_7d: get_opt_decimal("roi_7d"),
+            roi_30d: get_opt_decimal("roi_30d"),
             trade_count_30d: row.try_get("trade_count_30d").ok(),
-            win_rate: row
-                .try_get::<Option<Decimal>, _>("win_rate")
-                .ok()
-                .flatten(),
-            max_drawdown_30d: row
-                .try_get::<Option<Decimal>, _>("max_drawdown_30d")
-                .ok()
-                .flatten(),
-            avg_trade_size_sol: row
-                .try_get::<Option<Decimal>, _>("avg_trade_size_sol")
-                .ok()
-                .flatten(),
-            avg_win_sol: row
-                .try_get::<Option<Decimal>, _>("avg_win_sol")
-                .ok()
-                .flatten(),
-            avg_loss_sol: row
-                .try_get::<Option<Decimal>, _>("avg_loss_sol")
-                .ok()
-                .flatten(),
-            profit_factor: row
-                .try_get::<Option<Decimal>, _>("profit_factor")
-                .ok()
-                .flatten(),
-            realized_pnl_30d_sol: row
-                .try_get::<Option<Decimal>, _>("realized_pnl_30d_sol")
-                .ok()
-                .flatten(),
+            win_rate: get_opt_decimal("win_rate"),
+            max_drawdown_30d: get_opt_decimal("max_drawdown_30d"),
+            avg_trade_size_sol: get_opt_decimal("avg_trade_size_sol"),
+            avg_win_sol: get_opt_decimal("avg_win_sol"),
+            avg_loss_sol: get_opt_decimal("avg_loss_sol"),
+            profit_factor: get_opt_decimal("profit_factor"),
+            realized_pnl_30d_sol: get_opt_decimal("realized_pnl_30d_sol"),
             last_trade_at: row.try_get("last_trade_at").ok(),
             promoted_at: row.try_get("promoted_at").ok(),
             ttl_expires_at: row.try_get("ttl_expires_at").ok(),
             notes: row.try_get("notes").ok(),
             archetype: row.try_get("archetype").ok(),
-            avg_entry_delay_seconds: row
-                .try_get::<Option<Decimal>, _>("avg_entry_delay_seconds")
-                .ok()
-                .flatten(),
+            avg_entry_delay_seconds: get_opt_decimal("avg_entry_delay_seconds"),
             created_at: row
                 .try_get("created_at")
                 .unwrap_or_else(|_| chrono::Utc::now()),
