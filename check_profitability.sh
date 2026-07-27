@@ -4,9 +4,16 @@
 
 set -e
 
+# Portable date handling: BSD (macOS) vs GNU (Linux)
+if date -v-1d +%Y-%m-%d >/dev/null 2>&1; then
+    SINCE=$(date -v-12H -u +%Y-%m-%d\ %H:%M:%S)
+else
+    SINCE=$(date -u -d '12 hours ago' +%Y-%m-%d\ %H:%M:%S)
+fi
+
 echo "=========================================="
 echo "Chimera Profitability Analysis"
-echo "Last 12 hours (up to $(date -u -d '12 hours ago' +%Y-%m-%d\ %H:%M:%S))"
+echo "Last 12 hours (up to $SINCE)"
 echo "=========================================="
 echo ""
 

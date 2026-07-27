@@ -113,6 +113,9 @@ pub struct AppConfig {
     /// Forward test experiment configuration
     #[serde(default)]
     pub experiment: ExperimentConfig,
+    /// Profitability gate configuration for live trading enforcement
+    #[serde(default)]
+    pub profitability_gate: ProfitabilityGateConfig,
 }
 
 /// HTTP server configuration
@@ -446,6 +449,32 @@ pub struct StrategyConfig {
     /// is less than or equal to total transaction friction (tip + fee + slippage)
     #[serde(default = "default_friction_gating_enabled")]
     pub friction_gating_enabled: bool,
+}
+
+/// Profitability gate configuration for live trading enforcement.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ProfitabilityGateConfig {
+    /// Enable profitability gating (fail-open by default for safety)
+    #[serde(default = "default_profitability_gate_enabled")]
+    pub enabled: bool,
+    /// Refresh interval in seconds (default 300s / 5 minutes)
+    #[serde(default = "default_profitability_gate_refresh_interval")]
+    pub refresh_interval_seconds: u64,
+    /// Scale factor for INCONCLUSIVE verdicts (default 0.5 = 50% of original size)
+    #[serde(default = "default_profitability_gate_inconclusive_factor")]
+    pub inconclusive_size_factor: f64,
+}
+
+fn default_profitability_gate_enabled() -> bool {
+    false // Disabled by default to prevent accidental blocking
+}
+
+fn default_profitability_gate_refresh_interval() -> u64 {
+    300
+}
+
+fn default_profitability_gate_inconclusive_factor() -> f64 {
+    0.5
 }
 
 fn default_shield_percent() -> u32 {
@@ -2264,6 +2293,7 @@ impl Default for AppConfig {
             degradation: DegradationConfig::default(),
             execution_lock: crate::engine::ExecutionLockConfig::default(),
             experiment: ExperimentConfig::default(),
+            profitability_gate: ProfitabilityGateConfig::default(),
         }
     }
 }

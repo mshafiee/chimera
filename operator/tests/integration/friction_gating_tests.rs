@@ -5,13 +5,22 @@
 
 use chimera_operator::config::Config;
 use chimera_operator::db_abstraction::{
-    create_database, Database, DatabaseConfig, InsertTrade,
+    create_database, Database, DatabaseConfig, DbPool, InsertTrade,
 };
 use chimera_operator::engine::executor::Executor;
 use chimera_operator::models::{Signal, Strategy, TradeStatus};
 use rust_decimal::prelude::*;
+use sqlx::Pool;
+use sqlx::Postgres;
 use std::sync::Arc;
 use tempfile::TempDir;
+
+fn pg_pool(db: &Arc<dyn Database>) -> Pool<Postgres> {
+    match db.pool() {
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
+    }
+}
 
 async fn setup_test_executor() -> (Arc<dyn Database>, Executor, TempDir) {
     let temp_dir = TempDir::new().unwrap();
@@ -50,7 +59,10 @@ async fn setup_profitable_wallet(db: Arc<dyn Database>, wallet_address: &str) {
         })
         .await
         .unwrap();
-        db.update_trade_net_pnl(&uuid, Decimal::from_str("0.15").unwrap())
+        sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+            .bind(Decimal::from_str("0.15").unwrap())
+            .bind(&uuid)
+            .execute(&pg_pool(&db))
             .await
             .unwrap();
     }
@@ -70,7 +82,10 @@ async fn setup_profitable_wallet(db: Arc<dyn Database>, wallet_address: &str) {
         })
         .await
         .unwrap();
-        db.update_trade_net_pnl(&uuid, Decimal::from_str("-0.08").unwrap())
+        sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+            .bind(Decimal::from_str("-0.08").unwrap())
+            .bind(&uuid)
+            .execute(&pg_pool(&db))
             .await
             .unwrap();
     }
@@ -227,7 +242,12 @@ async fn test_friction_gating_insufficient_history() {
         } else {
             Decimal::from_str("-0.05").unwrap() // 4 losses
         };
-        db.update_trade_net_pnl(&uuid, pnl).await.unwrap();
+        sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+            .bind(pnl)
+            .bind(&uuid)
+            .execute(&pg_pool(&db))
+            .await
+            .unwrap();
     }
 
     // Create a signal

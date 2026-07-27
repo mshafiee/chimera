@@ -16,12 +16,10 @@ Target: Grow from $200 to $1,000 to afford Helius Business Plan upgrade
 
 import time
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
 import threading
-import json
-from pathlib import Path
 from collections import deque
 
 logger = logging.getLogger(__name__)
@@ -162,13 +160,13 @@ class RealtimeProfitTracker:
         # Last velocity calculation
         self._last_velocity: Optional[ProfitVelocity] = None
 
-        # Load state if available
-        self._load_state()
+        # Trade ID deduplication set
+        self._seen_trade_ids: Set[str] = set()
 
         logger.info(f"RealtimeProfitTracker initialized: ${self._current_capital:.2f}")
 
     def update_profit(self, trade_id: str, pnl: float, wqs: Optional[float] = None,
-                     category: Optional[str] = None) -> None:
+                      category: Optional[str] = None, timestamp: Optional[float] = None) -> None:
         """
         Update profit tracking with a trade result.
 
@@ -177,9 +175,15 @@ class RealtimeProfitTracker:
             pnl: Profit/loss amount
             wqs: Optional WQS score of wallet
             category: Optional budget category
+            timestamp: Optional trade timestamp (Unix epoch). If provided,
+                       used for snapshot/trade history instead of time.time().
         """
         with self._lock:
-            now = time.time()
+            if trade_id in self._seen_trade_ids:
+                return
+            self._seen_trade_ids.add(trade_id)
+
+            now = timestamp if timestamp is not None else time.time()
 
             # Update capital
             self._current_capital += pnl
@@ -586,41 +590,20 @@ class RealtimeProfitTracker:
             }
 
     def _load_state(self) -> None:
-        """Load state from disk."""
-        state_file = Path(self._config.STATE_FILE)
-        if not state_file.exists():
-            return
+        """Load state from disk.
 
-        try:
-            with open(state_file, 'r') as f:
-                data = json.load(f)
-
-            self._current_capital = data.get('current_capital', self._config.STARTING_CAPITAL)
-            self._peak_capital = data.get('peak_capital', self._config.STARTING_CAPITAL)
-            self._category_roi = data.get('category_roi', {})
-
-            logger.info(f"Loaded state from {state_file}")
-
-        except Exception as e:
-            logger.warning(f"Failed to load state: {e}")
+        Disabled: state persistence causes cumulative PnL to be re-added on
+        every run, compounding the tracker's capital. The tracker now resets
+        to STARTING_CAPITAL and replays trades from the DB each run.
+        """
+        return
 
     def save_state(self) -> None:
-        """Save state to disk."""
-        with self._lock:
-            try:
-                data = {
-                    'current_capital': self._current_capital,
-                    'peak_capital': self._peak_capital,
-                    'category_roi': self._category_roi,
-                    'last_save': time.time(),
-                }
+        """Save state to disk.
 
-                state_file = Path(self._config.STATE_FILE)
-                with open(state_file, 'w') as f:
-                    json.dump(data, f, indent=2)
-
-            except Exception as e:
-                logger.warning(f"Failed to save state: {e}")
+        Disabled: see _load_state().
+        """
+        return
 
     def reset_to_capital(self, new_capital: float) -> None:
         """Reset tracker to a new capital amount."""

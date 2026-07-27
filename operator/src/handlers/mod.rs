@@ -6,7 +6,7 @@ mod health;
 mod market;
 mod monitoring;
 mod operations;
-mod profitability;
+pub mod profitability;
 mod risk;
 mod scout;
 mod signals;

@@ -100,24 +100,6 @@ pub trait Database: Send + Sync {
     /// Get trades by status
     async fn get_trades_by_status(&self, status: &str, limit: i32) -> AppResult<Vec<Trade>>;
 
-    /// Update trade with execution results
-    async fn update_trade_execution(
-        &self,
-        trade_uuid: &str,
-        tx_signature: &str,
-        jito_tip_sol: rust_decimal::Decimal,
-        dex_fee_sol: rust_decimal::Decimal,
-        slippage_cost_sol: rust_decimal::Decimal,
-    ) -> AppResult<()>;
-
-    /// Update trade PnL
-    async fn update_trade_pnl(
-        &self,
-        trade_uuid: &str,
-        pnl_sol: rust_decimal::Decimal,
-        pnl_usd: rust_decimal::Decimal,
-    ) -> AppResult<()>;
-
     // ========================================================================
     // POSITION OPERATIONS
     // ========================================================================
@@ -604,13 +586,6 @@ pub trait Database: Send + Sync {
         jito_tip_sol: rust_decimal::Decimal,
         dex_fee_sol: rust_decimal::Decimal,
         slippage_cost_sol: rust_decimal::Decimal,
-    ) -> AppResult<()>;
-
-    /// Update trade net PnL (after costs)
-    async fn update_trade_net_pnl(
-        &self,
-        trade_uuid: &str,
-        net_pnl_sol: rust_decimal::Decimal,
     ) -> AppResult<()>;
 
     /// Atomically mark a trade as DEAD_LETTER and insert into DLQ

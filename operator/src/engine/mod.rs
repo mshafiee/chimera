@@ -222,6 +222,8 @@ pub struct Engine {
     /// Execution lock for preventing concurrent processing
     #[allow(dead_code)] // Used via SignalProcessor
     execution_lock: Option<Arc<ExecutionLock>>,
+    /// Profitability verdict cache for live trading enforcement
+    verdict_cache: Option<Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>>,
 }
 
 impl Engine {
@@ -304,6 +306,7 @@ impl Engine {
             None, // write_queue
             None, // wallet_performance
             None, // toxic_detector
+            None, // verdict_cache
         )
     }
 
@@ -323,6 +326,7 @@ impl Engine {
         write_queue: Option<Arc<AsyncWriteQueue>>,
         wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
         toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
+        verdict_cache: Option<Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
             config,
@@ -338,6 +342,7 @@ impl Engine {
             write_queue,
             wallet_performance,
             toxic_detector,
+            verdict_cache,
         )
     }
 
@@ -350,7 +355,7 @@ impl Engine {
         ws_state: Option<Arc<WsState>>,
     ) -> (Self, EngineHandle) {
         Self::new_with_optional_extras_tip_manager_and_price_cache(
-            config, db, notifier, metrics, ws_state, None, None, None, None, None, None, None, None,
+            config, db, notifier, metrics, ws_state, None, None, None, None, None, None, None, None, None,
         )
     }
 
@@ -370,6 +375,7 @@ impl Engine {
         write_queue: Option<Arc<AsyncWriteQueue>>,
         wallet_performance: Option<Arc<crate::monitoring::WalletPerformanceTracker>>,
         toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
+        verdict_cache: Option<Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>>,
     ) -> (Self, EngineHandle) {
         let config = Arc::new(config);
         let (tx, rx) = mpsc::channel(100); // Buffer for incoming signals
@@ -440,6 +446,13 @@ impl Engine {
             signal_processor
         };
 
+        // Wire profitability verdict cache
+        let signal_processor = if let Some(ref verdict_cache) = verdict_cache {
+            signal_processor.with_profitability_verdict(verdict_cache.clone())
+        } else {
+            signal_processor
+        };
+
         // Add execution lock to signal processor if enabled
         let signal_processor = if let Some(ref lock) = execution_lock {
             signal_processor.with_execution_lock(lock.clone())
@@ -464,6 +477,7 @@ impl Engine {
             state_registry: state_registry.clone(),
             write_queue: write_queue.clone(),
             execution_lock,
+            verdict_cache,
         };
 
         (engine, handle)

@@ -2128,50 +2128,61 @@ async def main_async():
     # Update profit tracker with realized PnL data
     if profit_tracker and PROFIT_TRACKER_AVAILABLE:
         try:
-            corr_reader = CorrelationReader()
-            if corr_reader.table_exists():
-                pnl_records = corr_reader.get_all_records(min_trades=5)
-                total_capital_change = 0.0
+            from core.db import Connection, execute_query, fetch_rows
 
-                # Update tracker with each wallet's PnL
-                for rec in pnl_records:
-                    if rec.actual_copy_pnl_30d_sol is not None:
-                        # Use WQS score as a proxy for wallet quality (stored in wqs_score_at_promotion)
-                        wqs_score = rec.wqs_score_at_promotion or 0.0
+            with Connection() as conn:
+                cursor = execute_query(
+                    conn,
+                    """SELECT t.trade_uuid, t.net_pnl_sol, t.pnl_usd,
+                              t.wallet_address, t.created_at,
+                              c.wqs_score_at_promotion
+                       FROM trades t
+                       LEFT JOIN wqs_pnl_correlation c ON t.wallet_address = c.wallet_address
+                       WHERE t.side = 'SELL'
+                         AND t.status = 'CLOSED'
+                         AND t.pnl_data_valid = TRUE
+                         AND t.net_pnl_sol IS NOT NULL
+                       ORDER BY t.created_at ASC
+                       LIMIT 500""",
+                    None,
+                )
+                rows = fetch_rows(cursor)
 
-                        # Update profit tracker with this wallet's performance
-                        profit_tracker.update_profit(
-                            trade_id=f"{rec.wallet_address}_30d",
-                            pnl=float(rec.actual_copy_pnl_30d_sol),
-                            wqs=wqs_score,
-                            category="copy_trading"
-                        )
-                        total_capital_change += float(rec.actual_copy_pnl_30d_sol)
+            total_capital_change = 0.0
+            for row in rows:
+                profit_tracker.update_profit(
+                    trade_id=row['trade_uuid'],
+                    pnl=float(row['pnl_usd'] or 0.0),
+                    wqs=row['wqs_score_at_promotion'],
+                    category='copy_trading',
+                    timestamp=row['created_at'].timestamp(),
+                )
+                total_capital_change += float(row['pnl_usd'] or 0.0)
 
-                # Print profit tracking summary
-                if pnl_records and total_capital_change != 0:
-                    tracker_summary = profit_tracker.get_tracker_summary()
-                    velocity = profit_tracker.get_profit_velocity()
-                    eta = profit_tracker.get_eta_to_1000()
+            # Print profit tracking summary
+            if rows and total_capital_change != 0:
+                tracker_summary = profit_tracker.get_tracker_summary()
+                velocity = profit_tracker.get_profit_velocity()
+                eta = profit_tracker.get_eta_to_1000()
 
-                    print(f"\n[Scout] === Growth Tracking ===")
-                    print(f"  Current capital: ${tracker_summary['capital']['current']:.2f}")
-                    print(f"  Total profit: ${tracker_summary['capital']['profit']:.2f} "
-                          f"({tracker_summary['capital']['profit_pct']:.1f}%)")
-                    print(f"  Growth stage: {tracker_summary['capital']['growth_stage']}")
-                    print(f"  Velocity: ${velocity.daily_rate:.2f}/day ({velocity.trend})")
-                    if eta.days_remaining < float('inf'):
-                        print(f"  ETA to $1,000: {eta.days_remaining:.1f} days (confidence: {eta.confidence:.1%})")
-                    else:
-                        print(f"  ETA to $1,000: Unable to calculate (negative velocity)")
-                    print(f"  Win rate: {tracker_summary['performance']['win_rate']:.1%}")
+                print(f"\n[Scout] === Growth Tracking ===")
+                print(f"  Current capital: ${tracker_summary['capital']['current']:.2f}")
+                print(f"  Total profit: ${tracker_summary['capital']['profit']:.2f} "
+                      f"({tracker_summary['capital']['profit_pct']:.1f}%)")
+                print(f"  Growth stage: {tracker_summary['capital']['growth_stage']}")
+                print(f"  Velocity: ${velocity.daily_rate:.2f}/day ({velocity.trend})")
+                if eta.days_remaining < float('inf'):
+                    print(f"  ETA to $1,000: {eta.days_remaining:.1f} days (confidence: {eta.confidence:.1%})")
+                else:
+                    print(f"  ETA to $1,000: Unable to calculate (negative velocity)")
+                print(f"  Win rate: {tracker_summary['performance']['win_rate']:.1%}")
 
-                    # Check for optimization triggers
-                    optimization_actions = profit_tracker.trigger_optimization_if_needed()
-                    if optimization_actions:
-                        print(f"\n[Scout] Optimization Actions:")
-                        for action in optimization_actions:
-                            print(f"  [{action.priority.upper()}] {action.action}: {action.description}")
+                # Check for optimization triggers
+                optimization_actions = profit_tracker.trigger_optimization_if_needed()
+                if optimization_actions:
+                    print(f"\n[Scout] Optimization Actions:")
+                    for action in optimization_actions:
+                        print(f"  [{action.priority.upper()}] {action.action}: {action.description}")
 
         except Exception as e:
             if args.verbose:

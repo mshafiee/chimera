@@ -57,6 +57,8 @@ pub struct SignalProcessor {
     /// Toxic-flow detector (B3): called on every confirmed SELL to record
     /// ROI-dropping wallet behaviour.
     toxic_detector: Option<Arc<crate::experiment::ToxicFlowDetector>>,
+    /// Profitability verdict cache for live trading enforcement
+    profitability_verdict: Option<Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>>,
 }
 
 impl SignalProcessor {
@@ -91,6 +93,7 @@ impl SignalProcessor {
             worker_id: "sequential".to_string(), // Default worker ID
             wallet_performance: None,
             toxic_detector: None,
+            profitability_verdict: None, // Set via with_profitability_verdict()
         }
     }
 
@@ -112,6 +115,15 @@ impl SignalProcessor {
         tracker: Arc<crate::monitoring::WalletPerformanceTracker>,
     ) -> Self {
         self.wallet_performance = Some(tracker);
+        self
+    }
+
+    /// Attach the profitability verdict cache for live trading enforcement.
+    pub fn with_profitability_verdict(
+        mut self,
+        verdict_cache: Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>,
+    ) -> Self {
+        self.profitability_verdict = Some(verdict_cache);
         self
     }
 
@@ -669,6 +681,83 @@ impl SignalProcessor {
         } else {
             None
         };
+
+        // ── Profitability gate check (enforce verdict before execution) ──
+        if let Some(ref verdict_cache) = self.profitability_verdict {
+            match verdict_cache.read().await.as_ref() {
+                Some(cached) => {
+                    match cached.verdict.as_str() {
+                        "GO" => {
+                            // Proceed normally
+                        }
+                        "INCONCLUSIVE" => {
+                            let gates = &cached.gates;
+                            // Check if sample_size gate is PASS (gate failure) vs FAIL (insufficient data)
+                            if gates.sample_size.status == "PASS" && self.config.profitability_gate.enabled {
+                                // Gate failure (not insufficient sample): scale down position size
+                                let original_amount = signal.payload.amount_sol;
+                                let factor = rust_decimal::Decimal::from_f64(
+                                    self.config.profitability_gate.inconclusive_size_factor
+                                ).unwrap_or(rust_decimal::Decimal::ONE);
+                                let scaled_amount = original_amount * factor;
+                                signal.payload.amount_sol = scaled_amount;
+                                tracing::info!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    original_amount = %original_amount,
+                                    scaled_amount = %scaled_amount,
+                                    factor = %self.config.profitability_gate.inconclusive_size_factor,
+                                    "Profitability gate INCONCLUSIVE: scaled position size"
+                                );
+                            } else {
+                                // Insufficient sample: proceed normally
+                                tracing::debug!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    sample_size = gates.sample_size.value,
+                                    threshold = gates.sample_size.threshold,
+                                    "Profitability gate INCONCLUSIVE: sample insufficient, proceeding"
+                                );
+                            }
+                        }
+                        "STOP" => {
+                            // Reject trade via dead_letter + WS broadcast
+                            let _ = self.db.mark_trade_dead_letter(
+                                &signal.trade_uuid,
+                                &serde_json::to_string(&signal.payload).unwrap_or_default(),
+                                "Profitability verdict STOP: integrity/completeness failure",
+                            ).await;
+                            if let Some(ref ws) = self.ws_state {
+                                ws.broadcast(WsEvent::TradeUpdate(TradeUpdateData {
+                                    trade_uuid: signal.trade_uuid.clone(),
+                                    status: "DEAD_LETTER".to_string(),
+                                    token_symbol: Some(signal.payload.token.clone()),
+                                    strategy: signal.payload.strategy.to_string(),
+                                }));
+                            }
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                "Profitability verdict STOP: rejecting trade via dead_letter"
+                            );
+                            return;
+                        }
+                        _ => {
+                            // Unknown verdict: proceed normally
+                            tracing::warn!(
+                                trade_uuid = %signal.trade_uuid,
+                                verdict = %cached.verdict,
+                                "Profitability verdict unknown, proceeding"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    // No cached verdict yet (startup): proceed normally (fail-open)
+                    tracing::trace!(
+                        trade_uuid = %signal.trade_uuid,
+                        "No cached profitability verdict yet, proceeding (fail-open)"
+                    );
+                }
+            }
+        }
 
         // Execute the trade
         let result = {

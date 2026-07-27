@@ -98,7 +98,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, token_address, side, entry_price, current_value_sol, unrealized_pnl_sol, opened_at FROM positions WHERE status = 'open' ORDER BY opened_at DESC LIMIT 50",
+          "rawSql": "SELECT wallet_address, token_address, side, entry_price, current_value_sol, unrealized_pnl_sol, opened_at FROM positions WHERE state IN ('ACTIVE', 'EXITING') AND pnl_data_valid = TRUE ORDER BY opened_at DESC LIMIT 50",
           "refId": "A"
         }
       ],
@@ -133,7 +133,7 @@
       "targets": [
         {
           "format": "table",
-          "rawSql": "SELECT wallet_address, SUM(realized_pnl_sol) as pnl FROM trades WHERE created_at > NOW() - INTERVAL '7 days' GROUP BY wallet_address ORDER BY pnl DESC LIMIT 15",
+          "rawSql": "SELECT wallet_address, SUM(net_pnl_sol) as pnl FROM trades WHERE side = 'SELL' AND status = 'CLOSED' AND pnl_data_valid = TRUE AND created_at > NOW() - INTERVAL '7 days' GROUP BY wallet_address ORDER BY pnl DESC LIMIT 15",
           "refId": "A"
         }
       ],
@@ -196,6 +196,46 @@
           }
         }
       ]
+    },
+    {
+      "id": 7,
+      "title": "Cost Attribution (30d)",
+      "type": "table",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+      "datasource": {
+        "type": "postgres",
+        "uid": "P4F7F8D3768E4C7A1"
+      },
+      "targets": [
+        {
+          "format": "table",
+          "rawSql": "SELECT wallet_address, SUM(pnl_sol) as gross_pnl, SUM(net_pnl_sol) as net_pnl, SUM(jito_tip_sol) as jito_tips, SUM(dex_fee_sol) as dex_fees, SUM(slippage_cost_sol) as slippage, SUM(total_cost_sol) as total_cost FROM trades WHERE side = 'SELL' AND status = 'CLOSED' AND pnl_data_valid = TRUE AND created_at > NOW() - INTERVAL '30 days' GROUP BY wallet_address ORDER BY net_pnl DESC LIMIT 20",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "indexByName": {},
+            "renameByName": {
+              "wallet_address": "Wallet",
+              "gross_pnl": "Gross PnL (SOL)",
+              "net_pnl": "Net PnL (SOL)",
+              "jito_tips": "Jito Tips (SOL)",
+              "dex_fees": "DEX Fees (SOL)",
+              "slippage": "Slippage (SOL)",
+              "total_cost": "Total Cost (SOL)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "sol"
+        }
+      }
     }
   ]
 }

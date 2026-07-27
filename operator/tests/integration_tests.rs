@@ -108,7 +108,12 @@ async fn test_circuit_breaker_loss_tracking() {
     .unwrap();
 
     let big_loss = Decimal::from_str("-2.5").unwrap();
-    db.update_trade_net_pnl(uuid, big_loss).await.unwrap();
+    sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+        .bind(big_loss)
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Verify the loss is stored correctly
     let row: (String,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")

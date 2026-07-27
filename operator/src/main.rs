@@ -33,6 +33,7 @@ use chimera_operator::engine::{
 use chimera_operator::handlers::{
     bulk_cleanup_webhooks,
     bulk_register_webhooks,
+    debug_backtest_smoke,
     disable_wallet_monitoring,
     enable_wallet_monitoring,
     export_trades,
@@ -56,7 +57,6 @@ use chimera_operator::handlers::{
     get_wallet,
     get_wallet_monitoring_states,
     get_webhook_audit_log,
-    // Webhook lifecycle handlers
     get_webhook_stats,
     get_wqs_distribution,
     health_check,
@@ -72,7 +72,6 @@ use chimera_operator::handlers::{
     reset_circuit_breaker,
     retry_webhook_registration,
     retry_dead_letter_item,
-    debug_backtest_smoke,
     toggle_wallet_webhook,
     trigger_scout_run,
     trip_circuit_breaker,
@@ -83,6 +82,7 @@ use chimera_operator::handlers::{
     wallet_auth,
     webhook_handler,
     ws_handler,
+    profitability_verdict,
     ApiState,
     AppState,
     OperationsState,
@@ -95,6 +95,7 @@ use chimera_operator::middleware::{self, bearer_auth, AuthState, Role};
 use chimera_operator::monitoring::{rate_limiter, HeliusClient, MonitoringState, SignalAggregator};
 use chimera_operator::notifications::{self, NotificationEvent};
 use chimera_operator::price_cache::PriceCache;
+use chimera_operator::handlers::profitability::{fetch_outcomes, count_missing_outcomes, count_invalid_pnl, CachedVerdict};
 use chimera_operator::token::{TokenCache, TokenMetadataFetcher, TokenParser, TokenSafetyConfig};
 use chimera_operator::vault;
 use chimera_operator::{Action, Signal, SignalPayload, Strategy};
@@ -651,6 +652,8 @@ async fn main() -> anyhow::Result<()> {
         "Toxic flow detector + wallet performance tracker initialized"
     );
 
+    let verdict_cache = Arc::new(tokio::sync::RwLock::new(None));
+
     // Create engine
     let (engine, _engine_handle) =
         engine::Engine::new_with_extras_tip_manager_price_cache_and_token_parser(
@@ -667,6 +670,7 @@ async fn main() -> anyhow::Result<()> {
             None, // write_queue
             Some(wallet_performance_tracker.clone()),
             Some(toxic_flow_detector.clone()),
+            Some(verdict_cache.clone()),
         );
     tracing::info!("Engine created");
 
@@ -1946,6 +1950,7 @@ async fn main() -> anyhow::Result<()> {
         toxic_detector: Some(toxic_flow_detector.clone()),
         run_context: Some(run_context.clone()),
         decision_recorder: Some(decision_recorder.clone()),
+        profitability_verdict: verdict_cache.clone(),
     });
 
     // Run startup webhook management check
@@ -2367,6 +2372,66 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Force-liquidation task spawned (60s interval, triggers at 150% heat)");
     }
 
+    // Profitability verdict refresh task: evaluate gates periodically and cache result
+    // for live trading enforcement in SignalProcessor.
+    if api_state.config.read().await.profitability_gate.enabled {
+        let verdict_cache = Arc::clone(&api_state.profitability_verdict);
+        let db_pool = db_pool.clone();
+        let run_id = run_context.clone();
+        let decision_recorder = api_state.decision_recorder.clone();
+        let total_capital_sol = {
+            let cfg = api_state.config.read().await;
+            cfg.position_sizing.total_capital_sol
+                .to_f64()
+                .unwrap_or(0.0)
+                .max(1.0)
+        };
+        let mut refresh_interval = tokio::time::interval(std::time::Duration::from_secs(
+            api_state.config.read().await.profitability_gate.refresh_interval_seconds,
+        ));
+        task_handles.push(tokio::spawn(async move {
+            loop {
+                refresh_interval.tick().await;
+                let pg_pool = match db_pool.pool() {
+                    chimera_operator::db_abstraction::DbPool::PostgreSQL(p) => p,
+                };
+                match refresh_verdict(&pg_pool, &run_id, &decision_recorder, total_capital_sol).await {
+                    Ok(Some(new_verdict)) => {
+                        let old_verdict = {
+                            let mut cache = verdict_cache.write().await;
+                            std::mem::replace(&mut *cache, Some(new_verdict.clone()))
+                        };
+                        if old_verdict.is_none() || old_verdict.as_ref().map(|v| &v.verdict) != Some(&new_verdict.verdict) {
+                            tracing::warn!(
+                                verdict = %new_verdict.verdict,
+                                from = old_verdict.map(|v| v.verdict),
+                                "Profitability verdict changed"
+                            );
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            "Profitability verdict evaluation failed: no cached verdict available"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "Profitability verdict evaluation failed, retaining previous verdict"
+                        );
+                    }
+                }
+            }
+        }));
+        tracing::info!(
+            "Profitability verdict refresh task spawned ({}s interval, enabled: {})",
+            api_state.config.read().await.profitability_gate.refresh_interval_seconds,
+            api_state.config.read().await.profitability_gate.enabled
+        );
+    } else {
+        tracing::info!("Profitability verdict gating disabled");
+    }
+
     let position_sizer = Arc::new(PositionSizer::new(
         db_pool.clone(),
         Arc::new(config.position_sizing.clone()),
@@ -2748,6 +2813,44 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Chimera Operator shut down successfully");
 
     Ok(())
+}
+
+/// Refresh the profitability verdict by evaluating all gates and caching the result.
+async fn refresh_verdict(
+    pool: &sqlx::Pool<sqlx::Postgres>,
+    run_context: &Arc<chimera_operator::engine::RunContext>,
+    decision_recorder: &Option<Arc<chimera_operator::engine::DecisionRecorder>>,
+    total_capital_sol: f64,
+) -> Result<Option<CachedVerdict>, anyhow::Error> {
+    use chimera_operator::handlers::profitability::evaluate_gates;
+
+    let run_id = run_context.run_id.clone();
+
+    let outcomes = fetch_outcomes(pool, &run_id).await?;
+    let missing_outcomes = count_missing_outcomes(pool, &run_id).await?;
+    let invalid_pnl = count_invalid_pnl(pool, &run_id).await?;
+
+    let (completeness_rate, completeness_ok) = if let Some(recorder) = decision_recorder {
+        let rate = recorder.completeness();
+        (rate, rate >= 0.99)
+    } else {
+        (1.0, true)
+    };
+
+    let (gates, verdict) = evaluate_gates(
+        outcomes,
+        missing_outcomes,
+        invalid_pnl,
+        completeness_rate,
+        completeness_ok,
+        total_capital_sol,
+    );
+
+    Ok(Some(CachedVerdict {
+        verdict: verdict.to_string(),
+        gates,
+        computed_at: std::time::Instant::now(),
+    }))
 }
 
 /// Build an EXIT signal from an active position entry (for stop-loss / profit-target exits)

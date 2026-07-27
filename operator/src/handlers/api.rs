@@ -60,6 +60,8 @@ pub struct ApiState {
     pub run_context: Option<Arc<crate::engine::RunContext>>,
     /// Decision recorder (C1) exposing the completeness counter (C4 gate).
     pub decision_recorder: Option<Arc<crate::engine::DecisionRecorder>>,
+    /// Cached profitability verdict for live trading enforcement.
+    pub profitability_verdict: Arc<tokio::sync::RwLock<Option<crate::handlers::CachedVerdict>>>,
 }
 
 // =============================================================================

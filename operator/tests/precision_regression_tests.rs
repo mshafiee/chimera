@@ -18,7 +18,17 @@
 mod common;
 
 use chimera_operator::db_abstraction::InsertTrade;
+use chimera_operator::db_abstraction::{create_database, Database, DatabaseConfig, DbPool};
 use rust_decimal::prelude::*;
+use sqlx::Pool;
+use sqlx::Postgres;
+
+fn pg_pool(db: &std::sync::Arc<dyn Database>) -> Pool<Postgres> {
+    match db.pool() {
+        DbPool::PostgreSQL(pool) => pool,
+        _ => panic!("test requires PostgreSQL backend"),
+    }
+}
 
 /// Round-trip a single 18-digit Decimal through insert + read on the active backend.
 #[tokio::test]
@@ -81,9 +91,13 @@ async fn test_high_precision_net_pnl_round_trip() {
     .await
     .expect("insert_trade should succeed");
 
-    db.update_trade_net_pnl(trade_uuid, precise_pnl)
+    let pool = pg_pool(&db);
+    sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+        .bind(precise_pnl)
+        .bind(trade_uuid)
+        .execute(&pool)
         .await
-        .expect("update_trade_net_pnl should succeed");
+        .expect("update trade net_pnl_sol should succeed");
 
     let trades = db
         .get_trades_filtered(None, None, None, None, None, 10, 0)

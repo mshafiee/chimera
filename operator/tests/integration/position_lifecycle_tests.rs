@@ -146,7 +146,7 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     // Net PnL = 0.1 - 0.0017 = 0.0983 SOL
     //
     // This test validates that close_position() calculates gross PnL correctly.
-    // Fee deduction is done separately via update_trade_costs + update_trade_net_pnl.
+    // Fee deduction is done separately via update_trade_costs + close_position_full.
 
     let (db, _tmp) = create_test_db().await;
     let pool = pg_pool(&db);
@@ -222,7 +222,12 @@ async fn test_pnl_calculation_accuracy_with_fees() {
     let fees = Decimal::from_str("0.0017").unwrap();
     let net = gross - fees;
 
-    db.update_trade_net_pnl(uuid, net).await.unwrap();
+    sqlx::query("UPDATE trades SET net_pnl_sol = $1 WHERE trade_uuid = $2")
+        .bind(net)
+        .bind(uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let (net_stored,): (f64,) = sqlx::query_as(
         "SELECT COALESCE(net_pnl_sol, 0)::FLOAT8 FROM trades WHERE trade_uuid = $1",

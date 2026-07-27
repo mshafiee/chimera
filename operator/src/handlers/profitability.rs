@@ -27,7 +27,7 @@ pub struct VerdictResponse {
     pub computed_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct VerdictGates {
     pub sample_size: GateValue,
     pub net_return: NetReturnGate,
@@ -39,14 +39,14 @@ pub struct VerdictGates {
     pub completeness: CompletenessGate,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GateValue {
     pub status: String,
     pub value: i64,
     pub threshold: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct NetReturnGate {
     pub status: String,
     pub lower_95_ci: f64,
@@ -55,7 +55,7 @@ pub struct NetReturnGate {
     pub samples: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct CohortGate {
     pub status: String,
     pub cohorts_evaluated: i64,
@@ -63,39 +63,51 @@ pub struct CohortGate {
     pub cohort_min_count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct BiasGate {
     pub status: String,
     pub declared_bias: f64,
     pub threshold: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct LossGate {
     pub status: String,
     pub worst_loss_pct: f64,
     pub threshold: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct DrawdownGate {
     pub status: String,
     pub max_drawdown_pct: f64,
     pub threshold: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct IntegrityGate {
     pub status: String,
     pub invalid_pnl_count: i64,
     pub missing_outcomes: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct CompletenessGate {
     pub status: String,
     pub rate: f64,
     pub threshold: f64,
+}
+
+/// Cached profitability verdict for live trading enforcement.
+///
+/// Stored in `Arc<RwLock<Option<CachedVerdict>>>` and refreshed
+/// periodically in the background. The verdict is checked before
+/// executing signals in `SignalProcessor::process_signal`.
+#[derive(Debug, Clone)]
+pub struct CachedVerdict {
+    pub verdict: String,
+    pub gates: VerdictGates,
+    pub computed_at: std::time::Instant,
 }
 
 /// Row from the outcome join (decision_records ⨝ trades).

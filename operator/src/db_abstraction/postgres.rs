@@ -366,55 +366,6 @@ impl Database for PostgresBackend {
         rows.into_iter().map(|r| self.row_to_trade(r)).collect()
     }
 
-    async fn update_trade_execution(
-        &self,
-        trade_uuid: &str,
-        tx_signature: &str,
-        jito_tip_sol: Decimal,
-        dex_fee_sol: Decimal,
-        slippage_cost_sol: Decimal,
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE trades
-            SET tx_signature = $1, jito_tip_sol = $2, dex_fee_sol = $3,
-                slippage_cost_sol = $4, total_cost_sol = jito_tip_sol + dex_fee_sol + slippage_cost_sol
-            WHERE trade_uuid = $5
-            "#,
-        )
-        .bind(tx_signature)
-        .bind(jito_tip_sol)
-        .bind(dex_fee_sol)
-        .bind(slippage_cost_sol)
-        .bind(trade_uuid)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
-    async fn update_trade_pnl(
-        &self,
-        trade_uuid: &str,
-        pnl_sol: Decimal,
-        pnl_usd: Decimal,
-    ) -> AppResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE trades
-            SET pnl_sol = $1, pnl_usd = $2, net_pnl_sol = pnl_sol - total_cost_sol
-            WHERE trade_uuid = $3
-            "#,
-        )
-        .bind(pnl_sol)
-        .bind(pnl_usd)
-        .bind(trade_uuid)
-        .execute(&self.pool)
-        .await?;
-
-        Ok(())
-    }
-
     // ========================================================================
     // POSITION OPERATIONS
     // ========================================================================
@@ -3411,29 +3362,6 @@ impl Database for PostgresBackend {
         .bind(new_dex)
         .bind(new_slip)
         .bind(total)
-        .bind(trade_uuid)
-        .execute(&self.pool)
-        .await?;
-
-        if result.rows_affected() == 0 {
-            return Err(AppError::NotFound(format!(
-                "trade_uuid {} not found",
-                trade_uuid
-            )));
-        }
-
-        Ok(())
-    }
-
-    async fn update_trade_net_pnl(&self, trade_uuid: &str, net_pnl_sol: Decimal) -> AppResult<()> {
-        let result = sqlx::query(
-            r#"
-            UPDATE trades
-            SET net_pnl_sol = $1
-            WHERE trade_uuid = $2
-            "#,
-        )
-        .bind(net_pnl_sol)
         .bind(trade_uuid)
         .execute(&self.pool)
         .await?;
