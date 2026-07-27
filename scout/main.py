@@ -2547,13 +2547,10 @@ async def main_async():
             print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
             exit_code = 2
     
-    return exit_code
-    except Exception as e:
-        if args.verbose:
-            print(f"[Scout] Warning during cleanup: {e}")
-
     print(f"\n[Scout] Finished at: {utcnow().isoformat()}")
     print("=" * 70)
+
+    return exit_code
 
 
 def main():
