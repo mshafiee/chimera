@@ -3039,6 +3039,8 @@ class HeliusClient:
         
         # 1) Native SOL delta (lamports)
         lamports_delta = 0
+        wallet_owned_accounts = set([wallet_address])  # Initialize with wallet itself
+        
         for t in tx.get("nativeTransfers", []) or []:
             if not isinstance(t, dict):
                 continue
