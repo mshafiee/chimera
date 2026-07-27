@@ -396,7 +396,10 @@ class PrePromotionValidator:
         # Use archetype-specific close ratio threshold
         archetype = getattr(metrics, 'archetype', None)
         close_ratio_threshold = self._get_close_ratio_threshold(archetype)
-        min_closes = max(3, int(len(trades) * close_ratio_threshold))
+        # SCALPER wallets have high turnover and fewer complete closes.
+        # Use a lower minimum floor (1) vs default (3) for SCALPER archetype.
+        min_close_floor = 1 if (archetype and archetype.upper() == "SCALPER") else 3
+        min_closes = max(min_close_floor, int(len(trades) * close_ratio_threshold))
 
         if len(close_trades) < min_closes:
             logger.info(
