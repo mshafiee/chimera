@@ -476,7 +476,15 @@ impl SignalProcessor {
                         "Strategy allocation limit reached at execution time for {:?}",
                         signal.payload.strategy
                     );
-                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: strategy allocation limit reached");
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        strategy = ?signal.payload.strategy,
+                        token = %signal.payload.token,
+                        amount = %signal.payload.amount_sol,
+                        wallet = %signal.payload.wallet_address,
+                        "[SIGNAL_PIPELINE] Allocation check failed: {}",
+                        reason
+                    );
 
                     let _ = self
                         .db

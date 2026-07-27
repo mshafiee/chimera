@@ -219,6 +219,16 @@ impl PortfolioHeat {
         let heat = self.calculate_heat().await?;
 
         if !heat.can_open_position {
+            tracing::warn!(
+                capital = %(*self.total_capital_sol.read()),
+                max_heat_percent = %self.max_heat_percent,
+                current_heat_percent = %heat.current_heat_percent,
+                total_exposure = %heat.total_exposure_sol,
+                available_heat = %heat.available_heat_sol,
+                "[PORTFOLIO_HEAT] General heat check: BLOCKED - current heat {}% > max heat {}%",
+                heat.current_heat_percent,
+                self.max_heat_percent
+            );
             return Ok(false);
         }
 
@@ -231,7 +241,24 @@ impl PortfolioHeat {
             Decimal::from(100)
         };
 
-        Ok(new_heat_percent <= self.max_heat_percent)
+        let result = new_heat_percent <= self.max_heat_percent;
+        
+        tracing::info!(
+            capital = %capital,
+            max_heat_percent = %self.max_heat_percent,
+            current_heat_percent = %heat.current_heat_percent,
+            total_exposure = %heat.total_exposure_sol,
+            new_exposure = %new_exposure,
+            new_heat_percent = %new_heat_percent,
+            position_size = %position_size_sol,
+            can_open = result,
+            "[PORTFOLIO_HEAT] Position check: {} ({}% <= {}%)",
+            if result { "PASS" } else { "BLOCK" },
+            new_heat_percent,
+            self.max_heat_percent
+        );
+
+        Ok(result)
     }
 
     /// Get heat breakdown by strategy
@@ -316,7 +343,29 @@ impl PortfolioHeat {
             crate::models::Strategy::Spear => spear_heat,
             _ => Decimal::ZERO,
         };
-        Ok(current_heat + position_size_sol <= allocated_sol)
+        
+        // Diagnostic logging for allocation checks
+        let result = current_heat + position_size_sol <= allocated_sol;
+        tracing::info!(
+            strategy = ?strategy,
+            capital = %capital,
+            max_heat_percent = %self.max_heat_percent,
+            max_heat_sol = %max_heat_sol,
+            allocation_pct = %allocation_pct,
+            allocated_sol = %allocated_sol,
+            shield_heat = %shield_heat,
+            spear_heat = %spear_heat,
+            current_heat = %current_heat,
+            position_size = %position_size_sol,
+            can_open = result,
+            "[PORTFOLIO_HEAT] Strategy allocation check: {} ({} + {} <= {})",
+            if result { "PASS" } else { "BLOCK" },
+            current_heat,
+            position_size_sol,
+            allocated_sol
+        );
+        
+        Ok(result)
     }
 
     /// Returns the 150% heat threshold limit directly in SOL
