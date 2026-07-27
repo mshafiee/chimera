@@ -154,8 +154,59 @@ pub fn get_rpc_backoff_multiplier() -> u64 {
     RPC_BACKOFF_MULTIPLIER.load(Ordering::Relaxed)
 }
 
+/// Disk space critical threshold (percentage free). Below this, pruning becomes aggressive.
+const DISK_SPACE_CRITICAL_THRESHOLD: f64 = 0.05;
+
+/// Check whether a path points at a log file (current, rotated, or compressed).
+fn is_log_file(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.starts_with("operator.log.") || n.ends_with(".log") || n.ends_with(".gz"))
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn check_disk_space_sync(path: &std::path::Path) -> AppResult<f64> {
+    let path_str = path.to_string_lossy().to_string();
+    let output = std::process::Command::new("df")
+        .arg("-k")
+        .arg(&path_str)
+        .output()
+        .map_err(|e| AppError::Internal(format!("df command failed: {}", e)))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .nth(1)
+        .ok_or_else(|| AppError::Internal("df output missing data line".to_string()))?;
+
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 5 {
+        return Err(AppError::Internal(format!(
+            "Unexpected df output: {}",
+            line
+        )));
+    }
+
+    let total: f64 = cols[1].parse().unwrap_or(1.0);
+    let avail: f64 = cols[3].parse().unwrap_or(0.0);
+
+    if total == 0.0 {
+        return Ok(0.0);
+    }
+
+    Ok(avail / total)
+}
+
+#[cfg(not(unix))]
+fn check_disk_space_sync(_path: &std::path::Path) -> AppResult<f64> {
+    Ok(0.5)
+}
+
 /// Prune old log files if disk space is below the warning threshold.
-/// Deletes `.log` files in `log_dir` that are older than `max_age_days`.
+/// Deletes `.log`, rotated (`operator.log.*`) and compressed (`.gz`) files
+/// in `log_dir` older than `max_age_days`. Below the critical threshold,
+/// shortens max_age to 1 day and includes all rotated/compressed logs.
 pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) -> AppResult<()> {
     let free_space = check_disk_space(log_dir).await?;
 
@@ -163,41 +214,73 @@ pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) 
         return Ok(());
     }
 
+    let critical = free_space < DISK_SPACE_CRITICAL_THRESHOLD;
+    let effective_max_age_days = if critical { 1u32 } else { max_age_days };
+    let effective_max_age = std::time::Duration::from_secs(effective_max_age_days as u64 * 86400);
+
     tracing::warn!(
         free_space_pct = free_space * 100.0,
         threshold_pct = DISK_SPACE_WARNING_THRESHOLD * 100.0,
-        max_age_days = max_age_days,
+        critical = critical,
+        max_age_days = effective_max_age_days,
         "Disk space low, pruning old log files"
     );
 
     let log_dir_owned = log_dir.to_path_buf();
     tokio::task::spawn_blocking(move || -> AppResult<()> {
-        let max_age = std::time::Duration::from_secs(max_age_days as u64 * 86400);
         let now = std::time::SystemTime::now();
         let mut pruned = 0u32;
+        let mut bytes_freed: u64 = 0;
 
         let entries = std::fs::read_dir(&log_dir_owned)
             .map_err(|e| AppError::Internal(format!("Failed to read log dir: {}", e)))?;
 
+        let mut candidates: Vec<(std::time::SystemTime, u64, std::path::PathBuf)> = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("log") {
+            if !is_log_file(&path) {
                 continue;
             }
             if let Ok(meta) = entry.metadata() {
                 if let Ok(modified) = meta.modified() {
-                    if let Ok(age) = now.duration_since(modified) {
-                        if age > max_age
-                            && std::fs::remove_file(&path).is_ok() {
-                                pruned += 1;
-                                tracing::debug!(file = ?path, age_days = age.as_secs() / 86400, "Pruned log file");
-                            }
+                    candidates.push((modified, meta.len(), path));
+                }
+            }
+        }
+
+        // Phase 1: age-based pruning
+        for (modified, size, ref path) in &candidates {
+            if let Ok(age) = now.duration_since(*modified) {
+                if age > effective_max_age && std::fs::remove_file(path).is_ok() {
+                    pruned += 1;
+                    bytes_freed += size;
+                    tracing::debug!(file = ?path, age_days = age.as_secs() / 86400, "Pruned log file");
+                }
+            }
+        }
+
+        // Phase 2: size-based capping — delete oldest remaining files until threshold met
+        let remaining_free = check_disk_space_sync(&log_dir_owned).unwrap_or(free_space);
+        if remaining_free < DISK_SPACE_WARNING_THRESHOLD {
+            let mut remaining: Vec<_> = candidates
+                .iter()
+                .filter(|(_, _, path)| std::fs::metadata(path).is_ok())
+                .collect();
+            remaining.sort_by(|a, b| a.0.cmp(&b.0));
+
+            for (_, size, path) in remaining {
+                if std::fs::remove_file(path).is_ok() {
+                    pruned += 1;
+                    bytes_freed += size;
+                    tracing::debug!(file = ?path, "Pruned log file (size-based cap)");
+                    if check_disk_space_sync(&log_dir_owned).unwrap_or(0.0) >= DISK_SPACE_WARNING_THRESHOLD {
+                        break;
                     }
                 }
             }
         }
 
-        tracing::info!(pruned_files = pruned, "Log pruning complete");
+        tracing::info!(pruned_files = pruned, bytes_freed = bytes_freed, "Log pruning complete");
         Ok(())
     })
     .await
@@ -207,6 +290,7 @@ pub async fn prune_logs_if_needed(log_dir: &std::path::Path, max_age_days: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn test_memory_pressure_flag() {
@@ -222,5 +306,22 @@ mod tests {
         RPC_BACKOFF_MULTIPLIER.store(8, Ordering::Relaxed);
         reset_rpc_backoff();
         assert_eq!(RPC_BACKOFF_MULTIPLIER.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn test_is_log_file() {
+        let cases = [
+            (PathBuf::from("operator.log"), true),
+            (PathBuf::from("operator.log.1"), true),
+            (PathBuf::from("operator.log.2.gz"), true),
+            (PathBuf::from("something.gz"), true),
+            (PathBuf::from("other.log"), true),
+            (PathBuf::from("config.yaml"), false),
+            (PathBuf::from("backup.db"), false),
+            (PathBuf::from("README.md"), false),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(is_log_file(&path), expected, "path: {:?}", path);
+        }
     }
 }

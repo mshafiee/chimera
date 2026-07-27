@@ -3,12 +3,18 @@
 use axum::{extract::State, http::StatusCode, Json};
 use chrono::Utc;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::circuit_breaker::{CircuitBreaker, CircuitBreakerState};
 use crate::db_abstraction::Database;
 use crate::engine::EngineHandle;
 use crate::price_cache::PriceCache;
+
+/// Grace window for transient DB failures (seconds).
+/// If the last successful DB check was within this window, a failure is reported
+/// as Degraded rather than Unhealthy.
+const DB_GRACE_WINDOW_SECS: u64 = 60;
 
 /// Health check response
 #[derive(Debug, Serialize)]
@@ -48,7 +54,7 @@ pub struct HealthResponse {
 }
 
 /// Health status enum
-#[derive(Debug, Serialize, Clone, Copy)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
     /// All systems operational
@@ -102,6 +108,9 @@ pub struct AppState {
     /// Run-scoped identity (C1). Optional so health still works if the run
     /// context was not constructed (e.g. tests).
     pub run_context: Option<Arc<crate::engine::RunContext>>,
+    /// Epoch seconds of the last successful DB health probe (for grace window).
+    /// 0 means no success yet; during that state DB failures are always Unhealthy.
+    pub last_db_ok_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Health check handler
@@ -114,7 +123,7 @@ pub async fn health_check(
     let uptime = (now - state.started_at).num_seconds();
 
     // Check database health
-    let db_health = check_database(state.db.as_ref()).await;
+    let db_health = check_database(state.db.as_ref(), &state.last_db_ok_epoch).await;
 
     // Get queue depth from engine
     let queue_depth = state.engine.queue_depth();
@@ -227,18 +236,44 @@ pub async fn health_simple() -> StatusCode {
 }
 
 /// Check database health
-async fn check_database(db: &dyn Database) -> ComponentHealth {
+async fn check_database(db: &dyn Database, last_db_ok: &AtomicU64) -> ComponentHealth {
     match db.get_trade_statistics().await {
-        Ok(_) => ComponentHealth {
-            status: HealthStatus::Healthy,
-            message: None,
-        },
+        Ok(_) => {
+            let now = Utc::now().timestamp() as u64;
+            last_db_ok.store(now, Ordering::Relaxed);
+            ComponentHealth {
+                status: HealthStatus::Healthy,
+                message: None,
+            }
+        }
         Err(e) => {
             tracing::error!(error = %e, "Database health check failed");
+            let now_epoch = Utc::now().timestamp() as u64;
+            let (status, message) = determine_db_grace_status(last_db_ok.load(Ordering::Relaxed), now_epoch);
             ComponentHealth {
-                status: HealthStatus::Unhealthy,
-                message: Some(e.to_string()),
+                status,
+                message: message.or(Some(e.to_string())),
             }
+        }
+    }
+}
+
+/// Determine health status for a DB failure based on the grace window.
+/// Returns (status, optional_grace_message).
+fn determine_db_grace_status(last_db_ok: u64, now_epoch: u64) -> (HealthStatus, Option<String>) {
+    if last_db_ok == 0 {
+        (HealthStatus::Unhealthy, None)
+    } else {
+        if now_epoch.saturating_sub(last_db_ok) < DB_GRACE_WINDOW_SECS {
+            (
+                HealthStatus::Degraded,
+                Some(format!(
+                    "DB transient failure (last ok {}s ago)",
+                    now_epoch.saturating_sub(last_db_ok)
+                )),
+            )
+        } else {
+            (HealthStatus::Unhealthy, None)
         }
     }
 }
@@ -249,4 +284,40 @@ async fn get_last_trade_time(db: &dyn Database) -> Option<String> {
         .await
         .ok()
         .and_then(|trades| trades.first().map(|t| t.created_at.to_rfc3339()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_determine_db_grace_status_cold_start_failure() {
+        let (status, msg) = determine_db_grace_status(0, 1_000_000);
+        assert_eq!(status, HealthStatus::Unhealthy);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_determine_db_grace_status_within_window() {
+        let now = 1_000_000u64;
+        let (status, msg) = determine_db_grace_status(now - 10, now);
+        assert_eq!(status, HealthStatus::Degraded);
+        assert!(msg.unwrap().contains("last ok 10s ago"));
+    }
+
+    #[test]
+    fn test_determine_db_grace_status_after_window() {
+        let now = 1_000_000u64;
+        let (status, msg) = determine_db_grace_status(now - 120, now);
+        assert_eq!(status, HealthStatus::Unhealthy);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_determine_db_grace_status_exact_boundary() {
+        let now = 1_000_000u64;
+        let (status, _msg) = determine_db_grace_status(now, now);
+        let (status2, _msg2) = determine_db_grace_status(now, now);
+        assert_eq!(status, status2);
+    }
 }

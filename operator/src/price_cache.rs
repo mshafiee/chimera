@@ -537,24 +537,42 @@ impl PriceCache {
 
     /// Update prices for a list of tokens
     async fn update_prices(&self, tokens: &[String]) -> Result<(), PriceCacheError> {
-        // Fetch prices from Jupiter API
-        let (prices, decimals_map) = self.fetch_prices_jupiter(tokens).await?;
+        let mut last_err: Option<PriceCacheError> = None;
+        for attempt in 0..3 {
+            match self.fetch_prices_jupiter(tokens).await {
+                Ok((prices, decimals_map)) => {
+                    for (token, price, decimals) in prices {
+                        self.set_price(&token, price, PriceSource::Jupiter, decimals);
+                    }
 
-        for (token, price, decimals) in prices {
-            self.set_price(&token, price, PriceSource::Jupiter, decimals);
-        }
+                    if !decimals_map.is_empty() {
+                        let mut inner = self.inner.write();
+                        for (token, (decimals, _)) in decimals_map {
+                            inner.decimals.insert(token, (decimals, std::time::Instant::now()));
+                        }
+                    }
 
-        // Store decimals in separate cache
-        if !decimals_map.is_empty() {
-            let mut inner = self.inner.write();
-            for (token, (decimals, _)) in decimals_map {
-                inner.decimals.insert(token, (decimals, std::time::Instant::now()));
+                    tracing::trace!(token_count = tokens.len(), "Updated prices");
+                    return Ok(());
+                }
+                Err(e) => {
+                    if matches!(e, PriceCacheError::HttpError(_)) && attempt < 2 {
+                        let delay = [250, 500][attempt];
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            delay_ms = delay,
+                            error = %e,
+                            "Jupiter price fetch failed, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                    } else {
+                        last_err = Some(e);
+                        break;
+                    }
+                }
             }
         }
-
-        tracing::trace!(token_count = tokens.len(), "Updated prices");
-
-        Ok(())
+        Err(last_err.unwrap_or_else(|| PriceCacheError::HttpError("unknown error".into())))
     }
 
     /// Fetch prices from Jupiter Price API.

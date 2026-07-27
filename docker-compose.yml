@@ -143,13 +143,16 @@ services:
     env_file:
       - .env
     depends_on:
-      - prometheus
-      - postgres
-      - redis
+      prometheus:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
       - chimera-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -243,9 +246,12 @@ services:
     env_file:
       - .env
     depends_on:
-      - operator
-      - postgres
-      - redis
+      operator:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks:
         - chimera-network
     # Run scout on a schedule (daily at 2 AM UTC)

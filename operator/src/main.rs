@@ -1874,6 +1874,7 @@ async fn main() -> anyhow::Result<()> {
         price_cache: price_cache.clone(),
         trade_mode: config.trade_mode.to_string().to_lowercase(),
         run_context: Some(run_context.clone()),
+        last_db_ok_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     });
 
     // signal_aggregator was created earlier (before stop_loss_mgr) so it could be wired
