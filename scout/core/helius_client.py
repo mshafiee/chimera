@@ -3037,10 +3037,13 @@ class HeliusClient:
         # but don't appear in fromUserAccount/toUserAccount. We can identify these by SOL flows.
         wallet_owned_accounts = set([wallet_address])
         
+        # Identify wallet-owned accounts through SOL flows
+        # In routing transactions, the wallet may have temporary accounts that receive/send tokens
+        # but don't appear in fromUserAccount/toUserAccount. We can identify these by SOL flows.
+        wallet_owned_accounts = set([wallet_address])
+        
         # 1) Native SOL delta (lamports)
         lamports_delta = 0
-        wallet_owned_accounts = set([wallet_address])  # Initialize with wallet itself
-        
         for t in tx.get("nativeTransfers", []) or []:
             if not isinstance(t, dict):
                 continue
@@ -3065,6 +3068,21 @@ class HeliusClient:
                     wallet_owned_accounts.add(to_acc)  # Account receiving SOL is likely wallet-owned
                 if to_acc == wallet_address or (user_acc == wallet_address and to_acc == wallet_address):
                     wallet_owned_accounts.add(from_acc)  # Account sending SOL is likely wallet-owned
+        
+        # Also expand wallet-owned accounts by checking if they receive tokens from wallet-owned accounts
+        # This handles multi-hop routing: wallet -> accountA -> accountB
+        token_transfers = tx.get("tokenTransfers", []) or []
+        for tr in token_transfers:
+            if not isinstance(tr, dict):
+                continue
+            from_acc = tr.get("fromUserAccount")
+            to_acc = tr.get("toUserAccount")
+            if from_acc in wallet_owned_accounts and to_acc not in wallet_owned_accounts:
+                # If wallet-owned account sends tokens to another account, that account might also be wallet-controlled
+                wallet_owned_accounts.add(to_acc)
+            if to_acc in wallet_owned_accounts and from_acc not in wallet_owned_accounts:
+                # If wallet-owned account receives tokens from another account, that account might also be wallet-controlled
+                wallet_owned_accounts.add(from_acc)
                     
         sol_delta = lamports_delta / 1e9
 

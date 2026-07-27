@@ -3195,6 +3195,70 @@ pub struct DebugBacktestSmokeResponse {
 /// Debug smoke-test: verify the PnL-population fix is live for a wallet.
 ///
 /// POST /api/v1/debug/backtest-smoke
+/// Admin endpoint to clear all monitoring caches
+/// This is useful after parser updates or cache corruption
+pub async fn clear_monitoring_caches(
+    State(state): State<Arc<ApiState>>,
+    axum::Extension(auth): axum::Extension<AuthExtension>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    if !auth.0.role.has_permission(Role::Admin) {
+        return Err(AppError::Forbidden(
+            "Requires admin role".to_string(),
+        ));
+    }
+
+    tracing::info!(user = %auth.0.identifier, "Admin cache clear requested");
+
+    // Clear token metadata cache (including parse results)
+    let cache_size_before = state.token_fetcher.get_metadata_cache().read().len();
+    state.token_fetcher.clear_cache();
+    let cache_size_after = state.token_fetcher.get_metadata_cache().read().len();
+
+    // Clear liquidity cache if available
+    let liquidity_cleared = if let Some(liquidity_cache) = &state.liquidity_cache {
+        let before = liquidity_cache.read().len();
+        liquidity_cache.write().clear();
+        let after = liquidity_cache.read().len();
+        (before, after)
+    } else {
+        (0, 0)
+    };
+
+    // Log the cache clear to config_audit
+    state.db.log_config_change(
+        "monitoring_cache_clear",
+        Some(&format!("metadata_entries:{}", cache_size_before)),
+        "cleared",
+        &auth.0.identifier,
+        Some(&format!("Cleared {} metadata cache entries", cache_size_before)),
+    ).await?;
+
+    tracing::info!(
+        metadata_before = cache_size_before,
+        metadata_after = cache_size_after,
+        liquidity_before = liquidity_cleared.0,
+        liquidity_after = liquidity_cleared.1,
+        "Monitoring caches cleared"
+    );
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Monitoring caches cleared successfully",
+        "cache_stats": {
+            "metadata_cache": {
+                "entries_before": cache_size_before,
+                "entries_after": cache_size_after,
+                "cleared": cache_size_before > 0
+            },
+            "liquidity_cache": {
+                "entries_before": liquidity_cleared.0,
+                "entries_after": liquidity_cleared.1,
+                "cleared": liquidity_cleared.0 > 0
+            }
+        }
+    })))
+}
+
 /// Requires: protected route bearer auth (inherited from `protected_api_routes`).
 pub async fn debug_backtest_smoke(
     State(state): State<Arc<ApiState>>,

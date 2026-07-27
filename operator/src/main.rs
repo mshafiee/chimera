@@ -2242,6 +2242,11 @@ async fn main() -> anyhow::Result<()> {
             "/reconciliation/discrepancies/:id/resolve",
             post(chimera_operator::handlers::resolve_discrepancy),
         )
+        // Admin cache management
+        .route(
+            "/admin/caches/clear",
+            post(chimera_operator::handlers::clear_monitoring_caches),
+        )
         .route("/debug/backtest-smoke", post(debug_backtest_smoke))
         .with_state(api_state.clone())
         .layer(axum_middleware::from_fn_with_state(
