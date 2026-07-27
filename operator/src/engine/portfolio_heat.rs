@@ -293,7 +293,7 @@ impl PortfolioHeat {
                 }
             }
         }
-
+        
         for status in &["PENDING", "QUEUED", "EXECUTING", "RETRY"] {
             let trades = self
                 .db
@@ -302,10 +302,25 @@ impl PortfolioHeat {
                 .map_err(|e| format!("Failed to query strategy heat: {}", e))?;
             for trade in &trades {
                 if trade.side == "BUY" {
-                    match trade.strategy.as_str() {
-                        "SHIELD" => shield_heat += trade.amount_sol,
-                        "SPEAR" => spear_heat += trade.amount_sol,
-                        _ => {}
+                    // FIX: Exclude trades that have been pending for >5 minutes
+                    // to prevent stale queue entries from blocking new trades
+                    let trade_age = chrono::Utc::now() - trade.created_at;
+                    let is_stale = trade_age.num_seconds() > 300; // 5 minutes
+                    
+                    if !is_stale {
+                        match trade.strategy.as_str() {
+                            "SHIELD" => shield_heat += trade.amount_sol,
+                            "SPEAR" => spear_heat += trade.amount_sol,
+                            _ => {}
+                        }
+                    } else {
+                        tracing::warn!(
+                            trade_uuid = %trade.trade_uuid,
+                            strategy = %trade.strategy,
+                            amount = %trade.amount_sol,
+                            age_seconds = trade_age.num_seconds(),
+                            "[PORTFOLIO_HEAT] Excluding stale pending trade from heat calculation"
+                        );
                     }
                 }
             }
