@@ -67,12 +67,17 @@ def clear_scout_caches() -> Dict[str, Any]:
         # Clear Helius caching wrapper (parse cache)
         from core.caching import HeliusCachingWrapper
         helius_cache = HeliusCachingWrapper(os.getenv('HELIUS_API_KEY'))
-        cleared = helius_cache.clear_cache()
-        results['caches_cleared'].append({
-            'cache': 'HeliusCachingWrapper.parse_cache',
-            'status': 'cleared',
-            'entries_cleared': cleared.get('entries_cleared', 'unknown')
-        })
+        if helius_cache.cache is not None:
+            helius_cache.clear_cache()
+            results['caches_cleared'].append({
+                'cache': 'HeliusCachingWrapper.parse_cache',
+                'status': 'cleared'
+            })
+        else:
+            results['caches_cleared'].append({
+                'cache': 'HeliusCachingWrapper.parse_cache',
+                'status': 'no_cache_initialized'
+            })
     except Exception as e:
         results['errors'].append({
             'cache': 'HeliusCachingWrapper',
@@ -98,11 +103,17 @@ def clear_scout_caches() -> Dict[str, Any]:
         # Clear advanced cache
         from core.advanced_cache import AdvancedCache
         adv_cache = AdvancedCache()
-        adv_cache.reset_cache()
-        results['caches_cleared'].append({
-            'cache': 'AdvancedCache',
-            'status': 'cleared'
-        })
+        if hasattr(adv_cache, 'clear'):
+            adv_cache.clear()
+            results['caches_cleared'].append({
+                'cache': 'AdvancedCache',
+                'status': 'cleared'
+            })
+        else:
+            results['caches_cleared'].append({
+                'cache': 'AdvancedCache',
+                'status': 'not_clearable'
+            })
     except Exception as e:
         results['errors'].append({
             'cache': 'AdvancedCache',
@@ -125,7 +136,7 @@ def clear_scout_caches() -> Dict[str, Any]:
         })
     
     try:
-        # Clear feature enrichment cache
+        # Clear feature enrichment cache (imported from scout.core)
         from core.feature_enrichment import FeatureEnricher
         feat_cache = FeatureEnricher()
         feat_cache.clear_cache()
