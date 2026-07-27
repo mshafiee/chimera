@@ -48,6 +48,98 @@ sys.stdout.reconfigure(line_buffering=True)
 sys.path.insert(0, str(Path(__file__).parent))
 
 # ruff: noqa: E402
+
+def clear_scout_caches() -> Dict[str, Any]:
+    """
+    Clear all scout in-memory caches to force re-computation with updated parser logic.
+    Call this after parser improvements to ensure cached stale data doesn't persist.
+    
+    Returns:
+        Dict with cache clearing results and statistics
+    """
+    results = {
+        'timestamp': datetime.utcnow().isoformat(),
+        'caches_cleared': [],
+        'errors': []
+    }
+    
+    try:
+        # Clear Helius caching wrapper (parse cache)
+        from core.caching import HeliusCachingWrapper
+        helius_cache = HeliusCachingWrapper(os.getenv('HELIUS_API_KEY'))
+        cleared = helius_cache.clear_cache()
+        results['caches_cleared'].append({
+            'cache': 'HeliusCachingWrapper.parse_cache',
+            'status': 'cleared',
+            'entries_cleared': cleared.get('entries_cleared', 'unknown')
+        })
+    except Exception as e:
+        results['errors'].append({
+            'cache': 'HeliusCachingWrapper',
+            'error': str(e)
+        })
+    
+    try:
+        # Clear activity cache
+        from core.activity_cache import ActivityBasedCache
+        activity_cache = ActivityBasedCache()
+        activity_cache.clear()
+        results['caches_cleared'].append({
+            'cache': 'ActivityBasedCache',
+            'status': 'cleared'
+        })
+    except Exception as e:
+        results['errors'].append({
+            'cache': 'ActivityBasedCache',
+            'error': str(e)
+        })
+    
+    try:
+        # Clear advanced cache
+        from core.advanced_cache import AdvancedCache
+        adv_cache = AdvancedCache()
+        adv_cache.reset_cache()
+        results['caches_cleared'].append({
+            'cache': 'AdvancedCache',
+            'status': 'cleared'
+        })
+    except Exception as e:
+        results['errors'].append({
+            'cache': 'AdvancedCache',
+            'error': str(e)
+        })
+    
+    try:
+        # Clear liquidity cache
+        from core.liquidity import LiquidityProvider
+        liq_cache = LiquidityProvider(os.getenv('HELIUS_API_KEY'))
+        liq_cache.clear_cache()
+        results['caches_cleared'].append({
+            'cache': 'LiquidityProvider',
+            'status': 'cleared'
+        })
+    except Exception as e:
+        results['errors'].append({
+            'cache': 'LiquidityProvider',
+            'error': str(e)
+        })
+    
+    try:
+        # Clear feature enrichment cache
+        from core.feature_enrichment import FeatureEnricher
+        feat_cache = FeatureEnricher()
+        feat_cache.clear_cache()
+        results['caches_cleared'].append({
+            'cache': 'FeatureEnricher',
+            'status': 'cleared'
+        })
+    except Exception as e:
+        results['errors'].append({
+            'cache': 'FeatureEnricher',
+            'error': str(e)
+        })
+    
+    return results
 from core.utils import utcnow
 
 from core.roster_writer_db import WalletRecord, write_wallets_to_db, get_wallets_by_status, update_wallet_status
@@ -444,6 +536,13 @@ Examples:
         type=float,
         default=0.0001,
         help="Jito tip per trade in SOL (default: 0.0001)"
+    )
+    
+    # Cache management
+    parser.add_argument(
+        "--clear-cache",
+        action="store_true",
+        help="Clear all scout caches and exit (useful after parser improvements)"
     )
     
     parser.add_argument(
@@ -1651,6 +1750,23 @@ async def main_async():
     setup_logging()
 
     args = parse_args()
+    
+    # Handle cache clearing command
+    if args.clear_cache:
+        print("[Scout] Clearing all in-memory caches...")
+        results = clear_scout_caches()
+        
+        print(f"✓ Cache clearing completed at {results['timestamp']}")
+        print(f"✓ Cleared {len(results['caches_cleared'])} cache types:")
+        for cache_result in results['caches_cleared']:
+            print(f"  - {cache_result['cache']}: {cache_result['status']}")
+        
+        if results['errors']:
+            print(f"⚠ {len(results['errors'])} errors occurred:")
+            for error in results['errors']:
+                print(f"  - {error['cache']}: {error['error']}")
+        
+        return 0
     
     print("=" * 70)
     print("Chimera Scout - Wallet Intelligence Layer")
