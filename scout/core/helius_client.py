@@ -3062,9 +3062,12 @@ class HeliusClient:
             to_acc = tr.get("toUserAccount")
             user_acc = tr.get("userAccount")
 
-            if from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address):
+            wallet_involved_from = from_acc == wallet_address or (user_acc == wallet_address)
+            wallet_involved_to = to_acc == wallet_address or (user_acc == wallet_address)
+            
+            if wallet_involved_from:
                 token_deltas[mint] -= amt_ui
-            if to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address):
+            if wallet_involved_to:
                 token_deltas[mint] += amt_ui
 
         # Include wSOL delta in SOL delta if present
@@ -3130,13 +3133,15 @@ class HeliusClient:
             from_acc = tr.get("fromUserAccount")
             to_acc = tr.get("toUserAccount")
             user_acc = tr.get("userAccount")
-            user_acc = tr.get("userAccount")
             
             # Check all account fields for wallet involvement
             # Wallet may be in userAccount instead of from/to fields
-            if from_acc == wallet_address or (user_acc == wallet_address and from_acc == wallet_address):
+            wallet_involved_from = from_acc == wallet_address or (user_acc == wallet_address)
+            wallet_involved_to = to_acc == wallet_address or (user_acc == wallet_address)
+            
+            if wallet_involved_from:
                 token_deltas_for_primary[mint] = token_deltas_for_primary.get(mint, 0.0) - amt_ui
-            if to_acc == wallet_address or (user_acc == wallet_address and to_acc == wallet_address):
+            if wallet_involved_to:
                 token_deltas_for_primary[mint] = token_deltas_for_primary.get(mint, 0.0) + amt_ui
         primary_delta = 0.0
         
@@ -3160,9 +3165,9 @@ class HeliusClient:
                     to_acc = tr.get("toUserAccount")
                     user_acc = tr.get("userAccount")
                     
-                    if (from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address)):
+                    if wallet_involved_from:
                         primary_delta = -primary_amount
-                    elif (to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address)):
+                    elif wallet_involved_to:
                         primary_delta = primary_amount
                     break
         
@@ -3189,9 +3194,12 @@ class HeliusClient:
                             to_acc = tr.get("toUserAccount")
                             user_acc = tr.get("userAccount")
                             
-                            if (from_acc == wallet_address or (user_acc == wallet_address and tr.get("fromUserAccount") == wallet_address)):
+                            wallet_involved_from = from_acc == wallet_address or (user_acc == wallet_address)
+                            wallet_involved_to = to_acc == wallet_address or (user_acc == wallet_address)
+                            
+                            if wallet_involved_from:
                                 primary_delta = -primary_amount
-                            elif (to_acc == wallet_address or (user_acc == wallet_address and tr.get("toUserAccount") == wallet_address)):
+                            elif wallet_involved_to:
                                 primary_delta = primary_amount
                             break
                 

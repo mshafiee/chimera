@@ -1238,10 +1238,7 @@ impl Executor {
     pub async fn check_jito_health(&self) -> Result<JitoHealth, ExecutorError> {
         let start = std::time::Instant::now();
 
-        // Check if Jito client is configured
-        let jito_client = self.jito_searcher.as_ref().ok_or_else(|| {
-            ExecutorError::TransactionFailed("Jito Searcher client not configured".to_string())
-        })?;
+        let jito_client = self.jito_searcher.as_ref().ok_or(ExecutorError::JitoDisabled)?;
 
         // Attempt a lightweight GET request to the Jito endpoint
         // This checks connectivity without submitting a bundle
@@ -1257,11 +1254,16 @@ impl Executor {
         let latency = start.elapsed().as_millis() as u64;
 
         // Calculate resolution success rate from atomic counters
-        let state = self.mutable.lock();
-        let total_submissions = state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed);
-        let successful_resolutions = state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed);
-        let _failed_resolutions = state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed);
-        drop(state);
+        let total_submissions;
+        let successful_resolutions;
+        let previous_health;
+        {
+            let state = self.mutable.lock();
+            total_submissions = state.jito_submissions.load(std::sync::atomic::Ordering::Relaxed);
+            successful_resolutions = state.jito_resolutions_success.load(std::sync::atomic::Ordering::Relaxed);
+            let _failed_resolutions = state.jito_resolutions_failed.load(std::sync::atomic::Ordering::Relaxed);
+            previous_health = state.jito_health.clone();
+        }
 
         let resolution_success_rate = if total_submissions > 0 {
             successful_resolutions as f64 / total_submissions as f64
@@ -1308,8 +1310,10 @@ impl Executor {
         };
 
         // Update cached health
-        let previous_health = self.mutable.lock().jito_health.clone();
-        self.mutable.lock().jito_health = Some(health.clone());
+        {
+            let mut state = self.mutable.lock();
+            state.jito_health = Some(health.clone());
+        }
 
         // Update Prometheus metrics
         self.update_jito_health_metrics(&health);
@@ -2730,6 +2734,7 @@ impl Executor {
             | ExecutorError::InsufficientBalance { .. }
             | ExecutorError::TransactionTooLarge { .. }
             | ExecutorError::SpearDisabled
+            | ExecutorError::JitoDisabled
             | ExecutorError::CircuitBreakerTripped(_)
             | ExecutorError::MarketConditionsUnfavorable(_)
             | ExecutorError::ExecutionCostTooHigh { .. } => {
@@ -3545,6 +3550,10 @@ pub enum ExecutorError {
     /// Spear strategy disabled in fallback mode
     #[error("Spear strategy is disabled in fallback RPC mode")]
     SpearDisabled,
+
+    /// Jito Searcher client not configured
+    #[error("Jito Searcher client not configured")]
+    JitoDisabled,
 
     #[error("Blockhash expired, retry required")]
     BlockhashExpired,

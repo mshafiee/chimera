@@ -700,11 +700,7 @@ class LiquidityProvider:
                 INSERT INTO historical_liquidity
                 (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
                 VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (token_address, timestamp) DO UPDATE SET
-                    liquidity_usd = EXCLUDED.liquidity_usd,
-                    price_usd = EXCLUDED.price_usd,
-                    volume_24h_usd = EXCLUDED.volume_24h_usd,
-                    source = EXCLUDED.source
+                ON CONFLICT (token_address, timestamp) DO NOTHING
                 """,
                 (
                     liquidity_data.token_address,
@@ -768,11 +764,7 @@ class LiquidityProvider:
                         INSERT INTO historical_liquidity
                         (token_address, liquidity_usd, price_usd, volume_24h_usd, timestamp, source)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (token_address, timestamp) DO UPDATE SET
-                            liquidity_usd = EXCLUDED.liquidity_usd,
-                            price_usd = EXCLUDED.price_usd,
-                            volume_24h_usd = EXCLUDED.volume_24h_usd,
-                            source = EXCLUDED.source
+                        ON CONFLICT (token_address, timestamp) DO NOTHING
                         """,
                         (
                             liquidity_data.token_address,

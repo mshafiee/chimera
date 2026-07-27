@@ -542,6 +542,35 @@ impl Engine {
             });
         }
 
+        // Spawn Jito health check task
+        let executor_clone = self.executor.clone();
+        let jito_health_token = self.shutdown_token.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = jito_health_token.cancelled() => {
+                        tracing::info!("Shutting down Jito health check task");
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        let executor = executor_clone.read().await;
+                        match executor.check_jito_health().await {
+                            Ok(_) => {
+                                tracing::debug!("Jito health check completed");
+                            }
+                            Err(crate::engine::executor::ExecutorError::JitoDisabled) => {
+                                tracing::debug!("Jito client not configured, skipping health check");
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Jito health check failed");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         // Use engine's shutdown token for external cancellation triggering
         let cancel_token = self.shutdown_token.clone();
 
