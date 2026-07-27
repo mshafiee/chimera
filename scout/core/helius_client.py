@@ -3032,6 +3032,11 @@ class HeliusClient:
             "CWGsHHN7LCLfgL8rBFaJMXzyYrRoP7yRgx15fLaTnUuW",  # BUSD (deprecated but still in circulation)
         }
 
+        # Identify wallet-owned accounts through SOL flows
+        # In routing transactions, the wallet may have temporary accounts that receive/send tokens
+        # but don't appear in fromUserAccount/toUserAccount. We can identify these by SOL flows.
+        wallet_owned_accounts = set([wallet_address])
+        
         # 1) Native SOL delta (lamports)
         lamports_delta = 0
         for t in tx.get("nativeTransfers", []) or []:
@@ -3046,6 +3051,19 @@ class HeliusClient:
                 lamports_delta -= amt_i
             if t.get("toUserAccount") == wallet_address:
                 lamports_delta += amt_i
+            
+            # Also identify wallet-owned accounts from significant SOL flows
+            amount = float(amt)
+            from_acc = t.get("fromUserAccount")
+            to_acc = t.get("toUserAccount")
+            user_acc = t.get("userAccount")
+            
+            if amount > 1e-6:  # Only significant SOL transfers
+                if from_acc == wallet_address or (user_acc == wallet_address and from_acc == wallet_address):
+                    wallet_owned_accounts.add(to_acc)  # Account receiving SOL is likely wallet-owned
+                if to_acc == wallet_address or (user_acc == wallet_address and to_acc == wallet_address):
+                    wallet_owned_accounts.add(from_acc)  # Account sending SOL is likely wallet-owned
+                    
         sol_delta = lamports_delta / 1e9
 
         # 2) Token deltas (UI units) by mint
@@ -3062,8 +3080,13 @@ class HeliusClient:
             to_acc = tr.get("toUserAccount")
             user_acc = tr.get("userAccount")
 
-            wallet_involved_from = from_acc == wallet_address or (user_acc == wallet_address)
-            wallet_involved_to = to_acc == wallet_address or (user_acc == wallet_address)
+            # Check wallet involvement: direct wallet OR userAccount field OR wallet-owned accounts
+            wallet_involved_from = (from_acc == wallet_address or 
+                                     (user_acc == wallet_address) or 
+                                     from_acc in wallet_owned_accounts)
+            wallet_involved_to = (to_acc == wallet_address or 
+                                   (user_acc == wallet_address) or 
+                                   to_acc in wallet_owned_accounts)
             
             if wallet_involved_from:
                 token_deltas[mint] -= amt_ui
