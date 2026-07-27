@@ -2397,11 +2397,6 @@ async def main_async():
     # so that cron can alert. Configurable via SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT.
     # Runs AFTER the database write so low parse rate does not block wallet
     # promotion to the operator.
-    if analyzer.is_parse_rate_below_threshold():
-        exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
-        print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
-        sys.exit(2)
-
     # Print optimization report if enabled
     if optimizer and OPTIMIZATION_AVAILABLE and ScoutConfig.get_optimization_enabled():
         try:
@@ -2511,6 +2506,7 @@ async def main_async():
             print(f"[Scout] WARNING: High-conviction report generation failed: {e}")
 
     # Clean up resources
+    exit_code = 0
     try:
         if analyzer and hasattr(analyzer, 'shutdown'):
             await analyzer.shutdown()
@@ -2531,6 +2527,17 @@ async def main_async():
             except Exception:
                 pass  # Non-critical
     except Exception as e:
+        print(f"[Scout] WARNING: Error during cleanup: {e}")
+    
+    # Check parse rate after cleanup to avoid skipping resource cleanup
+    if analyzer and hasattr(analyzer, 'is_parse_rate_below_threshold'):
+        if analyzer.is_parse_rate_below_threshold():
+            exit_pct = float(os.getenv("SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT", "40"))
+            print(f"[Scout] ⚠ Overall parse rate < {exit_pct:.0f}% — exiting non-zero for cron alert")
+            exit_code = 2
+    
+    return exit_code
+    except Exception as e:
         if args.verbose:
             print(f"[Scout] Warning during cleanup: {e}")
 
@@ -2540,8 +2547,9 @@ async def main_async():
 
 def main():
     """Main entry point for the Scout (sync wrapper for async main)."""
+    exit_code = 0
     try:
-        asyncio.run(main_async())
+        exit_code = asyncio.run(main_async())
     except KeyboardInterrupt:
         print("\n[Scout] Interrupted by user")
         sys.exit(1)
@@ -2550,6 +2558,8 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    else:
+        sys.exit(exit_code if exit_code > 0 else 0)
 
 
 if __name__ == "__main__":
