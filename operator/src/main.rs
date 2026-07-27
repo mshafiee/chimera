@@ -340,6 +340,10 @@ async fn main() -> anyhow::Result<()> {
         min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
         min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
         min_token_age_hours: config.token_safety.min_token_age_hours,
+        min_wqs_score: std::env::var("CHIMERA_SELECTION__MIN_WQS_SCORE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(70.0),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

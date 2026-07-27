@@ -78,6 +78,10 @@ pub struct SelectionConfig {
     /// Minimum token age in hours. Tokens younger than this are rejected.
     /// Unknown age (API failure): rejected for SPEAR, warned-and-allowed for SHIELD.
     pub min_token_age_hours: f64,
+    /// Minimum WQS score for a wallet to be eligible for copying.
+    /// Wallets below this are rejected entirely. Configurable via env var
+    /// CHIMERA_SELECTION__MIN_WQS_SCORE (default: 70.0).
+    pub min_wqs_score: f64,
 }
 
 impl SelectionConfig {
@@ -96,6 +100,7 @@ impl SelectionConfig {
         hasher.update(self.min_liquidity_shield_usd.to_string().as_bytes());
         hasher.update(self.min_liquidity_spear_usd.to_string().as_bytes());
         hasher.update(self.min_token_age_hours.to_le_bytes());
+        hasher.update(self.min_wqs_score.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -495,13 +500,14 @@ impl SelectionService {
             .unwrap_or(Decimal::from_f64_retain(0.5).unwrap_or(Decimal::ZERO));
 
         // ── 2. Hard WQS gate + strategy assignment ──────────────────────────
-        // <70 → drop entirely; ≥80 → SHIELD; 70–79 → SPEAR.
-        if wallet_wqs < 70.0 {
+        // Configurable minimum WQS; ≥80 → SHIELD; min..80 → SPEAR.
+        let min_wqs = self.config.min_wqs_score;
+        if wallet_wqs < min_wqs {
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "WQS_TOO_LOW",
-                format!("Wallet WQS {:.1} below minimum 70.0", wallet_wqs),
+                format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs),
             );
         }
         let strategy = if wallet_wqs >= 80.0 {

@@ -136,6 +136,8 @@ services:
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-jup_7e095c7e729dadb3070b15417faaeed98464afde972184fdd93e0b24247fc857}
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
+       # Minimum WQS for signal admission (lowered for paper trading to expand wallet pool)
+       - CHIMERA_SELECTION__MIN_WQS_SCORE=60.0
        # Paper trading mode
        - CHIMERA_TRADE_MODE=paper
     env_file:
