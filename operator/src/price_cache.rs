@@ -572,6 +572,20 @@ impl PriceCache {
                         );
                         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                     } else {
+                        // On final HTTP failure, try lite-api fallback before giving up
+                        if matches!(e, PriceCacheError::HttpError(_)) {
+                            tracing::warn!(error = %e, "Primary Jupiter API exhausted, trying lite-api fallback");
+                            let lite_url = "https://lite-api.jup.ag/price";
+                            match self.fetch_prices_jupiter(tokens, Some(lite_url)).await {
+                                Ok((fallback_prices, fallback_decimals_map)) => {
+                                    tracing::info!("Lite-api fallback returned {} prices after HTTP error", fallback_prices.len());
+                                    return self.apply_price_updates(fallback_prices, fallback_decimals_map);
+                                }
+                                Err(fallback_err) => {
+                                    tracing::warn!(error = %fallback_err, "Lite-api fallback also failed");
+                                }
+                            }
+                        }
                         last_err = Some(e);
                         break;
                     }
@@ -619,7 +633,7 @@ impl PriceCache {
         // Build URL with comma-separated token addresses
         let token_list = tokens.join(",");
         let url = format!(
-            "{}/v3?ids={}&vsToken=SOL",
+            "{}/v3?ids={}",
             url_override.unwrap_or(self.jupiter_price_api_url.trim_end_matches('/')),
             token_list
         );
@@ -706,8 +720,8 @@ impl PriceCache {
             tracing::error!(
                 token_count = tokens.len(),
                 url = %url,
-                "Jupiter price API returned 0 prices for {} requested tokens — \
-                 check API key and endpoint configuration. Try 'vsCurrency=USD' if vsToken=SOL doesn't work.",
+                 "Jupiter price API returned 0 prices for {} requested tokens — \
+                  check API key and endpoint configuration. The token may have unreliable pricing and was omitted.",
                 tokens.len()
             );
         }
