@@ -371,6 +371,18 @@ impl Database for PostgresBackend {
     // ========================================================================
 
     async fn insert_position(&self, position: &InsertPosition) -> AppResult<i64> {
+        // Guard against fake seed positions — reject positions with placeholder signatures
+        if position.entry_tx_signature == "seed-position-init"
+            || position.entry_tx_signature == "SEED_POSITION_INIT"
+            || position.entry_tx_signature.starts_with("seed-position")
+            || position.entry_tx_signature.starts_with("SEED_POSITION")
+        {
+            return Err(AppError::Validation(format!(
+                "Position has placeholder entry_tx_signature '{}'. Seed positions are not allowed in production.",
+                position.entry_tx_signature
+            )));
+        }
+
         let result = sqlx::query(
             r#"
             INSERT INTO positions (

@@ -10,6 +10,8 @@ use crate::monitoring::helius::{
 use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -1327,20 +1329,12 @@ impl WebhookLifecycleManager {
 }
 
 /// Validate Solana address format
+///
+/// Uses the Solana SDK's `Pubkey::from_str()` for robust validation,
+/// which checks Base58 encoding and verifies the address is 32 bytes.
+/// This is more reliable than manual character set/length checks.
 pub fn is_valid_solana_address(address: &str) -> bool {
-    // Basic Solana address validation (Base58, 32-44 characters)
-    address.len() >= 32
-        && address.len() <= 44
-        && address.chars().all(|c| {
-            c.is_alphanumeric()
-                || [
-                    '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F', 'G',
-                    'H', 'J', 'K', 'L', 'M', 'N', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y',
-                    'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'm', 'n', 'o', 'p',
-                    'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
-                ]
-                .contains(&c)
-        })
+    Pubkey::from_str(address).is_ok()
 }
 
 #[cfg(test)]

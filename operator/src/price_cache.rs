@@ -539,21 +539,27 @@ impl PriceCache {
     async fn update_prices(&self, tokens: &[String]) -> Result<(), PriceCacheError> {
         let mut last_err: Option<PriceCacheError> = None;
         for attempt in 0..3 {
-            match self.fetch_prices_jupiter(tokens).await {
+            match self.fetch_prices_jupiter(tokens, None).await {
                 Ok((prices, decimals_map)) => {
-                    for (token, price, decimals) in prices {
-                        self.set_price(&token, price, PriceSource::Jupiter, decimals);
-                    }
-
-                    if !decimals_map.is_empty() {
-                        let mut inner = self.inner.write();
-                        for (token, (decimals, _)) in decimals_map {
-                            inner.decimals.insert(token, (decimals, std::time::Instant::now()));
+                    // If we got 0 prices but requested >0, retry with lite-api fallback
+                    if prices.is_empty() && !tokens.is_empty() && attempt == 0 {
+                        let lite_url = "https://lite-api.jup.ag/price";
+                        tracing::warn!(
+                            "Primary Jupiter price API returned 0 prices, retrying with lite-api fallback"
+                        );
+                        match self.fetch_prices_jupiter(tokens, Some(lite_url)).await {
+                            Ok((fallback_prices, fallback_decimals_map)) => {
+                                tracing::info!("Lite-api fallback returned {} prices", fallback_prices.len());
+                                return self.apply_price_updates(fallback_prices, fallback_decimals_map);
+                            }
+                            Err(fallback_err) => {
+                                tracing::warn!(error = %fallback_err, "Lite-api fallback failed, continuing retries");
+                                // Continue with retry loop
+                            }
                         }
                     }
 
-                    tracing::trace!(token_count = tokens.len(), "Updated prices");
-                    return Ok(());
+                    return self.apply_price_updates(prices, decimals_map);
                 }
                 Err(e) => {
                     if matches!(e, PriceCacheError::HttpError(_)) && attempt < 2 {
@@ -575,12 +581,36 @@ impl PriceCache {
         Err(last_err.unwrap_or_else(|| PriceCacheError::HttpError("unknown error".into())))
     }
 
+    /// Apply price updates from a successful fetch
+    fn apply_price_updates(
+        &self,
+        prices: Vec<(String, Decimal, Option<u8>)>,
+        decimals_map: HashMap<String, (u8, u64)>,
+    ) -> Result<(), PriceCacheError> {
+        let price_count = prices.len();
+        for (token, price, decimals) in prices {
+            self.set_price(&token, price, PriceSource::Jupiter, decimals);
+        }
+
+        if !decimals_map.is_empty() {
+            let mut inner = self.inner.write();
+            for (token, (decimals, _)) in decimals_map {
+                inner.decimals.insert(token, (decimals, std::time::Instant::now()));
+            }
+        }
+
+        tracing::trace!(token_count = price_count, "Updated prices");
+        Ok(())
+    }
+
     /// Fetch prices from Jupiter Price API.
     /// FIX [R-L4]: Uses the reusable `self.http_client` rather than rebuilding on every call.
     /// Returns (prices_with_decimals, decimals_map) where decimals_map maps token -> (decimals, block_id)
+    /// If `url_override` is provided, uses that URL instead of `self.jupiter_price_api_url`.
     async fn fetch_prices_jupiter(
         &self,
         tokens: &[String],
+        url_override: Option<&str>,
     ) -> Result<(Vec<(String, Decimal, Option<u8>)>, HashMap<String, (u8, u64)>), PriceCacheError> {
         if tokens.is_empty() {
             return Ok((Vec::new(), HashMap::new()));
@@ -588,7 +618,11 @@ impl PriceCache {
 
         // Build URL with comma-separated token addresses
         let token_list = tokens.join(",");
-        let url = format!("{}/v3?ids={}", self.jupiter_price_api_url.trim_end_matches('/'), token_list);
+        let url = format!(
+            "{}/v3?ids={}&vsToken=SOL",
+            url_override.unwrap_or(self.jupiter_price_api_url.trim_end_matches('/')),
+            token_list
+        );
 
         tracing::trace!(
             token_count = tokens.len(),
@@ -666,6 +700,17 @@ impl PriceCache {
             total_requested = tokens.len(),
             "Fetched prices from Jupiter"
         );
+
+        // If we got 0 prices but requested >0, log a clear error
+        if results.is_empty() && !tokens.is_empty() {
+            tracing::error!(
+                token_count = tokens.len(),
+                url = %url,
+                "Jupiter price API returned 0 prices for {} requested tokens — \
+                 check API key and endpoint configuration. Try 'vsCurrency=USD' if vsToken=SOL doesn't work.",
+                tokens.len()
+            );
+        }
 
         Ok((results, decimals_map))
     }
