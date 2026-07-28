@@ -286,6 +286,8 @@ pub struct WalletMonitoring {
     pub registration_attempts: i32,
     pub last_registration_error: Option<String>,
     pub last_updated_url: Option<String>,
+    pub last_speculative_signal_at: Option<String>,
+    pub inactivity_demotion_count: i32,
 }
 
 /// Webhook monitoring record for comprehensive tracking

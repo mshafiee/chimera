@@ -89,7 +89,6 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
                 archetype = EXCLUDED.archetype,
                 avg_entry_delay_seconds = EXCLUDED.avg_entry_delay_seconds,
                 updated_at = CURRENT_TIMESTAMP
-            WHERE wallets.address = EXCLUDED.address
         """
 
         params = (
@@ -117,6 +116,20 @@ def write_wallet_to_db(wallet: WalletRecord) -> bool:
 
         execute_update(query, params)
         logger.debug(f"Wrote wallet {wallet.address} to database")
+        
+        # Reset inactivity demotion count when wallet is promoted to ACTIVE
+        if wallet.status == "ACTIVE":
+            try:
+                reset_query = """
+                    UPDATE wallet_monitoring
+                    SET inactivity_demotion_count = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE wallet_address = %s
+                """
+                execute_update(reset_query, (wallet.address,))
+                logger.debug(f"Reset inactivity_demotion_count for promoted wallet {wallet.address}")
+            except Exception as e:
+                logger.warning(f"Failed to reset inactivity_demotion_count for {wallet.address}: {e}")
+        
         return True
 
     except Exception as e:

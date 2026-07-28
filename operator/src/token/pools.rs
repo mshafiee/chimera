@@ -11,6 +11,19 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
 
+/// Known DEX program IDs for holder concentration filtering (Phase 2)
+/// Accounts owned by these programs are excluded from holder concentration checks.
+pub const KNOWN_DEX_PROGRAM_IDS: &[&str] = &[
+    // Raydium AMM v4
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8",
+    // Orca Whirlpool
+    "whirLbUiic3C5yQJgR7Cm4U6gfH4Bi9sK1S9ZDm5pq9",
+    // Meteora DLMM
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+    // Pump.fun bonding curve (already covered by PUMPFUN rejection but included for completeness)
+    "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P",
+];
+
 /// Pool liquidity data
 #[derive(Debug, Clone)]
 pub struct PoolLiquidity {

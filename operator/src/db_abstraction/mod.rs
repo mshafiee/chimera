@@ -455,6 +455,18 @@ pub trait Database: Send + Sync {
         webhook_status: &str,
     ) -> AppResult<()>;
 
+    /// Update last speculative signal timestamp for a wallet
+    async fn update_last_speculative_signal(&self, wallet_address: &str, timestamp: chrono::DateTime<chrono::Utc>) -> AppResult<()>;
+
+    /// Get inactivity demotion count for a wallet
+    async fn get_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<i32>;
+
+    /// Increment inactivity demotion count for a wallet
+    async fn increment_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<()>;
+
+    /// Reset inactivity demotion count for a wallet
+    async fn reset_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<()>;
+
     /// Log webhook lifecycle event with comprehensive tracking
     #[allow(clippy::too_many_arguments)]
     async fn log_webhook_lifecycle_event(

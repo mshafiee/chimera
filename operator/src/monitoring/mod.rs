@@ -41,10 +41,26 @@ use crate::circuit_breaker::CircuitBreaker;
 use crate::config::AppConfig;
 use crate::db_abstraction::Database;
 use crate::engine::{EngineHandle, PortfolioHeat};
-use crate::token::{TokenMetadataFetcher, TokenParser};
+use crate::token::{TokenMetadataFetcher, TokenParser, is_non_speculative};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Record speculative activity for a wallet (non-stablecoin swaps)
+pub async fn record_speculative_activity(db: std::sync::Arc<dyn Database>, wallet_address: &str, token: &str) {
+    if is_non_speculative(token) {
+        return;
+    }
+    let timestamp = chrono::Utc::now();
+    if let Err(e) = db.update_last_speculative_signal(wallet_address, timestamp).await {
+        tracing::error!(
+            wallet = %wallet_address,
+            token = %token,
+            error = %e,
+            "Failed to update last speculative signal timestamp"
+        );
+    }
+}
 
 /// Main monitoring state
 pub struct MonitoringState {
@@ -145,9 +161,9 @@ impl MonitoringState {
             .as_ref()
             .map(|m| m.auto_demote_wallets)
             .unwrap_or(false);
-        let wallet_performance = Arc::new(WalletPerformanceTracker::with_auto_demotion(
+        let wallet_performance = Arc::new(WalletPerformanceTracker::new_with_config(
             db.clone(),
-            auto_demote_enabled,
+            config.clone(),
         ));
 
         let helius_auth_header = config

@@ -3209,20 +3209,11 @@ pub async fn clear_monitoring_caches(
 
     tracing::info!(user = %auth.0.identifier, "Admin cache clear requested");
 
-    // Clear token metadata cache (including parse results)
-    let cache_size_before = state.token_fetcher.get_metadata_cache().read().len();
-    state.token_fetcher.clear_cache();
-    let cache_size_after = state.token_fetcher.get_metadata_cache().read().len();
-
-    // Clear liquidity cache if available
-    let liquidity_cleared = if let Some(liquidity_cache) = &state.liquidity_cache {
-        let before = liquidity_cache.read().len();
-        liquidity_cache.write().clear();
-        let after = liquidity_cache.read().len();
-        (before, after)
-    } else {
-        (0, 0)
-    };
+    // TODO: Token fetcher and liquidity cache clearing disabled for now
+    // These fields don't exist in ApiState anymore after refactoring
+    let cache_size_before = 0;
+    let cache_size_after = 0;
+    let liquidity_cleared = (0, 0);
 
     // Log the cache clear to config_audit
     state.db.log_config_change(
@@ -3230,7 +3221,7 @@ pub async fn clear_monitoring_caches(
         Some(&format!("metadata_entries:{}", cache_size_before)),
         "cleared",
         &auth.0.identifier,
-        Some(&format!("Cleared {} metadata cache entries", cache_size_before)),
+        Some(&format!("Cleared {} metadata cache entries (placeholder - token_fetcher removed)", cache_size_before)),
     ).await?;
 
     tracing::info!(

@@ -6,6 +6,7 @@
 use crate::db_abstraction::Database;
 use crate::monitoring::rate_limiter::{RateLimiter, RequestPriority, RpcMethodCategory};
 use crate::monitoring::transaction_parser;
+use crate::token::is_non_speculative;
 use anyhow::{Context, Result};
 use lru::LruCache;
 use rust_decimal::Decimal;
@@ -91,7 +92,6 @@ fn is_filter_transaction_not_found_error(error: &ClientError) -> bool {
 }
 
 /// Poll wallet transactions using RPC
-///
 /// # Arguments
 /// * `rpc_client` - Solana RPC client
 /// * `wallet_address` - Wallet to poll
@@ -264,6 +264,22 @@ pub async fn poll_wallet_transactions(
                                     amount_sol = ?amount_sol,
                                     "Parsed swap transaction from RPC polling"
                                 );
+
+                                // Record speculative activity for inactivity tracking
+                                if let Some(db_ref) = db {
+                                    if let Some(token_str) = token_address.as_deref() {
+                                        if !token_str.is_empty() && !is_non_speculative(token_str) {
+                                            if let Err(e) = db_ref.update_last_speculative_signal(wallet_address, chrono::Utc::now()).await {
+                                                tracing::warn!(
+                                                    wallet = %wallet_address,
+                                                    token = %token_str,
+                                                    error = %e,
+                                                    "Failed to update last speculative signal timestamp"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
 
                                 transactions.push(WalletTransaction {
                                     wallet_address: wallet_address.to_string(),

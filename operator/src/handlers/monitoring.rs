@@ -189,6 +189,10 @@ pub async fn helius_webhook_handler(
                     tracked_from_db = tracked_wallet.is_some(),
                     "Parsed swap from webhook"
                 );
+                
+                // Record speculative activity for inactivity tracking
+                crate::monitoring::record_speculative_activity(state.db.clone(), &wallet_address, &swap.token_out).await;
+                
                 // Check if wallet exists in database
                 let wallet_opt = state.db.get_wallet(&wallet_address).await;
 

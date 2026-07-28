@@ -617,6 +617,8 @@ async fn main() -> anyhow::Result<()> {
         min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
         min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
         honeypot_detection_enabled: config.token_safety.honeypot_detection_enabled,
+        holder_concentration_check_enabled: config.token_safety.holder_concentration_check_enabled,
+        max_holder_concentration_pct: config.token_safety.max_holder_concentration_pct,
     };
     let token_parser = Arc::new(TokenParser::new(
         token_safety_config,
@@ -642,7 +644,7 @@ async fn main() -> anyhow::Result<()> {
 
     // B3: Wallet performance tracker + toxic flow detector
     let wallet_performance_tracker = Arc::new(
-        chimera_operator::monitoring::WalletPerformanceTracker::new(db_pool.clone()),
+        chimera_operator::monitoring::WalletPerformanceTracker::new_with_config(db_pool.clone(), Arc::new(config.clone())),
     );
     let toxic_flow_detector = Arc::new(
         chimera_operator::experiment::ToxicFlowDetector::new(config.experiment.clone()),

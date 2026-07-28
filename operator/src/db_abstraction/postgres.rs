@@ -2525,6 +2525,71 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
+    async fn update_last_speculative_signal(
+        &self,
+        wallet_address: &str,
+        timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET last_speculative_signal_at = $1,
+                updated_at = NOW()
+            WHERE wallet_address = $2
+            "#,
+        )
+        .bind(timestamp)
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn get_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<i32> {
+        let count = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(inactivity_demotion_count, 0)
+            FROM wallet_monitoring
+            WHERE wallet_address = $1
+            "#,
+        )
+        .bind(wallet_address)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+        Ok(count)
+    }
+
+    async fn increment_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET inactivity_demotion_count = COALESCE(inactivity_demotion_count, 0) + 1,
+                updated_at = NOW()
+            WHERE wallet_address = $1
+            "#,
+        )
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn reset_inactivity_demotion_count(&self, wallet_address: &str) -> AppResult<()> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET inactivity_demotion_count = 0,
+                updated_at = NOW()
+            WHERE wallet_address = $1
+            "#,
+        )
+        .bind(wallet_address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn log_webhook_lifecycle_event(
         &self,
@@ -4359,6 +4424,12 @@ impl PostgresBackend {
             registration_attempts: row.try_get("registration_attempts").unwrap_or(0),
             last_registration_error: row.try_get("last_registration_error").ok(),
             last_updated_url: row.try_get("last_updated_url").ok(),
+            last_speculative_signal_at: row
+                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_speculative_signal_at")
+                .ok()
+                .flatten()
+                .map(|dt| dt.to_rfc3339()),
+            inactivity_demotion_count: row.try_get("inactivity_demotion_count").unwrap_or(0),
         })
     }
 

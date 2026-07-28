@@ -6,6 +6,7 @@
 //! - Average return per trade
 //! - Exit timing accuracy
 
+use crate::config::{AppConfig, InactivityRotationConfig};
 use crate::db_abstraction::Database;
 use rust_decimal::prelude::*;
 use std::sync::Arc;
@@ -18,6 +19,8 @@ pub struct WalletPerformanceTracker {
     metrics_cache: Arc<RwLock<std::collections::HashMap<String, WalletCopyMetrics>>>,
     /// Whether auto-demotion is enabled
     auto_demote_enabled: bool,
+    /// Configuration
+    config: Arc<AppConfig>,
 }
 
 /// Wallet copy trading metrics
@@ -42,6 +45,16 @@ impl WalletPerformanceTracker {
             db,
             metrics_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             auto_demote_enabled: false,
+            config: Arc::new(AppConfig::default()),
+        }
+    }
+
+    pub fn new_with_config(db: Arc<dyn Database>, config: Arc<AppConfig>) -> Self {
+        Self {
+            db,
+            metrics_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            auto_demote_enabled: false,
+            config,
         }
     }
 
@@ -51,6 +64,7 @@ impl WalletPerformanceTracker {
             db,
             metrics_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             auto_demote_enabled: enabled,
+            config: Arc::new(AppConfig::default()),
         }
     }
 
@@ -265,11 +279,81 @@ impl WalletPerformanceTracker {
                         );
                     }
                 }
-            } else if self.should_demote(wallet_address).await {
-                tracing::debug!(
-                    wallet_address = %wallet_address,
-                    "Wallet should be demoted but auto-demotion is disabled"
-                );
+            } else {
+                // Phase 1: Inactivity-based rotation (separate from auto_demote_enabled)
+                if let Some(monitoring_config) = &self.config.monitoring {
+                    if monitoring_config.inactivity_rotation_enabled {
+                        if self.should_demote(wallet_address).await {
+                            // Determine target status and reason
+                            let demotion_count = self.db.get_inactivity_demotion_count(wallet_address).await.unwrap_or(0);
+                            let max_cycles = monitoring_config.inactivity_rotation
+                                .as_ref()
+                                .map(|cfg| cfg.max_oscillation_cycles)
+                                .unwrap_or(3);
+                            
+                            let (target_status, reason) = if demotion_count >= max_cycles as i32 {
+                                (
+                                    "REJECTED",
+                                    format!("Inactivity demotion: wallet inactive for tiered threshold, oscillation limit ({}) reached", max_cycles)
+                                )
+                            } else {
+                                (
+                                    "CANDIDATE",
+                                    format!("Inactivity demotion: wallet inactive for tiered threshold (demotion #{}/{})", demotion_count + 1, max_cycles)
+                                )
+                            };
+
+                            tracing::warn!(
+                                wallet_address = %wallet_address,
+                                target = %target_status,
+                                reason = %reason,
+                                "Auto-demoting wallet due to inactivity"
+                            );
+
+                            // Increment demotion count
+                            let _ = self.db.increment_inactivity_demotion_count(wallet_address).await;
+
+                            // Update wallet status
+                            match self
+                                .db
+                                .update_wallet_status_ext(
+                                    wallet_address,
+                                    target_status,
+                                    None,
+                                    Some(&reason),
+                                )
+                                .await
+                            {
+                                Ok(true) => {
+                                    tracing::info!(
+                                        wallet_address = %wallet_address,
+                                        from = "ACTIVE",
+                                        to = %target_status,
+                                        "Wallet auto-demoted due to inactivity"
+                                    );
+                                }
+                                Ok(false) => {
+                                    tracing::warn!(
+                                        wallet_address = %wallet_address,
+                                        "Wallet inactivity demotion attempted but wallet not found or already demoted"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        wallet_address = %wallet_address,
+                                        error = %e,
+                                        "Failed to auto-demote wallet due to inactivity"
+                                    );
+                                }
+                            }
+                        } else {
+                            tracing::debug!(
+                                wallet_address = %wallet_address,
+                                "Wallet passed inactivity check"
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -287,30 +371,72 @@ impl WalletPerformanceTracker {
     /// The 7-day timer starts when performance first breaches the threshold and is stored in
     /// `breach_started_at`; it is NOT reset on every trade close (that was the old bug).
     pub async fn should_demote(&self, wallet_address: &str) -> bool {
-        // Get wallet from database to compare copy vs original performance
-        if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
-            if let Some(metrics) = self.get_metrics(wallet_address).await {
-                // Get original wallet ROI (from Scout analysis)
-                let original_roi_7d = wallet.roi_7d.unwrap_or(rust_decimal::Decimal::ZERO);
+        // Phase 1: Inactivity-based rotation
+        if let Some(monitoring_config) = &self.config.monitoring {
+            if monitoring_config.inactivity_rotation_enabled {
+                if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
+                    if let Ok(Some(wm)) = self.db.get_wallet_monitoring(wallet_address).await {
+                        if let Some(rotation_config) = &monitoring_config.inactivity_rotation {
+                            // Determine tiered threshold based on WQS
+                            let wqs = wallet.wqs_score.unwrap_or(Decimal::ZERO);
+                            let wqs_f64 = wqs.to_f64().unwrap_or(0.0);
+                            let threshold_secs = if wqs_f64 >= rotation_config.high_conviction_wqs_threshold {
+                                rotation_config.high_conviction_threshold_secs
+                            } else if wqs_f64 >= rotation_config.regular_conviction_wqs_threshold {
+                                rotation_config.regular_conviction_threshold_secs
+                            } else {
+                                rotation_config.low_conviction_threshold_secs
+                            };
 
-                // Calculate expected copy PnL (simplified: assume same ROI)
-                // In reality, we'd need to track original wallet's actual PnL
-                let expected_copy_pnl = original_roi_7d
-                    * rust_decimal::Decimal::from_f64_retain(0.01)
-                        .unwrap_or(rust_decimal::Decimal::ZERO); // Rough estimate
+                            // Get last activity timestamp
+                            let last_activity = if let Some(ref last_spec_str) = wm.last_speculative_signal_at {
+                                chrono::DateTime::parse_from_rfc3339(last_spec_str)
+                                    .ok()
+                                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                            } else {
+                                // Fallback to promoted_at if never had speculative signal
+                                wallet.promoted_at
+                            };
 
-                // If copy PnL is significantly worse than expected (less than 70% of expected)
-                let threshold =
-                    expected_copy_pnl * Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
-                if metrics.copy_pnl_7d < threshold {
-                    // Use breach_started_at to measure how long performance has been poor.
-                    // This timer is set on the first breach and only reset on recovery, so
-                    // it accurately reflects continuous underperformance rather than resetting
-                    // on every trade close (which was the previous bug).
-                    return metrics
-                        .breach_started_at
-                        .map(|t| t.elapsed().as_secs() >= 7 * 24 * 3600)
-                        .unwrap_or(false);
+                            if let Some(last_activity_dt) = last_activity {
+                                let elapsed = chrono::Utc::now().signed_duration_since(last_activity_dt);
+                                if elapsed.num_seconds() >= threshold_secs as i64 {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Existing copy-PnL demotion logic
+        if self.auto_demote_enabled {
+            // Get wallet from database to compare copy vs original performance
+            if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
+                if let Some(metrics) = self.get_metrics(wallet_address).await {
+                    // Get original wallet ROI (from Scout analysis)
+                    let original_roi_7d = wallet.roi_7d.unwrap_or(rust_decimal::Decimal::ZERO);
+
+                    // Calculate expected copy PnL (simplified: assume same ROI)
+                    // In reality, we'd need to track original wallet's actual PnL
+                    let expected_copy_pnl = original_roi_7d
+                        * rust_decimal::Decimal::from_f64_retain(0.01)
+                            .unwrap_or(rust_decimal::Decimal::ZERO); // Rough estimate
+
+                    // If copy PnL is significantly worse than expected (less than 70% of expected)
+                    let threshold =
+                        expected_copy_pnl * Decimal::from_str("0.7").unwrap_or(Decimal::ZERO);
+                    if metrics.copy_pnl_7d < threshold {
+                        // Use breach_started_at to measure how long performance has been poor.
+                        // This timer is set on the first breach and only reset on recovery, so
+                        // it accurately reflects continuous underperformance rather than resetting
+                        // on every trade close (which was the previous bug).
+                        return metrics
+                            .breach_started_at
+                            .map(|t| t.elapsed().as_secs() >= 7 * 24 * 3600)
+                            .unwrap_or(false);
+                    }
                 }
             }
         }

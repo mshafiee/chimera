@@ -802,6 +802,12 @@ pub struct TokenSafetyConfig {
     /// Example: "redis://127.0.0.1:6379"
     #[serde(default)]
     pub redis_url: Option<String>,
+    /// Enable holder-concentration rug check (LP-aware top-10).
+    #[serde(default = "default_false")]
+    pub holder_concentration_check_enabled: bool,
+    /// Max top-10 non-DEX holder concentration (% of supply) before rejection.
+    #[serde(default = "default_max_holder_concentration_pct")]
+    pub max_holder_concentration_pct: f64,
 }
 
 fn default_allow_unlisted_heuristic() -> bool {
@@ -859,6 +865,10 @@ pub fn default_token_cache_ttl() -> i64 {
     86400 // 24 hours (immutable token metadata)
 }
 
+fn default_max_holder_concentration_pct() -> f64 {
+    25.0
+}
+
 impl Default for TokenSafetyConfig {
     fn default() -> Self {
         Self {
@@ -876,6 +886,8 @@ impl Default for TokenSafetyConfig {
             liquidity_update_interval_secs: default_liquidity_update_interval(),
             cache_backend: default_cache_backend(),
             redis_url: None,
+            holder_concentration_check_enabled: default_false(),
+            max_holder_concentration_pct: default_max_holder_concentration_pct(),
         }
     }
 }
@@ -1059,6 +1071,66 @@ fn default_regular_conviction_threshold() -> i32 {
     60
 }
 
+/// Inactivity rotation configuration for wallet demotion
+#[derive(Debug, Clone, Deserialize)]
+pub struct InactivityRotationConfig {
+    /// Inactivity threshold for high conviction wallets (WQS > 80) in seconds
+    #[serde(default = "default_inactivity_high_conviction_threshold")]
+    pub high_conviction_threshold_secs: u64,
+    /// Inactivity threshold for regular conviction wallets (WQS 60-80) in seconds
+    #[serde(default = "default_inactivity_regular_conviction_threshold")]
+    pub regular_conviction_threshold_secs: u64,
+    /// Inactivity threshold for low conviction wallets (WQS < 60) in seconds
+    #[serde(default = "default_inactivity_low_conviction_threshold")]
+    pub low_conviction_threshold_secs: u64,
+    /// WQS threshold for high conviction
+    #[serde(default = "default_inactivity_high_conviction_wqs_threshold")]
+    pub high_conviction_wqs_threshold: f64,
+    /// WQS threshold for regular conviction
+    #[serde(default = "default_inactivity_regular_conviction_wqs_threshold")]
+    pub regular_conviction_wqs_threshold: f64,
+    /// Maximum oscillation cycles before escalating to REJECTED
+    #[serde(default = "default_inactivity_max_oscillation_cycles")]
+    pub max_oscillation_cycles: u32,
+}
+
+impl Default for InactivityRotationConfig {
+    fn default() -> Self {
+        Self {
+            high_conviction_threshold_secs: default_inactivity_high_conviction_threshold(),
+            regular_conviction_threshold_secs: default_inactivity_regular_conviction_threshold(),
+            low_conviction_threshold_secs: default_inactivity_low_conviction_threshold(),
+            high_conviction_wqs_threshold: default_inactivity_high_conviction_wqs_threshold(),
+            regular_conviction_wqs_threshold: default_inactivity_regular_conviction_wqs_threshold(),
+            max_oscillation_cycles: default_inactivity_max_oscillation_cycles(),
+        }
+    }
+}
+
+fn default_inactivity_high_conviction_threshold() -> u64 {
+    259200
+}
+
+fn default_inactivity_regular_conviction_threshold() -> u64 {
+    172800
+}
+
+fn default_inactivity_low_conviction_threshold() -> u64 {
+    86400
+}
+
+fn default_inactivity_high_conviction_wqs_threshold() -> f64 {
+    80.0
+}
+
+fn default_inactivity_regular_conviction_wqs_threshold() -> f64 {
+    60.0
+}
+
+fn default_inactivity_max_oscillation_cycles() -> u32 {
+    3
+}
+
 /// Monitoring configuration
 #[derive(Debug, Clone, Deserialize)]
 pub struct MonitoringConfig {
@@ -1108,6 +1180,12 @@ pub struct MonitoringConfig {
     /// Enable automatic wallet demotion based on copy performance
     #[serde(default = "default_auto_demote_wallets")]
     pub auto_demote_wallets: bool,
+    /// Enable inactivity-based wallet demotion (rotates dormant/stablecoin-only ACTIVE wallets).
+    #[serde(default = "default_false")]
+    pub inactivity_rotation_enabled: bool,
+    /// Tiered inactivity thresholds + oscillation limit.
+    #[serde(default)]
+    pub inactivity_rotation: Option<InactivityRotationConfig>,
     /// Webhook lifecycle management configuration
     #[serde(default)]
     pub webhook_lifecycle: Option<WebhookLifecycleConfig>,
@@ -1295,6 +1373,8 @@ impl Default for MonitoringConfig {
             exit_detection_delay_secs: default_exit_detection_delay(),
             max_active_wallets: default_max_active_wallets(),
             auto_demote_wallets: default_auto_demote_wallets(),
+            inactivity_rotation_enabled: default_false(),
+            inactivity_rotation: None,
             webhook_lifecycle: None,
             use_websocket: false,
             helius_websocket_url: None,

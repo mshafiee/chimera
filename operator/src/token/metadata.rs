@@ -81,7 +81,7 @@ pub struct TokenMetadata {
 /// Fetches token metadata from Solana RPC
 pub struct TokenMetadataFetcher {
     /// RPC client
-    rpc_client: Arc<RpcClient>,
+    pub rpc_client: Arc<RpcClient>,
     /// Metadata cache (separate from safety result cache) - shared with HeliusClient
     metadata_cache: Arc<RwLock<HashMap<String, TokenMetadata>>>,
     /// FIX 12: Tracks when each token was last fetched for TTL-based cache eviction
@@ -137,6 +137,11 @@ impl TokenMetadataFetcher {
     /// Get a shared reference to the metadata cache for use with other components
     pub fn get_metadata_cache(&self) -> Arc<RwLock<HashMap<String, TokenMetadata>>> {
         Arc::clone(&self.metadata_cache)
+    }
+
+    /// Get a shared reference to the RPC client
+    pub fn get_rpc_client(&self) -> Arc<RpcClient> {
+        Arc::clone(&self.rpc_client)
     }
 
     /// Set the price cache for decimals lookup

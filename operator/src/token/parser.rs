@@ -102,6 +102,10 @@ pub struct TokenSafetyConfig {
     pub min_liquidity_spear_usd: Decimal,
     /// Whether to enable honeypot detection
     pub honeypot_detection_enabled: bool,
+    /// Whether to enable holder concentration check
+    pub holder_concentration_check_enabled: bool,
+    /// Max top-10 non-DEX holder concentration (% of supply)
+    pub max_holder_concentration_pct: f64,
 }
 
 impl Default for TokenSafetyConfig {
@@ -127,6 +131,8 @@ impl Default for TokenSafetyConfig {
                 Decimal::from(6000)
             }), // 20% buffer over 5k
             honeypot_detection_enabled: true,
+            holder_concentration_check_enabled: false,
+            max_holder_concentration_pct: 25.0,
         }
     }
 }
@@ -274,6 +280,15 @@ impl TokenParser {
             }
         }
 
+        // Phase 2: Holder concentration check
+        if self.config.holder_concentration_check_enabled {
+            if let Err(e) = self.check_holder_concentration(token_address, &metadata.supply).await {
+                let result = TokenSafetyResult::unsafe_with_reason(e.to_string());
+                self.cache.insert(cache_key, result.clone());
+                return Ok(result);
+            }
+        }
+
         // Fast path passed
         let result = TokenSafetyResult::safe();
         self.cache.insert(cache_key, result.clone());
@@ -285,6 +300,122 @@ impl TokenParser {
         );
 
         Ok(result)
+    }
+
+    /// Check holder concentration - Phase 2
+    async fn check_holder_concentration(
+        &self,
+        token_address: &str,
+        supply: &u64,
+    ) -> AppResult<()> {
+        use crate::token::pools::KNOWN_DEX_PROGRAM_IDS;
+        use solana_sdk::pubkey::Pubkey;
+        use std::str::FromStr;
+
+        let supply = *supply;
+        if supply == 0 {
+            tracing::warn!(
+                token = token_address,
+                "Token supply is zero, skipping holder concentration check"
+            );
+            return Ok(());
+        }
+
+        let rpc_client = std::sync::Arc::clone(&self.fetcher.get_rpc_client());
+
+        // Step 1: Get top-20 token accounts
+        let token_pubkey = Pubkey::from_str(token_address).map_err(|_| {
+            AppError::InvalidTokenAddress(format!("Invalid token address: {}", token_address))
+        })?;
+        let largest_accounts = match rpc_client.get_token_largest_accounts(&token_pubkey) {
+            Ok(accounts) => accounts,
+            Err(e) => {
+                tracing::warn!(
+                    token = token_address,
+                    error = %e,
+                    "Failed to get token largest accounts, skipping holder check (fail-open)"
+                );
+                return Ok(());
+            }
+        };
+
+        if largest_accounts.len() < 10 {
+            tracing::warn!(
+                token = token_address,
+                "Not enough token accounts found, skipping holder check (fail-open)"
+            );
+            return Ok(());
+        }
+
+        // Step 2: Batch get account owners
+        let account_pubkeys: Vec<Pubkey> = largest_accounts
+            .iter()
+            .filter_map(|account| {
+                if let Ok(pubkey) = account.address.parse::<Pubkey>() {
+                    Some(pubkey)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if account_pubkeys.is_empty() {
+            return Ok(());
+        }
+
+        let accounts = match rpc_client.get_multiple_accounts(&account_pubkeys) {
+            Ok(accounts) => accounts,
+            Err(e) => {
+                tracing::warn!(
+                    token = token_address,
+                    error = %e,
+                    "Failed to get account owners, skipping holder check (fail-open)"
+                );
+                return Ok(());
+            }
+        };
+
+        // Step 3: Filter out DEX-owned accounts and calculate concentration
+        let mut top_10_non_dex_amount = 0u64;
+        let mut non_dex_count = 0;
+        let dex_programs: std::collections::HashSet<String> =
+            KNOWN_DEX_PROGRAM_IDS.iter().map(|s| s.to_string()).collect();
+
+        for (i, account_opt) in accounts.iter().take(10).enumerate() {
+            if let Some(account) = account_opt {
+                let owner = account.owner.to_string();
+                if !dex_programs.contains(&owner) {
+                    if let Some(ref token_account) = largest_accounts.get(i) {
+                        if let Ok(amount) = token_account.amount.ui_amount_string.parse::<u64>() {
+                            top_10_non_dex_amount += amount;
+                            non_dex_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if non_dex_count == 0 {
+            return Ok(());
+        }
+
+        // Step 4: Calculate concentration percentage
+        let concentration_pct = (top_10_non_dex_amount as f64 / supply as f64) * 100.0;
+        let max_pct = self.config.max_holder_concentration_pct;
+
+        if concentration_pct > max_pct {
+            return Err(AppError::Http(format!(
+                "HOLDER_CONCENTRATION: Top-10 non-DEX holders hold {:.2}% of supply (max allowed: {:.2}%)",
+                concentration_pct, max_pct
+            )));
+        }
+
+        tracing::debug!(
+            token = token_address,
+            concentration = concentration_pct,
+            "Holder concentration check passed"
+        );
+        Ok(())
     }
 
     /// Get token decimals from on-chain metadata.
