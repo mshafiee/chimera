@@ -769,6 +769,14 @@ pub struct TokenSafetyConfig {
     /// Minimum liquidity for Spear strategy (USD)
     #[serde(default = "default_min_liquidity_spear")]
     pub min_liquidity_spear_usd: Decimal,
+    /// Minimum liquidity for graduated pump.fun tokens (USD).
+    /// Higher than normal tokens because pump.fun tokens are inherently riskier.
+    #[serde(default = "default_min_liquidity_pumpfun")]
+    pub min_liquidity_pumpfun_usd: Decimal,
+    /// When true, pump.fun tokens with sufficient DEX liquidity are allowed.
+    /// When false, all pump.fun tokens are blanket-rejected (legacy behavior).
+    #[serde(default = "default_allow_graduated_pumpfun")]
+    pub allow_graduated_pumpfun: bool,
     /// Enable honeypot detection
     #[serde(default = "default_honeypot_detection")]
     pub honeypot_detection_enabled: bool,
@@ -853,6 +861,14 @@ fn default_min_liquidity_spear() -> Decimal {
     dec!(5000.0)
 }
 
+fn default_min_liquidity_pumpfun() -> Decimal {
+    dec!(25000.0)
+}
+
+fn default_allow_graduated_pumpfun() -> bool {
+    true
+}
+
 fn default_honeypot_detection() -> bool {
     true
 }
@@ -876,6 +892,8 @@ impl Default for TokenSafetyConfig {
             mint_authority_whitelist: default_authority_whitelist(),
             min_liquidity_shield_usd: default_min_liquidity_shield(),
             min_liquidity_spear_usd: default_min_liquidity_spear(),
+            min_liquidity_pumpfun_usd: default_min_liquidity_pumpfun(),
+            allow_graduated_pumpfun: default_allow_graduated_pumpfun(),
             honeypot_detection_enabled: default_honeypot_detection(),
             cache_capacity: default_token_cache_capacity(),
             cache_ttl_seconds: default_token_cache_ttl(),
@@ -2388,6 +2406,13 @@ mod tests {
         assert_eq!(default_port(), 8080);
         assert_eq!(default_max_timestamp_drift(), 60);
         assert_eq!(default_queue_capacity(), 1000);
+    }
+
+    #[test]
+    fn test_pumpfun_config_defaults() {
+        let defaults = TokenSafetyConfig::default();
+        assert_eq!(defaults.min_liquidity_pumpfun_usd, dec!(25000.0));
+        assert!(defaults.allow_graduated_pumpfun);
     }
 
     #[test]

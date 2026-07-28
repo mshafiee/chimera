@@ -340,6 +340,8 @@ async fn main() -> anyhow::Result<()> {
         spear_percent: config.strategy.spear_percent,
         min_liquidity_shield_usd: config.token_safety.min_liquidity_shield_usd,
         min_liquidity_spear_usd: config.token_safety.min_liquidity_spear_usd,
+        min_liquidity_pumpfun_usd: config.token_safety.min_liquidity_pumpfun_usd,
+        allow_graduated_pumpfun: config.token_safety.allow_graduated_pumpfun,
         min_token_age_hours: config.token_safety.min_token_age_hours,
         min_wqs_score: std::env::var("CHIMERA_SELECTION__MIN_WQS_SCORE")
             .ok()

@@ -75,6 +75,10 @@ pub struct SelectionConfig {
     pub spear_percent: u32,
     pub min_liquidity_shield_usd: Decimal,
     pub min_liquidity_spear_usd: Decimal,
+    /// Minimum liquidity for graduated pump.fun tokens (USD).
+    pub min_liquidity_pumpfun_usd: Decimal,
+    /// When true, pump.fun tokens with sufficient DEX liquidity are allowed.
+    pub allow_graduated_pumpfun: bool,
     /// Minimum token age in hours. Tokens younger than this are rejected.
     /// Unknown age (API failure): rejected for SPEAR, warned-and-allowed for SHIELD.
     pub min_token_age_hours: f64,
@@ -99,6 +103,8 @@ impl SelectionConfig {
         hasher.update(self.spear_percent.to_le_bytes());
         hasher.update(self.min_liquidity_shield_usd.to_string().as_bytes());
         hasher.update(self.min_liquidity_spear_usd.to_string().as_bytes());
+        hasher.update(self.min_liquidity_pumpfun_usd.to_string().as_bytes());
+        hasher.update(u8::from(self.allow_graduated_pumpfun).to_le_bytes());
         hasher.update(self.min_token_age_hours.to_le_bytes());
         hasher.update(self.min_wqs_score.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
@@ -525,12 +531,13 @@ impl SelectionService {
                 "Stablecoin/WSOL — no profit potential".to_string(),
             );
         }
-        if is_pumpfun_token(&req.token_address) {
+        let is_pumpfun = is_pumpfun_token(&req.token_address);
+        if is_pumpfun && !self.config.allow_graduated_pumpfun {
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "PUMPFUN_BONDING_CURVE",
-                "pump.fun bonding-curve token — no DEX exit liquidity".to_string(),
+                "pump.fun token — graduated-pumpfun disabled in config".to_string(),
             );
         }
 
@@ -625,21 +632,34 @@ impl SelectionService {
             },
         };
 
-        let min_liquidity = match strategy {
-            Strategy::Shield => self.config.min_liquidity_shield_usd,
-            Strategy::Spear => self.config.min_liquidity_spear_usd,
-            Strategy::Exit => Decimal::ZERO,
+        let min_liquidity = if is_pumpfun {
+            self.config.min_liquidity_pumpfun_usd
+        } else {
+            match strategy {
+                Strategy::Shield => self.config.min_liquidity_shield_usd,
+                Strategy::Spear => self.config.min_liquidity_spear_usd,
+                Strategy::Exit => Decimal::ZERO,
+            }
         };
         if !SignalQuality::passes_liquidity_floor(liquidity_usd, min_liquidity) {
-            return BuyDecision::rejected(
-                req,
-                &self.config_hash,
-                "LIQUIDITY_BELOW_MINIMUM",
-                format!(
-                    "Liquidity ${} below strategy minimum ${}",
-                    liquidity_usd, min_liquidity
-                ),
-            );
+            let (code, reason) = if is_pumpfun {
+                (
+                    "PUMPFUN_INSUFFICIENT_LIQUIDITY",
+                    format!(
+                        "pump.fun token liquidity ${} below graduated threshold ${}",
+                        liquidity_usd, min_liquidity
+                    ),
+                )
+            } else {
+                (
+                    "LIQUIDITY_BELOW_MINIMUM",
+                    format!(
+                        "Liquidity ${} below strategy minimum ${}",
+                        liquidity_usd, min_liquidity
+                    ),
+                )
+            };
+            return BuyDecision::rejected(req, &self.config_hash, code, reason);
         }
 
         // ── 6b. 24h volume via DexScreener (B3, fail-open) ─────────────────
@@ -847,5 +867,45 @@ impl SelectionService {
         .await
         .map_err(crate::error::AppError::Database)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    #[test]
+    fn selection_config_hash_changes_with_pumpfun_fields() {
+        let mut config1 = SelectionConfig {
+            total_capital_sol: Decimal::from(10),
+            max_position_sol: Decimal::from(5),
+            shield_signal_quality_threshold: 0.55,
+            spear_signal_quality_threshold: 0.30,
+            shield_percent: 60,
+            spear_percent: 40,
+            min_liquidity_shield_usd: Decimal::from(10000),
+            min_liquidity_spear_usd: Decimal::from(5000),
+            min_liquidity_pumpfun_usd: Decimal::from(25000),
+            allow_graduated_pumpfun: true,
+            min_token_age_hours: 1.0,
+            min_wqs_score: 70.0,
+        };
+
+        let mut config2 = config1.clone();
+        assert_eq!(config1.hash(), config2.hash(), "identical configs should hash identically");
+
+        config2.allow_graduated_pumpfun = false;
+        assert_ne!(
+            config1.hash(), config2.hash(),
+            "changing allow_graduated_pumpfun should change hash"
+        );
+
+        config2 = config1.clone();
+        config2.min_liquidity_pumpfun_usd = Decimal::from(50000);
+        assert_ne!(
+            config1.hash(), config2.hash(),
+            "changing min_liquidity_pumpfun_usd should change hash"
+        );
     }
 }
