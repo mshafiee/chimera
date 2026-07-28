@@ -2119,7 +2119,7 @@ async fn main() -> anyhow::Result<()> {
     // Build public read-only API routes (no auth required for dashboard)
     let public_api_routes = Router::new()
         .route("/positions", get(list_positions))
-        .route("/positions/{trade_uuid}", get(get_position))
+        .route("/positions/:trade_uuid", get(get_position))
         .route("/trades", get(list_trades))
         .route("/trades/export", get(export_trades))
         .route("/metrics/strategy", get(get_strategy_performance))
@@ -2158,7 +2158,7 @@ async fn main() -> anyhow::Result<()> {
             get(chimera_operator::handlers::get_position_size_analysis),
         )
         .route("/incidents/dead-letter", get(list_dead_letter_queue))
-        .route("/incidents/dead-letter/{trade_uuid}/retry", post(retry_dead_letter_item))
+        .route("/incidents/dead-letter/:trade_uuid/retry", post(retry_dead_letter_item))
         .route("/incidents/config-audit", get(list_config_audit))
         .route(
             "/signals/consensus",
@@ -2214,7 +2214,7 @@ async fn main() -> anyhow::Result<()> {
     let protected_api_routes = Router::new()
         .route("/config", get(get_config))
         .route("/wallets", get(list_wallets))
-        .route("/wallets/{address}", get(get_wallet).put(update_wallet))
+        .route("/wallets/:address", get(get_wallet).put(update_wallet))
         .route("/config", put(update_config))
         .route("/config/circuit-breaker/reset", post(reset_circuit_breaker))
         .route("/config/circuit-breaker/trip", post(trip_circuit_breaker))
@@ -2629,11 +2629,11 @@ async fn main() -> anyhow::Result<()> {
             // Enable/disable wallet monitoring require operator role
             let monitoring_protected = Router::new()
                 .route(
-                    "/monitoring/wallets/{wallet_address}/enable",
+                    "/monitoring/wallets/:wallet_address/enable",
                     post(enable_wallet_monitoring),
                 )
                 .route(
-                    "/monitoring/wallets/{wallet_address}/disable",
+                    "/monitoring/wallets/:wallet_address/disable",
                     post(disable_wallet_monitoring),
                 )
                 // Webhook lifecycle management routes (require operator role)
