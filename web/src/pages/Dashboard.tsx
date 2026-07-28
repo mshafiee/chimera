@@ -185,8 +185,8 @@ export function Dashboard() {
                 {metricsLoading
                   ? '...'
                   : performanceMetrics && performanceMetrics.pnl_24h != null
-                  ? `${Number(performanceMetrics.pnl_24h) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_24h, 2)}`
-                  : '$0.00'}
+                  ? `${Number(performanceMetrics.pnl_24h) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_24h, 4)} SOL`
+                  : '0.00 SOL'}
               </div>
               {performanceMetrics?.pnl_24h_change_percent != null && (
                 <div className={`text-xs mt-1 ${
@@ -315,8 +315,8 @@ export function Dashboard() {
                 metricsLoading
                   ? '...'
                   : performanceMetrics && performanceMetrics.pnl_24h != null
-                  ? `${Number(performanceMetrics.pnl_24h) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_24h, 2)}`
-                  : '$0.00'
+                  ? `${Number(performanceMetrics.pnl_24h) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_24h, 4)} SOL`
+                  : '0.00 SOL'
               }
               change={
                 performanceMetrics?.pnl_24h_change_percent !== undefined && performanceMetrics.pnl_24h_change_percent !== null
@@ -331,8 +331,8 @@ export function Dashboard() {
                 metricsLoading
                   ? '...'
                   : performanceMetrics && performanceMetrics.pnl_7d != null
-                  ? `${Number(performanceMetrics.pnl_7d) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_7d, 2)}`
-                  : '$0.00'
+                  ? `${Number(performanceMetrics.pnl_7d) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_7d, 4)} SOL`
+                  : '0.00 SOL'
               }
               change={
                 performanceMetrics?.pnl_7d_change_percent !== undefined && performanceMetrics.pnl_7d_change_percent !== null
@@ -347,8 +347,8 @@ export function Dashboard() {
                 metricsLoading
                   ? '...'
                   : performanceMetrics && performanceMetrics.pnl_30d != null
-                  ? `${Number(performanceMetrics.pnl_30d) >= 0 ? '+' : ''}$${safeToFixed(performanceMetrics.pnl_30d, 2)}`
-                  : '$0.00'
+                  ? `${Number(performanceMetrics.pnl_30d) >= 0 ? '+' : ''}${safeToFixed(performanceMetrics.pnl_30d, 4)} SOL`
+                  : '0.00 SOL'
               }
               change={
                 performanceMetrics?.pnl_30d_change_percent !== undefined && performanceMetrics.pnl_30d_change_percent !== null
