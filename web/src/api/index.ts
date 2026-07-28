@@ -48,7 +48,6 @@ export {
   useResourceUsage,
   useSecretRotation,
   useRateLimitStatus,
-  useSystemLogs,
   useHealthCheckDetails,
 } from './operations'
 export {
@@ -122,7 +121,6 @@ export type {
   ResourceUsageResponse,
   SecretRotationResponse,
   RateLimitStatusResponse,
-  SystemLogsResponse,
   HealthCheckDetailsResponse,
 } from './operations'
 export type {

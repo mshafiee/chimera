@@ -168,7 +168,7 @@ export function useResolveDiscrepancy() {
 
   return useMutation({
     mutationFn: async ({ id, resolution }: { id: number; resolution: string }) => {
-      const response = await apiClient.post(`/api/v1/reconciliation/discrepancies/${id}/resolve`, { resolution })
+      const response = await apiClient.post(`/reconciliation/discrepancies/${id}/resolve`, { resolution })
       return response.data
     },
     onSuccess: () => {

@@ -62,26 +62,7 @@ export interface RateLimitEndpoint {
 }
 
 // System Logs Response
-export interface SystemLogsResponse {
-  logs: SystemLog[]
-  total_count: number
-  log_levels: LogLevelStats[]
-}
-
-export interface SystemLog {
-  id: number
-  timestamp: string
-  level: 'debug' | 'info' | 'warn' | 'error'
-  component: string
-  message: string
-  context?: Record<string, unknown>
-}
-
-export interface LogLevelStats {
-  level: string
-  count: number
-  percentage: number
-}
+// NOTE: Backend endpoint /operations/logs not yet implemented — removed to avoid 404s.
 
 // Health Check Details
 export interface HealthCheckDetailsResponse {
@@ -153,31 +134,6 @@ export function useRateLimitStatus() {
       onError: (error: unknown) => {
         console.error('[Operations API] Failed to fetch rate limit status:', error)
         // Rate limit status is optional - console only
-      },
-    },
-  })
-}
-
-// Fetch System Logs
-export function useSystemLogs(level?: string, limit?: number) {
-  return useQuery({
-    queryKey: ['operations', 'logs', level, limit],
-    queryFn: async ({ signal: _signal }) => {
-      const response = await apiClient.get<SystemLogsResponse>('/operations/logs', {
-        params: {
-          ...(level && { level }),
-          ...(limit && { limit }),
-        },
-      })
-      return response.data
-    },
-    refetchInterval: 30000,
-    staleTime: 10000,
-    retry: 1,
-    meta: {
-      onError: (error: unknown) => {
-        console.error('[Operations API] Failed to fetch system logs:', error)
-        // System logs are optional - console only
       },
     },
   })
