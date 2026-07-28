@@ -456,9 +456,9 @@ export function Dashboard() {
                     ? 'text-profit'
                     : 'text-loss'
                 }`}>
-                  {shieldPerformance
-                    ? `${Number(shieldPerformance.avg_return) >= 0 ? '+' : ''}$${safeToFixed(shieldPerformance.avg_return, 2)}`
-                    : '...'}
+{shieldPerformance
+                     ? `${Number(shieldPerformance.avg_return) >= 0 ? '+' : ''}${safeToFixed(shieldPerformance.avg_return, 4)} SOL`
+                     : '...'}
                 </div>
               </div>
               <div>
@@ -506,9 +506,9 @@ export function Dashboard() {
                     ? 'text-profit'
                     : 'text-loss'
                 }`}>
-                  {spearPerformance
-                    ? `${Number(spearPerformance.avg_return) >= 0 ? '+' : ''}$${safeToFixed(spearPerformance.avg_return, 2)}`
-                    : '...'}
+{spearPerformance
+                     ? `${Number(spearPerformance.avg_return) >= 0 ? '+' : ''}${safeToFixed(spearPerformance.avg_return, 4)} SOL`
+                     : '...'}
                 </div>
               </div>
               <div>

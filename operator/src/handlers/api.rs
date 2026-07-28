@@ -2030,13 +2030,13 @@ pub async fn get_cost_metrics(
     let from_date = chrono::Utc::now() - chrono::Duration::days(30);
     let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    // Get all trades from last 30 days
+    // Get all CLOSED trades from last 30 days (only closed trades have both costs and realized PnL)
     let trades = state
         .db
         .get_trades_filtered(
             Some(&from_date_str),
             None,
-            None, // All statuses
+            Some("CLOSED"), // Only closed trades
             None, // All strategies
             None, // All wallets
             -1,   // No limit
@@ -2060,10 +2060,10 @@ pub async fn get_cost_metrics(
                 total_dex_fee += trade.dex_fee_sol.unwrap_or(Decimal::ZERO);
                 total_slippage += trade.slippage_cost_sol.unwrap_or(Decimal::ZERO);
                 total_costs += cost;
+                if let Some(net_pnl) = trade.net_pnl_sol {
+                    total_net_pnl += net_pnl;
+                }
             }
-        }
-        if let Some(net_pnl) = trade.net_pnl_sol {
-            total_net_pnl += net_pnl;
         }
     }
 
