@@ -388,15 +388,19 @@ impl WalletPerformanceTracker {
                                 rotation_config.low_conviction_threshold_secs
                             };
 
-                            // Get last activity timestamp
-                            let last_activity = if let Some(ref last_spec_str) = wm.last_speculative_signal_at {
-                                chrono::DateTime::parse_from_rfc3339(last_spec_str)
-                                    .ok()
-                                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                            } else {
-                                // Fallback to promoted_at if never had speculative signal
-                                wallet.promoted_at
-                            };
+                            // Get last activity timestamp from the most recent
+                            // of: speculative signal, actual trade, or promotion.
+                            // Using max() avoids demoting wallets whose last_trade_at
+                            // is stale (scout hasn't re-analyzed) but are actively
+                            // generating signals right now.
+                            let spec_signal = wm.last_speculative_signal_at.as_ref()
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|dt| dt.with_timezone(&chrono::Utc));
+
+                            let last_activity = [spec_signal, wallet.last_trade_at, wallet.promoted_at]
+                                .into_iter()
+                                .flatten()
+                                .max();
 
                             if let Some(last_activity_dt) = last_activity {
                                 let elapsed = chrono::Utc::now().signed_duration_since(last_activity_dt);

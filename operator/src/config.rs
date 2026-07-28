@@ -794,6 +794,11 @@ pub struct TokenSafetyConfig {
     /// Default 1.0 (reject tokens deployed less than 1 hour ago).
     #[serde(default = "default_min_token_age_hours")]
     pub min_token_age_hours: f64,
+    /// Minimum token age in hours for pump.fun tokens.
+    /// Lower than normal tokens because pump.fun tokens are inherently newer.
+    /// The $25K liquidity gate (gate 6) is the primary risk filter for these.
+    #[serde(default = "default_min_token_age_pumpfun_hours")]
+    pub min_token_age_pumpfun_hours: f64,
     /// FIX 1: Liquidity cache TTL in seconds (default: 60)
     #[serde(default = "default_liquidity_cache_ttl")]
     pub liquidity_cache_ttl_secs: u64,
@@ -823,6 +828,10 @@ fn default_allow_unlisted_heuristic() -> bool {
 }
 
 fn default_min_token_age_hours() -> f64 {
+    1.0
+}
+
+fn default_min_token_age_pumpfun_hours() -> f64 {
     1.0
 }
 
@@ -899,6 +908,7 @@ impl Default for TokenSafetyConfig {
             cache_ttl_seconds: default_token_cache_ttl(),
             allow_unlisted_heuristic: default_allow_unlisted_heuristic(),
             min_token_age_hours: default_min_token_age_hours(),
+            min_token_age_pumpfun_hours: default_min_token_age_pumpfun_hours(),
             liquidity_cache_ttl_secs: default_liquidity_cache_ttl(),
             fdv_cache_ttl_secs: default_fdv_cache_ttl(),
             liquidity_update_interval_secs: default_liquidity_update_interval(),
@@ -2413,6 +2423,16 @@ mod tests {
         let defaults = TokenSafetyConfig::default();
         assert_eq!(defaults.min_liquidity_pumpfun_usd, dec!(25000.0));
         assert!(defaults.allow_graduated_pumpfun);
+        assert_eq!(defaults.min_token_age_pumpfun_hours, 1.0);
+    }
+
+    #[test]
+    fn test_pumpfun_age_override_parses() {
+        let mut config = TokenSafetyConfig::default();
+        config.min_token_age_pumpfun_hours = 2.0;
+        config.min_token_age_hours = 24.0;
+        assert_eq!(config.min_token_age_hours, 24.0);
+        assert_eq!(config.min_token_age_pumpfun_hours, 2.0);
     }
 
     #[test]

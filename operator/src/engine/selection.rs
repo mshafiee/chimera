@@ -82,6 +82,8 @@ pub struct SelectionConfig {
     /// Minimum token age in hours. Tokens younger than this are rejected.
     /// Unknown age (API failure): rejected for SPEAR, warned-and-allowed for SHIELD.
     pub min_token_age_hours: f64,
+    /// Minimum token age in hours for pump.fun tokens.
+    pub min_token_age_pumpfun_hours: f64,
     /// Minimum WQS score for a wallet to be eligible for copying.
     /// Wallets below this are rejected entirely. Configurable via env var
     /// CHIMERA_SELECTION__MIN_WQS_SCORE (default: 70.0).
@@ -106,6 +108,7 @@ impl SelectionConfig {
         hasher.update(self.min_liquidity_pumpfun_usd.to_string().as_bytes());
         hasher.update(u8::from(self.allow_graduated_pumpfun).to_le_bytes());
         hasher.update(self.min_token_age_hours.to_le_bytes());
+        hasher.update(self.min_token_age_pumpfun_hours.to_le_bytes());
         hasher.update(self.min_wqs_score.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
@@ -582,7 +585,11 @@ impl SelectionService {
             None
         };
 
-        let min_age = self.config.min_token_age_hours;
+        let min_age = if is_pumpfun {
+            self.config.min_token_age_pumpfun_hours
+        } else {
+            self.config.min_token_age_hours
+        };
         if min_age > 0.0 {
             match token_age_hours {
                 Some(age) if age < min_age => {
@@ -889,6 +896,7 @@ mod tests {
             min_liquidity_pumpfun_usd: Decimal::from(25000),
             allow_graduated_pumpfun: true,
             min_token_age_hours: 1.0,
+            min_token_age_pumpfun_hours: 1.0,
             min_wqs_score: 70.0,
         };
 

@@ -654,7 +654,7 @@ async fn get_wallet_statistics(db: &Arc<dyn Database>) -> Result<WalletStatistic
 
     // Get last update time from the most recently updated wallet
     let last_time: Option<String> =
-        sqlx::query_scalar("SELECT MAX(updated_at) FROM wallets WHERE updated_at IS NOT NULL")
+        sqlx::query_scalar("SELECT MAX(updated_at)::TEXT FROM wallets WHERE updated_at IS NOT NULL")
             .fetch_one(&pool)
             .await
             .map_err(AppError::Database)?;

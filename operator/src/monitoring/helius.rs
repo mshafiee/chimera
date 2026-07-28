@@ -260,12 +260,20 @@ impl HeliusClient {
         {
             let cache = self.metadata_cache.read();
             if let Some(metadata) = cache.get(mint_address) {
-                // If we have cached age, return it (metadata cache has 24-hour TTL)
-                if let Some(age) = metadata.age_hours {
+                // Recompute age from the immutable creation_timestamp instead of
+                // returning the stale cached age_hours, which would otherwise be
+                // frozen for the full 24-hour metadata-cache TTL.
+                if let Some(creation_ts) = metadata.creation_timestamp {
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .context("Failed to get current timestamp")?
+                        .as_secs() as i64;
+                    let age_hours = (now - creation_ts) as f64 / 3600.0;
                     self.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::debug!(token = mint_address, age = age, "Cache hit for token age");
-                    return Ok(Some(age));
+                    tracing::debug!(token = mint_address, age = age_hours, "Cache hit for token age");
+                    return Ok(Some(age_hours));
                 }
+                // Fall through if creation_timestamp is not cached
             }
         }
 
