@@ -1124,6 +1124,18 @@ impl Database for PostgresBackend {
         Ok(total)
     }
 
+    async fn get_capital_deployed_30d(&self) -> AppResult<Decimal> {
+        let total: Decimal = sqlx::query_scalar::<_, Decimal>(
+            r#"SELECT COALESCE(SUM(entry_amount_sol), 0.0) FROM positions
+               WHERE state = 'CLOSED' AND pnl_data_valid AND closed_at >= NOW() - INTERVAL '30 days'"#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(total)
+    }
+
     async fn get_strategy_performance(
         &self,
         strat: &str,

@@ -2026,46 +2026,49 @@ pub async fn get_performance_metrics(
 pub async fn get_cost_metrics(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<CostMetricsResponse>, AppError> {
-    // Query cost metrics from trades table
     let from_date = chrono::Utc::now() - chrono::Duration::days(30);
     let from_date_str = from_date.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
-    // Get all CLOSED trades from last 30 days (only closed trades have both costs and realized PnL)
+    // Get all CLOSED trades from last 30 days for cost analysis
     let trades = state
         .db
         .get_trades_filtered(
             Some(&from_date_str),
             None,
-            Some("CLOSED"), // Only closed trades
-            None, // All strategies
-            None, // All wallets
-            -1,   // No limit
-            0,    // No offset
+            Some("CLOSED"),
+            None,
+            None,
+            -1,
+            0,
         )
         .await?;
 
-    // Calculate averages and totals using Decimal for precision
+    // Calculate cost averages using Decimal for precision
     let mut total_jito_tip = Decimal::ZERO;
     let mut total_dex_fee = Decimal::ZERO;
     let mut total_slippage = Decimal::ZERO;
     let mut total_costs = Decimal::ZERO;
-    let mut total_net_pnl = Decimal::ZERO;
     let mut trade_count = 0;
 
     for trade in &trades {
         if let Some(cost) = trade.total_cost_sol {
-            if cost > rust_decimal::Decimal::ZERO {
+            if cost > Decimal::ZERO {
                 trade_count += 1;
                 total_jito_tip += trade.jito_tip_sol.unwrap_or(Decimal::ZERO);
                 total_dex_fee += trade.dex_fee_sol.unwrap_or(Decimal::ZERO);
                 total_slippage += trade.slippage_cost_sol.unwrap_or(Decimal::ZERO);
                 total_costs += cost;
-                if let Some(net_pnl) = trade.net_pnl_sol {
-                    total_net_pnl += net_pnl;
-                }
             }
         }
     }
+
+    // Get net profit from CLOSED positions (source of truth for realized PnL)
+    // This matches what get_pnl_30d() and the Performance metrics use.
+    let net_profit_30d = state.db.get_pnl_30d().await?;
+
+    // Get total capital deployed (sum of entry amounts for CLOSED positions)
+    // This avoids double-counting that would occur from summing trade amounts.
+    let capital_deployed = state.db.get_capital_deployed_30d().await?;
 
     let trade_count_dec = Decimal::from(trade_count);
     let avg_jito_tip = if trade_count > 0 {
@@ -2086,8 +2089,10 @@ pub async fn get_cost_metrics(
         Decimal::ZERO
     };
 
-    let roi_percent = if total_costs > Decimal::ZERO {
-        (total_net_pnl / total_costs) * Decimal::from(100)
+    // ROI = net_profit / capital_deployed * 100
+    // Measures return on invested capital, not return on costs.
+    let roi_percent = if capital_deployed > Decimal::ZERO {
+        (net_profit_30d / capital_deployed) * Decimal::from(100)
     } else {
         Decimal::ZERO
     };
@@ -2097,7 +2102,7 @@ pub async fn get_cost_metrics(
         avg_dex_fee_sol: avg_dex_fee,
         avg_slippage_cost_sol: avg_slippage,
         total_costs_30d_sol: total_costs,
-        net_profit_30d_sol: total_net_pnl,
+        net_profit_30d_sol: net_profit_30d,
         roi_percent,
     }))
 }
