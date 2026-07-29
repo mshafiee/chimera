@@ -510,6 +510,7 @@ impl SelectionService {
 
         // ── 2. Hard WQS gate + strategy assignment ──────────────────────────
         // Configurable minimum WQS; ≥80 → SHIELD; min..80 → SPEAR.
+        // pump.fun tokens always use SHIELD (SPEAR has 0% win rate on pump.fun).
         let min_wqs = self.config.min_wqs_score;
         if wallet_wqs < min_wqs {
             return BuyDecision::rejected(
@@ -519,7 +520,8 @@ impl SelectionService {
                 format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs),
             );
         }
-        let strategy = if wallet_wqs >= 80.0 {
+        let is_pumpfun = is_pumpfun_token(&req.token_address);
+        let strategy = if wallet_wqs >= 80.0 || is_pumpfun {
             Strategy::Shield
         } else {
             Strategy::Spear
@@ -534,7 +536,7 @@ impl SelectionService {
                 "Stablecoin/WSOL — no profit potential".to_string(),
             );
         }
-        let is_pumpfun = is_pumpfun_token(&req.token_address);
+        let is_pumpfun = is_pumpfun_token(&req.token_address); // computed above for strategy routing
         if is_pumpfun && !self.config.allow_graduated_pumpfun {
             return BuyDecision::rejected(
                 req,

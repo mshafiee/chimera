@@ -581,11 +581,11 @@ fn default_helius_fallback() -> bool {
 }
 
 fn default_tip_floor() -> Decimal {
-    dec!(0.001)
+    dec!(0.0005)
 }
 
 fn default_tip_ceiling() -> Decimal {
-    dec!(0.01)
+    dec!(0.005)
 }
 
 fn default_tip_percentile() -> u32 {
@@ -593,7 +593,7 @@ fn default_tip_percentile() -> u32 {
 }
 
 fn default_tip_percent_max() -> Decimal {
-    dec!(0.10)
+    dec!(0.02)
 }
 
 fn default_jito_min_failures_before_fallback() -> u32 {
@@ -832,7 +832,7 @@ fn default_min_token_age_hours() -> f64 {
 }
 
 fn default_min_token_age_pumpfun_hours() -> f64 {
-    1.0
+    4.0
 }
 
 fn default_liquidity_cache_ttl() -> u64 {
@@ -1571,7 +1571,7 @@ fn default_min_target_pct() -> Decimal {
 }
 
 fn default_max_stop_loss_distance() -> Decimal {
-    dec!(-25.0)
+    dec!(-5.0)
 }
 
 fn default_time_exit_hours() -> u64 {
@@ -1666,7 +1666,7 @@ pub struct PositionSizingConfig {
 }
 
 fn default_base_size_sol() -> Decimal {
-    dec!(0.1)
+    dec!(0.5)
 }
 
 fn default_max_size_sol() -> Decimal {
@@ -2432,7 +2432,7 @@ mod tests {
         let defaults = TokenSafetyConfig::default();
         assert_eq!(defaults.min_liquidity_pumpfun_usd, dec!(25000.0));
         assert!(defaults.allow_graduated_pumpfun);
-        assert_eq!(defaults.min_token_age_pumpfun_hours, 1.0);
+        assert_eq!(defaults.min_token_age_pumpfun_hours, 4.0);
     }
 
     #[test]
