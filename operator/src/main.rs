@@ -80,6 +80,7 @@ use chimera_operator::handlers::{
     update_secret_rotation_metrics,
     update_wallet,
     wallet_auth,
+    refresh_token,
     webhook_handler,
     ws_handler,
     profitability_verdict,
@@ -2600,6 +2601,7 @@ async fn main() -> anyhow::Result<()> {
     // jwt_secret already defined above
     let auth_routes = Router::new()
         .route("/auth/wallet", post(wallet_auth))
+        .route("/auth/refresh", post(refresh_token))
         .with_state(Arc::new(WalletAuthState {
             db: db_pool.clone(),
             jwt_secret,

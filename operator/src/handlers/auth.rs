@@ -40,6 +40,52 @@ pub struct WalletAuthResponse {
     pub identifier: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RefreshTokenRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RefreshTokenResponse {
+    pub access_token: String,
+    // For compatibility with frontend's updateTokens, but we don't use refresh tokens
+    // Returning the same token as both access_token and refresh_token with 24h expiry
+    pub refresh_token: String,
+    pub expires_in: u64,
+}
+
+/// Token refresh endpoint for JWT renewal
+///
+/// POST /api/v1/auth/refresh
+pub async fn refresh_token(
+    State(state): State<Arc<WalletAuthState>>,
+    Json(req): Json<RefreshTokenRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    // Verify and decode the existing JWT token
+    let token_data = jsonwebtoken::decode::<Claims>(
+        &req.token,
+        &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()),
+        &jsonwebtoken::Validation::default(),
+    )
+    .map_err(|_| AppError::Auth("Invalid or expired token".to_string()))?;
+
+    let claims = token_data.claims;
+
+    // Generate a new JWT token with fresh 24h expiry
+    let new_token = generate_jwt(&claims.sub, &claims.role, &state.jwt_secret)?;
+
+    let expires_in = 24 * 60 * 60; // 24 hours in seconds
+
+    Ok((
+        StatusCode::OK,
+        Json(RefreshTokenResponse {
+            access_token: new_token.clone(),
+            refresh_token: new_token,
+            expires_in,
+        }),
+    ))
+}
+
 /// Wallet authentication endpoint
 ///
 /// POST /api/v1/auth/wallet

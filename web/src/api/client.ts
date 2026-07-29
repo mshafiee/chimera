@@ -82,14 +82,16 @@ apiClient.interceptors.response.use(
       }
 
       // For other endpoints, try to refresh the token
-      if (authState.refreshToken && !isRefreshing) {
+      // Try refreshing with the current JWT token if available
+      if (authState.user?.token && !isRefreshing) {
         isRefreshing = true
         originalRequest._retry = true
 
         try {
-          // Attempt to refresh the token
+          // Attempt to refresh the token using the current JWT
+          const currentToken = authState.user?.token || ''
           const response = await axios.post(`${API_BASE}/auth/refresh`, {
-            refresh_token: authState.refreshToken,
+            token: currentToken,
           })
 
           const { access_token, refresh_token: newRefreshToken, expires_in } = response.data
@@ -110,7 +112,7 @@ apiClient.interceptors.response.use(
         } finally {
           isRefreshing = false
         }
-      } else if (authState.refreshToken && isRefreshing) {
+      } else if (authState.user?.token && isRefreshing) {
         // If we're already refreshing, add this request to the queue
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject })
