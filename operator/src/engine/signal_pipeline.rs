@@ -187,8 +187,8 @@ impl SignalProcessor {
         // First, update in-memory registry for immediate effect
         if let Some(ref registry) = self.state_registry {
             if let Err(e) = registry.update_trade_status(&trade_uuid, TradeStatus::Executing) {
-                tracing::error!(error = ?e, trade_uuid = %trade_uuid,
-                              "Failed to update trade status in registry, continuing with DB update");
+                tracing::debug!(error = ?e, trade_uuid = %trade_uuid,
+                              "Trade not in in-memory registry (expected after restart), proceeding with DB update");
                 // Continue anyway - DB is the source of truth
             }
         }

@@ -266,6 +266,9 @@ pub trait Database: Send + Sync {
     /// Get total capital deployed (sum of entry_amount_sol for CLOSED positions) in the last 30 days
     async fn get_capital_deployed_30d(&self) -> AppResult<rust_decimal::Decimal>;
 
+    /// Cancel PENDING/QUEUED trades older than max_age_minutes. Returns count of cancelled trades.
+    async fn cancel_stale_trades(&self, max_age_minutes: i32) -> AppResult<u64>;
+
     /// Get strategy performance metrics (win rate, avg return, trade count)
     async fn get_strategy_performance(
         &self,

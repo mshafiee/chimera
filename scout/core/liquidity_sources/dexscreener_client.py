@@ -56,17 +56,14 @@ class DexScreenerClient:
         """
         self._rate_limit()
 
+        # Skip empty/None addresses silently
+        if not token_address or token_address.strip() == "":
+            return None
+
         if not self._validate_solana_address(token_address):
             import logging
             logger = logging.getLogger(__name__)
             logger.warning(f"Invalid Solana address format: {token_address}")
-            return None
-
-        # Skip empty addresses
-        if not token_address or token_address.strip() == "":
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.warning("Empty token address, skipping liquidity fetch")
             return None
 
         safe_address = self._safe_url_encode(token_address)

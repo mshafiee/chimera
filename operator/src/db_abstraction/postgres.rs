@@ -1136,6 +1136,20 @@ impl Database for PostgresBackend {
         Ok(total)
     }
 
+    async fn cancel_stale_trades(&self, max_age_minutes: i32) -> AppResult<u64> {
+        let result = sqlx::query(
+            r#"UPDATE trades SET status = 'CANCELLED', updated_at = NOW()
+               WHERE status IN ('PENDING', 'QUEUED')
+               AND created_at < NOW() - ($1 || ' minutes')::INTERVAL"#,
+        )
+        .bind(max_age_minutes)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        Ok(result.rows_affected() as u64)
+    }
+
     async fn get_strategy_performance(
         &self,
         strat: &str,
@@ -2179,15 +2193,15 @@ impl Database for PostgresBackend {
             )
             VALUES ($1, 'CANDIDATE', $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(address) DO UPDATE SET
-                wqs_score          = COALESCE(excluded.wqs_score, wqs_score),
-                roi_7d             = COALESCE(excluded.roi_7d, roi_7d),
-                roi_30d            = COALESCE(excluded.roi_30d, roi_30d),
-                trade_count_30d    = COALESCE(excluded.trade_count_30d, trade_count_30d),
-                win_rate           = COALESCE(excluded.win_rate, win_rate),
-                max_drawdown_30d   = COALESCE(excluded.max_drawdown_30d, max_drawdown_30d),
-                avg_trade_size_sol = COALESCE(excluded.avg_trade_size_sol, avg_trade_size_sol),
-                notes              = COALESCE(excluded.notes, notes),
-                updated_at         = CURRENT_TIMESTAMP
+                wallets.wqs_score          = COALESCE(excluded.wqs_score, wallets.wqs_score),
+                wallets.roi_7d             = COALESCE(excluded.roi_7d, wallets.roi_7d),
+                wallets.roi_30d            = COALESCE(excluded.roi_30d, wallets.roi_30d),
+                wallets.trade_count_30d    = COALESCE(excluded.trade_count_30d, wallets.trade_count_30d),
+                wallets.win_rate           = COALESCE(excluded.win_rate, wallets.win_rate),
+                wallets.max_drawdown_30d   = COALESCE(excluded.max_drawdown_30d, wallets.max_drawdown_30d),
+                wallets.avg_trade_size_sol = COALESCE(excluded.avg_trade_size_sol, wallets.avg_trade_size_sol),
+                wallets.notes              = COALESCE(excluded.notes, wallets.notes),
+                wallets.updated_at         = CURRENT_TIMESTAMP
             "#,
         )
         .bind(address)

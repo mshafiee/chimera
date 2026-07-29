@@ -1866,6 +1866,32 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Rent scavenger disabled in paper mode");
     }
 
+    // Stale trade reaper: cancel PENDING/QUEUED trades older than threshold
+    let stale_trade_max_age = config.monitoring.as_ref()
+        .map(|m| m.stale_trade_reaper_minutes)
+        .unwrap_or(30);
+    if stale_trade_max_age > 0 {
+        let stale_trades_db = db_pool.clone();
+        task_handles.push(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // Every 5 minutes
+            loop {
+                interval.tick().await;
+                match stale_trades_db.cancel_stale_trades(stale_trade_max_age).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("Stale trade reaper cancelled {} stale trades", count);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Stale trade reaper error: {}", e);
+                    }
+                }
+            }
+        }));
+        tracing::info!(max_age_minutes = stale_trade_max_age, "Stale trade reaper started");
+    } else {
+        tracing::info!("Stale trade reaper disabled (stale_trade_reaper_minutes = 0)");
+    }
+
     tracing::info!("All background tasks spawned");
 
     // Now create the FULL router with all routes

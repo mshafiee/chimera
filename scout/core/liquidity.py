@@ -633,7 +633,7 @@ class LiquidityProvider:
                 SELECT liquidity_usd, price_usd, volume_24h_usd, timestamp, source
                 FROM historical_liquidity
                 WHERE token_address = %s AND timestamp BETWEEN %s AND %s
-                ORDER BY ABS(EXTRACT(EPOCH FROM CAST(timestamp AS TIMESTAMP)) - EXTRACT(EPOCH FROM CAST(%s AS TIMESTAMP)))
+                ORDER BY ABS(EXTRACT(EPOCH FROM timestamp) - EXTRACT(EPOCH FROM %s::timestamptz))
                 LIMIT 1
                 """,
                 (token_address, time_start.isoformat(), time_end.isoformat(), timestamp.isoformat()),

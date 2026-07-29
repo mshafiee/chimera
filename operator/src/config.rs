@@ -1249,6 +1249,10 @@ pub struct MonitoringConfig {
     /// on-chain deltas do not match the webhook claim.
     #[serde(default = "default_true")]
     pub rpc_verify_enforce: bool,
+    /// Minutes threshold for the stale trade reaper. PENDING/QUEUED trades
+    /// older than this value are automatically cancelled. Set to 0 to disable.
+    #[serde(default = "default_stale_trade_max_age")]
+    pub stale_trade_reaper_minutes: i32,
 }
 
 impl MonitoringConfig {
@@ -1347,6 +1351,10 @@ fn default_false() -> bool {
     false
 }
 
+fn default_stale_trade_max_age() -> i32 {
+    30
+}
+
 fn default_webhook_batch_size() -> usize {
     10
 }
@@ -1412,6 +1420,7 @@ impl Default for MonitoringConfig {
             helius_webhook_auth_header: None,
             helius_auth_enforce: true,
             rpc_verify_enforce: true,
+            stale_trade_reaper_minutes: default_stale_trade_max_age(),
         }
     }
 }
