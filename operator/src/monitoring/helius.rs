@@ -334,7 +334,7 @@ impl HeliusClient {
     /// Returns the timestamp of the first (oldest) transaction for the mint address
     async fn get_token_creation_time(&self, mint_address: &str) -> Result<Option<i64>> {
         let url = format!(
-            "{}/v0/addresses/{}/transactions?api-key={}&limit=1",
+            "{}/v0/addresses/{}/transactions?api-key={}&limit=100",
             self.base_url, mint_address, self.api_key
         );
 
@@ -384,12 +384,27 @@ impl HeliusClient {
 
         match result {
             Ok(transactions) => {
-                // Get timestamp from first transaction
-                if let Some(first_tx) = transactions.first() {
-                    if let Some(timestamp) = first_tx.get("timestamp").and_then(|t| t.as_i64()) {
-                        return Ok(Some(timestamp));
-                    }
+                // v0 API returns transactions newest-first.
+                // Find the OLDEST (minimum) timestamp as the token creation time.
+                let oldest_ts = transactions
+                    .iter()
+                    .filter_map(|tx| tx.get("timestamp").and_then(|t| t.as_i64()))
+                    .min();
+
+                if let Some(ts) = oldest_ts {
+                    tracing::debug!(
+                        mint = mint_address,
+                        creation_timestamp = ts,
+                        tx_count = transactions.len(),
+                        "Found oldest transaction timestamp for token"
+                    );
+                    return Ok(Some(ts));
                 }
+                tracing::debug!(
+                    mint = mint_address,
+                    tx_count = transactions.len(),
+                    "No timestamps found in token transactions"
+                );
                 Ok(None)
             }
             Err(e) => {
