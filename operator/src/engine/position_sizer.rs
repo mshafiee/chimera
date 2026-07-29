@@ -171,22 +171,24 @@ impl PositionSizer {
                 }
             }
         } else {
-            // Kelly not enabled: apply WQS + confidence scaling directly
-            // Uses 15-trade denominator to match Kelly's minimum threshold
+            // Kelly not enabled: apply WQS + confidence scaling directly.
+            // WQS factor floors at 0.5× so even mid-tier wallets get meaningful sizes.
+            // Formula: 0.5 + (wqs / 200), clamped to [0.5, 1.0]
+            //   WQS-25 → 0.625×, WQS-50 → 0.75×, WQS-100 → 1.0×
             let trade_count = self
                 .db
                 .get_closed_trade_count_for_wallet(&factors.wallet_address)
                 .await
                 .unwrap_or(0);
             let confidence = if trade_count >= 15 {
-                Decimal::from_f64_retain((trade_count as f64 / 15.0).clamp(0.05, 1.0))
-                    .unwrap_or(dec!(0.05))
+                Decimal::ONE
             } else {
-                let conf_f64 = factors.wqs_confidence.unwrap_or(0.50).clamp(0.35, 1.0);
-                Decimal::from_f64_retain(conf_f64).unwrap_or(dec!(0.50))
+                // Default 0.8 for new wallets (was 0.5 — too punitive)
+                let conf_f64 = factors.wqs_confidence.unwrap_or(0.80).clamp(0.5, 1.0);
+                Decimal::from_f64_retain(conf_f64).unwrap_or(dec!(0.80))
             };
-            let wqs_factor = Decimal::from_f64_retain(factors.wallet_wqs / 100.0)
-                .unwrap_or(Decimal::from_str("0.5").unwrap_or(dec!(0.5)));
+            let wqs_factor = Decimal::from_f64_retain((0.5 + factors.wallet_wqs / 200.0).min(1.0))
+                .unwrap_or(dec!(0.75));
             (self.config.base_size_sol * wqs_factor * confidence).min(self.config.max_size_sol)
         };
 

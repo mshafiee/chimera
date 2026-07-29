@@ -1666,7 +1666,7 @@ pub struct PositionSizingConfig {
 }
 
 fn default_base_size_sol() -> Decimal {
-    dec!(0.1)
+    dec!(0.3)
 }
 
 fn default_max_size_sol() -> Decimal {
