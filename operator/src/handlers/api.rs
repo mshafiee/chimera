@@ -2007,7 +2007,11 @@ pub async fn get_performance_metrics(
         } else {
             // Use abs() on denominator so direction is correct even when
             // the prior window was net-negative (e.g. -10 → -5 = +50%, not -50%)
-            ((curr - prev) / prev.abs() * Decimal::from(100)).to_f64()
+            let pct = ((curr - prev) / prev.abs() * Decimal::from(100)).to_f64()?;
+            // Cap at ±200% to avoid meaningless extremes when prior value was small.
+            // Beyond 200% the percentage is no longer informative — the direction
+            // simply reversed (e.g. +0.008 → -0.017 = -307% is misleading).
+            if pct.abs() > 200.0 { None } else { Some(pct) }
         }
     };
 
