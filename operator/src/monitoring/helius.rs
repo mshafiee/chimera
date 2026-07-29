@@ -334,7 +334,7 @@ impl HeliusClient {
     /// Returns the timestamp of the first (oldest) transaction for the mint address
     async fn get_token_creation_time(&self, mint_address: &str) -> Result<Option<i64>> {
         let url = format!(
-            "{}/v0/addresses/{}/transactions?api-key={}&limit=100",
+            "{}/addresses/{}/transactions?api-key={}&limit=100&order=asc",
             self.base_url, mint_address, self.api_key
         );
 
