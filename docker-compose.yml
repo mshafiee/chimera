@@ -137,7 +137,7 @@ services:
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
        # Minimum WQS for signal admission (lowered for paper trading to expand wallet pool)
-       - CHIMERA_SELECTION__MIN_WQS_SCORE=60.0
+       - CHIMERA_SELECTION__MIN_WQS_SCORE=25.0
        # Paper trading mode
        - CHIMERA_TRADE_MODE=paper
     env_file:
