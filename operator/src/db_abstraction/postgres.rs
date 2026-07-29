@@ -2205,15 +2205,15 @@ impl Database for PostgresBackend {
             )
             VALUES ($1, 'CANDIDATE', $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
             ON CONFLICT(address) DO UPDATE SET
-                wallets.wqs_score          = COALESCE(excluded.wqs_score, wallets.wqs_score),
-                wallets.roi_7d             = COALESCE(excluded.roi_7d, wallets.roi_7d),
-                wallets.roi_30d            = COALESCE(excluded.roi_30d, wallets.roi_30d),
-                wallets.trade_count_30d    = COALESCE(excluded.trade_count_30d, wallets.trade_count_30d),
-                wallets.win_rate           = COALESCE(excluded.win_rate, wallets.win_rate),
-                wallets.max_drawdown_30d   = COALESCE(excluded.max_drawdown_30d, wallets.max_drawdown_30d),
-                wallets.avg_trade_size_sol = COALESCE(excluded.avg_trade_size_sol, wallets.avg_trade_size_sol),
-                wallets.notes              = COALESCE(excluded.notes, wallets.notes),
-                wallets.updated_at         = CURRENT_TIMESTAMP
+                wqs_score          = COALESCE(EXCLUDED.wqs_score, wallets.wqs_score),
+                roi_7d             = COALESCE(EXCLUDED.roi_7d, wallets.roi_7d),
+                roi_30d            = COALESCE(EXCLUDED.roi_30d, wallets.roi_30d),
+                trade_count_30d    = COALESCE(EXCLUDED.trade_count_30d, wallets.trade_count_30d),
+                win_rate           = COALESCE(EXCLUDED.win_rate, wallets.win_rate),
+                max_drawdown_30d   = COALESCE(EXCLUDED.max_drawdown_30d, wallets.max_drawdown_30d),
+                avg_trade_size_sol = COALESCE(EXCLUDED.avg_trade_size_sol, wallets.avg_trade_size_sol),
+                notes              = COALESCE(EXCLUDED.notes, wallets.notes),
+                updated_at         = CURRENT_TIMESTAMP
             "#,
         )
         .bind(address)
