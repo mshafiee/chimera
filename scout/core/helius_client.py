@@ -3320,6 +3320,49 @@ class HeliusClient:
                         "net_token_delta": net_token_delta,
                     }
 
+        # ── SimpleSOL↔Token swap detection (most common DEX trade) ──
+        # The Direction Logic below (line ~3537) was dead code because the
+        # multi-token detection requires both token inflow AND outflow.
+        # For SOL→Token / Token→SOL swaps, SOL moves via nativeTransfers
+        # (not tokenTransfers), so `all_outflows` is empty and the multi-token
+        # block is skipped.  This early-return handles the majority of trades.
+        SIGNIFICANT_SOL = 0.001
+        if primary_mint and abs(sol_delta) >= SIGNIFICANT_SOL:
+            if primary_delta > 0 and sol_delta < -SIGNIFICANT_SOL:
+                # Received tokens, spent SOL → BUY
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": primary_mint,
+                    "token_amount": primary_delta,
+                    "sol_amount": abs(sol_delta),
+                    "direction": "BUY",
+                    "price_sol": abs(sol_delta) / primary_delta if primary_delta > 0 else 0.0,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": sol_mint,
+                    "net_sol_delta": sol_delta,
+                    "net_token_delta": primary_delta,
+                }
+            elif primary_delta < 0 and sol_delta > SIGNIFICANT_SOL:
+                # Sent tokens, received SOL → SELL
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": primary_mint,
+                    "token_amount": abs(primary_delta),
+                    "sol_amount": sol_delta,
+                    "direction": "SELL",
+                    "price_sol": sol_delta / abs(primary_delta) if primary_delta != 0 else 0.0,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": sol_mint,
+                    "net_sol_delta": sol_delta,
+                    "net_token_delta": primary_delta,
+                }
+
         # COMPREHENSIVE ENHANCEMENT: Advanced token→token swap parsing
         # Handle multi-token swaps, routing transactions, and complex DEX patterns
 
@@ -3359,6 +3402,8 @@ class HeliusClient:
             # If we're receiving stablecoins or wSOL, it's a SELL
             spent_any = False
             received_any = False
+            stable_spent = None
+            stable_received = None
 
             # Check for stablecoins in outflows
             spent_any = any(mint in stable_mints for mint, _ in all_outflows)
@@ -3392,8 +3437,10 @@ class HeliusClient:
                 # Calculate USD spent (wSOL converted to USD)
                 if spent_any and received_any and stable_received is not None and stable_spent is not None:
                     # Multi-sided swap with both stablecoin and wSOL
-                    usd_spent = stable_spent + (stable_received * current_sol_price or 0.0)
-                    price_usd = usd_spent / token_amount if token_amount > 0 else None
+                    price_usd = None
+                elif spent_any and stable_spent is not None:
+                    # Spending stablecoin or wSOL only
+                    price_usd = None
                 elif spent_any and stable_spent is not None:
                     # Spending stablecoin or wSOL only
                     usd_spent = stable_spent
@@ -3428,8 +3475,10 @@ class HeliusClient:
                 # Calculate USD received (wSOL converted to USD)
                 if spent_any and received_any and stable_received is not None and stable_spent is not None:
                     # Multi-sided swap
-                    usd_received = stable_received + (stable_spent * current_sol_price or 0.0)
-                    price_usd = usd_received / token_amount if token_amount > 0 else None
+                    price_usd = None
+                elif received_any and stable_received is not None:
+                    # Receiving stablecoin or wSOL only
+                    price_usd = None
                 elif received_any and stable_received is not None:
                     # Receiving stablecoin or wSOL only
                     usd_received = stable_received
@@ -3758,16 +3807,20 @@ class HeliusClient:
 
         sol_mint = "So11111111111111111111111111111111111111112"
 
-        if native_input is not None and native_output is not None:
-            # SOL-in token-out = BUY, SOL-out token-in = SELL
+        if native_input is not None or native_output is not None:
+            # Parse SOL amounts (handles dict or scalar forms)
             if isinstance(native_input, dict):
                 sol_in = _safe_float(native_input.get("amount", 0))
-            else:
+            elif native_input is not None:
                 sol_in = float(native_input) if native_input else 0.0
+            else:
+                sol_in = 0.0
             if isinstance(native_output, dict):
                 sol_out = _safe_float(native_output.get("amount", 0))
-            else:
+            elif native_output is not None:
                 sol_out = float(native_output) if native_output else 0.0
+            else:
+                sol_out = 0.0
 
             token_in_count = 0.0
             token_in_mint = None
@@ -3787,50 +3840,98 @@ class HeliusClient:
                 else:
                     token_out_count += float(to) if to else 0.0
 
-            if sol_in > sol_out:
-                # Spent SOL, received token
-                if token_out_mint and token_out_count > 0:
-                    token_amount = token_out_count
-                    token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
-                    if token_decimals > 0:
-                        token_amount /= (10 ** token_decimals)
-                    return {
-                        "signature": signature,
-                        "timestamp": timestamp,
-                        "wallet": wallet_address,
-                        "token_mint": token_out_mint,
-                        "token_amount": token_amount,
-                        "sol_amount": sol_in - sol_out,
-                        "direction": "BUY",
-                        "price_sol": (sol_in - sol_out) / token_amount if token_amount > 0 else 0.0,
-                        "price_usd": None,
-                        "usd_amount": None,
-                        "quote_mint": sol_mint,
-                        "net_sol_delta": -(sol_in - sol_out),
-                        "net_token_delta": token_amount,
-                    }
-            elif sol_out > sol_in:
-                # Received SOL, spent token
-                if token_in_mint and token_in_count > 0:
-                    token_amount = token_in_count
-                    token_decimals = token_inputs[0].get("decimals", 0) if isinstance(token_inputs[0], dict) and token_inputs else 0
-                    if token_decimals > 0:
-                        token_amount /= (10 ** token_decimals)
-                    return {
-                        "signature": signature,
-                        "timestamp": timestamp,
-                        "wallet": wallet_address,
-                        "token_mint": token_in_mint,
-                        "token_amount": token_amount,
-                        "sol_amount": sol_out - sol_in,
-                        "direction": "SELL",
-                        "price_sol": (sol_out - sol_in) / token_amount if token_amount > 0 else 0.0,
-                        "price_usd": None,
-                        "usd_amount": None,
-                        "quote_mint": sol_mint,
-                        "net_sol_delta": sol_out - sol_in,
-                        "net_token_delta": -token_amount,
-                    }
+            # SOL→Token (no SOL out) = BUY
+            if sol_in > 0 and sol_out == 0 and token_out_mint and token_out_count > 0:
+                token_amount = token_out_count
+                token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
+                if token_decimals > 0:
+                    token_amount /= (10 ** token_decimals)
+                sol_in_sol = sol_in / 1e9
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": token_out_mint,
+                    "token_amount": token_amount,
+                    "sol_amount": sol_in_sol,
+                    "direction": "BUY",
+                    "price_sol": sol_in_sol / token_amount if token_amount > 0 else 0.0,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": sol_mint,
+                    "net_sol_delta": -sol_in_sol,
+                    "net_token_delta": token_amount,
+                }
+            # Token→SOL (no SOL in) = SELL
+            elif sol_out > 0 and sol_in == 0 and token_in_mint and token_in_count > 0:
+                token_amount = token_in_count
+                token_decimals = token_inputs[0].get("decimals", 0) if isinstance(token_inputs[0], dict) and token_inputs else 0
+                if token_decimals > 0:
+                    token_amount /= (10 ** token_decimals)
+                sol_out_sol = sol_out / 1e9
+                return {
+                    "signature": signature,
+                    "timestamp": timestamp,
+                    "wallet": wallet_address,
+                    "token_mint": token_in_mint,
+                    "token_amount": token_amount,
+                    "sol_amount": sol_out_sol,
+                    "direction": "SELL",
+                    "price_sol": sol_out_sol / token_amount if token_amount > 0 else 0.0,
+                    "price_usd": None,
+                    "usd_amount": None,
+                    "quote_mint": sol_mint,
+                    "net_sol_delta": sol_out_sol,
+                    "net_token_delta": -token_amount,
+                }
+            # Both SOL in and out → net comparison (existing logic)
+            elif sol_in != sol_out:
+                if sol_in > sol_out:
+                    # Spent SOL, received token
+                    if token_out_mint and token_out_count > 0:
+                        token_amount = token_out_count
+                        token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
+                        if token_decimals > 0:
+                            token_amount /= (10 ** token_decimals)
+                        net_sol = (sol_in - sol_out) / 1e9
+                        return {
+                            "signature": signature,
+                            "timestamp": timestamp,
+                            "wallet": wallet_address,
+                            "token_mint": token_out_mint,
+                            "token_amount": token_amount,
+                            "sol_amount": net_sol,
+                            "direction": "BUY",
+                            "price_sol": net_sol / token_amount if token_amount > 0 else 0.0,
+                            "price_usd": None,
+                            "usd_amount": None,
+                            "quote_mint": sol_mint,
+                            "net_sol_delta": -net_sol,
+                            "net_token_delta": token_amount,
+                        }
+                elif sol_out > sol_in:
+                    # Received SOL, spent token
+                    if token_in_mint and token_in_count > 0:
+                        token_amount = token_in_count
+                        token_decimals = token_inputs[0].get("decimals", 0) if isinstance(token_inputs[0], dict) and token_inputs else 0
+                        if token_decimals > 0:
+                            token_amount /= (10 ** token_decimals)
+                        net_sol = (sol_out - sol_in) / 1e9
+                        return {
+                            "signature": signature,
+                            "timestamp": timestamp,
+                            "wallet": wallet_address,
+                            "token_mint": token_in_mint,
+                            "token_amount": token_amount,
+                            "sol_amount": net_sol,
+                            "direction": "SELL",
+                            "price_sol": net_sol / token_amount if token_amount > 0 else 0.0,
+                            "price_usd": None,
+                            "usd_amount": None,
+                            "quote_mint": sol_mint,
+                            "net_sol_delta": net_sol,
+                            "net_token_delta": -token_amount,
+                        }
 
         # Token-to-token swap from events (no SOL leg)
         if token_inputs and token_outputs:
@@ -3925,10 +4026,12 @@ class HeliusClient:
 
         # Try to determine SOL delta from native balance changes
         sol_delta = 0.0
-        native_before = _safe_float(wallet_data.get("nativeBalanceChange", {}).get("before", 0) or 0)
-        native_after = _safe_float(wallet_data.get("nativeBalanceChange", {}).get("after", 0) or 0)
-        if native_before or native_after:
-            sol_delta = (native_after - native_before) / 1e9
+        native_change = wallet_data.get("nativeBalanceChange")
+        if native_change is not None:
+            try:
+                sol_delta = int(native_change) / 1e9
+            except (TypeError, ValueError):
+                pass
 
         direction = "BUY" if best_delta > 0 else "SELL"
         sol_amount = abs(sol_delta) if sol_delta != 0 else None
