@@ -136,23 +136,10 @@ services:
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-jup_7e095c7e729dadb3070b15417faaeed98464afde972184fdd93e0b24247fc857}
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
-        # Minimum WQS for signal admission (lowered for paper trading to expand wallet pool)
+        # Minimum WQS for signal admission
        - CHIMERA_SELECTION__MIN_WQS_SCORE=25.0
-       # ─── Dust-size live testing config ───────────────────────────────
-       # Minimal SOL per trade (0.01–0.10 SOL) for end-to-end evaluation.
-       # Total capital at risk: ~0.5 SOL max (5 positions × 0.1 SOL cap).
+       # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
-       - CHIMERA_POSITION_SIZING__BASE_SIZE_SOL=0.05
-       - CHIMERA_POSITION_SIZING__MIN_SIZE_SOL=0.01
-       - CHIMERA_POSITION_SIZING__MIN_LIVE_POSITION_SOL=0.01
-       - CHIMERA_POSITION_SIZING__MAX_SIZE_SOL=0.1
-       - CHIMERA_POSITION_SIZING__SHIELD_MAX_SIZE_SOL=0.1
-       - CHIMERA_POSITION_SIZING__SPEAR_MAX_SIZE_SOL=0.05
-       - CHIMERA_STRATEGY__MIN_POSITION_SOL=0.01
-       - CHIMERA_STRATEGY__MAX_POSITION_SOL=0.1
-       # Disable friction gating — dust trades have unfavorable fee:profit ratio
-       - CHIMERA_STRATEGY__FRICTION_GATING_ENABLED=false
-       # ─── End dust-size config ────────────────────────────────────────
     env_file:
       - .env
     depends_on:
