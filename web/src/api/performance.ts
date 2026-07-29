@@ -155,7 +155,10 @@ export function useRPCLatency() {
       // Transform response to match expected format
       const data = response.data
       return {
-        endpoints: data.endpoints || [],
+        endpoints: (data.endpoints || []).map((ep: any) => ({
+          ...ep,
+          error_rate: ep.error_rate_percent ?? ep.error_rate ?? 0,
+        })),
         overall_avg: data.overall_avg_ms || 0,
         overall_p95: data.overall_p95_ms || 0,
         overall_p99: data.overall_p99_ms || 0,

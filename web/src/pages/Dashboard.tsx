@@ -108,7 +108,7 @@ export function Dashboard() {
     
     for (const trade of sortedTrades) {
       const dateStr = new Date(trade.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-      cumPnl += toNum(trade.pnl_usd)
+      cumPnl += toNum(trade.pnl_sol)
       pnlByDate.set(dateStr, cumPnl)
     }
     
@@ -669,10 +669,9 @@ export function Dashboard() {
                       </div>
                     </div>
                     <Badge
-                      variant={(endpoint.error_rate ?? 0) < 0.01 ? 'success' : (endpoint.error_rate ?? 0) < 0.05 ? 'warning' : 'danger'}
-                      size="sm"
+                      variant={(endpoint.error_rate ?? 0) < 1.0 ? 'success' : (endpoint.error_rate ?? 0) < 5.0 ? 'warning' : 'danger'}
                     >
-                      {((endpoint.error_rate ?? 0) * 100).toFixed(1)}% errors
+                      {(endpoint.error_rate ?? 0).toFixed(1)}% errors
                     </Badge>
                   </div>
                 </div>

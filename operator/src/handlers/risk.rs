@@ -11,6 +11,7 @@ use axum::{
     Json,
 };
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -815,8 +816,14 @@ pub async fn get_portfolio_risk(
         },
     };
 
+    let portfolio_heat_pct = if total_capital > Decimal::ZERO {
+        (exposure.total_exposure_sol / total_capital.to_f64().unwrap_or(1.0)) * 100.0
+    } else {
+        0.0
+    };
+
     Ok(Json(PortfolioRiskResponse {
-        portfolio_heat_percent: exposure.total_exposure_sol,
+        portfolio_heat_percent: portfolio_heat_pct,
         heat_threshold,
         heat_status: heat_status.to_string(),
         concentration: ConcentrationData {

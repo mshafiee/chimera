@@ -2005,7 +2005,9 @@ pub async fn get_performance_metrics(
         if prev.is_zero() {
             None
         } else {
-            ((curr - prev) / prev * Decimal::from(100)).to_f64()
+            // Use abs() on denominator so direction is correct even when
+            // the prior window was net-negative (e.g. -10 → -5 = +50%, not -50%)
+            ((curr - prev) / prev.abs() * Decimal::from(100)).to_f64()
         }
     };
 
@@ -2062,9 +2064,9 @@ pub async fn get_cost_metrics(
         }
     }
 
-    // Get net profit from CLOSED positions (source of truth for realized PnL)
-    // This matches what get_pnl_30d() and the Performance metrics use.
-    let net_profit_30d = state.db.get_pnl_30d().await?;
+    // Net profit = gross realized PnL minus total trading costs
+    let gross_pnl_30d = state.db.get_pnl_30d().await?;
+    let net_profit_30d = gross_pnl_30d - total_costs;
 
     // Get total capital deployed (sum of entry amounts for CLOSED positions)
     // This avoids double-counting that would occur from summing trade amounts.
