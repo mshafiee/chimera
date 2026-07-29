@@ -49,7 +49,8 @@ pub struct PortfolioRiskResponse {
     pub concentration: ConcentrationData,
     pub exposure: ExposureData,
     pub drawdown: DrawdownData,
-    pub total_capital_sol: f64, // Current wallet balance
+    pub total_capital_sol: f64, // Configured capital cap
+    pub wallet_balance_sol: f64, // Actual available balance (capital + realized PnL - active exposure)
 }
 
 /// Concentration data (by token and sector)
@@ -822,6 +823,14 @@ pub async fn get_portfolio_risk(
         0.0
     };
 
+    // Compute actual wallet balance:
+    //   starting capital + cumulative realized PnL − capital in active positions
+    let realized_pnl = state.db.get_total_realized_pnl().await.unwrap_or(Decimal::ZERO);
+    let wallet_balance = (total_capital + realized_pnl
+        - Decimal::try_from(exposure.total_exposure_sol).unwrap_or(Decimal::ZERO))
+        .to_f64()
+        .unwrap_or(0.0);
+
     Ok(Json(PortfolioRiskResponse {
         portfolio_heat_percent: portfolio_heat_pct,
         heat_threshold,
@@ -835,6 +844,7 @@ pub async fn get_portfolio_risk(
         exposure,
         drawdown,
         total_capital_sol: total_capital.to_f64().unwrap_or(0.0),
+        wallet_balance_sol: wallet_balance,
     }))
 }
 

@@ -12,8 +12,9 @@ export function useBalanceAndNAV() {
   const { data: portfolioRisk } = usePortfolioRisk()
 
   return useMemo(() => {
-    // Balance from portfolio risk endpoint (polled every 60s on backend)
-    const balance = portfolioRisk?.total_capital_sol ?? 0
+    // Balance from portfolio risk endpoint — actual wallet balance
+    // (config capital + realized PnL − active exposure)
+    const balance = portfolioRisk?.wallet_balance_sol ?? portfolioRisk?.total_capital_sol ?? 0
 
     // Calculate NAV: Balance + Total Unrealized PnL
     const totalUnrealizedPnL = positionsData?.total_unrealized_pnl_sol ?? 0

@@ -682,7 +682,7 @@ export function Dashboard() {
       )}
 
       {/* NEW: Enhanced Cost Breakdown */}
-      {costAnalysis && costAnalysis.per_trade_costs.length > 0 && (
+      {costAnalysis && costAnalysis.cost_by_type.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Cost Breakdown (Recent Trades)</CardTitle>

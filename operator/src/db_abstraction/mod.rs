@@ -263,6 +263,9 @@ pub trait Database: Send + Sync {
     /// Get total PnL for the last 30 days
     async fn get_pnl_30d(&self) -> AppResult<rust_decimal::Decimal>;
 
+    /// Get cumulative realized PnL (all-time, from CLOSED positions)
+    async fn get_total_realized_pnl(&self) -> AppResult<rust_decimal::Decimal>;
+
     /// Get total capital deployed (sum of entry_amount_sol for CLOSED positions) in the last 30 days
     async fn get_capital_deployed_30d(&self) -> AppResult<rust_decimal::Decimal>;
 

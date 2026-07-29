@@ -9,7 +9,8 @@ export interface PortfolioRiskResponse {
   concentration: ConcentrationData
   exposure: ExposureData
   drawdown: DrawdownData
-  total_capital_sol: number  // Current wallet balance
+  total_capital_sol: number  // Configured capital cap
+  wallet_balance_sol: number // Actual available balance (capital + realized PnL - exposure)
 }
 
 export interface ConcentrationData {
