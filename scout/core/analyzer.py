@@ -1440,7 +1440,7 @@ class WalletAnalyzer:
 
             token_mint = swap.get("token_mint", "") or swap.get("token_out", "")
             if not token_mint or not token_mint.strip():
-                continue
+                return None
             # Convert all financial values to Decimal immediately
             token_amount = float_to_decimal(swap.get("token_amount") or 0.0)
             sol_amount_raw = swap.get("sol_amount")
