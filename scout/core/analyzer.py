@@ -856,9 +856,9 @@ class WalletAnalyzer:
                                 WHERE status IN ('ACTIVE', 'CANDIDATE')
                                 AND (archetype != 'ARBITRAGE' OR last_arb_check_at IS NULL OR last_arb_check_at < NOW() - INTERVAL '24 hours')
                                 ORDER BY wqs_score DESC NULLS LAST
-                                LIMIT ?
+                                LIMIT %s
                             """, (self._max_wallets,))
-                            existing_wallets = [row[0] for row in cursor.fetchall()]
+                            existing_wallets = [row["address"] for row in cursor.fetchall()]
 
                             if existing_wallets:
                                 self._candidate_wallets = existing_wallets[:self._max_wallets]

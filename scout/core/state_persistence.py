@@ -242,7 +242,7 @@ class StatePersistence:
                     (date, total_credits, credits_discovery, credits_analysis,
                      credits_validation, credits_enrichment, credits_monitoring,
                      credits_reserve, credits_remaining, day_of_month, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     history.date,
                     history.total_credits,
@@ -278,7 +278,7 @@ class StatePersistence:
                            credits_validation, credits_enrichment, credits_monitoring,
                            credits_reserve, credits_remaining, day_of_month, timestamp
                     FROM credit_history
-                    WHERE timestamp >= ?
+                    WHERE timestamp >= %s
                     ORDER BY timestamp DESC
                 """, (cutoff,))
 
@@ -317,7 +317,7 @@ class StatePersistence:
                     INSERT OR REPLACE INTO wallet_performance_history
                     (wallet_address, wqs_score, total_trades, winning_trades,
                      total_pnl, avg_pnl, win_rate, roi_score, first_seen, last_updated)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     performance.wallet_address,
                     performance.wqs_score,
@@ -350,7 +350,7 @@ class StatePersistence:
                         SELECT wallet_address, wqs_score, total_trades, winning_trades,
                                total_pnl, avg_pnl, win_rate, roi_score, first_seen, last_updated
                         FROM wallet_performance_history
-                        WHERE wallet_address = ?
+                        WHERE wallet_address = %s
                     """, (wallet_address,))
                 else:
                     cursor = conn.execute("""
@@ -391,7 +391,7 @@ class StatePersistence:
                     INSERT INTO roi_metrics
                     (category, credits_consumed, value_generated, roi_score,
                      operations_count, period_start, period_end)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (
                     metrics.category,
                     metrics.credits_consumed,
@@ -426,7 +426,7 @@ class StatePersistence:
                         SELECT category, credits_consumed, value_generated, roi_score,
                                operations_count, period_start, period_end, timestamp
                         FROM roi_metrics
-                        WHERE category = ? AND timestamp >= ?
+                        WHERE category = %s AND timestamp >= %s
                         ORDER BY timestamp DESC
                     """, (category, cutoff))
                 else:
@@ -434,7 +434,7 @@ class StatePersistence:
                         SELECT category, credits_consumed, value_generated, roi_score,
                                operations_count, period_start, period_end, timestamp
                         FROM roi_metrics
-                        WHERE timestamp >= ?
+                        WHERE timestamp >= %s
                         ORDER BY timestamp DESC
                     """, (cutoff,))
 
@@ -489,7 +489,7 @@ class StatePersistence:
                      fast_wallets_discovered, fast_execution_time, fast_credits_consumed,
                      trending_wallets_discovered, trending_execution_time, trending_credits_consumed,
                      cross_timeframe_quality_avg, parallel_execution, discovery_goal)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     result.timestamp,
                     len(result.combined_wallets),
@@ -537,33 +537,33 @@ class StatePersistence:
                            trending_credits_consumed, cross_timeframe_quality_avg, parallel_execution,
                            discovery_goal, created_at
                     FROM multi_timeframe_discovery_stats
-                    WHERE discovery_timestamp >= ?
+                    WHERE discovery_timestamp >= %s
                     ORDER BY discovery_timestamp DESC
                 """, (cutoff,))
 
                 records = []
                 for row in cursor:
                     records.append({
-                        'discovery_timestamp': row[0],
-                        'total_unique_wallets': row[1],
-                        'total_raw_wallets': row[2],
-                        'deduplication_ratio': row[3],
-                        'multi_timeframe_wallets': row[4],
-                        'total_credits_consumed': row[5],
-                        'total_execution_time_seconds': row[6],
-                        'deep_wallets_discovered': row[7],
-                        'deep_execution_time': row[8],
-                        'deep_credits_consumed': row[9],
-                        'fast_wallets_discovered': row[10],
-                        'fast_execution_time': row[11],
-                        'fast_credits_consumed': row[12],
-                        'trending_wallets_discovered': row[13],
-                        'trending_execution_time': row[14],
-                        'trending_credits_consumed': row[15],
-                        'cross_timeframe_quality_avg': row[16],
-                        'parallel_execution': bool(row[17]),
-                        'discovery_goal': row[18],
-                        'created_at': row[19],
+                        'discovery_timestamp': row["discovery_timestamp"],
+                        'total_unique_wallets': row["total_unique_wallets"],
+                        'total_raw_wallets': row["total_raw_wallets"],
+                        'deduplication_ratio': row["deduplication_ratio"],
+                        'multi_timeframe_wallets': row["multi_timeframe_wallets"],
+                        'total_credits_consumed': row["total_credits_consumed"],
+                        'total_execution_time_seconds': row["total_execution_time_seconds"],
+                        'deep_wallets_discovered': row["deep_wallets_discovered"],
+                        'deep_execution_time': row["deep_execution_time"],
+                        'deep_credits_consumed': row["deep_credits_consumed"],
+                        'fast_wallets_discovered': row["fast_wallets_discovered"],
+                        'fast_execution_time': row["fast_execution_time"],
+                        'fast_credits_consumed': row["fast_credits_consumed"],
+                        'trending_wallets_discovered': row["trending_wallets_discovered"],
+                        'trending_execution_time': row["trending_execution_time"],
+                        'trending_credits_consumed': row["trending_credits_consumed"],
+                        'cross_timeframe_quality_avg': row["cross_timeframe_quality_avg"],
+                        'parallel_execution': bool(row["parallel_execution"]),
+                        'discovery_goal': row["discovery_goal"],
+                        'created_at': row["created_at"],
                     })
 
                 logger.debug(f"Loaded {len(records)} multi-timeframe discovery stats records")
@@ -592,19 +592,19 @@ class StatePersistence:
                            AVG(total_execution_time_seconds) as avg_execution_time,
                            AVG(cross_timeframe_quality_avg) as avg_quality
                     FROM multi_timeframe_discovery_stats
-                    WHERE discovery_timestamp >= ?
+                    WHERE discovery_timestamp >= %s
                 """, (cutoff,))
 
                 row = cursor.fetchone()
-                if row and row[0] > 0:
+                if row and row["total_runs"] > 0:
                     return {
-                        'total_runs': row[0],
-                        'avg_unique_wallets': row[1] or 0,
-                        'avg_deduplication_ratio': row[2] or 0.0,
-                        'avg_multi_timeframe_wallets': row[3] or 0,
-                        'avg_credits_consumed': row[4] or 0,
-                        'avg_execution_time_seconds': row[5] or 0.0,
-                        'avg_cross_timeframe_quality': row[6] or 0.0,
+                        'total_runs': row["total_runs"],
+                        'avg_unique_wallets': row["avg_unique_wallets"] or 0,
+                        'avg_deduplication_ratio': row["avg_deduplication_ratio"] or 0.0,
+                        'avg_multi_timeframe_wallets': row["avg_multi_timeframe_wallets"] or 0,
+                        'avg_credits_consumed': row["avg_credits"] or 0,
+                        'avg_execution_time_seconds': row["avg_execution_time"] or 0.0,
+                        'avg_cross_timeframe_quality': row["avg_quality"] or 0.0,
                     }
                 else:
                     return {
@@ -643,7 +643,7 @@ class StatePersistence:
                         MAX(total_credits) as max_daily,
                         MIN(total_credits) as min_daily
                     FROM credit_history
-                    WHERE timestamp >= ?
+                    WHERE timestamp >= %s
                 """, (cutoff,))
 
                 row = cursor.fetchone()
@@ -676,13 +676,13 @@ class StatePersistence:
             with self._get_connection() as conn:
                 # Clean credit history
                 cursor = conn.execute("""
-                    DELETE FROM credit_history WHERE timestamp < ?
+                    DELETE FROM credit_history WHERE timestamp < %s
                 """, (cutoff,))
                 credit_deleted = cursor.rowcount
 
                 # Clean old ROI metrics
                 cursor = conn.execute("""
-                    DELETE FROM roi_metrics WHERE timestamp < ?
+                    DELETE FROM roi_metrics WHERE timestamp < %s
                 """, (cutoff,))
                 roi_deleted = cursor.rowcount
 

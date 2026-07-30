@@ -106,7 +106,7 @@ class ValidationReporter:
                 conn = get_connection(str(self.db_path))
                 cursor = conn.cursor()
                 cursor.execute("SELECT DISTINCT model_type FROM ml_predictions WHERE status = 'MATCHED'")
-                model_types = [row[0] for row in cursor.fetchall()]
+                model_types = [row["model_type"] for row in cursor.fetchall()]
                 conn.close()
             except Exception as e:
                 logger.error(f"Failed to get model types: {e}")

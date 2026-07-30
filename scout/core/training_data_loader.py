@@ -176,14 +176,14 @@ class TrainingDataLoader:
                         SUM(net_pnl_sol) as total_pnl,
                         COUNT(*) as trade_count
                     FROM trades
-                    WHERE wallet_address = ?
-                        AND created_at >= ?
+                    WHERE wallet_address = %s
+                        AND created_at >= %s
                         AND status IN ('CLOSED', 'EXITED')
                 """, (address, threshold.isoformat()))
 
                 row = cursor.fetchone()
-                if row and row[1] > 0:  # Has closed trades
-                    targets[address] = float(row[0]) if row[0] else 0.0
+                if row and row["trade_count"] > 0:  # Has closed trades
+                    targets[address] = float(row["total_pnl"]) if row["total_pnl"] else 0.0
 
             conn.close()
 

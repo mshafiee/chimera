@@ -118,6 +118,14 @@ class FilterConfig:
     # Signal freshness
     FRESH_SECONDS: int = 300       # 5 minutes = fresh
     STALE_SECONDS: int = 1800      # 30 minutes = stale
+    FRESHNESS_MAX_AGE_SECONDS: int = 300       # Max age for signal to be considered (seconds)
+    FRESHNESS_OPTIMAL_AGE_SECONDS: int = 60    # Optimal signal age (seconds)
+
+    # Ensemble confidence threshold
+    ENSEMBLE_MIN_CONFIDENCE: float = 0.6
+
+    # Timing minimum score
+    TIMING_MIN_SCORE: float = 0.3
 
     # Threshold adjustment
     ADAPTIVE_THRESHOLD: bool = True

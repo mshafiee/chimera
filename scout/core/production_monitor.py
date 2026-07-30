@@ -461,7 +461,7 @@ class ProductionMonitor:
             cursor.execute("""
                 INSERT OR REPLACE INTO health_checks
                 (name, status, message, timestamp, details, response_time_ms)
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 check.name,
                 check.status.value,
@@ -483,7 +483,7 @@ class ProductionMonitor:
             cursor = conn.cursor()
 
             cursor.execute("""
-                INSERT INTO metrics VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO metrics VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 metrics.timestamp,
                 metrics.cpu_percent,
@@ -552,7 +552,7 @@ class ProductionMonitor:
             cursor.execute("""
                 INSERT OR REPLACE INTO alerts
                 (id, severity, title, message, timestamp, source, resolved, resolution_timestamp, details)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """, (
                 alert.id,
                 alert.severity.value,
@@ -734,15 +734,15 @@ class ProductionMonitor:
             alerts = []
             for row in cursor.fetchall():
                 alert = Alert(
-                    id=row[0],
-                    severity=AlertSeverity(row[1]),
-                    title=row[2],
-                    message=row[3],
-                    timestamp=row[4],
-                    source=row[5],
-                    resolved=bool(row[6]),
-                    resolution_timestamp=row[7],
-                    details=json.loads(row[8]) if row[8] else {}
+                    id=row["id"],
+                    severity=AlertSeverity(row["severity"]),
+                    title=row["title"],
+                    message=row["message"],
+                    timestamp=row["timestamp"],
+                    source=row["source"],
+                    resolved=bool(row["resolved"]),
+                    resolution_timestamp=row["resolution_timestamp"],
+                    details=json.loads(row["details"]) if row["details"] else {}
                 )
                 alerts.append(alert)
 
@@ -961,7 +961,7 @@ class GrowthTracker:
 
             row = cursor.fetchone()
             if row:
-                self.current_capital = row[0]
+                self.current_capital = row["current_capital"]
                 logger.info(f"Loaded current capital: ${self.current_capital:.2f}")
 
             conn.close()
@@ -1026,24 +1026,24 @@ class GrowthTracker:
             # Get capital at different time periods
             cursor.execute("""
                 SELECT current_capital, timestamp FROM growth_history
-                WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+                WHERE timestamp >= %s ORDER BY timestamp ASC LIMIT 1
             """, (month_ago,))
             month_row = cursor.fetchone()
-            capital_month_ago = month_row[0] if month_row else self.starting_capital
+            capital_month_ago = month_row["current_capital"] if month_row else self.starting_capital
 
             cursor.execute("""
                 SELECT current_capital, timestamp FROM growth_history
-                WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+                WHERE timestamp >= %s ORDER BY timestamp ASC LIMIT 1
             """, (week_ago,))
             week_row = cursor.fetchone()
-            capital_week_ago = week_row[0] if week_row else self.starting_capital
+            capital_week_ago = week_row["current_capital"] if week_row else self.starting_capital
 
             cursor.execute("""
                 SELECT current_capital, timestamp FROM growth_history
-                WHERE timestamp >= ? ORDER BY timestamp ASC LIMIT 1
+                WHERE timestamp >= %s ORDER BY timestamp ASC LIMIT 1
             """, (day_ago,))
             day_row = cursor.fetchone()
-            capital_day_ago = day_row[0] if day_row else self.starting_capital
+            capital_day_ago = day_row["current_capital"] if day_row else self.starting_capital
 
             conn.close()
 
@@ -1247,7 +1247,7 @@ class GrowthTracker:
             alert_id = f"{alert_type}_{int(time.time())}_{time.time_ns()}"
 
             cursor.execute("""
-                INSERT INTO growth_alerts VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO growth_alerts VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 alert_id,
                 time.time(),
@@ -1288,29 +1288,29 @@ class GrowthTracker:
 
             cursor.execute("""
                 SELECT * FROM growth_history
-                WHERE timestamp >= ?
+                WHERE timestamp >= %s
                 ORDER BY timestamp ASC
             """, (cutoff_time,))
 
             history = []
             for row in cursor.fetchall():
                 history.append(GrowthMetrics(
-                    timestamp=row[0],
-                    current_capital=row[1],
+                    timestamp=row["timestamp"],
+                    current_capital=row["current_capital"],
                     target_capital=self.target_capital,
                     starting_capital=self.starting_capital,
-                    roi_daily=row[2],
-                    roi_weekly=row[3],
-                    roi_monthly=row[4],
-                    growth_rate_daily=row[5],
-                    growth_rate_weekly=row[6],
-                    growth_rate_monthly=row[7],
-                    days_to_target=row[8],
-                    high_wqs_wallets=row[9],
-                    avg_wallet_wqs=row[10],
-                    credits_used=row[11],
-                    credits_remaining=row[12],
-                    credits_roi=row[13],
+                    roi_daily=row["roi_daily"],
+                    roi_weekly=row["roi_weekly"],
+                    roi_monthly=row["roi_monthly"],
+                    growth_rate_daily=row["growth_rate_daily"],
+                    growth_rate_weekly=row["growth_rate_weekly"],
+                    growth_rate_monthly=row["growth_rate_monthly"],
+                    days_to_target=row["days_to_target"],
+                    high_wqs_wallets=row["high_wqs_wallets"],
+                    avg_wallet_wqs=row["avg_wallet_wqs"],
+                    credits_used=row["credits_used"],
+                    credits_remaining=row["credits_remaining"],
+                    credits_roi=row["credits_roi"],
                 ))
 
             conn.close()

@@ -1145,6 +1145,16 @@ class ScoutConfig:
         return float(os.getenv("SCOUT_TIMING_MIN_SCORE", "0.5"))
 
     @staticmethod
+    def get_budget_tracking_enabled() -> bool:
+        """Get whether predictive budget tracking is enabled (default false)."""
+        return os.getenv("SCOUT_BUDGET_TRACKING_ENABLED", "false").lower() == "true"
+
+    @staticmethod
+    def get_high_conviction_enabled() -> bool:
+        """Get whether high-conviction credit allocation is enabled (default false)."""
+        return os.getenv("SCOUT_HIGH_CONVICTION_ENABLED", "false").lower() == "true"
+
+    @staticmethod
     def get_signal_quality_adaptive_threshold() -> bool:
         """Get whether adaptive threshold adjustment is enabled."""
         return os.getenv("SCOUT_SIGNAL_QUALITY_ADAPTIVE_THRESHOLD", "true").lower() == "true"
