@@ -487,29 +487,26 @@ class HeliusClient:
         """
         Estimate the earliest known transaction timestamp for a token mint.
 
-        Uses getSignaturesForAddress to find the oldest signature on the mint,
-        which serves as a lower-bound estimate of when the token began trading.
-        Used as a fallback when Birdeye API is unavailable.
+        Uses the Enhanced Transactions API (order=asc) to find the oldest
+        transaction, which serves as a lower-bound estimate of when the token
+        began trading.  Used as a fallback when Birdeye API is unavailable.
 
         Returns epoch seconds (int) or None if unavailable.
         """
         if not self.api_key or not token_address:
             return None
 
-        # Pump.fun bonding-curve tokens (mint ends with "pump") have no
-        # signature history on Helius enhanced API — querying them 404s.
-        if token_address.endswith("pump"):
-            return None
-
         try:
-            endpoint = f"/addresses/{token_address}/signatures"
-            params = {"limit": 50, "api-key": self.api_key}
+            # Use /transactions endpoint (same as operator) — /signatures
+            # returns 404 for many token mints including pump.fun tokens.
+            endpoint = f"/addresses/{token_address}/transactions"
+            params: Dict[str, Any] = {"limit": 1, "api-key": self.api_key, "order": "asc"}
 
             data = await self._make_request(endpoint, params, use_retry=False)
             if not data or not isinstance(data, list) or not data:
                 return None
-            
-            oldest = data[-1]
+
+            oldest = data[0]  # Only fetched 1, and it's the oldest (asc order by default)
             return oldest.get("timestamp")
         except Exception:
             return None

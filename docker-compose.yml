@@ -187,12 +187,12 @@ services:
       - BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
-      - SCOUT_MAX_WALLETS=50
+      - SCOUT_MAX_WALLETS=100
       - SCOUT_DISCOVERY_HOURS=24
       - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
       # Performance Optimization
-      - SCOUT_WALLET_TX_LIMIT=50                                 # Reduced to 50 for faster testing
-      - SCOUT_WALLET_TX_MAX_PAGES=10                             # Reduced from 20 (50% reduction)
+      - SCOUT_WALLET_TX_LIMIT=100
+      - SCOUT_WALLET_TX_MAX_PAGES=15
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
       # WQS Thresholds (relaxed for paper trading)
       - SCOUT_MIN_WQS_ACTIVE=25.0
