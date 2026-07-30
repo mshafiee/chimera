@@ -23,7 +23,7 @@ const DEFAULT_CACHE_TTL_SECS: i64 = 30;
 /// Price update interval for active tokens.
 /// Jupiter's free API rate-limits at ~5s polling; 15s keeps prices fresh
 /// within the 30s staleness threshold while avoiding 429 responses.
-const PRICE_UPDATE_INTERVAL_SECS: u64 = 15;
+const PRICE_UPDATE_INTERVAL_SECS: u64 = 30;
 
 /// Decimals cache TTL in seconds (24 hours - decimals are immutable for minted tokens)
 const DECIMALS_TTL_SECS: i64 = 86400;
@@ -514,6 +514,17 @@ impl PriceCache {
                 Err(PriceCacheError::RateLimited) => {
                     tracing::warn!("Jupiter price API rate-limited, entering cooldown for one cycle");
                     rate_limit_cooldown = true;
+                    // Try lite-api fallback so the cache doesn't go stale during cooldown
+                    let lite_url = "https://lite-api.jup.ag/price";
+                    match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
+                        Ok((prices, decimals_map)) if !prices.is_empty() => {
+                            tracing::info!("Lite-api fallback returned {} prices after rate-limit", prices.len());
+                            let _ = self.apply_price_updates(prices, decimals_map);
+                        }
+                        _ => {
+                            tracing::debug!("Lite-api fallback unavailable during rate-limit cooldown");
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "Failed to update prices");

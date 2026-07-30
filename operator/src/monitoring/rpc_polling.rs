@@ -110,9 +110,9 @@ pub async fn poll_wallet_transactions(
         .acquire_rpc(RpcMethodCategory::AccountQuery, RequestPriority::Polling)
         .await;
 
-    // Paginated fetch: signatures are returned newest-first. Walk pages of 10 until
-    // the anchor (last_signature) is found or we exhaust 20 pages (200 signatures max).
-    const PAGE_SIZE: usize = 10;
+    // Paginated fetch: signatures are returned newest-first. Walk pages of 20 until
+    // the anchor (last_signature) is found or we exhaust 20 pages (400 signatures max).
+    const PAGE_SIZE: usize = 20;
     const MAX_PAGES: usize = 20;
 
     let pubkey = wallet_address.parse().context("Invalid wallet address")?;

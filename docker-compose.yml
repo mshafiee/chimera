@@ -190,6 +190,9 @@ services:
       - SCOUT_MAX_WALLETS=100
       - SCOUT_DISCOVERY_HOURS=24
       - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
+      # Historical liquidity fallback: 'flexible' uses current liquidity with confidence
+      # penalty when historical data is missing (instead of strict rejection)
+      - SCOUT_STRICT_HISTORICAL_LIQUIDITY=flexible
       # Performance Optimization
       - SCOUT_WALLET_TX_LIMIT=100
       - SCOUT_WALLET_TX_MAX_PAGES=15
