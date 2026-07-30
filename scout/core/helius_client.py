@@ -3959,73 +3959,107 @@ class HeliusClient:
         Some Helius API responses omit structured tokenTransfers but include pre/post
         token balance changes in accountData. This reconstructs a minimal trade from
         the wallet's own balance deltas.
+
+        Scans ALL accountData entries (not just the wallet's direct account) because
+        token balance changes are often recorded under the wallet's Associated Token
+        Account (ATA), which has a different address. The userAccount field inside
+        tokenBalanceChanges links the ATA back to the wallet.
         """
         signature = tx.get("signature", "")
         timestamp = tx.get("timestamp", int(utcnow().timestamp()))
 
-        wallet_data = None
+        sol_mint = "So11111111111111111111111111111111111111112"
+
+        # Aggregate ALL token balance changes where userAccount == wallet_address
+        # across ALL accountData entries (handles ATAs).
+        all_changes: list[tuple[str, float]] = []  # (mint, delta_in_ui_units)
+        wallet_native_change = 0
+
         for acc in tx.get("accountData", []) or []:
+            # Check native balance change for wallet's direct account
             if acc.get("account") == wallet_address:
-                wallet_data = acc
-                break
+                nc = acc.get("nativeBalanceChange")
+                if nc is not None:
+                    try:
+                        wallet_native_change = int(nc)
+                    except (TypeError, ValueError):
+                        pass
 
-        if not wallet_data:
+            # Scan tokenBalanceChanges for wallet's userAccount
+            for change in acc.get("tokenBalanceChanges") or []:
+                if change.get("userAccount") != wallet_address:
+                    continue
+                mint = change.get("mint")
+                if not mint:
+                    continue
+                # Extract delta from rawTokenAmount dict
+                raw = change.get("rawTokenAmount")
+                if isinstance(raw, dict):
+                    try:
+                        raw_amt = float(raw.get("tokenAmount", 0))
+                        dec = int(raw.get("decimals", 0))
+                        delta = raw_amt / (10 ** dec) if dec > 0 else raw_amt
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    # Fallback: rawTokenAmountBefore/After scalars
+                    raw_before = _safe_float(change.get("rawTokenAmountBefore", 0) or 0)
+                    raw_after = _safe_float(change.get("rawTokenAmountAfter", 0) or 0)
+                    delta = raw_after - raw_before
+                    try:
+                        dec = int(change.get("decimals", 0) or 0)
+                        if dec > 0:
+                            delta = delta / (10 ** dec)
+                    except (TypeError, ValueError):
+                        pass
+
+                if abs(delta) > 1e-12:
+                    all_changes.append((mint, delta))
+
+        if not all_changes:
             return None
 
-        token_balance_changes = wallet_data.get("tokenBalanceChanges") or []
-        if not token_balance_changes:
-            return None
-
-        # Find the largest token balance change (most significant movement)
-        best_change = None
+        # Find the largest non-SOL token balance change
+        best_mint = None
         best_delta = 0.0
-        for change in token_balance_changes:
-            mint = change.get("mint")
-            if not mint:
+        for mint, delta in all_changes:
+            if mint == sol_mint:
                 continue
-            raw_before = _safe_float(change.get("rawTokenAmountBefore", 0) or 0)
-            raw_after = _safe_float(change.get("rawTokenAmountAfter", 0) or 0)
-            delta = raw_after - raw_before
             if abs(delta) > abs(best_delta):
                 best_delta = delta
-                best_change = change
+                best_mint = mint
 
-        if not best_change or abs(best_delta) < 1e-12:
+        # If no non-SOL change, check if SOL itself moved significantly
+        if not best_mint:
+            for mint, delta in all_changes:
+                if mint == sol_mint and abs(delta) > abs(best_delta):
+                    best_delta = delta
+                    best_mint = mint
+
+        if not best_mint or abs(best_delta) < 1e-12:
             return None
 
-        mint = best_change.get("mint", "")
-        try:
-            token_decimals = int(best_change.get("decimals", 0) or 0)
-        except (TypeError, ValueError):
-            token_decimals = 0
-        token_amount = abs(best_delta)
-        if token_decimals > 0:
-            token_amount /= (10 ** token_decimals)
-
-        # Try to determine SOL delta from native balance changes
-        sol_delta = 0.0
-        native_change = wallet_data.get("nativeBalanceChange")
-        if native_change is not None:
-            try:
-                sol_delta = int(native_change) / 1e9
-            except (TypeError, ValueError):
-                pass
+        # SOL delta: combine native change + wSOL token changes
+        sol_delta = wallet_native_change / 1e9
+        for mint, delta in all_changes:
+            if mint == sol_mint:
+                sol_delta += delta
 
         direction = "BUY" if best_delta > 0 else "SELL"
-        sol_amount = abs(sol_delta) if sol_delta != 0 else None
+        sol_amount = abs(sol_delta) if abs(sol_delta) > 0.001 else None
 
         return {
             "signature": signature,
             "timestamp": timestamp,
             "wallet": wallet_address,
-            "token_mint": mint,
-            "token_amount": token_amount,
+            "token_mint": best_mint,
+            "token_amount": abs(best_delta),
             "sol_amount": sol_amount,
             "direction": direction,
-            "price_sol": (sol_amount / token_amount) if sol_amount and token_amount > 0 else None,
+            "price_sol": (sol_amount / abs(best_delta)) if sol_amount and abs(best_delta) > 0 else None,
             "price_usd": None,
             "usd_amount": None,
-            "quote_mint": "So11111111111111111111111111111111111111112" if sol_amount else None,
+            "quote_mint": sol_mint if sol_amount else None,
             "net_sol_delta": sol_delta,
             "net_token_delta": best_delta,
         }
