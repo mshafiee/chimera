@@ -10,6 +10,7 @@ use axum::{
     extract::{Query, State},
     Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -51,7 +52,7 @@ pub struct PromotionItem {
     pub wqs_score: f64,
     pub reason: String,
     pub backtest_success: bool,
-    pub validated_at: String,
+    pub validated_at: DateTime<Utc>,
 }
 
 /// Rejection queue item
@@ -60,7 +61,7 @@ pub struct RejectionItem {
     pub address: String,
     pub wqs_score: f64,
     pub reason: String,
-    pub rejected_at: String,
+    pub rejected_at: DateTime<Utc>,
 }
 
 /// WQS distribution response
@@ -835,7 +836,7 @@ async fn calculate_scout_metrics(db: &Arc<dyn Database>) -> Result<ScoutMetricsR
 async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem>, AppError> {
     let pool = pg_pool(db)?;
 
-    let rows = sqlx::query_as::<_, (String, f64, String, String)>(
+    let rows = sqlx::query_as::<_, (String, f64, String, DateTime<Utc>)>(
         "SELECT address, wqs_score, notes, promoted_at FROM wallets
          WHERE status = 'ACTIVE' AND promoted_at IS NOT NULL
          ORDER BY promoted_at DESC LIMIT 20",
@@ -865,7 +866,7 @@ async fn get_promotion_queue(db: &Arc<dyn Database>) -> Result<Vec<PromotionItem
 async fn get_rejection_queue(db: &Arc<dyn Database>) -> Result<Vec<RejectionItem>, AppError> {
     let pool = pg_pool(db)?;
 
-    let rows = sqlx::query_as::<_, (String, f64, String, String)>(
+    let rows = sqlx::query_as::<_, (String, f64, String, DateTime<Utc>)>(
         "SELECT address, wqs_score, notes, updated_at FROM wallets
          WHERE status = 'REJECTED'
          ORDER BY updated_at DESC LIMIT 20",
