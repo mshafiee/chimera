@@ -728,24 +728,27 @@ class StatePersistence:
     def get_database_stats(self) -> Dict[str, Any]:
         """Get database statistics."""
         with self._get_connection() as conn:
-            # Table row counts
+            # Table row counts (dict_row factory: SELECT COUNT(*) → key "count")
             cursor = conn.execute("SELECT COUNT(*) FROM credit_history")
-            credit_count = cursor.fetchone()[0]
+            credit_count = cursor.fetchone()["count"]
 
             cursor = conn.execute("SELECT COUNT(*) FROM wallet_performance_history")
-            wallet_count = cursor.fetchone()[0]
+            wallet_count = cursor.fetchone()["count"]
 
             cursor = conn.execute("SELECT COUNT(*) FROM roi_metrics")
-            roi_count = cursor.fetchone()[0]
+            roi_count = cursor.fetchone()["count"]
 
             # Database size
             db_path = Path(self._get_db_path())
             db_size = db_path.stat().st_size if db_path.exists() else 0
+            total = credit_count + wallet_count + roi_count
 
             return {
                 'credit_history_records': credit_count,
                 'wallet_performance_records': wallet_count,
                 'roi_metrics_records': roi_count,
+                'total_records': total,
+                'database_path': str(db_path),
                 'database_size_bytes': db_size,
                 'database_size_mb': db_size / (1024 * 1024),
             }

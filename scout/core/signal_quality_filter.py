@@ -422,6 +422,7 @@ class SignalQualityFilter:
             return {
                 'current_threshold': self._current_threshold,
                 'total_signals': self._total_signals,
+                'total_signals_evaluated': self._total_signals,
                 'executed_count': self._executed_count,
                 'skipped_count': self._skipped_count,
                 'execution_rate': (
