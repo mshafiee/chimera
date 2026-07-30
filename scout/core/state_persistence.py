@@ -508,7 +508,7 @@ class StatePersistence:
                     trending_result.execution_time_seconds if trending_result else 0.0,
                     trending_result.credits_consumed if trending_result else 0,
                     cross_timeframe_quality_avg,
-                    1 if parallel else 0,  # Convert boolean to integer
+                    parallel,
                     discovery_goal
                 ))
 
