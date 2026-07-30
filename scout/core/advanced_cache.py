@@ -281,10 +281,16 @@ class AdvancedCache:
             logger.error(f"Failed to serialize cache value: {e}")
             return b'{}'
 
-    def _deserialize_value(self, data: bytes) -> Any:
-        """Deserialize value from storage."""
+    def _deserialize_value(self, data) -> Any:
+        """Deserialize value from storage.
+
+        Handles both ``bytes`` (raw Redis) and ``str`` (Redis with
+        ``decode_responses=True``) payloads.
+        """
         try:
-            return json.loads(data.decode('utf-8'))
+            if isinstance(data, bytes):
+                data = data.decode('utf-8')
+            return json.loads(data)
         except Exception as e:
             logger.error(f"Failed to deserialize cache value: {e}")
             return None

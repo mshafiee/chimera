@@ -247,7 +247,7 @@ class PredictionLogger:
             )
 
             row = cursor.fetchone()
-            prediction_id = row[0] if row else None
+            prediction_id = row["id"] if row else None
             conn.commit()
             conn.close()
 

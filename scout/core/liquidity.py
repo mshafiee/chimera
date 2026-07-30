@@ -643,22 +643,25 @@ class LiquidityProvider:
             conn.close()
 
             if row:
-                # Parse timestamp
-                if isinstance(row[3], str):
-                    row_timestamp = datetime.fromisoformat(row[3].replace('Z', '+00:00'))
+                # psycopg3 connection pool uses the dict_row factory, so rows
+                # are dicts keyed by column name (not positional tuples). The
+                # SELECT column order is: liquidity_usd, price_usd,
+                # volume_24h_usd, timestamp, source.
+                if isinstance(row["timestamp"], str):
+                    row_timestamp = datetime.fromisoformat(row["timestamp"].replace('Z', '+00:00'))
                 else:
-                    row_timestamp = row[3]
-                
+                    row_timestamp = row["timestamp"]
+
                 # Verify it's within tolerance
                 time_diff = abs((row_timestamp - timestamp).total_seconds() / 3600)
                 if time_diff <= tolerance_hours:
                     return LiquidityData(
                         token_address=token_address,
-                        liquidity_usd=row[0],
-                        price_usd=row[1],
-                        volume_24h_usd=row[2],
+                        liquidity_usd=row["liquidity_usd"],
+                        price_usd=row["price_usd"],
+                        volume_24h_usd=row["volume_24h_usd"],
                         timestamp=row_timestamp,
-                        source=row[4] or "database",
+                        source=row["source"] or "database",
                     )
         except Exception as e:
             import logging
