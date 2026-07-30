@@ -130,18 +130,20 @@ class MarketContextFeatures:
             # Sort trades by timestamp
             sorted_trades = sorted(
                 trades,
-                key=lambda x: x.get('timestamp', '')
+                key=lambda x: str(x.get('timestamp', ''))
             )
 
             # Create price lookup
             sol_prices = {
-                datetime.fromisoformat(p['timestamp']): p['price']
+                (p['timestamp'] if isinstance(p['timestamp'], datetime)
+                 else datetime.fromisoformat(str(p['timestamp']))): p['price']
                 for p in sol_price_history
                 if 'timestamp' in p and 'price' in p
             }
 
             for i, trade in enumerate(sorted_trades):
-                trade_time = datetime.fromisoformat(trade.get('timestamp', datetime.utcnow().isoformat()))
+                _ts = trade.get('timestamp')
+                trade_time = _ts if isinstance(_ts, datetime) else datetime.fromisoformat(str(_ts or datetime.utcnow().isoformat()))
 
                 # Get trade return
                 trade_pnl = trade.get('pnl_sol', trade.get('pnl', 0.0))
@@ -155,7 +157,8 @@ class MarketContextFeatures:
 
                 if closest_time and i > 0:
                     prev_trade = sorted_trades[i - 1]
-                    datetime.fromisoformat(prev_trade.get('timestamp', trade_time))
+                    _pts = prev_trade.get('timestamp')
+                    _pts if isinstance(_pts, datetime) else datetime.fromisoformat(str(_pts or trade_time.isoformat()))
 
                     # Get SOL return
                     sol_price_now = sol_prices.get(closest_time, 0)

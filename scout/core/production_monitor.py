@@ -484,6 +484,18 @@ class ProductionMonitor:
 
             cursor.execute("""
                 INSERT INTO metrics VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (timestamp) DO UPDATE SET
+                    cpu_percent = EXCLUDED.cpu_percent,
+                    memory_percent = EXCLUDED.memory_percent,
+                    memory_used_mb = EXCLUDED.memory_used_mb,
+                    disk_usage_percent = EXCLUDED.disk_usage_percent,
+                    active_threads = EXCLUDED.active_threads,
+                    open_files = EXCLUDED.open_files,
+                    network_connections = EXCLUDED.network_connections,
+                    wallets_analyzed = EXCLUDED.wallets_analyzed,
+                    requests_made = EXCLUDED.requests_made,
+                    cache_hit_rate = EXCLUDED.cache_hit_rate,
+                    avg_response_time_ms = EXCLUDED.avg_response_time_ms
             """, (
                 metrics.timestamp,
                 metrics.cpu_percent,

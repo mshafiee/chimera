@@ -93,7 +93,7 @@ class TimeSeriesFeatures:
         # Sort by timestamp and extract PnL series
         sorted_history = sorted(
             performance_history,
-            key=lambda x: x.get('timestamp', '')
+            key=lambda x: str(x.get('timestamp', ''))
         )
 
         pnl_series = np.array([
@@ -107,7 +107,8 @@ class TimeSeriesFeatures:
         ])
 
         timestamps = [
-            datetime.fromisoformat(x.get('timestamp', datetime.utcnow().isoformat()))
+            x.get('timestamp') if isinstance(x.get('timestamp'), datetime)
+            else datetime.fromisoformat(str(x.get('timestamp', datetime.utcnow().isoformat())))
             for x in sorted_history
         ]
 
