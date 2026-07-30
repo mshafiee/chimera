@@ -305,10 +305,16 @@ impl PreValidator {
         (base + size_part).min(max_slippage)
     }
 
-    /// Return false if the token is younger than `min_token_age_hours` in config.
+    /// Return false if the token is younger than the minimum age threshold.
+    /// Uses `min_token_age_pumpfun_hours` for pump.fun tokens, `min_token_age_hours` otherwise.
     /// Fail-open: unknown age (API failure or no data) → allowed.
     pub async fn check_token_age(&self, token_address: &str) -> Result<bool> {
-        let min_age = self.config.token_safety.min_token_age_hours;
+        let is_pumpfun = crate::token::is_pumpfun_token(token_address);
+        let min_age = if is_pumpfun {
+            self.config.token_safety.min_token_age_pumpfun_hours
+        } else {
+            self.config.token_safety.min_token_age_hours
+        };
         if min_age == 0.0 {
             return Ok(true);
         }
@@ -324,6 +330,7 @@ impl PreValidator {
                     token = token_address,
                     age_hours = age_hours,
                     min_age_hours = min_age,
+                    is_pumpfun = is_pumpfun,
                     "Token rejected: too new"
                 );
                 Ok(false)
