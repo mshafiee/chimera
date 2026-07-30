@@ -29,6 +29,7 @@ import logging.handlers
 import math
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -575,6 +576,19 @@ Examples:
         type=int,
         default=int(os.getenv("SCOUT_WALLET_TX_MAX_PAGES", str(DEFAULT_WALLET_TX_MAX_PAGES))),
         help=f"Max pagination pages per wallet tx fetch (default: {DEFAULT_WALLET_TX_MAX_PAGES}, or SCOUT_WALLET_TX_MAX_PAGES)",
+    )
+    
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="Run in continuous mode: loop with sleep between runs (default: single run)",
+    )
+    
+    parser.add_argument(
+        "--continuous-interval",
+        type=int,
+        default=int(os.getenv("SCOUT_CONTINUOUS_INTERVAL", "300")),
+        help="Sleep interval (seconds) between runs in --continuous mode (default: 300)",
     )
     
     return parser.parse_args()
@@ -2683,19 +2697,38 @@ async def main_async():
 
 def main():
     """Main entry point for the Scout (sync wrapper for async main)."""
+    args = parse_args()
     exit_code = 0
-    try:
-        exit_code = asyncio.run(main_async())
-    except KeyboardInterrupt:
-        print("\n[Scout] Interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"[Scout] Fatal error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    
+    if args.continuous:
+        print(f"[Scout] Continuous mode enabled (interval={args.continuous_interval}s)")
+        while True:
+            try:
+                exit_code = asyncio.run(main_async())
+                if exit_code != 0:
+                    print(f"[Scout] Run exited with code {exit_code}, continuing loop")
+            except KeyboardInterrupt:
+                print("\n[Scout] Interrupted by user")
+                sys.exit(0)
+            except Exception as e:
+                print(f"[Scout] Run failed: {e}")
+                import traceback
+                traceback.print_exc()
+            print(f"[Scout] Sleeping {args.continuous_interval}s before next run...")
+            time.sleep(args.continuous_interval)
     else:
-        sys.exit(exit_code if exit_code > 0 else 0)
+        try:
+            exit_code = asyncio.run(main_async())
+        except KeyboardInterrupt:
+            print("\n[Scout] Interrupted by user")
+            sys.exit(1)
+        except Exception as e:
+            print(f"[Scout] Fatal error: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        else:
+            sys.exit(exit_code if exit_code > 0 else 0)
 
 
 if __name__ == "__main__":

@@ -257,16 +257,13 @@ services:
         condition: service_healthy
     networks:
         - chimera-network
-    # Run scout on a 6-hour cycle (memecoin wallets go stale fast)
-    command: >
-       sh -c "
-         while true; do
-           echo '[Scout] Starting wallet analysis...';
-            python main.py || true;
-           echo '[Scout] Analysis complete, sleeping for 6 hours...';
-            sleep 21600;
-         done
-       "
+     # Run scout in continuous mode with 6-hour cycles (memecoin wallets go stale fast).
+     # Using --continuous keeps the Python process alive, so the Prometheus metrics
+     # server (daemon thread) stays up between runs instead of dying when main.py exits.
+     command: >
+        sh -c "
+          python main.py --continuous --continuous-interval 21600
+        "
     profiles:
        - devnet
        - mainnet-paper
