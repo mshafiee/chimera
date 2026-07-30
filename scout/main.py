@@ -2490,7 +2490,8 @@ async def main_async():
             addr = candidate.get("address", "")
             if not addr:
                 continue
-            print(f"[Scout] Re-validating {addr[:8]}... (WQS={candidate.get('wqs_score', 0):.0f})")
+            _wqs = candidate.get('wqs_score') or 0
+            print(f"[Scout] Re-validating {addr[:8]}... (WQS={_wqs:.0f})")
             try:
                 metrics = await analyzer.get_wallet_metrics(addr)
                 if metrics is None:
