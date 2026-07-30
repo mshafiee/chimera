@@ -72,7 +72,7 @@ services:
     ports:
       - "9101:9101"
     command:
-      - "--haproxy.scrape-uri=http://admin:${HAPROXY_STATS_PASSWORD:-changeme_asap}@stats:8404/stats"
+      - "--haproxy.scrape-uri=http://admin:${HAPROXY_STATS_PASSWORD:-changeme_asap}@haproxy:8404/stats"
       - "--web.listen-address=:9101"
     networks:
       - chimera-network
