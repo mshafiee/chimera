@@ -3827,25 +3827,18 @@ class HeliusClient:
             for ti in token_inputs:
                 if isinstance(ti, dict):
                     token_in_mint = ti.get("mint") or token_in_mint
-                    token_in_count += _safe_float(ti.get("rawTokenAmount", 0))
-                else:
-                    token_in_count += float(ti) if ti else 0.0
+                    token_in_count += self._parse_ui_token_amount(ti)
 
             token_out_count = 0.0
             token_out_mint = None
             for to in token_outputs:
                 if isinstance(to, dict):
                     token_out_mint = to.get("mint") or token_out_mint
-                    token_out_count += _safe_float(to.get("rawTokenAmount", 0))
-                else:
-                    token_out_count += float(to) if to else 0.0
+                    token_out_count += self._parse_ui_token_amount(to)
 
             # SOL→Token (no SOL out) = BUY
             if sol_in > 0 and sol_out == 0 and token_out_mint and token_out_count > 0:
                 token_amount = token_out_count
-                token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
-                if token_decimals > 0:
-                    token_amount /= (10 ** token_decimals)
                 sol_in_sol = sol_in / 1e9
                 return {
                     "signature": signature,
@@ -3865,9 +3858,6 @@ class HeliusClient:
             # Token→SOL (no SOL in) = SELL
             elif sol_out > 0 and sol_in == 0 and token_in_mint and token_in_count > 0:
                 token_amount = token_in_count
-                token_decimals = token_inputs[0].get("decimals", 0) if isinstance(token_inputs[0], dict) and token_inputs else 0
-                if token_decimals > 0:
-                    token_amount /= (10 ** token_decimals)
                 sol_out_sol = sol_out / 1e9
                 return {
                     "signature": signature,
@@ -3890,9 +3880,6 @@ class HeliusClient:
                     # Spent SOL, received token
                     if token_out_mint and token_out_count > 0:
                         token_amount = token_out_count
-                        token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
-                        if token_decimals > 0:
-                            token_amount /= (10 ** token_decimals)
                         net_sol = (sol_in - sol_out) / 1e9
                         return {
                             "signature": signature,
@@ -3913,9 +3900,6 @@ class HeliusClient:
                     # Received SOL, spent token
                     if token_in_mint and token_in_count > 0:
                         token_amount = token_in_count
-                        token_decimals = token_inputs[0].get("decimals", 0) if isinstance(token_inputs[0], dict) and token_inputs else 0
-                        if token_decimals > 0:
-                            token_amount /= (10 ** token_decimals)
                         net_sol = (sol_out - sol_in) / 1e9
                         return {
                             "signature": signature,
@@ -3940,18 +3924,15 @@ class HeliusClient:
             for ti in token_inputs:
                 if isinstance(ti, dict):
                     token_in_mint = ti.get("mint") or token_in_mint
-                    token_in_count += _safe_float(ti.get("rawTokenAmount", 0))
+                    token_in_count += self._parse_ui_token_amount(ti)
             token_out_mint = None
             token_out_count = 0.0
             for to in token_outputs:
                 if isinstance(to, dict):
                     token_out_mint = to.get("mint") or token_out_mint
-                    token_out_count += _safe_float(to.get("rawTokenAmount", 0))
+                    token_out_count += self._parse_ui_token_amount(to)
 
             if token_in_mint and token_out_mint and token_out_count > 0:
-                token_decimals = token_outputs[0].get("decimals", 0) if isinstance(token_outputs[0], dict) and token_outputs else 0
-                if token_decimals > 0:
-                    token_out_count /= (10 ** token_decimals)
                 return {
                     "signature": signature,
                     "timestamp": timestamp,
