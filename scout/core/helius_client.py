@@ -1767,6 +1767,87 @@ class HeliusClient:
         self._discovery_stats["balance_filtered"] = total_checked - len(valid_wallets)
         return valid_wallets
 
+    async def _get_wallet_creation_timestamps_batch(
+        self,
+        wallets: List[str],
+        max_concurrent: int = 10,
+    ) -> Dict[str, Optional[float]]:
+        """
+        Fetch wallet creation timestamps (first on-chain transaction) for a batch.
+
+        Uses the existing ``get_wallet_first_transaction`` infrastructure with
+        concurrency limiting. Returns a dict mapping address → unix timestamp
+        (or ``None`` if unknown / API failure).
+        """
+        import asyncio as _asyncio
+
+        sem = _asyncio.Semaphore(max_concurrent)
+        results: Dict[str, Optional[float]] = {}
+
+        async def _fetch_one(wallet: str) -> Tuple[str, Optional[float]]:
+            async with sem:
+                try:
+                    ts = await self.get_wallet_first_transaction(wallet)
+                    return wallet, float(ts) if ts else None
+                except Exception:
+                    return wallet, None
+
+        tasks = [_fetch_one(w) for w in wallets]
+        completed = await _asyncio.gather(*tasks)
+        for wallet, ts in completed:
+            results[wallet] = ts
+
+        return results
+
+    async def _filter_by_wallet_age(
+        self,
+        wallets: List[str],
+        min_age_days: int = 0,
+    ) -> List[str]:
+        """
+        Filter out wallets younger than ``min_age_days``.
+
+        Uses cached wallet creation timestamps. Wallets with unknown creation
+        time pass through (fail-open) to avoid blocking legitimate wallets when
+        the creation-time API is unavailable.
+
+        Args:
+            wallets: List of wallet addresses to filter.
+            min_age_days: Minimum wallet age in days. ``0`` disables the filter.
+
+        Returns:
+            Filtered list of wallet addresses.
+        """
+        if min_age_days <= 0 or not wallets:
+            return wallets
+
+        from datetime import datetime, timedelta, timezone as _tz
+
+        cutoff_timestamp = (
+            datetime.now(_tz.utc) - timedelta(days=min_age_days)
+        ).timestamp()
+
+        creation_times = await self._get_wallet_creation_timestamps_batch(wallets)
+
+        result: List[str] = []
+        for wallet in wallets:
+            creation_ts = creation_times.get(wallet)
+            # Fail-open: if we don't know the creation time, let it through
+            if creation_ts is None:
+                result.append(wallet)
+            elif creation_ts <= cutoff_timestamp:
+                result.append(wallet)
+            # else: wallet is too young, filtered out
+
+        filtered_count = len(wallets) - len(result)
+        if filtered_count > 0:
+            logging.getLogger(__name__).info(
+                f"[Discovery] Wallet age filter: removed {filtered_count}/{len(wallets)} "
+                f"wallets younger than {min_age_days} days"
+            )
+
+        return result
+
     async def get_wallet_sol_balances(self, wallets: List[str]) -> Dict[str, float]:
         """
         Batch-fetch SOL balances for multiple wallets.
@@ -2574,6 +2655,21 @@ class HeliusClient:
                     print(f"[Helius]   Filtered {filtered_out} zero-balance addresses (programs/vaults)")
             except Exception as e:
                 print(f"[Helius]   Balance validation skipped (error: {e})")
+
+        # Wallet age filter: remove brand-new wallets (improves average WQS)
+        min_wallet_age_days = int(os.getenv("SCOUT_MIN_WALLET_AGE_DAYS", "0"))
+        if min_wallet_age_days > 0 and candidate_wallets:
+            print(f"[Helius] Filtering wallets younger than {min_wallet_age_days} days...")
+            pre_age_count = len(candidate_wallets)
+            try:
+                candidate_wallets = await self._filter_by_wallet_age(
+                    candidate_wallets, min_age_days=min_wallet_age_days
+                )
+                age_filtered = pre_age_count - len(candidate_wallets)
+                if age_filtered > 0:
+                    print(f"[Helius]   Filtered {age_filtered} young wallets")
+            except Exception as e:
+                print(f"[Helius]   Wallet age filter skipped (error: {e})")
 
         # Optional: Validate wallet activity in parallel (Item 8 — batch validation)
         validate_activity = os.getenv("SCOUT_VALIDATE_WALLET_ACTIVITY", "false").lower() == "true"
