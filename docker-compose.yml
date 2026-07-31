@@ -139,8 +139,8 @@ services:
         # Minimum WQS for signal admission
        - CHIMERA_SELECTION__MIN_WQS_SCORE=15.0
         # Micro-position cap for low-WQS wallets (WQS < 40 → max 0.1 SOL)
-        - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.1
-        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
+       - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.1
+       - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
     env_file:
