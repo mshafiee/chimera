@@ -459,9 +459,14 @@ class ProductionMonitor:
             cursor = conn.cursor()
 
             cursor.execute("""
-                INSERT OR REPLACE INTO health_checks
+                INSERT INTO health_checks
                 (name, status, message, timestamp, details, response_time_ms)
                 VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (name, timestamp) DO UPDATE SET
+                    status = EXCLUDED.status,
+                    message = EXCLUDED.message,
+                    details = EXCLUDED.details,
+                    response_time_ms = EXCLUDED.response_time_ms
             """, (
                 check.name,
                 check.status.value,
@@ -562,9 +567,18 @@ class ProductionMonitor:
             cursor = conn.cursor()
 
             cursor.execute("""
-                INSERT OR REPLACE INTO alerts
+                INSERT INTO alerts
                 (id, severity, title, message, timestamp, source, resolved, resolution_timestamp, details)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (id) DO UPDATE SET
+                    severity = EXCLUDED.severity,
+                    title = EXCLUDED.title,
+                    message = EXCLUDED.message,
+                    timestamp = EXCLUDED.timestamp,
+                    source = EXCLUDED.source,
+                    resolved = EXCLUDED.resolved,
+                    resolution_timestamp = EXCLUDED.resolution_timestamp,
+                    details = EXCLUDED.details
             """, (
                 alert.id,
                 alert.severity.value,

@@ -238,11 +238,22 @@ class StatePersistence:
         with self._lock:
             with self._get_connection() as conn:
                 conn.execute("""
-                    INSERT OR REPLACE INTO credit_history
+                    INSERT INTO credit_history
                     (date, total_credits, credits_discovery, credits_analysis,
                      credits_validation, credits_enrichment, credits_monitoring,
                      credits_reserve, credits_remaining, day_of_month, timestamp)
                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     ON CONFLICT (date) DO UPDATE SET
+                        total_credits = EXCLUDED.total_credits,
+                        credits_discovery = EXCLUDED.credits_discovery,
+                        credits_analysis = EXCLUDED.credits_analysis,
+                        credits_validation = EXCLUDED.credits_validation,
+                        credits_enrichment = EXCLUDED.credits_enrichment,
+                        credits_monitoring = EXCLUDED.credits_monitoring,
+                        credits_reserve = EXCLUDED.credits_reserve,
+                        credits_remaining = EXCLUDED.credits_remaining,
+                        day_of_month = EXCLUDED.day_of_month,
+                        timestamp = EXCLUDED.timestamp
                 """, (
                     history.date,
                     history.total_credits,
@@ -314,10 +325,20 @@ class StatePersistence:
         with self._lock:
             with self._get_connection() as conn:
                 conn.execute("""
-                    INSERT OR REPLACE INTO wallet_performance_history
+                    INSERT INTO wallet_performance_history
                     (wallet_address, wqs_score, total_trades, winning_trades,
                      total_pnl, avg_pnl, win_rate, roi_score, first_seen, last_updated)
                      VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     ON CONFLICT (wallet_address) DO UPDATE SET
+                        wqs_score = EXCLUDED.wqs_score,
+                        total_trades = EXCLUDED.total_trades,
+                        winning_trades = EXCLUDED.winning_trades,
+                        total_pnl = EXCLUDED.total_pnl,
+                        avg_pnl = EXCLUDED.avg_pnl,
+                        win_rate = EXCLUDED.win_rate,
+                        roi_score = EXCLUDED.roi_score,
+                        first_seen = EXCLUDED.first_seen,
+                        last_updated = EXCLUDED.last_updated
                 """, (
                     performance.wallet_address,
                     performance.wqs_score,
