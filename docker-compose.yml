@@ -209,7 +209,7 @@ services:
       # Log token creation time API failures for diagnostics
       - SCOUT_VERBOSE=true
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
-      - SCOUT_MIN_CONFIDENCE_ACTIVE=0.20
+      - SCOUT_MIN_CONFIDENCE_ACTIVE=0.10
       # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
       - SCOUT_REVALIDATE_CANDIDATES=true
       - SCOUT_REVALIDATE_CANDIDATES_LIMIT=20
