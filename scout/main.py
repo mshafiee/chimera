@@ -511,15 +511,15 @@ Examples:
     parser.add_argument(
         "--min-wqs-active",
         type=float,
-        default=25.0,
-        help="Minimum WQS score for ACTIVE status (default: 25.0)"
+        default=float(os.getenv("SCOUT_MIN_WQS_ACTIVE", "25.0")),
+        help="Minimum WQS score for ACTIVE status (env: SCOUT_MIN_WQS_ACTIVE, default: 25.0)"
     )
     
     parser.add_argument(
         "--min-wqs-candidate",
         type=float,
-        default=10.0,
-        help="Minimum WQS score for CANDIDATE status (default: 10.0)"
+        default=float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "10.0")),
+        help="Minimum WQS score for CANDIDATE status (env: SCOUT_MIN_WQS_CANDIDATE, default: 10.0)"
     )
     
     parser.add_argument(
