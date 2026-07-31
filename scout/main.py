@@ -717,6 +717,38 @@ async def analyze_wallets(
                 print(f"[Scout] No metrics for {wallet_address[:8]}... (skipped)")
                 return None
 
+            # Operator gate-admission feedback: query the operator's decision_records
+            # for this wallet to measure what fraction of its BUY signals the
+            # operator actually ADMITTED. This is the ground-truth signal that a
+            # wallet's trades are copy-tradeable — a wallet with high ROI on tokens
+            # the operator can never trade (brand-new / ungraduated pump.fun) must
+            # not be promoted no matter how good its WQS looks. Mirrors the
+            # selection gates: BUY decisions only (SELL noise is irrelevant).
+            try:
+                from core.db import execute_and_fetchone
+                _row = execute_and_fetchone(
+                    """
+                    SELECT COUNT(*) AS total,
+                           COUNT(*) FILTER (WHERE admitted) AS admitted
+                    FROM decision_records
+                    WHERE wallet_address = %s AND action = 'BUY'
+                    """,
+                    (wallet_address,),
+                )
+                if _row:
+                    _total = int(_row.get("total", 0) or 0)
+                    _admitted = int(_row.get("admitted", 0) or 0)
+                    if _total > 0:
+                        metrics.operator_admission_rate = _admitted / _total
+                        metrics.operator_decision_count = _total
+                        print(
+                            f"[Scout] operator gate-admission addr={wallet_address[:8]} "
+                            f"admitted={_admitted}/{_total} "
+                            f"rate={metrics.operator_admission_rate:.2%}"
+                        )
+            except Exception as e:
+                print(f"[Scout] Warning: could not fetch gate-admission data for {wallet_address[:8]}...: {e}")
+
             print(f"[Scout] Getting trades from cache for {wallet_address[:8]}...")
             trades = analyzer._trades_cache.get(wallet_address, [])
             if not trades:

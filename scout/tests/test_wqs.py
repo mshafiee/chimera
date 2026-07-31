@@ -842,3 +842,64 @@ def test_wqs_thin_history_roi_guard():
     # 1-trade extreme-ROI wallet must NOT reach WQS 100 (the artifact threshold
     # that fast-tracked phantom wallets)
     assert score_1 < 100.0, f"1-trade wallet must not hit WQS 100, got {score_1}"
+
+
+def test_wqs_gate_admission_zero_rejects_ghost_wallet():
+    """A wallet whose operator signals are 100% rejected (admission rate 0)
+    must be instant-rejected regardless of high ROI — this is the ground-truth
+    signal that its trades are not copy-tradeable (ghost wallets like 7oLDf)."""
+    w = WalletMetrics(
+        address="ghost_wallet",
+        roi_30d=95.0, roi_7d=120.0, trade_count_30d=46, win_rate=0.55,
+        max_drawdown_30d=8.0, avg_trade_size_sol=Decimal('0.08'),
+        profit_factor=2.1, win_streak_consistency=0.7,
+        operator_admission_rate=0.0,       # 0% of BUY signals admitted
+        operator_decision_count=40,        # enough monitored decisions to trust
+    )
+    score = calculate_wqs(w)
+    assert score == 0.0, f"Ghost wallet must score 0, got {score}"
+
+
+def test_wqs_gate_admission_nonzero_no_penalty():
+    """A wallet with ANY admitted signal (rate > 0) is proven copy-tradeable and
+    must NOT be penalized — real producers have low admission rates (3-8%)
+    because the operator rejects most signals for safety, so a 3% admission rate
+    must score the same as a 100% rate (both prove tradeability)."""
+    w_low = WalletMetrics(
+        address="low_admission",
+        roi_30d=50.0, roi_7d=30.0, trade_count_30d=20, win_rate=0.6,
+        max_drawdown_30d=5.0, avg_trade_size_sol=Decimal('0.1'),
+        profit_factor=2.0, win_streak_consistency=0.7,
+        operator_admission_rate=0.03,
+        operator_decision_count=83,
+    )
+    w_full = WalletMetrics(
+        address="full_admission",
+        roi_30d=50.0, roi_7d=30.0, trade_count_30d=20, win_rate=0.6,
+        max_drawdown_30d=5.0, avg_trade_size_sol=Decimal('0.1'),
+        profit_factor=2.0, win_streak_consistency=0.7,
+        operator_admission_rate=1.0,
+        operator_decision_count=7,
+    )
+    score_low = calculate_wqs(w_low)
+    score_full = calculate_wqs(w_full)
+    # Both have proven tradeability → gate-admission imposes no penalty → equal scores
+    assert score_low == score_full, (
+        f"Non-zero admission must not be penalized: {score_low} vs {score_full}"
+    )
+
+
+def test_wqs_gate_admission_thin_sample_no_penalty():
+    """A wallet with fewer than MIN_ADMISSION_SAMPLE decisions must NOT be
+    penalized — one or two monitored signals isn't a trustworthy verdict."""
+    from core.wqs import MIN_ADMISSION_SAMPLE
+    w = WalletMetrics(
+        address="thin_sample",
+        roi_30d=50.0, roi_7d=30.0, trade_count_30d=20, win_rate=0.6,
+        max_drawdown_30d=5.0, avg_trade_size_sol=Decimal('0.1'),
+        profit_factor=2.0, win_streak_consistency=0.7,
+        operator_admission_rate=0.0,
+        operator_decision_count=2,   # below MIN_ADMISSION_SAMPLE
+    )
+    score = calculate_wqs(w)
+    assert score > 0.0, f"Thin-sample wallet must not be zeroed, got {score}"

@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 # score to WQS 100+ and being fast-tracked to ACTIVE.
 MIN_TRADES_FOR_FULL_ROI = 10
 
+# Minimum number of operator-evaluated BUY decisions before the gate-admission
+# feedback penalty can zero out a wallet. A single monitored signal is not a
+# meaningful sample; we need enough decisions to trust the 0% admission verdict.
+MIN_ADMISSION_SAMPLE = 10
+
 
 class PenaltyCategory(Enum):
     MARTINGALE = auto()
@@ -424,6 +429,16 @@ class WalletMetrics:
     is_tg_bot_user: bool = False  # Flagged as Telegram bot user (≥50% of ≥10 swaps through bot router)
     round_trip_ratio: Optional[float] = None  # Ratio of round-trip swaps to total swaps (arbitrage detection)
     pumpfun_trade_ratio: Optional[float] = None  # Fraction of trades on pump.fun bonding-curve tokens (mint ends with "pump")
+    # Operator gate-admission feedback: fraction of this wallet's BUY signals that
+    # the operator ADMITTED (passed all selection gates). Populated from the
+    # operator's decision_records when the wallet has been monitored. This is the
+    # ground-truth signal that the wallet's trades are actually copy-tradeable —
+    # a wallet whose signals are 100% rejected by the operator (e.g. it only
+    # trades ungraduated pump.fun tokens) is useless regardless of its ROI.
+    # None = no operator history yet (fresh candidate); 0.0..1.0 = measured rate.
+    operator_admission_rate: Optional[float] = None
+    # Number of BUY decisions the operator has evaluated for this wallet.
+    operator_decision_count: Optional[int] = None
 
 
 @dataclass
@@ -593,6 +608,31 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         elif metrics.pumpfun_trade_ratio >= 0.3:
             logger.debug("[WQS] penalty pumpfun_concentration -15.00 addr=%s pumpfun_trade_ratio=%.2f", addr, metrics.pumpfun_trade_ratio)
             tracker.add_neg("pumpfun_concentration", 15.0)
+
+    # Operator gate-admission feedback.
+    # When the operator has evaluated this wallet's BUY signals (decision_records
+    # exist), the admission rate is ground truth for whether the wallet's trades
+    # are actually copy-tradeable. A wallet whose signals are 100% rejected
+    # (e.g. it only trades brand-new or ungraduated pump.fun tokens) is useless
+    # regardless of its raw ROI — high-WQS ghost wallets were being promoted and
+    # then produced zero qualifying trades. Only a ZERO rate over a meaningful
+    # sample is instant-reject: real producers also have low admission rates
+    # (3-8%) because the operator rejects most signals for safety, so any
+    # non-zero admission proves the wallet is copy-tradeable and must not be
+    # penalized. Require a minimum measured sample (MIN_ADMISSION_SAMPLE) so a
+    # single monitored signal can't zero out a wallet.
+    if (
+        metrics.operator_admission_rate is not None
+        and metrics.operator_decision_count is not None
+        and metrics.operator_decision_count >= MIN_ADMISSION_SAMPLE
+    ):
+        if metrics.operator_admission_rate <= 0.0:
+            logger.info(
+                "[WQS] INSTANT-REJECT addr=%s reason=gate_admission_zero "
+                "admission_rate=0.00 decisions=%d",
+                addr, metrics.operator_decision_count,
+            )
+            return tracker.to_components(is_instant_reject=True)
 
     if metrics.win_streak_consistency and metrics.win_streak_consistency > 0.4:
         logger.debug("[WQS] bonus consistency_score +5.00 addr=%s win_streak_consistency=%.2f", addr, metrics.win_streak_consistency)
