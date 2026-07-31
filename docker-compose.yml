@@ -197,6 +197,7 @@ services:
       - SCOUT_WALLET_TX_LIMIT=100
       - SCOUT_WALLET_TX_MAX_PAGES=15
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
+      - SCOUT_MIN_WALLET_AGE_DAYS=7                               # Filter out wallets < 7 days old
       # WQS Thresholds (relaxed for paper trading)
        - SCOUT_MIN_WQS_ACTIVE=15.0
       - SCOUT_MIN_WQS_CANDIDATE=10.0

@@ -768,7 +768,7 @@ class WalletAnalyzer:
         print("[Analyzer] Using manual sequential discovery implementation...")
 
         # Get configuration from environment variables
-        hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "24"))
+        hours_back = int(os.getenv("SCOUT_DISCOVERY_HOURS", "168"))
         min_trade_count = int(os.getenv("SCOUT_MIN_TRADE_COUNT", "3"))
 
         # When profitability pre-screen is enabled, discover 2x wallets
