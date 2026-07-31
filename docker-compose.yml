@@ -215,20 +215,23 @@ services:
       - SCOUT_REVALIDATE_CANDIDATES_LIMIT=20
       # Validation gate parameters (all configurable)
       - SCOUT_FORBIDDEN_ARCHETYPES=SNIPER
-      - SCOUT_MIN_CLOSE_RATIO=0.20
-      - SCOUT_MIN_CLOSE_RATIO_SCALPER=0.10
-      - SCOUT_MIN_CLOSE_RATIO_SWING=0.30
-      - SCOUT_MIN_CLOSE_RATIO_WHALE=0.25
-      - SCOUT_PROMOTION_MIN_TRADES=5
+      - SCOUT_MIN_CLOSE_RATIO=0.05
+      - SCOUT_MIN_CLOSE_RATIO_SCALPER=0.05
+      - SCOUT_MIN_CLOSE_RATIO_SWING=0.05
+      - SCOUT_MIN_CLOSE_RATIO_WHALE=0.05
+      - SCOUT_PROMOTION_MIN_TRADES=2
       - SCOUT_WALK_FORWARD_ENABLED=true
       - SCOUT_WALK_FORWARD_HOLDOUT_FRACTION=0.3
-      - SCOUT_WALK_FORWARD_FALLBACK_PENALTY=5.0
+      - SCOUT_WALK_FORWARD_FALLBACK_PENALTY=2.0
       - SCOUT_MAX_REJECTION_RATE=0.5
       - SCOUT_MAX_PNL_REDUCTION_PCT=80.0
       - SCOUT_MAX_DRAWDOWN_FRACTION=0.5
       - SCOUT_MIN_AVG_HOLD_HOURS=2.0
       - SCOUT_ENFORCE_LOW_CHURN=true
       - SCOUT_MOMENTUM_BOOST=5.0
+      # Fast-track promotion: WQS above this threshold with >=1 trade bypasses
+      # close-count / walk-forward / backtest gates (RugCheck still enforced)
+      - SCOUT_FAST_TRACK_WQS_THRESHOLD=80
       # Parse failure debug: completed data collection (2142 files captured)
       # Backtest cost calibration — match production Jito tip (default 0.0001 is 30x too low).
       # Production charges 0.0012-0.0055 SOL tips; 0.003 is the median observed tip.

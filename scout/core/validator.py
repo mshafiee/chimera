@@ -90,6 +90,12 @@ class PromotionCriteria:
     # keep high (0.70) in live mode. Mirrors SCOUT_MIN_CONFIDENCE_ACTIVE.
     min_confidence: float = 0.50
 
+    # Fast-track promotion: wallets with WQS above this threshold and at least
+    # 1 trade bypass the close-count / walk-forward / backtest gates (RugCheck
+    # is still enforced). Unblocks high-conviction wallets with thin trade
+    # history from being stuck in CANDIDATE limbo.
+    fast_track_wqs_threshold: float = 80.0
+
     # Low-churn filter to prevent promotion of latency-impaired wallets
     forbidden_archetypes: set[str] = None
     min_avg_hold_time_hours: float = 2.0
@@ -344,8 +350,23 @@ class PrePromotionValidator:
                 notes=f"WQS: {wqs_score:.1f} (boosted: {boosted_wqs_score:.1f}), confidence: {wqs_confidence:.2f}, archetype: {getattr(metrics, 'archetype', 'N/A')}",
             )
         
-        # Step 2: Check minimum trades
-        if len(trades) < self.criteria.min_trades:
+        # Fast-track: high-WQS wallets with at least 1 trade bypass the
+        # min-trades, close-count, walk-forward, and backtest gates. RugCheck
+        # (step 2b) is still enforced — a wallet trading all honeypots must
+        # never be promoted regardless of WQS.
+        fast_track = (
+            wqs_score >= self.criteria.fast_track_wqs_threshold
+            and len(trades) >= 1
+        )
+        if fast_track:
+            logger.info(
+                f"Wallet {wallet_address[:8]} fast-track eligible: "
+                f"WQS {wqs_score:.1f} >= {self.criteria.fast_track_wqs_threshold:.1f}, "
+                f"{len(trades)} trade(s)"
+            )
+
+        # Step 2: Check minimum trades (bypassed for fast-track wallets)
+        if not fast_track and len(trades) < self.criteria.min_trades:
             logger.info(f"Wallet failed trade count check: {len(trades)} < {self.criteria.min_trades}")
             return ValidationResult(
                 wallet_address=wallet_address,
@@ -385,6 +406,21 @@ class PrePromotionValidator:
                     )
                 # Otherwise, use only safe trades for backtesting
                 trades = safe_trades
+
+        # Fast-track promotion: WQS above threshold with at least 1 trade
+        # and no RugCheck rejection → promote immediately.
+        if fast_track:
+            return ValidationResult(
+                wallet_address=wallet_address,
+                status=ValidationStatus.PASSED,
+                passed=True,
+                reason=(
+                    f"Fast-track promotion: WQS {wqs_score:.1f} >= "
+                    f"{self.criteria.fast_track_wqs_threshold:.1f}, {len(trades)} trade(s)"
+                ),
+                recommended_status="ACTIVE",
+                notes=f"Bypassed close-count/walk-forward/backtest gates (fast-track WQS {wqs_score:.1f})",
+            )
         
         # Step 2c: Check minimum realized closes (SELLs with computed PnL)
         # Uses a ratio threshold rather than a fixed count — a wallet with 15 trades
@@ -396,9 +432,10 @@ class PrePromotionValidator:
         # Use archetype-specific close ratio threshold
         archetype = getattr(metrics, 'archetype', None)
         close_ratio_threshold = self._get_close_ratio_threshold(archetype)
-        # SCALPER wallets have high turnover and fewer complete closes.
-        # Use a lower minimum floor (1) vs default (3) for SCALPER archetype.
-        min_close_floor = 1 if (archetype and archetype.upper() == "SCALPER") else 3
+        # Minimum floor of 1 realized close for all archetypes — active traders
+        # with thin close history shouldn't be blocked when they demonstrably
+        # exit positions.
+        min_close_floor = 1
         min_closes = max(min_close_floor, int(len(trades) * close_ratio_threshold))
 
         if len(close_trades) < min_closes:

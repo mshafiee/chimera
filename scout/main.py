@@ -616,6 +616,7 @@ def _load_promotion_criteria(args) -> PromotionCriteria:
         ),
         min_avg_hold_time_hours=float(os.getenv("SCOUT_MIN_AVG_HOLD_HOURS", "2.0")),
         enforce_low_churn=os.getenv("SCOUT_ENFORCE_LOW_CHURN", "true").lower() == "true",
+        fast_track_wqs_threshold=float(os.getenv("SCOUT_FAST_TRACK_WQS_THRESHOLD", "80.0")),
     )
 
 

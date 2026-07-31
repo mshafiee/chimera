@@ -827,3 +827,169 @@ def test_low_churn_filter_can_be_disabled():
 
     result = validator.quick_check(metrics, trade_count=30)
     assert result, "quick_check must pass when low-churn filter is disabled"
+
+
+@pytest.mark.asyncio
+async def test_fast_track_promotes_high_wqs_single_trade():
+    """WQS above fast-track threshold with >=1 trade must promote, bypassing
+    close-count / walk-forward / backtest gates (RugCheck disabled → None)."""
+    metrics = WalletMetrics(
+        address="fast_track_001",
+        roi_7d=95.0,
+        roi_30d=88.0,
+        trade_count_30d=1,
+        win_rate=1.0,
+        max_drawdown_30d=2.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.9,
+        avg_entry_delay_seconds=300.0,
+        profit_factor=3.0,
+        archetype="SWING",
+        avg_hold_time_hours=5.0,
+    )
+
+    # Single BUY only — no SELL / no realized closes. Without fast-track this
+    # would fail the close-count check; fast-track must bypass it.
+    trades = [
+        HistoricalTrade(
+            token_address="fasttok_0",
+            token_symbol="FASTTOK_0",
+            action=TradeAction.BUY,
+            amount_sol=Decimal("1.0"),
+            price_at_trade=Decimal("100.0"),
+            timestamp=datetime.utcnow() - timedelta(days=2),
+            tx_signature="fast_track_buy_0",
+            token_amount=Decimal("1000"),
+        )
+    ]
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=15.0,
+            min_confidence=0.10,
+            min_trades=5,
+            fast_track_wqs_threshold=80.0,
+            enforce_low_churn=True,
+            min_avg_hold_time_hours=2.0,
+        ),
+    )
+    validator.rugcheck_client = None
+
+    result = await validator.validate_for_promotion(
+        "fast_track_001", metrics, trades, strategy="SHIELD"
+    )
+
+    assert result.passed, "High-WQS wallet with 1 trade must fast-track promote"
+    assert result.status == ValidationStatus.PASSED
+    assert "Fast-track" in result.reason
+    assert result.recommended_status == "ACTIVE"
+
+
+@pytest.mark.asyncio
+async def test_fast_track_still_rejects_risky_tokens():
+    """Fast-track must still enforce RugCheck — a wallet trading all
+    honeypots is rejected even with WQS above the fast-track threshold."""
+    from unittest.mock import AsyncMock
+
+    metrics = WalletMetrics(
+        address="fast_track_risky_001",
+        roi_7d=95.0,
+        roi_30d=88.0,
+        trade_count_30d=3,
+        win_rate=1.0,
+        max_drawdown_30d=2.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.9,
+        avg_entry_delay_seconds=300.0,
+        profit_factor=3.0,
+        archetype="SWING",
+        avg_hold_time_hours=5.0,
+    )
+
+    trades = [
+        HistoricalTrade(
+            token_address="risky_tok_0",
+            token_symbol="RISKY_0",
+            action=TradeAction.BUY,
+            amount_sol=Decimal("1.0"),
+            price_at_trade=Decimal("100.0"),
+            timestamp=datetime.utcnow() - timedelta(days=2),
+            tx_signature="risky_buy_0",
+            token_amount=Decimal("1000"),
+        )
+        for _ in range(3)
+    ]
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=15.0,
+            min_confidence=0.10,
+            min_trades=5,
+            fast_track_wqs_threshold=80.0,
+            enforce_low_churn=True,
+            min_avg_hold_time_hours=2.0,
+        ),
+    )
+    mock_rug = AsyncMock()
+    mock_rug.is_token_safe.return_value = False
+    validator.rugcheck_client = mock_rug
+
+    result = await validator.validate_for_promotion(
+        "fast_track_risky_001", metrics, trades, strategy="SHIELD"
+    )
+
+    assert not result.passed, "Risky-token wallet must be rejected even with high WQS"
+    assert result.recommended_status == "REJECTED"
+
+
+@pytest.mark.asyncio
+async def test_below_fast_track_threshold_still_enforces_min_trades():
+    """Wallets below the fast-track threshold must still hit the normal-path
+    min-trades gate (no fast-track bypass)."""
+    metrics = WalletMetrics(
+        address="normal_path_001",
+        roi_7d=20.0,
+        roi_30d=15.0,
+        trade_count_30d=1,
+        win_rate=0.6,
+        max_drawdown_30d=10.0,
+        avg_trade_size_sol=Decimal('0.5'),
+        win_streak_consistency=0.6,
+        avg_entry_delay_seconds=300.0,
+        profit_factor=1.5,
+        archetype="SCALPER",
+        avg_hold_time_hours=3.0,
+    )
+
+    trades = [
+        HistoricalTrade(
+            token_address="normtok_0",
+            token_symbol="NORMTOK_0",
+            action=TradeAction.BUY,
+            amount_sol=Decimal("1.0"),
+            price_at_trade=Decimal("100.0"),
+            timestamp=datetime.utcnow() - timedelta(days=2),
+            tx_signature="norm_buy_0",
+            token_amount=Decimal("1000"),
+        )
+    ]
+
+    validator = PrePromotionValidator(
+        promotion_criteria=PromotionCriteria(
+            min_wqs_score=15.0,
+            min_confidence=0.10,
+            min_trades=5,
+            fast_track_wqs_threshold=80.0,
+            enforce_low_churn=True,
+            min_avg_hold_time_hours=2.0,
+        ),
+    )
+    validator.rugcheck_client = None
+
+    result = await validator.validate_for_promotion(
+        "normal_path_001", metrics, trades, strategy="SHIELD"
+    )
+
+    assert not result.passed, "Below fast-track WQS must use normal path"
+    assert result.status == ValidationStatus.FAILED_INSUFFICIENT_TRADES
+    assert "Insufficient trades" in result.reason
