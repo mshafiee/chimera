@@ -2529,6 +2529,60 @@ async def main_async():
             print(f"[Scout] Re-validation sweep: {reval_promoted} new ACTIVE promotion(s)")
         else:
             print(f"[Scout] Re-validation sweep: 0 promotions (all candidates still failed validation)")
+    elif _reval_enabled and not args.dry_run and validator is None:
+        # Fallback revalidation path: when the full PrePromotionValidator is unavailable
+        # (e.g. validator init failed due to missing API keys), do a lightweight
+        # WQS + confidence revalidation so CANDIDATE wallets can still be promoted.
+        print(f"\n[Scout] Re-validation sweep (lightweight mode, validator=None) for top {_reval_limit} CANDIDATE wallets...")
+        try:
+            existing_candidates = get_wallets_by_status("CANDIDATE")[:_reval_limit]
+        except Exception as e:
+            print(f"[Scout] Re-validation sweep: DB query failed: {e}")
+            existing_candidates = []
+
+        reval_promoted = 0
+        for candidate in existing_candidates:
+            addr = candidate.get("address", "")
+            if not addr:
+                continue
+            _wqs = candidate.get('wqs_score') or 0
+            print(f"[Scout] Re-validating {addr[:8]}... (WQS={_wqs:.0f})")
+            try:
+                metrics = await analyzer.get_wallet_metrics(addr)
+                if metrics is None:
+                    print(f"[Scout] Re-validation skipped for {addr[:8]}: no metrics available")
+                    continue
+
+                # Lightweight promotion: recompute WQS with confidence and check thresholds
+                from core.wqs import calculate_wqs_with_confidence
+                wqs_result = calculate_wqs_with_confidence(metrics, strategy="SHIELD")
+                _min_active = float(os.getenv("SCOUT_MIN_WQS_ACTIVE", "15.0"))
+                _min_conf = float(os.getenv("SCOUT_MIN_CONFIDENCE_ACTIVE", "0.20"))
+                _min_cand = float(os.getenv("SCOUT_MIN_WQS_CANDIDATE", "10.0"))
+
+                if wqs_result.score <= 0 and wqs_result.adjusted_score <= 0:
+                    print(f"[Scout]   {addr[:8]} instant-rejected by WQS (sniper/pumpfun/etc.)")
+                    continue
+
+                if wqs_result.adjusted_score >= _min_active and wqs_result.confidence >= _min_conf:
+                    update_wallet_status(addr, "ACTIVE")
+                    reval_promoted += 1
+                    print(f"[Scout] ✓ Promoted {addr[:8]} → ACTIVE (lightweight: WQS={wqs_result.adjusted_score:.1f}, conf={wqs_result.confidence:.2f})")
+                elif wqs_result.adjusted_score >= _min_cand:
+                    print(f"[Scout]   {addr[:8]} remains CANDIDATE (WQS={wqs_result.adjusted_score:.1f}, conf={wqs_result.confidence:.2f})")
+                else:
+                    print(f"[Scout]   {addr[:8]} below CANDIDATE threshold (WQS={wqs_result.adjusted_score:.1f})")
+            except Exception as e:
+                print(f"[Scout] Re-validation error for {addr[:8]}: {e}")
+
+        if reval_promoted > 0:
+            print(f"[Scout] Re-validation sweep (lightweight): {reval_promoted} new ACTIVE promotion(s)")
+        else:
+            print(f"[Scout] Re-validation sweep (lightweight): 0 promotions")
+    elif _reval_enabled and args.dry_run:
+        print(f"\n[Scout] Re-validation sweep: SKIPPED (dry-run mode)")
+    elif not _reval_enabled:
+        print(f"\n[Scout] Re-validation sweep: SKIPPED (SCOUT_REVALIDATE_CANDIDATES not enabled)")
 
     # Summary
     print("\n[Scout] Analysis complete:")

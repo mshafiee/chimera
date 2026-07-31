@@ -424,6 +424,7 @@ class WalletAnalyzer:
             "token_creation_fetched": 0,
             "token_creation_success": 0,
             "token_creation_fallback_helix": 0,
+            "token_creation_failed": 0,
             "parse_cache_hits": 0,
             "parse_cache_misses": 0,
         }
@@ -1754,7 +1755,7 @@ class WalletAnalyzer:
             
         timestamp = None
         
-        # Try Birdeye API
+        # Try Birdeye API first (best for DeFi tokens)
         try:
             if getattr(self.liquidity_provider, "birdeye_client", None):
                 birdeye_client = self.liquidity_provider.birdeye_client
@@ -1766,12 +1767,40 @@ class WalletAnalyzer:
                         if ts:
                             timestamp = float(ts)
         except Exception as e:
-            # Only log if verbose mode enabled
             if os.getenv("SCOUT_VERBOSE") == "true":
                 print(f"[Analyzer] Birdeye creation fetch failed for {token_address[:8]}: {e}")
         
-        # Fallback: Helius signatures — use the oldest known tx on this mint
-        # as a lower-bound estimate of when the token began trading.
+        # Fallback 2: Jupiter Price API — includes creation metadata for known tokens
+        if timestamp is None:
+            try:
+                import aiohttp
+                jupiter_url = "https://api.jup.ag/price"
+                session = await self.helius_client._get_session() if (self.helius_client and self.helius_client.api_key) else None
+                if not session:
+                    import aiohttp as _aiohttp
+                    session = _aiohttp.ClientSession()
+                async with session.get(
+                    jupiter_url,
+                    params={"ids": token_address},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                ) as resp:
+                    if resp.status == 200:
+                        jdata = await resp.json()
+                        if jdata and "data" in jdata and token_address in jdata["data"]:
+                            jd = jdata["data"][token_address]
+                            # Jupiter price API may include 'created' timestamp in extensions
+                            ext = jd.get("extensions", {}) or {}
+                            jts = ext.get("created_at") or ext.get("creation_time")
+                            if jts:
+                                try:
+                                    timestamp = float(int(jts))
+                                except (ValueError, TypeError):
+                                    pass
+            except Exception as e:
+                if os.getenv("SCOUT_VERBOSE") == "true":
+                    print(f"[Analyzer] Jupiter creation fetch failed for {token_address[:8]}: {e}")
+        
+        # Fallback 3: Helius transactions — use the oldest known tx on this mint
         if timestamp is None and self.helius_client.api_key:
             try:
                 fallback_ts = await self.helius_client.get_token_first_tx_timestamp(token_address)
@@ -1781,19 +1810,57 @@ class WalletAnalyzer:
             except Exception as e:
                 logger.debug(f"Fallback timestamp fetch failed for {token_address[:8]}: {e}")
         
+        # Fallback 4: Helius token-metadata API — may include creation time for verified tokens
+        if timestamp is None:
+            try:
+                import aiohttp
+                from datetime import datetime, timezone
+                
+                if self.helius_client and self.helius_client.api_key:
+                    tm_url = f"https://api.helius.xyz/v1/token-metadata"
+                    params = {
+                        "api-key": self.helius_client.api_key,
+                        "MintAddresses": token_address,
+                    }
+                    session = await self.helius_client._get_session()
+                    async with session.get(tm_url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                        if resp.status == 200:
+                            tm_data = await resp.json()
+                            if isinstance(tm_data, list) and tm_data:
+                                created = tm_data[0].get("created_at") or tm_data[0].get("creation_time")
+                                if created:
+                                    try:
+                                        from datetime import datetime as dt
+                                        if isinstance(created, str):
+                                            dt_parsed = dt.fromisoformat(created.replace("Z", "+00:00"))
+                                        else:
+                                            dt_parsed = dt.fromtimestamp(int(created), tz=timezone.utc)
+                                        timestamp = dt_parsed.timestamp()
+                                    except (ValueError, TypeError, OSError):
+                                        pass
+            except Exception as e:
+                if os.getenv("SCOUT_VERBOSE") == "true":
+                    print(f"[Analyzer] Helius token-metadata fallback failed for {token_address[:8]}: {e}")
+        
         self._parse_stats["token_creation_fetched"] += 1
         if timestamp is not None:
             self._parse_stats["token_creation_success"] += 1
+        else:
+            self._parse_stats["token_creation_failed"] = self._parse_stats.get("token_creation_failed", 0) + 1
         
-        # Cache the result (even if None) to avoid repeated API calls
-        # Store in Redis for persistence across restarts
+        # Cache the result in Redis for persistence across restarts
         if self._redis_client and self._redis_client.is_available():
             try:
                 import json
                 cache_key = f"token_creation:{token_address}"
-                # Cache for 7 days (token creation time never changes)
-                cache_value = json.dumps(timestamp) if timestamp is not None else "null"
-                self._redis_client.set(cache_key, cache_value, ttl_seconds=7 * 24 * 3600)
+                if timestamp is not None:
+                    # Cache successful results for 7 days (token creation time never changes)
+                    cache_value = json.dumps(timestamp)
+                    self._redis_client.set(cache_key, cache_value, ttl_seconds=7 * 24 * 3600)
+                else:
+                    # Cache negative results for only 1 hour so the API is retried
+                    # on subsequent runs (prevents permanent cache poisoning)
+                    self._redis_client.set(cache_key, json.dumps(None), ttl_seconds=3600)
             except Exception as e:
                 logger.debug(f"Redis cache write failed for token creation: {e}")
         
@@ -3630,14 +3697,17 @@ class WalletAnalyzer:
         tcf = stats.get("token_creation_fetched", 0)
         tcs = stats.get("token_creation_success", 0)
         tcfb = stats.get("token_creation_fallback_helix", 0)
+        tcfail = stats.get("token_creation_failed", 0)
         if tcf > 0:
             success_rate = tcs / max(1, tcf) * 100
             fallback_rate = tcfb / max(1, tcf) * 100
+            failed_rate = tcfail / max(1, tcf) * 100
             print()
             print("[Analyzer] Token Creation Time Quality")
             print(f"  Fetched:               {tcf}")
             print(f"  Successful:            {tcs}  ({success_rate:.1f}%)")
             print(f"  Helius fallback used:  {tcfb}  ({fallback_rate:.1f}%)")
+            print(f"  Failed (all sources):  {tcfail}  ({failed_rate:.1f}%)")
             if success_rate < 20:
                 print("  ⚠ WARNING: Token creation fetch success < 20% — sniper detection degraded!")
 

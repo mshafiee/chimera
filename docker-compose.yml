@@ -191,7 +191,7 @@ services:
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
       - SCOUT_MAX_WALLETS=300
-      - SCOUT_DISCOVERY_HOURS=24
+      - SCOUT_DISCOVERY_HOURS=168
       - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
       # Historical liquidity fallback: 'flexible' uses current liquidity with confidence
       # penalty when historical data is missing (instead of strict rejection)
@@ -206,6 +206,8 @@ services:
       - SCOUT_MIN_WQS_CANDIDATE=10.0
       # Parse health exit threshold (lowered from 40 to reduce false cron alerts)
       - SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT=25
+      # Log token creation time API failures for diagnostics
+      - SCOUT_VERBOSE=true
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
       - SCOUT_MIN_CONFIDENCE_ACTIVE=0.20
       # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
