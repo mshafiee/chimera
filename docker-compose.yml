@@ -202,12 +202,12 @@ services:
       - SCOUT_DISCOVERY_MIN_SOL=0.05                             # Increased from 0.01 (filter spam)
       - SCOUT_MIN_WALLET_AGE_DAYS=7                               # Filter out wallets < 7 days old
       # WQS Thresholds (relaxed for paper trading)
-       - SCOUT_MIN_WQS_ACTIVE=15.0
+      - SCOUT_MIN_WQS_ACTIVE=15.0
       - SCOUT_MIN_WQS_CANDIDATE=10.0
       # Parse health exit threshold (lowered from 40 to reduce false cron alerts)
       - SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT=25
       # Confidence threshold for ACTIVE promotion (lowered for paper mode to expand wallet pool)
-       - SCOUT_MIN_CONFIDENCE_ACTIVE=0.20
+      - SCOUT_MIN_CONFIDENCE_ACTIVE=0.20
       # Re-validate existing CANDIDATE wallets each cycle (top 5 by WQS)
       - SCOUT_REVALIDATE_CANDIDATES=true
       - SCOUT_REVALIDATE_CANDIDATES_LIMIT=20
