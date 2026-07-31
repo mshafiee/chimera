@@ -17,22 +17,31 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::time::interval;
 
-/// Default cache TTL in seconds
-const DEFAULT_CACHE_TTL_SECS: i64 = 30;
+/// Default cache TTL in seconds.
+/// Must be >= STALENESS_THRESHOLD_SECS: `get_price_usd` checks both the
+/// staleness flag AND the TTL, so a TTL shorter than the staleness window
+/// would expire prices before the staleness guard gets a chance to extend them.
+const DEFAULT_CACHE_TTL_SECS: i64 = 90;
 
 /// Price update interval for active tokens.
-/// Jupiter's free API rate-limits at ~5s polling; 15s keeps prices fresh
-/// within the 30s staleness threshold while avoiding 429 responses.
-const PRICE_UPDATE_INTERVAL_SECS: u64 = 30;
+/// Deliberately shorter than the staleness threshold so a single rate-limited
+/// or skipped cycle never blinds the exit system. At 15s this stays well under
+/// the Jupiter free-tier budget (60 req/min shared bucket) while keeping the
+/// effective cadence >= 3x the staleness window even when a cycle is skipped.
+const PRICE_UPDATE_INTERVAL_SECS: u64 = 15;
 
 /// Decimals cache TTL in seconds (24 hours - decimals are immutable for minted tokens)
 const DECIMALS_TTL_SECS: i64 = 86400;
 
 /// Staleness threshold in seconds: if a token's cached price is older than this
 /// window, it is considered stale and `get_price_usd` returns None.
-/// FIX [B-H8]: Reduced from 120 to 30 so stale prices don't silently feed
-/// risk calculations for up to 2 minutes after the price feed stops.
-pub const STALENESS_THRESHOLD_SECS: i64 = 30;
+/// MUST be strictly greater than `PRICE_UPDATE_INTERVAL_SECS`. When both were
+/// 30s, any rate-limited / skipped cycle made prices stale exactly when the next
+/// fetch was due, so the position monitor ran blind for 30-60s after entry —
+/// the first price it saw was already 5-8% below entry, triggering guaranteed
+/// stop-loss/momentum exits. 90s covers 3+ update intervals with margin while
+/// still bounding how old a price can be before risk checks refuse it.
+pub const STALENESS_THRESHOLD_SECS: i64 = 90;
 
 /// Price entry in cache
 #[derive(Debug, Clone)]
@@ -443,6 +452,32 @@ impl PriceCache {
         }
     }
 
+    /// Eagerly fetch a fresh price for a single token and write it into the cache.
+    ///
+    /// Called right after a position opens so the position monitor has a live
+    /// price from second 0 instead of waiting up to `PRICE_UPDATE_INTERVAL_SECS`
+    /// for the next background cycle. Without this, the first price the monitor
+    /// sees can already be 5-8% below entry (pump tokens dump within seconds),
+    /// which is exactly what triggered the guaranteed-loss exits observed in logs.
+    pub async fn eager_fetch_token(&self, token_address: &str) {
+        // If we already have a fresh price, nothing to do.
+        if self.get_price_usd(token_address).is_some() {
+            return;
+        }
+        let tokens = vec![token_address.to_string()];
+        match self.fetch_prices_jupiter(&tokens, None).await {
+            Ok((prices, decimals_map)) if !prices.is_empty() => {
+                let _ = self.apply_price_updates(prices, decimals_map);
+            }
+            Ok(_) => {
+                tracing::warn!(token = token_address, "Eager price fetch returned 0 prices");
+            }
+            Err(e) => {
+                tracing::warn!(token = token_address, error = %e, "Eager price fetch failed");
+            }
+        }
+    }
+
     /// Remove token from active tracking
     pub fn untrack_token(&self, token_address: &str) {
         let mut tokens = self.active_tokens.write();
@@ -512,17 +547,26 @@ impl PriceCache {
 
             match self.update_prices(&tokens).await {
                 Err(PriceCacheError::RateLimited) => {
-                    tracing::warn!("Jupiter price API rate-limited, entering cooldown for one cycle");
-                    rate_limit_cooldown = true;
-                    // Try lite-api fallback so the cache doesn't go stale during cooldown
+                    // Try lite-api fallback so the cache doesn't go stale during cooldown.
+                    // Only skip the next cycle if BOTH the primary AND the fallback fail:
+                    // the cooldown exists to stop hammering a rate-limited endpoint, but
+                    // if lite-api delivered fresh prices we have no reason to stall a cycle.
                     let lite_url = "https://lite-api.jup.ag/price";
                     match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
                         Ok((prices, decimals_map)) if !prices.is_empty() => {
                             tracing::info!("Lite-api fallback returned {} prices after rate-limit", prices.len());
                             let _ = self.apply_price_updates(prices, decimals_map);
                         }
-                        _ => {
-                            tracing::debug!("Lite-api fallback unavailable during rate-limit cooldown");
+                        Ok((_, _)) => {
+                            tracing::warn!("Lite-api fallback returned 0 prices during rate-limit cooldown");
+                            rate_limit_cooldown = true;
+                        }
+                        Err(fallback_err) => {
+                            tracing::warn!(
+                                error = %fallback_err,
+                                "Lite-api fallback unavailable during rate-limit cooldown"
+                            );
+                            rate_limit_cooldown = true;
                         }
                     }
                 }

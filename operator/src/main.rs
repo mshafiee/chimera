@@ -739,6 +739,16 @@ async fn main() -> anyhow::Result<()> {
                     Ok(positions) => {
                         for pos in positions {
                             pnl_pc.track_token(&pos.token_address);
+                            if pnl_pc.get_price_usd(&pos.token_address).is_none() {
+                                // No fresh price in cache — eager-fetch so PnL and
+                                // exit checks get live data immediately instead of
+                                // waiting up to PRICE_UPDATE_INTERVAL_SECS.
+                                let pc = pnl_pc.clone();
+                                let token = pos.token_address.clone();
+                                tokio::spawn(async move {
+                                    pc.eager_fetch_token(&token).await;
+                                });
+                            }
                             if let Some(current_usd) = pnl_pc.get_price_usd(&pos.token_address) {
                                 let entry = if pos.entry_price.is_zero() {
                                     current_usd

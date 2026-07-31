@@ -973,6 +973,16 @@ impl SignalProcessor {
                             // silently no-op because get_price_usd returns None.
                             if let Some(ref pc) = self.price_cache {
                                 pc.track_token(signal.token_address());
+                                // Eagerly prime a live price so the position monitor
+                                // sees current data on its very next 5s tick. Without
+                                // this the first price can arrive 15-60s late — by
+                                // then pump tokens are already 5-8% below entry and
+                                // stop-loss/momentum exits fire at a guaranteed loss.
+                                let pc_fetch = pc.clone();
+                                let token_fetch = signal.token_address().to_string();
+                                tokio::spawn(async move {
+                                    pc_fetch.eager_fetch_token(&token_fetch).await;
+                                });
                             }
 
                             // Update in-memory registry with the new position
