@@ -349,6 +349,14 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(70.0),
+        spear_lite_max_size_sol: std::env::var("CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(rust_decimal::Decimal::new(10, 2)), // 0.10 SOL
+        spear_lite_wqs_threshold: std::env::var("CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40.0),
     };
     let roster_addresses: Vec<String> = db_pool
         .get_active_wallets()

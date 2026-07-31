@@ -44,6 +44,9 @@ pub struct SizingFactors {
     pub consensus_wallet_count: Option<usize>,
     /// Multiplier based on the effective market regime
     pub regime_multiplier: Decimal,
+    /// Optional WQS-based max size cap. When set, the final position size
+    /// is clamped to this value (for low-WQS wallet micro-positions).
+    pub wqs_capped_max_size: Option<Decimal>,
 }
 
 impl PositionSizer {
@@ -357,6 +360,20 @@ impl PositionSizer {
 
         size = size.max(self.config.min_size_sol).min(strategy_max);
 
+        // WQS-based micro-position cap for low-conviction wallets.
+        // Applied after strategy max to ensure unproven wallets trade small.
+        if let Some(wqs_cap) = factors.wqs_capped_max_size {
+            if size > wqs_cap {
+                tracing::debug!(
+                    wallet_wqs = %factors.wallet_wqs,
+                    original_size = %size,
+                    capped_size = %wqs_cap,
+                    "Applying WQS-based micro-position cap"
+                );
+                size = wqs_cap;
+            }
+        }
+
         size
     }
 
@@ -431,6 +448,7 @@ impl PositionSizer {
             strategy: crate::models::Strategy::Shield, // caller can override
             consensus_wallet_count: None,
             regime_multiplier: Decimal::ONE,
+            wqs_capped_max_size: None,
         }
     }
 

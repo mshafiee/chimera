@@ -69,6 +69,7 @@ fn neutral_factors() -> SizingFactors {
         strategy: chimera_operator::models::Strategy::Shield,
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
+        wqs_capped_max_size: None,
     }
 }
 
@@ -289,6 +290,7 @@ async fn test_position_size_capped_at_max() {
         strategy: chimera_operator::models::Strategy::Shield,
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
+        wqs_capped_max_size: None,
     };
 
     let size = sizer.calculate_size(factors).await;
@@ -327,6 +329,7 @@ async fn test_position_size_floor_at_minimum() {
         strategy: chimera_operator::models::Strategy::Spear,
         consensus_wallet_count: None,
         regime_multiplier: Decimal::ONE,
+        wqs_capped_max_size: None,
     };
 
     let size = sizer.calculate_size(factors).await;
@@ -421,7 +424,8 @@ async fn test_hybrid_sizing_eliminated_multiplier_drift() {
         total_capital_sol: Decimal::from_str("10.0").unwrap(),
         strategy: chimera_operator::models::Strategy::Shield,
         consensus_wallet_count: None,
-        regime_multiplier: Decimal::ONE, // 1.0x (neutral regime)
+        regime_multiplier: Decimal::ONE,
+        wqs_capped_max_size: None, // 1.0x (neutral regime)
     };
 
     let size = sizer.calculate_size(factors).await;
@@ -495,6 +499,7 @@ async fn test_kelly_caps_work_with_hybrid_sizing() {
         strategy: chimera_operator::models::Strategy::Shield,
         consensus_wallet_count: Some(4), // 4 wallets consensus: 1.45x boost
         regime_multiplier: Decimal::from_str("1.5").unwrap(),  // 1.5x regime boost
+        wqs_capped_max_size: None,
     };
 
     let size = sizer.calculate_size(factors).await;

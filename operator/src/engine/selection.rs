@@ -88,6 +88,13 @@ pub struct SelectionConfig {
     /// Wallets below this are rejected entirely. Configurable via env var
     /// CHIMERA_SELECTION__MIN_WQS_SCORE (default: 70.0).
     pub min_wqs_score: f64,
+    /// Maximum position size for low-WQS wallets (below spear_lite_wqs_threshold).
+    /// These wallets are admitted but with very small positions to limit risk
+    /// while accumulating a track record. Default: 0.10 SOL.
+    pub spear_lite_max_size_sol: Decimal,
+    /// WQS threshold below which spear_lite_max_size_sol applies.
+    /// Wallets with WQS < this value get micro-positions. Default: 40.0.
+    pub spear_lite_wqs_threshold: f64,
 }
 
 impl SelectionConfig {
@@ -110,6 +117,8 @@ impl SelectionConfig {
         hasher.update(self.min_token_age_hours.to_le_bytes());
         hasher.update(self.min_token_age_pumpfun_hours.to_le_bytes());
         hasher.update(self.min_wqs_score.to_le_bytes());
+        hasher.update(self.spear_lite_max_size_sol.to_string().as_bytes());
+        hasher.update(self.spear_lite_wqs_threshold.to_le_bytes());
         hex::encode(&hasher.finalize()[..8])
     }
 }
@@ -756,6 +765,11 @@ impl SelectionService {
                 strategy,
                 consensus_wallet_count,
                 regime_multiplier,
+                wqs_capped_max_size: if wallet_wqs < self.config.spear_lite_wqs_threshold {
+                    Some(self.config.spear_lite_max_size_sol)
+                } else {
+                    None
+                },
             };
             let size = sizer.calculate_size(factors).await;
             if size.is_zero() {
@@ -900,6 +914,8 @@ mod tests {
             min_token_age_hours: 1.0,
             min_token_age_pumpfun_hours: 1.0,
             min_wqs_score: 70.0,
+            spear_lite_max_size_sol: Decimal::new(10, 2), // 0.10 SOL
+            spear_lite_wqs_threshold: 40.0,
         };
 
         let mut config2 = config1.clone();
