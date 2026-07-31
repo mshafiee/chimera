@@ -530,10 +530,7 @@ impl Executor {
             // Check market conditions for BUY signals only — exits must always be allowed
             // through regardless of crash or volatility so stop-losses can close positions.
             if signal.payload.action == crate::models::Action::Buy {
-                if let Err(e) = self
-                    .check_market_conditions(&signal.payload.action, Some(signal.token_address()))
-                    .await
-                {
+                if let Err(e) = self.check_market_conditions(signal).await {
                     tracing::warn!(
                         trade_uuid = %signal.trade_uuid,
                         error = %e,
@@ -771,6 +768,28 @@ impl Executor {
                             "Trade costs recorded"
                         );
                     }
+
+                    // Single most important diagnostic for profitability: the
+                    // final outcome + what the trade actually cost (BUY and SELL).
+                    let total_cost_sol = jito_tip + dex_fee_sol + slippage_cost_sol;
+                    tracing::info!(
+                        trade_uuid = %signal.trade_uuid,
+                        token = %signal.payload.token,
+                        wallet = %signal.payload.wallet_address,
+                        strategy = %signal.payload.strategy,
+                        side = %signal.payload.action,
+                        amount_sol = %signal.payload.amount_sol,
+                        signature = %outcome.signature,
+                        confirmed = outcome.confirmed,
+                        fill_price_sol_per_token = ?outcome.fill_price_sol_per_token,
+                        price_impact_pct = ?outcome.price_impact_pct,
+                        token_amount = ?outcome.token_amount,
+                        estimated_fee_sol = ?outcome.estimated_fee_sol,
+                        route_fee_sol = ?outcome.route_fee_sol,
+                        executed_output_sol = ?outcome.executed_output_sol,
+                        total_cost_sol = %total_cost_sol,
+                        "Trade executed — final outcome and costs"
+                    );
                 }
                 Err(e) => {
                     let failure_count = {
@@ -864,9 +883,18 @@ impl Executor {
     /// Returns Ok(()) if conditions are favorable, Err with reason otherwise
     async fn check_market_conditions(
         &self,
-        _action: &crate::models::Action,
-        token_address: Option<&str>,
+        signal: &Signal,
     ) -> Result<(), String> {
+        // Measured values captured for diagnostic logging (logging-only — the
+        // gating logic and thresholds below are unchanged).
+        let mut sol_price_now: Option<Decimal> = None;
+        let mut sol_price_delta_1h_pct: Option<Decimal> = None;
+        let mut sol_volatility_pct: Option<f64> = None;
+        let mut token_price_delta_15m_pct: Option<Decimal> = None;
+        let max_sol_crash_pct = Decimal::from(10);
+        let max_sol_volatility_pct = 30.0;
+        let max_token_crash_pct = Decimal::from(30);
+
         // Check 1: SOL price crash (>10% drop in last hour)
         // This requires price history - check if we have sufficient data
         if let Some(ref price_cache) = self.price_cache {
@@ -894,7 +922,20 @@ impl Executor {
                         if old_price > Decimal::ZERO {
                             let drop_percent =
                                 ((old_price - new_price) / old_price) * Decimal::from(100);
-                            if drop_percent > Decimal::from(10) {
+                            sol_price_delta_1h_pct = Some(drop_percent);
+                            sol_price_now = Some(new_price);
+                            if drop_percent > max_sol_crash_pct {
+                                tracing::warn!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    strategy = %signal.payload.strategy,
+                                    token = %signal.payload.token,
+                                    sol_price_delta_1h_pct = %drop_percent,
+                                    max_sol_crash_pct = %max_sol_crash_pct,
+                                    sol_price_1h_ago = %old_price,
+                                    sol_price_now = %new_price,
+                                    "Trade rejected: SOL price crash detected (>{}% drop in last hour)",
+                                    max_sol_crash_pct
+                                );
                                 return Err(format!(
                                     "SOL price crash detected: {:.2}% drop in last hour ({} -> {})",
                                     drop_percent, old_price, new_price
@@ -909,10 +950,20 @@ impl Executor {
         // Check 2: High volatility (>30% daily volatility)
         if let Some(ref price_cache) = self.price_cache {
             if let Some(volatility) = price_cache.get_sol_volatility() {
-                if volatility > 30.0 {
+                sol_volatility_pct = Some(volatility);
+                if volatility > max_sol_volatility_pct {
+                    tracing::warn!(
+                        trade_uuid = %signal.trade_uuid,
+                        strategy = %signal.payload.strategy,
+                        token = %signal.payload.token,
+                        sol_volatility_pct = volatility,
+                        max_sol_volatility_pct = max_sol_volatility_pct,
+                        "Trade rejected: SOL volatility too high (>{}%)",
+                        max_sol_volatility_pct
+                    );
                     return Err(format!(
-                        "High market volatility detected: {:.2}% (threshold: 30%)",
-                        volatility
+                        "High market volatility detected: {:.2}% (threshold: {:.0}%)",
+                        volatility, max_sol_volatility_pct
                     ));
                 }
             }
@@ -921,9 +972,9 @@ impl Executor {
         // Check 3: Individual token crash (>30% drop in last 15 minutes)
         // A token can crash even when SOL is stable — we must check the
         // specific token's price action before opening a new position.
-        if let (Some(token_addr), Some(ref price_cache)) = (token_address, &self.price_cache) {
+        if let Some(ref price_cache) = self.price_cache {
             let history = price_cache.price_history_read();
-            if let Some(token_history) = history.get(token_addr) {
+            if let Some(token_history) = history.get(signal.token_address()) {
                 if token_history.len() >= 2 {
                     let fifteen_min_ago = Utc::now() - chrono::Duration::minutes(15);
                     let mut price_15m_ago = None;
@@ -944,7 +995,19 @@ impl Executor {
                         if old_price > Decimal::ZERO {
                             let drop_percent =
                                 ((old_price - new_price) / old_price) * Decimal::from(100);
-                            if drop_percent > Decimal::from(30) {
+                            token_price_delta_15m_pct = Some(drop_percent);
+                            if drop_percent > max_token_crash_pct {
+                                tracing::warn!(
+                                    trade_uuid = %signal.trade_uuid,
+                                    strategy = %signal.payload.strategy,
+                                    token = %signal.payload.token,
+                                    token_price_delta_15m_pct = %drop_percent,
+                                    max_token_crash_pct = %max_token_crash_pct,
+                                    token_price_15m_ago = %old_price,
+                                    token_price_now = %new_price,
+                                    "Trade rejected: token price crash detected (>{}% drop in last 15 min)",
+                                    max_token_crash_pct
+                                );
                                 return Err(format!(
                                     "Token price crash detected: {:.2}% drop in last 15 min ({} -> {})",
                                     drop_percent, old_price, new_price
@@ -960,6 +1023,19 @@ impl Executor {
         // time (not at webhook receipt), so the reduced amount is already in signal.payload.amount_sol.
 
         // All checks passed
+        tracing::debug!(
+            trade_uuid = %signal.trade_uuid,
+            strategy = %signal.payload.strategy,
+            token = %signal.payload.token,
+            sol_price = ?sol_price_now,
+            sol_volatility_pct = ?sol_volatility_pct,
+            sol_price_delta_1h_pct = ?sol_price_delta_1h_pct,
+            token_price_delta_15m_pct = ?token_price_delta_15m_pct,
+            max_sol_crash_pct = %max_sol_crash_pct,
+            max_sol_volatility_pct = max_sol_volatility_pct,
+            max_token_crash_pct = %max_token_crash_pct,
+            "Market conditions check passed"
+        );
         Ok(())
     }
 
@@ -2974,10 +3050,25 @@ impl Executor {
             Decimal::ZERO
         };
 
+        tracing::debug!(
+            trade_uuid = %signal.trade_uuid,
+            strategy = %signal.payload.strategy,
+            estimated_tip_sol = %tip,
+            dex_fee_sol = %dex_fee,
+            slippage_cost_sol = %slippage,
+            total_cost_sol = %total_cost,
+            cost_pct_of_position = %cost_pct,
+            amount_sol = %signal.payload.amount_sol,
+            "Execution cost breakdown"
+        );
+
         // [FRICTION-GATING] Apply dynamic friction gating: reject trades where
         // expected edge (from Kelly sizing) is less than or equal to total friction.
         // This prevents unprofitable micro-trades where transaction costs eat the
         // entire mathematical edge.
+        // `expected_profit_sol` is captured for the diagnostic logs below
+        // (logging-only — no gating behavior is changed).
+        let mut expected_profit_sol = None;
         if self.config.strategy.friction_gating_enabled {
             // Calculate Kelly metrics for this wallet
             let kelly_result = self.kelly_sizer.calculate_kelly(
@@ -2990,13 +3081,19 @@ impl Executor {
                 // Expected profit = position_size * expected_return_pct
                 // This is the actual expected profit in SOL, NOT the position size
                 let expected_profit = kelly.expected_profit_sol(signal.payload.amount_sol);
+                expected_profit_sol = Some(expected_profit);
 
                 // Only reject if expected profit is less than or equal to total cost
                 if expected_profit <= total_cost {
                     tracing::warn!(
                         trade_uuid = %signal.trade_uuid,
+                        strategy = %signal.payload.strategy,
                         expected_profit_sol = %expected_profit,
                         total_cost_sol = %total_cost,
+                        estimated_tip_sol = %tip,
+                        dex_fee_sol = %dex_fee,
+                        slippage_cost_sol = %slippage,
+                        cost_pct_of_position = %cost_pct,
                         expected_return_pct = %kelly.expected_return_pct(),
                         win_rate = %kelly.win_rate,
                         avg_win_pct = %kelly.avg_win,
@@ -3014,8 +3111,13 @@ impl Executor {
 
                 tracing::debug!(
                     trade_uuid = %signal.trade_uuid,
+                    strategy = %signal.payload.strategy,
                     expected_profit_sol = %expected_profit,
                     total_cost_sol = %total_cost,
+                    estimated_tip_sol = %tip,
+                    dex_fee_sol = %dex_fee,
+                    slippage_cost_sol = %slippage,
+                    cost_pct_of_position = %cost_pct,
                     net_expected_profit_sol = %(expected_profit - total_cost),
                     expected_return_pct = %kelly.expected_return_pct(),
                     "Friction gating passed: expected profit exceeds transaction costs"
@@ -3083,6 +3185,18 @@ impl Executor {
         }
 
         if limit > Decimal::ZERO && cost_pct > limit {
+            tracing::warn!(
+                trade_uuid = %signal.trade_uuid,
+                strategy = %signal.payload.strategy,
+                estimated_tip_sol = %tip,
+                dex_fee_sol = %dex_fee,
+                slippage_cost_sol = %slippage,
+                total_cost_sol = %total_cost,
+                cost_pct_of_position = %cost_pct,
+                max_cost_pct = %limit,
+                expected_profit_sol = ?expected_profit_sol,
+                "Trade rejected: total execution cost exceeds strategy cost limit"
+            );
             return Err(ExecutorError::ExecutionCostTooHigh {
                 cost: total_cost,
                 cost_pct: cost_pct.to_f64().unwrap_or(0.0) * 100.0,
@@ -3090,6 +3204,19 @@ impl Executor {
                 strategy: signal.payload.strategy,
             });
         }
+
+        tracing::debug!(
+            trade_uuid = %signal.trade_uuid,
+            strategy = %signal.payload.strategy,
+            estimated_tip_sol = %tip,
+            dex_fee_sol = %dex_fee,
+            slippage_cost_sol = %slippage,
+            total_cost_sol = %total_cost,
+            cost_pct_of_position = %cost_pct,
+            max_cost_pct = %limit,
+            expected_profit_sol = ?expected_profit_sol,
+            "Execution cost check passed"
+        );
         Ok(())
     }
 
@@ -3257,6 +3384,20 @@ impl Executor {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
                     })?;
 
+                let expected_slippage = self.slippage_estimate(signal, result.price_impact_pct);
+                tracing::debug!(
+                    trade_uuid = %signal.trade_uuid,
+                    strategy = %signal.payload.strategy,
+                    token = %signal.payload.token,
+                    fill_price_lamports_per_base = ?result.fill_price_lamports_per_base,
+                    price_impact_pct = ?result.price_impact_pct,
+                    expected_slippage_pct = %(expected_slippage.expected_fraction * Decimal::from(100)),
+                    in_amount = result.in_amount,
+                    out_amount = result.out_amount,
+                    route_fee_sol = ?result.route_fee_sol,
+                    "Paper/devnet quote fetched (BUY)"
+                );
+
                 let fill_price_sol = convert_fill_price(
                     result.fill_price_lamports_per_base,
                     signal.token_decimals,
@@ -3312,6 +3453,20 @@ impl Executor {
                     .map_err(|e| {
                         ExecutorError::TransactionFailed(format!("Jupiter quote: {}", e))
                     })?;
+
+                let expected_slippage = self.slippage_estimate(signal, result.price_impact_pct);
+                tracing::debug!(
+                    trade_uuid = %signal.trade_uuid,
+                    strategy = %signal.payload.strategy,
+                    token = %signal.payload.token,
+                    fill_price_lamports_per_base = ?result.fill_price_lamports_per_base,
+                    price_impact_pct = ?result.price_impact_pct,
+                    expected_slippage_pct = %(expected_slippage.expected_fraction * Decimal::from(100)),
+                    in_amount = result.in_amount,
+                    out_amount = result.out_amount,
+                    route_fee_sol = ?result.route_fee_sol,
+                    "Paper/devnet quote fetched (SELL)"
+                );
 
                 let fill_price_sol = convert_fill_price(
                     result.fill_price_lamports_per_base,

@@ -194,6 +194,7 @@ impl StopLossManager {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
+                        current_price = %price,
                         "STALE_PRICE: cached price is stale (>30s old) — forcing exit (risk management blind)"
                     );
                     return StopLossAction::Exit;
@@ -224,6 +225,7 @@ impl StopLossManager {
             tracing::error!(
                 trade_uuid = %trade_uuid,
                 token_address = token_address,
+                entry_price = %entry_price,
                 "CORRUPT_POSITION: entry_price is zero — forcing immediate exit to recover capital"
             );
             return StopLossAction::Exit;
@@ -234,6 +236,11 @@ impl StopLossManager {
             let ratio = diff / entry_price;
             ratio * Decimal::from(100)
         };
+
+        let elapsed_secs = chrono::Utc::now()
+            .signed_duration_since(entry_time)
+            .num_seconds();
+        let is_hard_stop = loss_percent <= dec!(-25);
 
         // Get wallet WQS for dynamic stop calculation
         let wallet_opt = self.db.get_wallet(wallet_address).await;
@@ -374,16 +381,22 @@ impl StopLossManager {
         }
 
         if loss_percent <= stop_loss_threshold {
-            let elapsed_secs = chrono::Utc::now()
-                .signed_duration_since(entry_time)
-                .num_seconds();
             if elapsed_secs < self.config.wick_protection_secs as i64 {
                 // Hard stop at -25% always bypasses wick protection — a 25%+ crash
                 // in the first seconds is never "normal entry slippage."
                 if loss_percent <= dec!(-25) {
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
+                        token_address = token_address,
+                        current_price = %current_price,
+                        entry_price = %entry_price,
                         loss_percent = %loss_percent,
+                        stop_loss_threshold = %stop_loss_threshold,
+                        wqs,
+                        is_consensus,
+                        wick_elapsed_secs = elapsed_secs,
+                        is_hard_stop = true,
+                        exit_signal = ?StopLossAction::Exit,
                         "Hard stop at -25% triggered during wick protection window — catastrophic drop bypasses grace period"
                     );
                     return StopLossAction::Exit;
@@ -396,10 +409,52 @@ impl StopLossManager {
                     loss_percent = %loss_percent,
                     "Stop-loss triggered but ignored due to entry grace period (wick protection)"
                 );
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    current_price = %current_price,
+                    entry_price = %entry_price,
+                    loss_percent = %loss_percent,
+                    stop_loss_threshold = %stop_loss_threshold,
+                    wqs,
+                    is_consensus,
+                    wick_elapsed_secs = elapsed_secs,
+                    is_hard_stop,
+                    "Stop-loss within wick protection window — holding position"
+                );
                 return StopLossAction::None;
             }
+
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                current_price = %current_price,
+                entry_price = %entry_price,
+                loss_percent = %loss_percent,
+                stop_loss_threshold = %stop_loss_threshold,
+                wqs,
+                is_consensus,
+                wick_elapsed_secs = elapsed_secs,
+                is_hard_stop,
+                exit_signal = ?StopLossAction::Exit,
+                "STOP-LOSS TRIGGERED — exiting position"
+            );
             return StopLossAction::Exit;
         }
+
+        tracing::debug!(
+            trade_uuid = %trade_uuid,
+            token_address = token_address,
+            current_price = %current_price,
+            entry_price = %entry_price,
+            loss_percent = %loss_percent,
+            stop_loss_threshold = %stop_loss_threshold,
+            wqs,
+            is_consensus,
+            wick_elapsed_secs = elapsed_secs,
+            is_hard_stop,
+            "Stop-loss NOT triggered — holding position"
+        );
 
         StopLossAction::None
     }

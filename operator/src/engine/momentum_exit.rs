@@ -114,6 +114,11 @@ impl MomentumExit {
                     );
                     return MomentumExitAction::Exit;
                 }
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    "Momentum exit: no price data — skipping check"
+                );
                 return MomentumExitAction::None; // No price data, skip check
             }
         };
@@ -159,7 +164,7 @@ impl MomentumExit {
             // At 30% vol → 8+6=14%, at 50% vol → 8+10=18%, capped at 20%.
             // For positions held >5 min the threshold widens slightly (÷2 of elapsed hours,
             // max +5 pts) so long-held positions aren't exited on normal intraday noise.
-            let price_drop_threshold = {
+            let (vol_bonus, age_bonus) = {
                 let vol_bonus =
                     if let Some(vol) = self.price_cache.calculate_volatility(token_address) {
                         let vol_dec = Decimal::from_f64_retain(vol).unwrap_or(Decimal::ZERO);
@@ -176,8 +181,10 @@ impl MomentumExit {
                 } else {
                     Decimal::ZERO
                 };
-                (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(20))
+                (vol_bonus, age_bonus)
             };
+            let price_drop_threshold =
+                (base_drop_threshold + vol_bonus + age_bonus).min(Decimal::from(20));
             if price_drop_percent >= price_drop_threshold {
                 let price_drop_f64 = price_drop_percent.to_f64().unwrap_or(0.0);
                 tracing::warn!(
@@ -189,9 +196,21 @@ impl MomentumExit {
                 );
                 return MomentumExitAction::Exit;
             }
+            tracing::debug!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                price_drop_percent = ?price_drop_percent,
+                price_drop_threshold = ?price_drop_threshold,
+                base_drop_threshold = ?base_drop_threshold,
+                vol_bonus = ?vol_bonus,
+                age_bonus = ?age_bonus,
+                elapsed_minutes = elapsed_minutes,
+                "Momentum price-drop check passed — holding"
+            );
         } else {
             tracing::debug!(
                 trade_uuid = %trade_uuid,
+                token_address = token_address,
                 elapsed_secs = elapsed.as_secs(),
                 wick_protection_secs = self.wick_protection_secs,
                 price_drop_percent = ?price_drop_percent,
@@ -208,14 +227,33 @@ impl MomentumExit {
         let volume_check_ready = elapsed.as_secs() >= 300 && !in_wick_window;
         if volume_check_ready {
             if let Some(ref volume_cache) = self.volume_cache {
-                if volume_cache.has_volume_drop(token_address, Decimal::from(65)) {
+                let volume_drop_threshold = Decimal::from(65);
+                let volume_drop_percent = match (
+                    volume_cache.get_24h_average_volume(token_address),
+                    volume_cache.get_current_volume(token_address),
+                ) {
+                    (Some(avg), Some(cur)) if avg > Decimal::ZERO => {
+                        Some(((avg - cur) / avg) * Decimal::from(100))
+                    }
+                    _ => None,
+                };
+                if volume_cache.has_volume_drop(token_address, volume_drop_threshold) {
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
+                        volume_drop_percent = ?volume_drop_percent,
+                        volume_drop_threshold = %volume_drop_threshold,
                         "Negative momentum detected: volume dropped >65% from 24h average"
                     );
                     return MomentumExitAction::Exit;
                 }
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    volume_drop_percent = ?volume_drop_percent,
+                    volume_drop_threshold = %volume_drop_threshold,
+                    "Momentum volume-drop check passed — holding"
+                );
             }
         }
 
@@ -235,6 +273,14 @@ impl MomentumExit {
                     );
                     return MomentumExitAction::Exit;
                 }
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    current_rsi = current_rsi,
+                    previous_rsi = previous_rsi,
+                    rsi_threshold = 35.0_f64,
+                    "Momentum RSI check passed — holding"
+                );
             }
         }
 
@@ -320,11 +366,27 @@ impl MomentumExit {
         entry_price: Decimal,
         entry_time: SystemTime,
     ) -> bool {
-        matches!(
-            self.check_momentum(trade_uuid, token_address, entry_price, entry_time)
-                .await,
-            MomentumExitAction::Exit
-        )
+        match self
+            .check_momentum(trade_uuid, token_address, entry_price, entry_time)
+            .await
+        {
+            MomentumExitAction::Exit => {
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    "Momentum exit check: exit signal confirmed"
+                );
+                true
+            }
+            MomentumExitAction::None => {
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    "Momentum exit check passed — holding"
+                );
+                false
+            }
+        }
     }
 }
 

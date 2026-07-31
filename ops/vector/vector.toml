@@ -5,17 +5,18 @@
 # Sources - Log Collection from Chimera Services
 # ===================================================================
 
-# Operator Logs - JSON structured logs from Rust trading engine
+# Operator Logs - JSON structured logs from Rust trading engine.
+# Daily rotation (operator.log.YYYY-MM-DD) — glob matches current + rotated.
 [sources.operator_logs]
 type = "file"
-include = ["/host/data/logs/operator.log"]
+include = ["/host/data/logs/operator.log*"]
 read_from = "beginning"
 ignore_older_secs = 86400
 
 # Scout Logs - Python wallet intelligence layer logs
 [sources.scout_logs]
 type = "file"
-include = ["/host/data/logs/scout.log"]
+include = ["/host/data/logs/scout.log*"]
 read_from = "beginning"
 ignore_older_secs = 86400
 

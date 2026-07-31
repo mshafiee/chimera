@@ -491,6 +491,7 @@ async fn process_transaction(
             .unwrap_or_else(|| "Circuit breaker tripped".to_string());
         tracing::warn!(
             wallet = %tx.wallet_address,
+            signature = %tx.signature,
             reason = %reason,
             "Polling signal rejected by circuit breaker"
         );
@@ -501,7 +502,11 @@ async fn process_transaction(
     let wallet = match db.get_wallet(&tx.wallet_address).await? {
         Some(w) => w,
         None => {
-            tracing::warn!(wallet = %tx.wallet_address, "Wallet not found in database");
+            tracing::warn!(
+                wallet = %tx.wallet_address,
+                signature = %tx.signature,
+                "Wallet not found in database"
+            );
             return Ok(());
         }
     };
@@ -510,6 +515,9 @@ async fn process_transaction(
         tracing::debug!(
             wallet = %tx.wallet_address,
             status = %wallet.status,
+            signature = %tx.signature,
+            direction = ?tx.direction,
+            token = ?tx.token_address,
             "Skipping non-ACTIVE wallet"
         );
         return Ok(());
@@ -545,6 +553,7 @@ async fn process_transaction(
         tracing::debug!(
             signature = %tx.signature,
             wallet = %tx.wallet_address,
+            token = %token_address,
             amount_sol = %amount_sol,
             min_position_sol = %min_position_sol,
             "Polling trade amount below minimum — skipping dust signal"
@@ -608,13 +617,15 @@ async fn process_transaction(
     if db.trade_uuid_exists(&trade_uuid).await.unwrap_or(false) {
         tracing::debug!(
             trade_uuid = %trade_uuid,
+            wallet = %tx.wallet_address,
+            token = %token_address,
             "Duplicate polling signal skipped"
         );
         return Ok(());
     }
 
     // Gate 4: token safety fast-path (BUY signals only; SELL signals already own the token)
-    if matches!(direction, Action::Buy) {
+    let fast_check_result = if matches!(direction, Action::Buy) {
         match token_parser.fast_check(&token_address, strategy).await {
             Ok(result) if !result.safe => {
                 let reason = result
@@ -623,6 +634,8 @@ async fn process_transaction(
                 tracing::warn!(
                     token = %token_address,
                     wallet = %tx.wallet_address,
+                    signature = %tx.signature,
+                    amount_sol = %amount_sol,
                     reason = %reason,
                     "Polling signal rejected by token safety check"
                 );
@@ -632,14 +645,18 @@ async fn process_transaction(
                 // Fail closed: if we can't verify safety, reject the signal
                 tracing::warn!(
                     token = %token_address,
+                    wallet = %tx.wallet_address,
+                    signature = %tx.signature,
                     error = %e,
                     "Token safety check failed, rejecting polling signal"
                 );
                 return Ok(());
             }
-            Ok(_) => {} // safe — proceed
+            Ok(result) => Some(result), // safe — proceed
         }
-    }
+    } else {
+        None
+    };
 
     // Create signal (liquidity_usd not available from RPC polling path — executor uses config fallback)
     // force_slow_path is false: RPC polling signals have not gone through fast_check at all,
@@ -662,7 +679,11 @@ async fn process_transaction(
         amount_sol = %amount_sol,
         strategy = ?strategy,
         signature = %tx.signature,
-        "Generated signal from RPC polling"
+        fast_check_liquidity_usd = ?fast_check_result.as_ref().and_then(|r| r.liquidity_usd),
+        fast_check_safe = ?fast_check_result.as_ref().map(|r| r.safe),
+        bypasses_selection_engine = true,
+        bypasses_position_sizer = true,
+        "polling: signal queued bypassing selection engine (raw amount_sol, no PositionSizer)"
     );
 
     // Queue signal to engine

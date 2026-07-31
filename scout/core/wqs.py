@@ -289,26 +289,35 @@ def _apply_archetype_adjustments(tracker: ScoreTracker, metrics, regime: str) ->
 
     if regime == "VOLATILE":
         if archetype in ["SCALPER", "DAY_TRADER"]:
+            logger.debug("[WQS] bonus regime_adjustment +5.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_pos("regime_adjustment", 5.0)
         elif archetype == "SWING_TRADER":
+            logger.debug("[WQS] bonus regime_adjustment +3.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_pos("regime_adjustment", 3.0)
         elif archetype == "WHALE":
+            logger.debug("[WQS] penalty regime_adjustment -3.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_neg("regime_adjustment", 3.0)
 
     elif regime == "BULL":
         if archetype == "SWING_TRADER":
+            logger.debug("[WQS] bonus regime_adjustment +5.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_pos("regime_adjustment", 5.0)
         elif archetype == "WHALE":
+            logger.debug("[WQS] bonus regime_adjustment +3.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_pos("regime_adjustment", 3.0)
         elif archetype in ["SCALPER", "DAY_TRADER"]:
+            logger.debug("[WQS] penalty regime_adjustment -2.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_neg("regime_adjustment", 2.0)
 
     elif regime == "BEAR":
         if archetype == "SCALPER":
+            logger.debug("[WQS] bonus regime_adjustment +5.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_pos("regime_adjustment", 5.0)
         elif archetype == "WHALE":
+            logger.debug("[WQS] penalty regime_adjustment -5.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_neg("regime_adjustment", 5.0)
         elif archetype == "SWING_TRADER":
+            logger.debug("[WQS] penalty regime_adjustment -3.00 addr=%s regime=%s archetype=%s", metrics.address, regime, archetype)
             tracker.add_neg("regime_adjustment", 3.0)
 
 
@@ -444,6 +453,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     3. Apply penalties: cvar_95 * 0.2, max_drawdown_duration * 0.1
     """
     _is_spear = strategy.upper() == "SPEAR"
+    addr = metrics.address
     tracker = ScoreTracker()
 
     roi_7d = float(metrics.roi_7d) if metrics.roi_7d is not None else 0.0
@@ -467,17 +477,22 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         base_30d = min(25.0, (roi_30d / 100.0) * 25.0)
         weighted_roi = roi_7d * 0.5 + roi_30d * 0.5
         recency_score = min(25.0, (weighted_roi / 100.0) * 25.0)
+        logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_7d=%.2f roi_30d=%.2f", max(base_30d, recency_score), addr, roi_7d, roi_30d)
         tracker.add_pos("roi_score", max(base_30d, recency_score))
         if roi_30d >= 1.0 and roi_7d > roi_30d * 0.6:
+            logger.debug("[WQS] bonus roi_score +5.00 addr=%s roi_7d=%.2f roi_30d=%.2f", addr, roi_7d, roi_30d)
             tracker.add_pos("roi_score", 5.0)
     else:
         if roi_30d > 0:
+            logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_30d=%.2f", min(25.0, (roi_30d / 100.0) * 25.0), addr, roi_30d)
             tracker.add_pos("roi_score", min(25.0, (roi_30d / 100.0) * 25.0))
 
     if roi_7d > 0 and not _is_pump_spike:
+        logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_7d=%.2f", min(10.0, (roi_7d / 100.0) * 10.0), addr, roi_7d)
         tracker.add_pos("roi_score", min(10.0, (roi_7d / 100.0) * 10.0))
 
     if roi_7d > -5.0 and roi_30d > 20.0:
+        logger.debug("[WQS] bonus roi_score +10.00 addr=%s roi_7d=%.2f roi_30d=%.2f", addr, roi_7d, roi_30d)
         tracker.add_pos("roi_score", 10.0)
 
     # Apply confidence penalty for wallets with FIFO replay data gaps
@@ -488,44 +503,58 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         # Max penalty of 20 points when gap ratio is 100%
         roi_penalty = gap_ratio * 20.0
         if roi_penalty > 0:
+            logger.debug("[WQS] penalty replay_data_gap -%.2f addr=%s replay_data_gap_ratio=%.2f", roi_penalty, addr, gap_ratio)
             tracker.add_neg("replay_data_gap", roi_penalty)
 
     win_rate = metrics.win_rate or 0.0
     profit_factor = metrics.profit_factor
 
     if win_rate >= 0.5:
+        logger.debug("[WQS] bonus win_rate_score +5.00 addr=%s win_rate=%.2f", addr, win_rate)
         tracker.add_pos("win_rate_score", 5.0)
     if win_rate >= 0.65:
+        logger.debug("[WQS] bonus win_rate_score +5.00 addr=%s win_rate=%.2f", addr, win_rate)
         tracker.add_pos("win_rate_score", 5.0)
     if win_rate >= 0.80 and (profit_factor is None or profit_factor >= 1.2):
+        logger.debug("[WQS] bonus win_rate_score +5.00 addr=%s win_rate=%.2f profit_factor=%s", addr, win_rate, profit_factor)
         tracker.add_pos("win_rate_score", 5.0)
     if win_rate >= 0.90 and (profit_factor is None or profit_factor >= 1.2):
+        logger.debug("[WQS] bonus win_rate_score +5.00 addr=%s win_rate=%.2f profit_factor=%s", addr, win_rate, profit_factor)
         tracker.add_pos("win_rate_score", 5.0)
         
     count = metrics.trade_count_30d or 0
     
     if count >= 5:
+        logger.debug("[WQS] bonus activity_score +2.00 addr=%s trade_count_30d=%d", addr, count)
         tracker.add_pos("activity_score", 2.0)
     if count >= 10:
+        logger.debug("[WQS] bonus activity_score +3.00 addr=%s trade_count_30d=%d", addr, count)
         tracker.add_pos("activity_score", 3.0)
     if count >= 20:
+        logger.debug("[WQS] bonus activity_score +5.00 addr=%s trade_count_30d=%d", addr, count)
         tracker.add_pos("activity_score", 5.0)
     if count >= 50:
+        logger.debug("[WQS] bonus activity_score +5.00 addr=%s trade_count_30d=%d", addr, count)
         tracker.add_pos("activity_score", 5.0)
     if count >= 100:
+        logger.debug("[WQS] bonus activity_score +5.00 addr=%s trade_count_30d=%d", addr, count)
         tracker.add_pos("activity_score", 5.0)
     
     dd = metrics.max_drawdown_30d or 0.0
 
+    logger.debug("[WQS] penalty drawdown -%.2f addr=%s max_drawdown_30d=%.2f", dd * 0.2, addr, dd)
     tracker.add_neg(PenaltyCategory.DRAWDOWN, dd * 0.2)
 
     if metrics.roi_90d is not None and metrics.roi_90d < 0 and (metrics.roi_30d or 0) > 0:
+        logger.debug("[WQS] penalty recovery_fragility -10.00 addr=%s roi_90d=%.2f roi_30d=%.2f", addr, metrics.roi_90d, metrics.roi_30d or 0)
         tracker.add_neg("recovery_fragility", 10.0)
 
     if _is_pump_spike:
+        logger.debug("[WQS] penalty pump_spike -25.00 addr=%s roi_7d=%.2f roi_30d=%.2f", addr, roi_7d, roi_30d)
         tracker.add_neg(PenaltyCategory.PUMP_SPIKE, 25.0)
         
     if (metrics.avg_trade_size_sol or Decimal(0)) < Decimal('0.05'):
+        logger.debug("[WQS] penalty pump_spike -10.00 addr=%s avg_trade_size_sol=%s", addr, metrics.avg_trade_size_sol)
         tracker.add_neg(PenaltyCategory.PUMP_SPIKE, 10.0)
 
     # Pump.fun bonding-curve concentration check.
@@ -533,26 +562,39 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     # from Jito tips. Hard-reject wallets that are predominantly pump.fun traders.
     if metrics.pumpfun_trade_ratio is not None:
         if metrics.pumpfun_trade_ratio > 0.5:
+            logger.debug("[WQS] penalty pumpfun_concentration -100.00 addr=%s pumpfun_trade_ratio=%.2f", addr, metrics.pumpfun_trade_ratio)
             tracker.add_neg("pumpfun_concentration", 100.0)
+            logger.info(
+                "[WQS] INSTANT-REJECT addr=%s reason=pumpfun_concentration pumpfun_trade_ratio=%.2f avg_entry_delay=%s",
+                addr, metrics.pumpfun_trade_ratio, metrics.avg_entry_delay_seconds,
+            )
             return tracker.to_components(is_instant_reject=True)
         elif metrics.pumpfun_trade_ratio >= 0.3:
+            logger.debug("[WQS] penalty pumpfun_concentration -15.00 addr=%s pumpfun_trade_ratio=%.2f", addr, metrics.pumpfun_trade_ratio)
             tracker.add_neg("pumpfun_concentration", 15.0)
 
     if metrics.win_streak_consistency and metrics.win_streak_consistency > 0.4:
+        logger.debug("[WQS] bonus consistency_score +5.00 addr=%s win_streak_consistency=%.2f", addr, metrics.win_streak_consistency)
         tracker.add_pos("consistency_score", 5.0)
 
     if metrics.avg_entry_delay_seconds is not None:
         # Relaxed threshold: only instant reject if entering within 10 seconds of token creation
         # This catches actual snipers without rejecting fast but legitimate traders
         if metrics.avg_entry_delay_seconds < 10:
+            logger.info(
+                "[WQS] INSTANT-REJECT addr=%s reason=sniper avg_entry_delay=%.2f pumpfun_trade_ratio=%s",
+                addr, metrics.avg_entry_delay_seconds, metrics.pumpfun_trade_ratio,
+            )
             return tracker.to_components(is_instant_reject=True)
         
         # Apply moderate penalty for very fast entries (10-60 seconds)
         elif metrics.avg_entry_delay_seconds < 60:
+            logger.debug("[WQS] penalty sniper -15.00 addr=%s avg_entry_delay=%.2f", addr, metrics.avg_entry_delay_seconds)
             tracker.add_neg(PenaltyCategory.SNIPER, 15.0)
             
         # Bonus for reasonable entry timing (2-60 minutes)
         elif 120 < metrics.avg_entry_delay_seconds < 3600:
+            logger.debug("[WQS] bonus entry_delay_score +15.00 addr=%s avg_entry_delay=%.2f", addr, metrics.avg_entry_delay_seconds)
             tracker.add_pos("entry_delay_score", 15.0)
     else:
         # If avg_entry_delay_seconds is None (API failed), don't instant reject
@@ -561,84 +603,113 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
 
     if metrics.profit_factor is not None:
         if metrics.profit_factor > 3.0:
+            logger.debug("[WQS] bonus pf_score +15.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_pos("pf_score", 15.0)
         elif metrics.profit_factor > 1.5:
+            logger.debug("[WQS] bonus pf_score +5.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_pos("pf_score", 5.0)
         elif metrics.profit_factor >= 1.2:
+            logger.debug("[WQS] bonus pf_score +2.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_pos("pf_score", 2.0)
         elif metrics.profit_factor >= 1.15:
+            logger.debug("[WQS] penalty pf_score -1.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_neg("pf_score", 1.0)
         elif metrics.profit_factor >= 1.1:
+            logger.debug("[WQS] penalty pf_score -3.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_neg("pf_score", 3.0)
         elif metrics.profit_factor >= 1.0:
+            logger.debug("[WQS] penalty pf_score -6.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_neg("pf_score", 6.0)
         elif metrics.profit_factor >= 0.5:
+            logger.debug("[WQS] penalty pf_score -25.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_neg("pf_score", 25.0)
         else:
+            logger.debug("[WQS] penalty pf_score -40.00 addr=%s profit_factor=%.2f", addr, metrics.profit_factor)
             tracker.add_neg("pf_score", 40.0)
     
     if metrics.parse_rate is not None:
         if metrics.parse_rate < 0.60:
             continuous_penalty = (0.60 - metrics.parse_rate) * 80.0
+            logger.debug("[WQS] penalty martingale -%.2f addr=%s parse_rate=%.2f", continuous_penalty, addr, metrics.parse_rate)
             tracker.add_neg(PenaltyCategory.MARTINGALE, continuous_penalty)
     elif metrics.is_unproven:
+        logger.debug("[WQS] penalty martingale -20.00 addr=%s is_unproven=True", addr)
         tracker.add_neg(PenaltyCategory.MARTINGALE, 20.0)
 
     if profit_factor is not None and win_rate > 0.70 and profit_factor < 1.5:
+        logger.debug("[WQS] penalty martingale -15.00 addr=%s profit_factor=%.2f win_rate=%.2f", addr, profit_factor, win_rate)
         tracker.add_neg(PenaltyCategory.MARTINGALE, 15.0)
 
     if win_rate > 0.70 and profit_factor is not None and profit_factor > 0:
         pf_wr_ratio = profit_factor / win_rate
         if pf_wr_ratio < 1.3:
+            logger.debug("[WQS] penalty pf_wr -20.00 addr=%s pf_wr_ratio=%.2f", addr, pf_wr_ratio)
             tracker.add_neg(PenaltyCategory.PF_WR, 20.0)
 
     sortino = metrics.sortino_ratio
     if sortino is not None:
         if sortino >= 3.0 and dd < 10.0:
+            logger.debug("[WQS] bonus sortino_score +20.00 addr=%s sortino=%.2f max_drawdown_30d=%.2f", addr, sortino, dd)
             tracker.add_pos("sortino_score", 20.0)
         elif sortino >= 2.0 and dd < 20.0:
+            logger.debug("[WQS] bonus sortino_score +15.00 addr=%s sortino=%.2f max_drawdown_30d=%.2f", addr, sortino, dd)
             tracker.add_pos("sortino_score", 15.0)
         elif sortino >= 1.0 and dd < 30.0:
+            logger.debug("[WQS] bonus sortino_score +10.00 addr=%s sortino=%.2f max_drawdown_30d=%.2f", addr, sortino, dd)
             tracker.add_pos("sortino_score", 10.0)
         elif sortino < 0.5 and dd > 40.0:
+            logger.debug("[WQS] penalty sortino_score -15.00 addr=%s sortino=%.2f max_drawdown_30d=%.2f", addr, sortino, dd)
             tracker.add_neg("sortino_score", 15.0)
         elif sortino < 0:
+            logger.debug("[WQS] penalty sortino_score -10.00 addr=%s sortino=%.2f", addr, sortino)
             tracker.add_neg("sortino_score", 10.0)
 
     if _is_spear:
         if sortino is not None and sortino >= 1.5:
+            logger.debug("[WQS] bonus sortino_score +5.00 addr=%s sortino=%.2f", addr, sortino)
             tracker.add_pos("sortino_score", 5.0)
     else:
         if dd < 5.0:
+            logger.debug("[WQS] bonus sortino_score +5.00 addr=%s max_drawdown_30d=%.2f", addr, dd)
             tracker.add_pos("sortino_score", 5.0)
     
     if metrics.is_fresh_wallet:
+        logger.debug("[WQS] penalty insider -10.00 addr=%s is_fresh_wallet=True", addr)
         tracker.add_neg(PenaltyCategory.INSIDER, 10.0)
 
     if metrics.correlated_with_scam:
+        logger.debug("[WQS] penalty scam -20.00 addr=%s correlated_with_scam=True", addr)
         tracker.add_neg(PenaltyCategory.SCAM, 20.0)
 
     if metrics.mev_risk_score is not None and metrics.mev_risk_score > 0.05:
         if metrics.mev_risk_score > 0.50:
+            logger.debug("[WQS] penalty mev_risk -25.00 addr=%s mev_risk_score=%.2f", addr, metrics.mev_risk_score)
             tracker.add_neg(PenaltyCategory.MEV_RISK, 25.0)
         elif metrics.mev_risk_score > 0.25:
+            logger.debug("[WQS] penalty mev_risk -15.00 addr=%s mev_risk_score=%.2f", addr, metrics.mev_risk_score)
             tracker.add_neg(PenaltyCategory.MEV_RISK, 15.0)
         elif metrics.mev_risk_score > 0.10:
+            logger.debug("[WQS] penalty mev_risk -8.00 addr=%s mev_risk_score=%.2f", addr, metrics.mev_risk_score)
             tracker.add_neg(PenaltyCategory.MEV_RISK, 8.0)
     
     if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
+        logger.debug("[WQS] bonus dex_diversity_score +5.00 addr=%s dex_diversity_score=%d", addr, metrics.dex_diversity_score)
         tracker.add_pos("dex_diversity_score", 5.0)
 
     if metrics.uses_limit_orders:
+        logger.debug("[WQS] bonus smart_money_score +10.00 addr=%s uses_limit_orders=True", addr)
         tracker.add_pos("smart_money_score", 10.0)
 
     if metrics.uses_mev_protection:
+        logger.debug("[WQS] bonus smart_money_score +10.00 addr=%s uses_mev_protection=True", addr)
         tracker.add_pos("smart_money_score", 10.0)
 
     if metrics.unique_token_categories is not None:
         if metrics.unique_token_categories >= 3:
+            logger.debug("[WQS] bonus token_diversity_score +5.00 addr=%s unique_token_categories=%d", addr, metrics.unique_token_categories)
             tracker.add_pos("token_diversity_score", 5.0)
         elif metrics.unique_token_categories == 1:
+            logger.debug("[WQS] penalty token_diversity_score -5.00 addr=%s unique_token_categories=1", addr)
             tracker.add_neg("token_diversity_score", 5.0)
 
     should_remove_bonuses = False
@@ -651,47 +722,62 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
 
     if should_remove_bonuses:
         if metrics.dex_diversity_score is not None and metrics.dex_diversity_score >= 3:
+            logger.debug("[WQS] penalty smart_money -5.00 addr=%s should_remove_bonuses=True", addr)
             tracker.add_neg(PenaltyCategory.SMART_MONEY, 5.0)
         if metrics.uses_limit_orders:
+            logger.debug("[WQS] penalty smart_money -10.00 addr=%s uses_limit_orders=True", addr)
             tracker.add_neg(PenaltyCategory.SMART_MONEY, 10.0)
         if metrics.uses_mev_protection:
+            logger.debug("[WQS] penalty smart_money -10.00 addr=%s uses_mev_protection=True", addr)
             tracker.add_neg(PenaltyCategory.SMART_MONEY, 10.0)
 
     accumulation_score = _detect_smart_accumulation(metrics)
     if accumulation_score > 0.6:
+        logger.debug("[WQS] bonus smart_accumulation +8.00 addr=%s accumulation_score=%.2f", addr, accumulation_score)
         tracker.add_pos("smart_accumulation", 8.0)
     elif accumulation_score > 0.4:
+        logger.debug("[WQS] bonus smart_accumulation +5.00 addr=%s accumulation_score=%.2f", addr, accumulation_score)
         tracker.add_pos("smart_accumulation", 5.0)
     elif accumulation_score < 0.2:
+        logger.debug("[WQS] penalty smart_accumulation -5.00 addr=%s accumulation_score=%.2f", addr, accumulation_score)
         tracker.add_neg("smart_accumulation", 5.0)
 
     momentum_score = _calculate_enhanced_momentum_score(metrics)
     if momentum_score > 0.7:
+        logger.debug("[WQS] bonus enhanced_momentum +10.00 addr=%s momentum_score=%.2f", addr, momentum_score)
         tracker.add_pos("enhanced_momentum", 10.0)
     elif momentum_score > 0.5:
+        logger.debug("[WQS] bonus enhanced_momentum +7.00 addr=%s momentum_score=%.2f", addr, momentum_score)
         tracker.add_pos("enhanced_momentum", 7.0)
     elif momentum_score > 0.3:
+        logger.debug("[WQS] bonus enhanced_momentum +5.00 addr=%s momentum_score=%.2f", addr, momentum_score)
         tracker.add_pos("enhanced_momentum", 5.0)
     elif momentum_score < 0.1:
+        logger.debug("[WQS] penalty enhanced_momentum -3.00 addr=%s momentum_score=%.2f", addr, momentum_score)
         tracker.add_neg("enhanced_momentum", 3.0)
 
     market_regime = _detect_market_regime(metrics)
     _apply_archetype_adjustments(tracker, metrics, market_regime)
 
     if market_regime == "BULL":
+        logger.debug("[WQS] bonus market_regime +3.00 addr=%s market_regime=%s", addr, market_regime)
         tracker.add_pos("market_regime", 3.0)
     elif market_regime == "BEAR":
+        logger.debug("[WQS] penalty market_regime -2.00 addr=%s market_regime=%s", addr, market_regime)
         tracker.add_neg("market_regime", 2.0)
     elif market_regime == "VOLATILE":
         if metrics.volatility_30d and metrics.volatility_30d > 50:
             if metrics.win_rate and metrics.win_rate > 0.5:
+                logger.debug("[WQS] bonus adaptability +5.00 addr=%s volatility_30d=%.2f win_rate=%.2f", addr, metrics.volatility_30d, metrics.win_rate)
                 tracker.add_pos("adaptability", 5.0)
 
     if metrics.total_unrealized_loss_sol is not None and metrics.total_realized_profit_sol is not None:
         if metrics.total_realized_profit_sol > Decimal(0):
             loss_ratio = float(metrics.total_unrealized_loss_sol) / float(metrics.total_realized_profit_sol)
+            logger.debug("[WQS] penalty martingale -%.2f addr=%s loss_ratio=%.2f", min(30.0, loss_ratio * 60.0), addr, loss_ratio)
             tracker.add_neg(PenaltyCategory.MARTINGALE, min(30.0, loss_ratio * 60.0))
         elif metrics.total_unrealized_loss_sol > Decimal(0):
+            logger.debug("[WQS] penalty martingale -20.00 addr=%s total_unrealized_loss_sol=%s", addr, metrics.total_unrealized_loss_sol)
             tracker.add_neg(PenaltyCategory.MARTINGALE, 20.0)
     
     if metrics.total_unrealized_gain_sol is not None and float(metrics.total_unrealized_gain_sol) > 0:
@@ -699,6 +785,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         if total_gains > 0:
             paper_ratio = float(metrics.total_unrealized_gain_sol) / total_gains
             if paper_ratio > 0.60:
+                logger.debug("[WQS] penalty martingale -15.00 addr=%s paper_ratio=%.2f", addr, paper_ratio)
                 tracker.add_neg(PenaltyCategory.MARTINGALE, 15.0)
     
     if metrics.last_trade_at:
@@ -717,20 +804,27 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
             days_since_trade = (now - last_trade).days
             
             if days_since_trade <= 2:
+                logger.debug("[WQS] bonus recency_score +10.00 addr=%s days_since_trade=%d", addr, days_since_trade)
                 tracker.add_pos("recency_score", 10.0)
             elif days_since_trade <= 5:
+                logger.debug("[WQS] bonus recency_score +5.00 addr=%s days_since_trade=%d", addr, days_since_trade)
                 tracker.add_pos("recency_score", 5.0)
             elif days_since_trade > 14:
+                logger.debug("[WQS] penalty recency_score -10.00 addr=%s days_since_trade=%d", addr, days_since_trade)
                 tracker.add_neg("recency_score", 10.0)
                 
             wmi = _compute_wmi(roi_7d, roi_30d, count)
             if wmi > 0.5:
+                logger.debug("[WQS] bonus roi_score +10.00 addr=%s wmi=%.2f", addr, wmi)
                 tracker.add_pos("roi_score", 10.0)
             elif wmi > 0.2:
+                logger.debug("[WQS] bonus roi_score +5.00 addr=%s wmi=%.2f", addr, wmi)
                 tracker.add_pos("roi_score", 5.0)
             elif wmi < -0.5:
+                logger.debug("[WQS] penalty roi_score -15.00 addr=%s wmi=%.2f", addr, wmi)
                 tracker.add_neg("roi_score", 15.0)
             elif wmi < -0.2:
+                logger.debug("[WQS] penalty roi_score -5.00 addr=%s wmi=%.2f", addr, wmi)
                 tracker.add_neg("roi_score", 5.0)
         except (ValueError, TypeError) as e:
             logger.warning("Failed to parse last_trade_at for recency calculation: %s", e)
@@ -741,6 +835,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
             key: Union[str, PenaltyCategory] = _STRING_TO_PENALTY.get(name, name)
             if key in tracker.components and multiplier != 1.0:
                 tracker.components[key] *= multiplier
+                logger.debug("[WQS] adaptive weight applied addr=%s component=%s multiplier=%.3f", addr, name, multiplier)
         tracker.positive = sum(v for v in tracker.components.values() if v > 0)
         tracker.negative = abs(sum(v for v in tracker.components.values() if v < 0))
     except Exception as e:
@@ -783,12 +878,13 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
                 ))
 
                 logger.debug(
-                    f"Penalty cap applied: {total_negative_before:.1f} -> {tracker.negative:.1f} "
-                    f"(cappable={cappable:.1f}, uncappable={uncappable:.1f})"
+                    "[WQS] penalty cap applied addr=%s total_negative_before=%.1f -> total_negative=%.1f (cappable=%.1f, uncappable=%.1f)",
+                    addr, total_negative_before, tracker.negative, cappable, uncappable,
                 )
 
         if penalty_precedence_enabled:
             tracker._apply_penalty_precedence()
+            logger.debug("[WQS] penalty precedence applied addr=%s negative=%.2f components=%s", addr, tracker.negative, list(tracker.components.keys()))
 
         tracker._apply_penalty_confidence()
 
@@ -812,8 +908,8 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
                     cvar_penalty = abs(cvar_95) * 0.2
                     tracker.add_neg(PenaltyCategory.CVAR, cvar_penalty)
                     logger.debug(
-                        f"CVaR penalty applied: {cvar_penalty:.2f} "
-                        f"(cvar_95={cvar_95:.4f})"
+                        "[WQS] penalty cvar -%.2f addr=%s cvar_95=%.4f",
+                        cvar_penalty, addr, cvar_95,
                     )
 
                 # Apply Drawdown Duration penalty
@@ -824,8 +920,8 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
                     dd_duration_penalty = max_dd_duration * 0.1
                     tracker.add_neg(PenaltyCategory.DRAWDOWN_DURATION, dd_duration_penalty)
                     logger.debug(
-                        f"Drawdown duration penalty applied: {dd_duration_penalty:.2f} "
-                        f"(max_drawdown_duration_trades={max_dd_duration})"
+                        "[WQS] penalty drawdown_duration -%.2f addr=%s max_drawdown_duration_trades=%d",
+                        dd_duration_penalty, addr, max_dd_duration,
                     )
 
                 # Apply Ulcer Index penalty (depth + duration combined metric)
@@ -835,8 +931,8 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
                     ulcer_penalty = min(20.0, ulcer_index * 0.5)
                     tracker.add_neg(PenaltyCategory.ULCER_INDEX, ulcer_penalty)
                     logger.debug(
-                        f"Ulcer Index penalty applied: {ulcer_penalty:.2f} "
-                        f"(ulcer_index={ulcer_index:.2f})"
+                        "[WQS] penalty ulcer_index -%.2f addr=%s ulcer_index=%.2f",
+                        ulcer_penalty, addr, ulcer_index,
                     )
 
     return tracker.to_components()
@@ -855,6 +951,8 @@ def calculate_wqs(metrics: WalletMetrics, strategy: str = "SHIELD") -> float:
 
 
 def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None, metrics: Optional[WalletMetrics] = None, is_unproven: bool = False) -> float:
+    size_factor = 1.0
+    parse_cap = None
     confidence = 0.0
     if trade_count >= 20:
         confidence = 1.0
@@ -881,16 +979,27 @@ def _compute_confidence(trade_count: int, profit_factor: Optional[float] = None,
         if confidence > parse_cap:
             confidence = parse_cap
 
-    return max(0.0, min(confidence, 1.0))
+    final_confidence = max(0.0, min(confidence, 1.0))
+    logger.debug(
+        "[WQS] confidence addr=%s trade_count=%d size_factor=%.2f parse_cap=%s -> %.3f",
+        metrics.address if metrics is not None else "n/a",
+        trade_count,
+        size_factor,
+        f"{parse_cap:.2f}" if parse_cap is not None else "n/a",
+        final_confidence,
+    )
+    return final_confidence
 
 
 def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIELD") -> WqsResult:
     # Short-circuit ARBITRAGE wallets (bot behavior, not directional traders)
     if metrics.archetype == "ARBITRAGE":
+        logger.info("[WQS] FINAL addr=%s wqs=0.00 confidence=0.000 reason=arbitrage", metrics.address)
         return WqsResult(score=0.0, confidence=0.0, adjusted_score=0.0)
 
     components = _calculate_raw_score(metrics, strategy=strategy)
     if components.is_instant_reject:
+        logger.info("[WQS] FINAL addr=%s wqs=0.00 confidence=0.000 reason=instant_reject", metrics.address)
         return WqsResult(score=0.0, confidence=0.0, adjusted_score=0.0)
 
     trade_count = metrics.trade_count_30d or 0
@@ -898,6 +1007,10 @@ def calculate_wqs_with_confidence(metrics: WalletMetrics, strategy: str = "SHIEL
     adjusted_score = max(0.0, min(components.positive * confidence - components.negative, 100.0))
 
     adjusted_score = max(0.0, min(adjusted_score, 100.0))
+    logger.info(
+        "[WQS] FINAL addr=%s wqs=%.2f confidence=%.3f adjusted=%.2f positive=%.2f negative=%.2f",
+        metrics.address, components.raw_score, confidence, adjusted_score, components.positive, components.negative,
+    )
     return WqsResult(score=components.raw_score, confidence=confidence, adjusted_score=adjusted_score)
 
 

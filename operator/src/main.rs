@@ -1413,6 +1413,42 @@ async fn main() -> anyhow::Result<()> {
                         last_checked.retain(|uuid, _| positions.iter().any(|p| &p.trade_uuid == uuid));
 
                         for pos in positions {
+                            let current_price = monitor_pc.get_price_usd(&pos.token_address);
+                            if current_price.is_none() {
+                                tracing::warn!(
+                                    trade_uuid = %pos.trade_uuid,
+                                    token = %pos.token_address,
+                                    "position_monitor: no price available this tick (stale or untracked feed)"
+                                );
+                            }
+                            let pnl_pct = match (current_price, pos.entry_price.is_zero()) {
+                                (Some(cp), false) => Some(
+                                    ((cp - pos.entry_price) / pos.entry_price)
+                                        * rust_decimal::Decimal::from(100),
+                                ),
+                                _ => None,
+                            };
+                            let loss_pct = pnl_pct.map(|p| {
+                                if p < rust_decimal::Decimal::ZERO {
+                                    p
+                                } else {
+                                    rust_decimal::Decimal::ZERO
+                                }
+                            });
+                            let profit_pct = pnl_pct.map(|p| {
+                                if p > rust_decimal::Decimal::ZERO {
+                                    p
+                                } else {
+                                    rust_decimal::Decimal::ZERO
+                                }
+                            });
+                            let stop_loss_distance_pct = loss_pct.map(|p| p.abs());
+                            let est_pnl_sol = pnl_pct
+                                .map(|p| (p / rust_decimal::Decimal::from(100)) * pos.entry_amount_sol);
+                            let elapsed_secs = chrono::Utc::now()
+                                .signed_duration_since(pos.entry_time)
+                                .num_seconds();
+
                             // Check stop-loss first (higher priority)
                             let sl_action = monitor_sl.check_stop_loss(
                                 &pos.trade_uuid,
@@ -1426,7 +1462,29 @@ async fn main() -> anyhow::Result<()> {
                                 tracing::warn!(
                                     trade_uuid = %pos.trade_uuid,
                                     token = %pos.token_address,
+                                    exit_reason = "stop_loss",
+                                    exit_price = ?current_price,
+                                    pnl_percent = ?pnl_pct,
+                                    pnl_sol = ?est_pnl_sol,
                                     "Stop-loss triggered, queuing EXIT signal"
+                                );
+                                tracing::debug!(
+                                    trade_uuid = %pos.trade_uuid,
+                                    token = %pos.token_address,
+                                    wallet = %pos.wallet_address,
+                                    strategy = %pos.strategy,
+                                    side = "long",
+                                    entry_price = %pos.entry_price,
+                                    current_price = ?current_price,
+                                    loss_pct = ?loss_pct,
+                                    profit_pct = ?profit_pct,
+                                    stop_loss_distance_pct = ?stop_loss_distance_pct,
+                                    elapsed_secs = elapsed_secs,
+                                    est_pnl_sol = ?est_pnl_sol,
+                                    stop_loss_triggered = true,
+                                    profit_target_triggered = false,
+                                    exit = "stop_loss",
+                                    "position_monitor: tick"
                                 );
                                 let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
                                 if let Err(e) = monitor_engine.queue_signal(signal, None).await {
@@ -1450,11 +1508,24 @@ async fn main() -> anyhow::Result<()> {
                             ).await;
 
                             // Check profit targets
-                            match monitor_pt.check_targets(&pos.trade_uuid, &pos.token_address, &pos.strategy).await {
+                            let pt_action = monitor_pt
+                                .check_targets(&pos.trade_uuid, &pos.token_address, &pos.strategy)
+                                .await;
+                            let pt_triggered = !matches!(pt_action, ProfitTargetAction::None);
+                            let pt_exit = match pt_action {
+                                ProfitTargetAction::FullExit => "full_profit_target",
+                                ProfitTargetAction::ExitAmount(_) => "partial_profit_target",
+                                ProfitTargetAction::None => "none",
+                            };
+                            match pt_action {
                                 ProfitTargetAction::FullExit => {
                                     tracing::info!(
                                         trade_uuid = %pos.trade_uuid,
                                         token = %pos.token_address,
+                                        exit_reason = "full_profit_target",
+                                        exit_price = ?current_price,
+                                        pnl_percent = ?pnl_pct,
+                                        pnl_sol = ?est_pnl_sol,
                                         "Full profit target reached, queuing EXIT signal"
                                     );
                                     let signal = build_exit_signal(&pos, rust_decimal::Decimal::ONE);
@@ -1468,7 +1539,11 @@ async fn main() -> anyhow::Result<()> {
                                     tracing::info!(
                                         trade_uuid = %pos.trade_uuid,
                                         token = %pos.token_address,
+                                        exit_reason = "partial_profit_target",
                                         amount_sol = %amount_sol,
+                                        exit_price = ?current_price,
+                                        pnl_percent = ?pnl_pct,
+                                        pnl_sol = ?est_pnl_sol,
                                         "Partial profit target reached, queuing partial EXIT signal"
                                     );
                                     let signal = build_exit_signal_amount(&pos, amount_sol);
@@ -1478,6 +1553,25 @@ async fn main() -> anyhow::Result<()> {
                                 }
                                 ProfitTargetAction::None => {}
                             }
+
+                            tracing::debug!(
+                                trade_uuid = %pos.trade_uuid,
+                                token = %pos.token_address,
+                                wallet = %pos.wallet_address,
+                                strategy = %pos.strategy,
+                                side = "long",
+                                entry_price = %pos.entry_price,
+                                current_price = ?current_price,
+                                loss_pct = ?loss_pct,
+                                profit_pct = ?profit_pct,
+                                stop_loss_distance_pct = ?stop_loss_distance_pct,
+                                elapsed_secs = elapsed_secs,
+                                est_pnl_sol = ?est_pnl_sol,
+                                stop_loss_triggered = false,
+                                profit_target_triggered = pt_triggered,
+                                exit = pt_exit,
+                                "position_monitor: tick"
+                            );
                         }
                     }
                 }
@@ -2920,6 +3014,18 @@ fn build_exit_signal(pos: &ActivePositionEntry, fraction: rust_decimal::Decimal)
         trade_uuid: Some(pos.trade_uuid.clone()),
         exit_fraction: Some(fraction),
     };
+    tracing::debug!(
+        trade_uuid = %pos.trade_uuid,
+        token = %pos.token_address,
+        token_symbol = %pos.token_symbol,
+        wallet = %pos.wallet_address,
+        action = ?payload.action,
+        side = "SELL",
+        amount_sol = %amount,
+        exit_fraction = ?fraction,
+        price_basis = %pos.entry_price,
+        "EXIT signal built (managed exit)"
+    );
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
 
@@ -2956,11 +3062,29 @@ fn build_exit_signal_amount(
         trade_uuid: Some(pos.trade_uuid.clone()),
         exit_fraction: Some(fraction),
     };
+    tracing::debug!(
+        trade_uuid = %pos.trade_uuid,
+        token = %pos.token_address,
+        token_symbol = %pos.token_symbol,
+        wallet = %pos.wallet_address,
+        action = ?payload.action,
+        side = "SELL",
+        amount_sol = %amount,
+        exit_fraction = ?fraction,
+        price_basis = %pos.entry_price,
+        "EXIT signal built (managed exit by amount)"
+    );
     Signal::new(payload, chrono::Utc::now().timestamp(), None)
 }
 
-/// Initialize tracing/logging with file output. Falls back to stderr when the
-/// log directory is not writable (dev environments without /app/data/logs).
+/// Initialize tracing/logging with rotating file output. Falls back to stderr
+/// when the log directory is not writable (dev environments without /app/data/logs).
+///
+/// Logs are written to the host-mounted volume `./data/logs` (docker-compose
+/// binds `./data:/app/data`), so they never accumulate inside the container's
+/// writable layer. Daily rotation (operator.log.YYYY-MM-DD) keeps disk usage
+/// bounded and — unlike the previous single-file `File::create` — never
+/// truncates the log on restart.
 fn init_tracing() {
     // Ensure log directory exists (the production container mount).
     let log_dir = std::env::var("CHIMERA_LOG_DIR")
@@ -2969,22 +3093,35 @@ fn init_tracing() {
         .unwrap_or_else(|| "/app/data/logs".into());
     std::fs::create_dir_all(&log_dir).ok();
 
-    let log_path = format!("{}/operator.log", log_dir);
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "chimera_operator=debug,tower_http=debug".into());
 
-    match std::fs::File::create(&log_path) {
-        Ok(file) => {
+    let appender = tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("operator.log")
+        .max_log_files(14)
+        .build(&log_dir);
+
+    match appender {
+        Ok(appender) => {
+            let (writer, guard) = tracing_appender::non_blocking(appender);
+            // Keep the writer thread alive for the process lifetime — dropping
+            // the guard would shut it down and silently stop file logging.
+            std::mem::forget(guard);
             tracing_subscriber::registry()
                 .with(filter)
-                .with(tracing_subscriber::fmt::layer().json().with_writer(Arc::new(file)))
+                .with(tracing_subscriber::fmt::layer().json().with_writer(writer))
                 .init();
-            tracing::info!("File logging configured: {}", log_path);
+            tracing::info!(
+                log_dir = %log_dir,
+                "File logging configured (daily rotation): {}/operator.log.YYYY-MM-DD",
+                log_dir
+            );
         }
         Err(e) => {
             eprintln!(
-                "WARN: cannot create log file {} ({}): falling back to stderr",
-                log_path, e
+                "WARN: cannot create log dir {} ({}): falling back to stderr",
+                log_dir, e
             );
             tracing_subscriber::registry()
                 .with(filter)

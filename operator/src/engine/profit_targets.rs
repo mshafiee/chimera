@@ -341,13 +341,27 @@ impl ProfitTargetManager {
     ) -> ProfitTargetAction {
         let current_price = match self.price_cache.get_price_usd(token_address) {
             Some(price) => price,
-            None => return ProfitTargetAction::None,
+            None => {
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    "Profit targets: price unavailable for token — skipping evaluation"
+                );
+                return ProfitTargetAction::None;
+            }
         };
 
         let mut guard = self.active_targets.write().await;
         let state = match guard.get_mut(trade_uuid) {
             Some(s) => s,
-            None => return ProfitTargetAction::None,
+            None => {
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    token_address = token_address,
+                    "Profit targets: position not registered in tracker — skipping evaluation"
+                );
+                return ProfitTargetAction::None;
+            }
         };
 
         // Update current price and peak
@@ -571,47 +585,43 @@ impl ProfitTargetManager {
         // Spear positions use shorter hold times (higher volatility, faster decay).
         // Shield positions hold longer to allow conservative signals to play out.
         let is_spear = strategy == "SPEAR";
-        let time_exit = if let Ok(elapsed) = state.entry_time.elapsed() {
-            let elapsed_hours = elapsed.as_secs() / 3600;
-            if profit_percent > dec!(25) {
-                // High-profit: Shield holds to 48h, Spear exits sooner at 24h
-                elapsed_hours >= if is_spear { 24 } else { 48 }
-            } else if profit_percent > dec!(10) {
-                // Medium-profit: Shield 24h, Spear 12h
-                elapsed_hours
-                    >= if is_spear {
-                        12
+        let (elapsed_hours, time_exit_limit_hours, time_exit) =
+            match state.entry_time.elapsed() {
+                Ok(elapsed) => {
+                    let elapsed_hours = elapsed.as_secs() / 3600;
+                    let exit_limit_hours = if profit_percent > dec!(25) {
+                        // High-profit: Shield holds to 48h, Spear exits sooner at 24h
+                        if is_spear {
+                            24
+                        } else {
+                            48
+                        }
+                    } else if profit_percent > dec!(10) {
+                        // Medium-profit: Shield 24h, Spear 12h
+                        if is_spear {
+                            12
+                        } else {
+                            self.config.time_exit_hours
+                        }
                     } else {
-                        self.config.time_exit_hours
-                    }
-            } else if profit_percent > Decimal::ZERO {
-                // Low-profit: use losing_time_exit_hours for the strategy so operators
-                // can control all near-breakeven/losing exit timing through one config knob
-                // per strategy, rather than discovering that time_exit_hours doesn't apply.
-                elapsed_hours
-                    >= if is_spear {
-                        self.config.losing_time_exit_hours_spear
-                    } else {
-                        self.config.losing_time_exit_hours_shield
-                    }
-            } else {
-                // Losing: use configured time-exit hours for the strategy.
-                // losing_time_exit_threshold_percent (default -3%) determines whether the loss
-                // is "significant" — but both significant and minor losses now use the
-                // configured losing_time_exit_hours_* values instead of hardcoded fallbacks.
-                let exit_limit_hours = if is_spear {
-                    self.config.losing_time_exit_hours_spear
-                } else {
-                    self.config.losing_time_exit_hours_shield
-                };
-                elapsed_hours >= exit_limit_hours
-            }
-        } else {
-            false
-        };
+                        // Low-profit and losing: use the configured losing_time_exit_hours
+                        // for the strategy so operators can control all near-breakeven/
+                        // losing exit timing through one config knob per strategy.
+                        if is_spear {
+                            self.config.losing_time_exit_hours_spear
+                        } else {
+                            self.config.losing_time_exit_hours_shield
+                        }
+                    };
+                    (elapsed_hours, exit_limit_hours, elapsed_hours >= exit_limit_hours)
+                }
+                Err(_) => (0, 0, false),
+            };
 
         let entry_price_snap = state.entry_price;
         let entry_time_snap = state.entry_time;
+        let trailing_stop_active_snap = state.trailing_stop_active;
+        let trailing_stop_price_snap = state.trailing_stop_price;
 
         // Release the write lock before async DB calls. `guard` is the actual RwLock
         // WriteGuard from line 213; `profit_level_targets` is a plain Vec and needs no drop.
@@ -637,7 +647,13 @@ impl ProfitTargetManager {
             {
                 tracing::info!(
                     trade_uuid = %trade_uuid,
-                    "Momentum exit triggered: negative momentum detected"
+                    token_address = token_address,
+                    current_price = %current_price,
+                    entry_price = %entry_price_snap,
+                    profit_percent = %profit_percent,
+                    pnl_percent = %profit_percent,
+                    reason = "momentum_exit",
+                    "Profit exit triggered: momentum exit (negative momentum detected)"
                 );
                 return ProfitTargetAction::FullExit;
             }
@@ -645,12 +661,57 @@ impl ProfitTargetManager {
 
         // Tiered exit (only if no momentum crash)
         if let Some(action) = tiered_action {
+            tracing::info!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                current_price = %current_price,
+                entry_price = %entry_price_snap,
+                profit_percent = %profit_percent,
+                pnl_percent = %profit_percent,
+                tiered_action = ?action,
+                reason = "tiered_target",
+                "Profit exit triggered: tiered profit target hit"
+            );
             return action;
         }
 
         if trailing_hit || time_exit {
+            tracing::info!(
+                trade_uuid = %trade_uuid,
+                token_address = token_address,
+                current_price = %current_price,
+                entry_price = %entry_price_snap,
+                profit_percent = %profit_percent,
+                pnl_percent = %profit_percent,
+                trailing_stop_active = trailing_stop_active_snap,
+                trailing_stop_price = %trailing_stop_price_snap,
+                trailing_hit,
+                time_exit,
+                elapsed_hours,
+                reason = if trailing_hit { "trailing_stop" } else { "time_exit" },
+                "Profit exit triggered: trailing stop or time exit"
+            );
             return ProfitTargetAction::FullExit;
         }
+
+        tracing::debug!(
+            trade_uuid = %trade_uuid,
+            token_address = token_address,
+            current_price = %current_price,
+            entry_price = %entry_price_snap,
+            profit_percent = %profit_percent,
+            scaled_targets = ?profit_level_targets,
+            trailing_stop_active = trailing_stop_active_snap,
+            trailing_stop_price = %trailing_stop_price_snap,
+            trailing_distance = %trailing_distance,
+            trailing_activation = %scaled_activation,
+            elapsed_hours,
+            time_exit_limit_hours,
+            time_exit,
+            vol_scale = %vol_scale,
+            regime_multiplier = %multiplier,
+            "Profit targets evaluated — no exit signal"
+        );
 
         ProfitTargetAction::None
     }

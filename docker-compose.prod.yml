@@ -32,6 +32,10 @@ services:
       - ./scout:/app
     environment:
       - PYTHONUNBUFFERED=1
+      # Logs go to the host-mounted ./data volume (never inside the container layer)
+      - CHIMERA_LOG_DIR=/app/data/logs
+      # DEBUG captures the per-wallet WQS component ledger + validator gate numbers
+      - SCOUT_LOG_LEVEL=DEBUG
       - CHIMERA_API_URL=http://chimera-operator:8080
       - CHIMERA_OPERATOR_CONTAINER=chimera-operator
       # Discovery Configuration

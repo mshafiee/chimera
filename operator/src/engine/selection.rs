@@ -331,6 +331,18 @@ impl SelectionService {
             Action::Buy => self.decide_buy(req).await,
             Action::Sell => self.decide_sell(req).await,
         };
+        tracing::debug!(
+            ingress = ?req.ingress,
+            decision = %req.action,
+            token = %req.token_address,
+            wallet = %req.wallet_address,
+            admitted = decision.admitted,
+            rejection_code = ?decision.rejection_code,
+            strategy = ?decision.strategy,
+            size_sol = ?decision.size_sol,
+            decision_id = %decision.decision_id,
+            "selection: decision finalized"
+        );
         if let Some(ref recorder) = self.decision_recorder {
             // trade_uuid is linked by the caller after the trade row is
             // inserted (the Helius path derives it from the decision size, so
@@ -372,28 +384,60 @@ impl SelectionService {
         let wallet = match self.db.get_wallet(&req.wallet_address).await {
             Ok(Some(w)) => w,
             Ok(None) => {
+                let reason = format!("Unknown wallet {}", req.wallet_address);
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "SELL",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "UNKNOWN_WALLET",
+                    reason = %reason,
+                    "selection: SELL rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "UNKNOWN_WALLET",
-                    format!("Unknown wallet {}", req.wallet_address),
+                    reason,
                 )
             }
             Err(e) => {
+                let reason = format!("DB error fetching wallet: {}", e);
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "SELL",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "WALLET_LOOKUP_ERROR",
+                    reason = %reason,
+                    error = %e,
+                    "selection: SELL rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "WALLET_LOOKUP_ERROR",
-                    format!("DB error fetching wallet: {}", e),
+                    reason,
                 )
             }
         };
         if wallet.status != "ACTIVE" {
+            let reason = format!("Wallet status {} != ACTIVE", wallet.status);
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "SELL",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "WALLET_NOT_ACTIVE",
+                reason = %reason,
+                wallet_status = %wallet.status,
+                "selection: SELL rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "WALLET_NOT_ACTIVE",
-                format!("Wallet status {} != ACTIVE", wallet.status),
+                reason,
             );
         }
 
@@ -405,24 +449,57 @@ impl SelectionService {
         {
             Ok(Some(_)) => {}
             Ok(None) => {
+                let reason = "No active position to close".to_string();
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "SELL",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "NO_ACTIVE_POSITION",
+                    reason = %reason,
+                    "selection: SELL rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "NO_ACTIVE_POSITION",
-                    "No active position to close".to_string(),
+                    reason,
                 )
             }
             Err(e) => {
+                let reason = format!("Position lookup failed: {}", e);
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "SELL",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "POSITION_LOOKUP_ERROR",
+                    reason = %reason,
+                    error = %e,
+                    "selection: SELL rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "POSITION_LOOKUP_ERROR",
-                    format!("Position lookup failed: {}", e),
+                    reason,
                 )
             }
         }
 
         let wqs = wallet.wqs_score.and_then(|d| d.to_f64());
+        let size_sol = Some(req.source_amount_sol.min(self.config.max_position_sol));
+        tracing::debug!(
+            ingress = ?req.ingress,
+            decision = "SELL",
+            token = %req.token_address,
+            wallet = %req.wallet_address,
+            admitted = true,
+            size_sol = ?size_sol,
+            wqs = ?wqs,
+            wqs_confidence = ?wallet.wqs_confidence.and_then(|d| d.to_f64()),
+            "selection: SELL admitted"
+        );
         BuyDecision {
             decision_id: uuid::Uuid::new_v4().to_string(),
             admitted: true,
@@ -433,7 +510,7 @@ impl SelectionService {
             strategy: Some(Strategy::Exit),
             // SELL size = source amount, capped to max_position_sol so a
             // caller cannot close more than the configured ceiling.
-            size_sol: Some(req.source_amount_sol.min(self.config.max_position_sol)),
+            size_sol,
             source_amount_sol: req.source_amount_sol,
             wqs,
             wqs_confidence: wallet.wqs_confidence.and_then(|d| d.to_f64()),
@@ -458,14 +535,21 @@ impl SelectionService {
             .parse::<solana_sdk::pubkey::Pubkey>()
             .is_err()
         {
+            let reason = format!("Invalid Solana token address: {}", req.token_address);
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "INVALID_TOKEN_ADDRESS",
+                reason = %reason,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "INVALID_TOKEN_ADDRESS",
-                format!(
-                    "Invalid Solana token address: {}",
-                    req.token_address
-                ),
+                reason,
             );
         }
 
@@ -473,40 +557,82 @@ impl SelectionService {
         let wallet = match self.db.get_wallet(&req.wallet_address).await {
             Ok(Some(w)) => w,
             Ok(None) => {
+                let reason = "Unknown wallet — not in roster".to_string();
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "UNKNOWN_WALLET",
+                    reason = %reason,
+                    "selection: BUY rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "UNKNOWN_WALLET",
-                    "Unknown wallet — not in roster".to_string(),
+                    reason,
                 )
             }
             Err(e) => {
+                let reason = format!("DB error fetching wallet: {}", e);
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "WALLET_LOOKUP_ERROR",
+                    reason = %reason,
+                    error = %e,
+                    "selection: BUY rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "WALLET_LOOKUP_ERROR",
-                    format!("DB error fetching wallet: {}", e),
+                    reason,
                 )
             }
         };
         if wallet.status != "ACTIVE" {
+            let reason = format!("Wallet status {} != ACTIVE", wallet.status);
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "WALLET_NOT_ACTIVE",
+                reason = %reason,
+                wallet_status = %wallet.status,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "WALLET_NOT_ACTIVE",
-                format!("Wallet status {} != ACTIVE", wallet.status),
+                reason,
             );
         }
 
         // B3: Toxic-wallet gate — reject signals from wallets flagged toxic.
         if let Some(ref detector) = self.toxic_detector {
             if detector.is_wallet_toxic(&req.wallet_address).await {
+                let reason =
+                    "Wallet flagged as toxic — post-promotion ROI deterioration".to_string();
+                tracing::warn!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "TOXIC_WALLET",
+                    reason = %reason,
+                    "selection: BUY rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "TOXIC_WALLET",
-                    "Wallet flagged as toxic — post-promotion ROI deterioration"
-                        .to_string(),
+                    reason,
                 );
             }
         }
@@ -522,11 +648,23 @@ impl SelectionService {
         // pump.fun tokens always use SHIELD (SPEAR has 0% win rate on pump.fun).
         let min_wqs = self.config.min_wqs_score;
         if wallet_wqs < min_wqs {
+            let reason = format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs);
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "WQS_TOO_LOW",
+                reason = %reason,
+                wallet_wqs = wallet_wqs,
+                min_wqs = min_wqs,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "WQS_TOO_LOW",
-                format!("Wallet WQS {:.1} below minimum {:.1}", wallet_wqs, min_wqs),
+                reason,
             );
         }
         let is_pumpfun = is_pumpfun_token(&req.token_address);
@@ -538,20 +676,45 @@ impl SelectionService {
 
         // ── 3. Non-speculative / pump.fun bonding-curve skip ────────────────
         if is_non_speculative(&req.token_address) {
+            let reason = "Stablecoin/WSOL — no profit potential".to_string();
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "NON_SPECULATIVE_TOKEN",
+                reason = %reason,
+                strategy = ?strategy,
+                is_pumpfun = is_pumpfun,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "NON_SPECULATIVE_TOKEN",
-                "Stablecoin/WSOL — no profit potential".to_string(),
+                reason,
             );
         }
         let is_pumpfun = is_pumpfun_token(&req.token_address); // computed above for strategy routing
         if is_pumpfun && !self.config.allow_graduated_pumpfun {
+            let reason = "pump.fun token — graduated-pumpfun disabled in config".to_string();
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "PUMPFUN_BONDING_CURVE",
+                reason = %reason,
+                strategy = ?strategy,
+                is_pumpfun = is_pumpfun,
+                allow_graduated_pumpfun = self.config.allow_graduated_pumpfun,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "PUMPFUN_BONDING_CURVE",
-                "pump.fun token — graduated-pumpfun disabled in config".to_string(),
+                reason,
             );
         }
 
@@ -567,6 +730,17 @@ impl SelectionService {
                 let reason = result
                     .rejection_reason
                     .unwrap_or_else(|| "Token failed safety check".to_string());
+                tracing::warn!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "TOKEN_UNSAFE",
+                    reason = %reason,
+                    strategy = ?strategy,
+                    is_pumpfun = is_pumpfun,
+                    "selection: BUY rejected by gate"
+                );
                 return BuyDecision::rejected(req, &self.config_hash, "TOKEN_UNSAFE", reason);
             }
             Ok(result) => {
@@ -604,25 +778,49 @@ impl SelectionService {
         if min_age > 0.0 {
             match token_age_hours {
                 Some(age) if age < min_age => {
+                    let reason = format!("Token age {:.1}h below minimum {:.1}h", age, min_age);
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "TOKEN_TOO_NEW",
+                        reason = %reason,
+                        token_age_hours = age,
+                        min_age = min_age,
+                        strategy = ?strategy,
+                        is_pumpfun = is_pumpfun,
+                        "selection: BUY rejected by gate"
+                    );
                     return BuyDecision::rejected(
                         req,
                         &self.config_hash,
                         "TOKEN_TOO_NEW",
-                        format!(
-                            "Token age {:.1}h below minimum {:.1}h",
-                            age, min_age
-                        ),
+                        reason,
                     );
                 }
                 None => {
                     // Unknown age — policy: reject SPEAR, allow SHIELD.
                     if strategy == Strategy::Spear {
+                        let reason = "Token age unknown — rejected for SPEAR (conservative policy)"
+                            .to_string();
+                        tracing::info!(
+                            ingress = ?req.ingress,
+                            decision = "BUY",
+                            token = %req.token_address,
+                            wallet = %req.wallet_address,
+                            rejection_code = "TOKEN_AGE_UNKNOWN",
+                            reason = %reason,
+                            strategy = ?strategy,
+                            is_pumpfun = is_pumpfun,
+                            min_age = min_age,
+                            "selection: BUY rejected by gate"
+                        );
                         return BuyDecision::rejected(
                             req,
                             &self.config_hash,
                             "TOKEN_AGE_UNKNOWN",
-                            "Token age unknown — rejected for SPEAR (conservative policy)"
-                                .to_string(),
+                            reason,
                         );
                     }
                     tracing::warn!(
@@ -677,6 +875,19 @@ impl SelectionService {
                     ),
                 )
             };
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = code,
+                reason = %reason,
+                liquidity_usd = %liquidity_usd,
+                min_liquidity = %min_liquidity,
+                strategy = ?strategy,
+                is_pumpfun = is_pumpfun,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(req, &self.config_hash, code, reason);
         }
 
@@ -731,14 +942,29 @@ impl SelectionService {
             Strategy::Exit => 0.0,
         };
         if !quality.should_enter(quality_threshold) {
+            let reason = format!(
+                "Quality score {:.2} below threshold {:.2}",
+                quality.score, quality_threshold
+            );
+            tracing::info!(
+                ingress = ?req.ingress,
+                decision = "BUY",
+                token = %req.token_address,
+                wallet = %req.wallet_address,
+                rejection_code = "SIGNAL_QUALITY_TOO_LOW",
+                reason = %reason,
+                quality_score = quality.score,
+                quality_threshold = quality_threshold,
+                strategy = ?strategy,
+                is_pumpfun = is_pumpfun,
+                consensus_wallet_count = ?consensus_wallet_count,
+                "selection: BUY rejected by gate"
+            );
             return BuyDecision::rejected(
                 req,
                 &self.config_hash,
                 "SIGNAL_QUALITY_TOO_LOW",
-                format!(
-                    "Quality score {:.2} below threshold {:.2}",
-                    quality.score, quality_threshold
-                ),
+                reason,
             );
         }
 
@@ -773,12 +999,26 @@ impl SelectionService {
             };
             let size = sizer.calculate_size(factors).await;
             if size.is_zero() {
+                let reason = "Position sizer returned zero (strategy_max below min_size_sol)"
+                    .to_string();
+                tracing::info!(
+                    ingress = ?req.ingress,
+                    decision = "BUY",
+                    token = %req.token_address,
+                    wallet = %req.wallet_address,
+                    rejection_code = "POSITION_SIZE_ZERO",
+                    reason = %reason,
+                    strategy = ?strategy,
+                    quality_score = quality.score,
+                    is_consensus = is_consensus,
+                    regime_multiplier = %regime_multiplier,
+                    "selection: BUY rejected by gate"
+                );
                 return BuyDecision::rejected(
                     req,
                     &self.config_hash,
                     "POSITION_SIZE_ZERO",
-                    "Position sizer returned zero (strategy_max below min_size_sol)"
-                        .to_string(),
+                    reason,
                 );
             }
             size
@@ -794,11 +1034,23 @@ impl SelectionService {
         if let Some(ref heat) = self.portfolio_heat {
             match heat.can_open_position(size_sol).await {
                 Ok(false) => {
+                    let reason = "Portfolio heat limit reached".to_string();
+                    tracing::info!(
+                        ingress = ?req.ingress,
+                        decision = "BUY",
+                        token = %req.token_address,
+                        wallet = %req.wallet_address,
+                        rejection_code = "PORTFOLIO_HEAT_LIMIT",
+                        reason = %reason,
+                        size_sol = %size_sol,
+                        strategy = ?strategy,
+                        "selection: BUY rejected by gate"
+                    );
                     return BuyDecision::rejected(
                         req,
                         &self.config_hash,
                         "PORTFOLIO_HEAT_LIMIT",
-                        "Portfolio heat limit reached".to_string(),
+                        reason,
                     )
                 }
                 Ok(true) => {
@@ -812,14 +1064,26 @@ impl SelectionService {
                         .await
                     {
                         Ok(false) => {
+                            let reason = format!(
+                                "Strategy allocation limit reached for {:?}",
+                                strategy
+                            );
+                            tracing::info!(
+                                ingress = ?req.ingress,
+                                decision = "BUY",
+                                token = %req.token_address,
+                                wallet = %req.wallet_address,
+                                rejection_code = "STRATEGY_HEAT_LIMIT",
+                                reason = %reason,
+                                size_sol = %size_sol,
+                                strategy = ?strategy,
+                                "selection: BUY rejected by gate"
+                            );
                             return BuyDecision::rejected(
                                 req,
                                 &self.config_hash,
                                 "STRATEGY_HEAT_LIMIT",
-                                format!(
-                                    "Strategy allocation limit reached for {:?}",
-                                    strategy
-                                ),
+                                reason,
                             )
                         }
                         Ok(true) => {}
@@ -833,6 +1097,27 @@ impl SelectionService {
                 }
             }
         }
+
+        tracing::debug!(
+            ingress = ?req.ingress,
+            decision = "BUY",
+            token = %req.token_address,
+            wallet = %req.wallet_address,
+            admitted = true,
+            wallet_wqs = wallet_wqs,
+            wqs_confidence = ?wqs_confidence,
+            strategy = ?strategy,
+            size_sol = %size_sol,
+            quality_score = quality.score,
+            liquidity_usd = %liquidity_usd,
+            token_age_hours = ?token_age_hours,
+            volume_24h_usd = ?volume_24h_usd,
+            consensus_wallet_count = ?consensus_wallet_count,
+            regime_multiplier = %regime_multiplier,
+            is_pumpfun = is_pumpfun,
+            is_consensus = is_consensus,
+            "selection: BUY admitted"
+        );
 
         BuyDecision {
             decision_id: uuid::Uuid::new_v4().to_string(),

@@ -308,9 +308,15 @@ DEFAULT_JITO_TIP_SOL = 0.0001
 
 
 def setup_logging() -> None:
-    """Configure file logging with rotation for Scout."""
+    """Configure file logging with rotation for Scout.
+
+    Logs are written to the host-mounted volume ./data/logs (docker-compose
+    binds ./data:/app/data), so they never accumulate inside the container's
+    writable layer. CHIMERA_LOG_DIR overrides the location; SCOUT_LOG_LEVEL
+    (DEBUG|INFO|WARNING|ERROR) controls the verbosity captured to the file.
+    """
     # Create log directory - use /app/data/logs for container permissions
-    log_dir = "/app/data/logs"
+    log_dir = os.getenv("CHIMERA_LOG_DIR", "/app/data/logs")
     try:
         os.makedirs(log_dir, exist_ok=True)
     except Exception as e:
@@ -320,10 +326,16 @@ def setup_logging() -> None:
 
     log_file = os.path.join(log_dir, "scout.log")
 
+    # Effective log level from env (default INFO). DEBUG captures the per-wallet
+    # WQS component ledger and validator gate numbers added for the
+    # profitability investigation.
+    level_name = os.getenv("SCOUT_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
     try:
         # Configure root logger
         logger = logging.getLogger()
-        logger.setLevel(logging.INFO)
+        logger.setLevel(level)
 
         # File handler with daily rotation, 7-day retention
         file_handler = logging.handlers.RotatingFileHandler(
@@ -332,7 +344,7 @@ def setup_logging() -> None:
             backupCount=7,
             encoding='utf-8'
         )
-        file_handler.setLevel(logging.INFO)
+        file_handler.setLevel(level)
         file_formatter = logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
@@ -349,7 +361,7 @@ def setup_logging() -> None:
         logger.addHandler(file_handler)
         logger.addHandler(console_handler)
 
-        logger.info("File logging configured: %s", log_file)
+        logger.info("File logging configured: %s (level=%s)", log_file, level_name)
     except Exception as e:
         print(f"Warning: Could not setup file logging: {e}")
 
@@ -823,6 +835,18 @@ async def analyze_wallets(
                                 print(f"[Scout] Growth boost: +{ml_boost_applied:.1f} WQS "
                                       f"(heuristic total: {heuristic_boost_used:.1f})")
 
+                        if expected_return > 15 and prediction_confidence > 0.6:
+                            boost_tier = "tier1"
+                        elif expected_return > 10 and prediction_confidence > 0.5:
+                            boost_tier = "tier2"
+                        else:
+                            boost_tier = "none"
+                        print(f"[Scout] ML_BOOST wallet={wallet_address} "
+                              f"expected_return_pct={expected_return:.2f} "
+                              f"confidence={prediction_confidence:.3f} boost={ml_boost_applied:.2f} "
+                              f"(thresholds: tier1 exp_ret>15 AND conf>0.6; "
+                              f"tier2 exp_ret>10 AND conf>0.5; applied={boost_tier})")
+
                 except Exception as e:
                     print(f"[Scout] ML prediction failed: {e}")
 
@@ -868,6 +892,7 @@ async def analyze_wallets(
             
             # Get raw components for correlation tracking (from wqs_metrics)
             raw_components = _calculate_raw_score(wqs_metrics, strategy=_strategy)
+            print(f"[Scout] WQS_COMPONENTS wallet={wallet_address} json={raw_components.components_json}")
             
             # Step 2: Multi-TF trajectory interpretation (from wqs_metrics)
             trajectory = _interpret_trajectory(wqs_metrics.roi_7d, wqs_metrics.roi_30d)
@@ -884,13 +909,28 @@ async def analyze_wallets(
                 initial_status = "CANDIDATE"
             else:
                 initial_status = "REJECTED"
+            print(f"[Scout] STATUS wallet={wallet_address} wqs={wqs_score:.1f} conf={wqs_confidence:.2f} "
+                  f"-> {initial_status} "
+                  f"(active_threshold: wqs>={min_wqs_active:.1f} AND conf>={min_confidence_active:.2f}; "
+                  f"candidate_threshold: wqs>={min_wqs_candidate:.1f}; "
+                  f"delta_active_wqs={wqs_score - min_wqs_active:+.1f} "
+                  f"delta_active_conf={wqs_confidence - min_confidence_active:+.2f} "
+                  f"delta_candidate_wqs={wqs_score - min_wqs_candidate:+.1f})")
+
+            _r30 = f"{wqs_metrics.roi_30d:.1f}" if wqs_metrics.roi_30d is not None else "n/a"
+            _wr = f"{wqs_metrics.win_rate:.3f}" if wqs_metrics.win_rate is not None else "n/a"
+            _pr = f"{wqs_metrics.parse_rate:.2f}" if wqs_metrics.parse_rate is not None else "n/a"
+            print(f"[Scout] METRICS wallet={wallet_address} trades_30d={wqs_metrics.trade_count_30d} "
+                  f"roi_30d={_r30} win_rate={_wr} parse_rate={_pr}")
             
             # Step 2: Trajectory-based status adjustments
             if trajectory == "PEAKED" and initial_status in ("ACTIVE", "CANDIDATE"):
+                _prev_status = initial_status
                 initial_status = "CANDIDATE"
                 stats["trajectory_peak_blocks"] += 1
-                print(f"[Scout] {wallet_address[:8]}... PEAKED trajectory, "
-                      f"blocking promotion (WQS={wqs_score:.1f})")
+                print(f"[Scout] DEMOTE wallet={wallet_address} reason=trajectory_peaked "
+                      f"from={_prev_status} to=CANDIDATE wqs={wqs_score:.1f} "
+                      f"roi_7d={wqs_metrics.roi_7d} roi_30d={wqs_metrics.roi_30d}")
             elif trajectory == "IMPROVING":
                 trajectory_boost = min(5.0, MAX_HEURISTIC_BOOST - heuristic_boost_used)
                 if trajectory_boost > 0:
@@ -905,8 +945,9 @@ async def analyze_wallets(
                 if initial_status == "ACTIVE":
                     initial_status = "CANDIDATE"
                     stats["trajectory_demotions"] += 1
-                    print(f"[Scout] {wallet_address[:8]}... DECLINING trajectory, "
-                          f"demoting to CANDIDATE (WQS={wqs_score:.1f}, WMI={wmi:.2f})")
+                    print(f"[Scout] DEMOTE wallet={wallet_address} reason=trajectory_declining "
+                          f"from=ACTIVE to=CANDIDATE wqs={wqs_score:.1f} wmi={wmi:.2f} "
+                          f"roi_7d={wqs_metrics.roi_7d} roi_30d={wqs_metrics.roi_30d}")
                 # Step 5: Exit recommendation for DECLINING wallets with high WQS
                 if wqs_score >= min_wqs_active:
                     exit_recs.append({
@@ -946,8 +987,12 @@ async def analyze_wallets(
                     if composite_decay < 0.60 or single_signal_decay:
                         initial_status = "CANDIDATE"
                         reason = "composite" if composite_decay < 0.60 else "single-signal"
-                        print(f"[Scout] {wallet_address[:8]}... {reason} decay detected "
-                              f"(composite={composite_decay:.2f}), demoting to CANDIDATE")
+                        _wr_d = f"{wr_decay:.2f}" if wr_decay is not None else "n/a"
+                        _sz_d = f"{sz_decay:.2f}" if sz_decay is not None else "n/a"
+                        _rt_d = f"{rt_decay:.2f}" if rt_decay is not None else "n/a"
+                        print(f"[Scout] DEMOTE wallet={wallet_address} reason=alpha_decay:{reason} "
+                              f"from=ACTIVE to=CANDIDATE composite={composite_decay:.2f} "
+                              f"threshold=0.60 wr_decay={_wr_d} sz_decay={_sz_d} rt_decay={_rt_d}")
                     elif composite_decay < 0.70:
                         print(f"[Scout] {wallet_address[:8]}... borderline decay "
                               f"(composite={composite_decay:.2f}) — flagging for monitoring")
@@ -957,8 +1002,9 @@ async def analyze_wallets(
             # Skip for IMPROVING wallets — they're accelerating, not decaying.
             if initial_status == "ACTIVE" and trajectory != "IMPROVING" and check_performance_degradation(wqs_metrics):
                 initial_status = "CANDIDATE"
-                print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} but "
-                      f"degradation detected (7d ROI={wqs_metrics.roi_7d}), demoting to CANDIDATE")
+                print(f"[Scout] DEMOTE wallet={wallet_address} reason=performance_degradation "
+                      f"from=ACTIVE to=CANDIDATE wqs={wqs_score:.1f} "
+                      f"roi_7d={wqs_metrics.roi_7d} roi_30d={wqs_metrics.roi_30d}")
             
             print(f"[Scout] {wallet_address[:8]}... WQS={wqs_score:.1f} Status={initial_status}")
             
@@ -1770,6 +1816,34 @@ def _determine_exit_priority(rec: Dict[str, Any], confidence: float) -> str:
     return "LOW"
 
 
+def _print_config_snapshot(args) -> None:
+    """Print effective thresholds and env overrides that gate trading decisions."""
+    print("\n[Scout] CONFIG SNAPSHOT (effective trading thresholds)")
+    print(f"[Scout] CONFIG min_wqs_active={args.min_wqs_active:.1f} "
+          f"(env SCOUT_MIN_WQS_ACTIVE={os.getenv('SCOUT_MIN_WQS_ACTIVE') or 'not set'})")
+    print(f"[Scout] CONFIG min_wqs_candidate={args.min_wqs_candidate:.1f} "
+          f"(env SCOUT_MIN_WQS_CANDIDATE={os.getenv('SCOUT_MIN_WQS_CANDIDATE') or 'not set'})")
+    print(f"[Scout] CONFIG min_confidence_active="
+          f"{os.getenv('SCOUT_MIN_CONFIDENCE_ACTIVE', '0.70')} "
+          f"(env SCOUT_MIN_CONFIDENCE_ACTIVE={os.getenv('SCOUT_MIN_CONFIDENCE_ACTIVE') or 'not set'})")
+    print(f"[Scout] CONFIG min_confidence_candidate=unused "
+          f"(env SCOUT_MIN_CONFIDENCE_CANDIDATE={os.getenv('SCOUT_MIN_CONFIDENCE_CANDIDATE') or 'not set'})")
+    print(f"[Scout] CONFIG copier_size_sol={os.getenv('SCOUT_COPIER_SIZE_SOL', '0.5')} "
+          f"(env SCOUT_COPIER_SIZE_SOL={os.getenv('SCOUT_COPIER_SIZE_SOL') or 'not set'})")
+    print(f"[Scout] CONFIG position_size_risk_pct={os.getenv('SCOUT_POSITION_SIZE_RISK_PERCENT', '1.0')} "
+          f"(env SCOUT_POSITION_SIZE_RISK_PERCENT={os.getenv('SCOUT_POSITION_SIZE_RISK_PERCENT') or 'not set'})")
+    print(f"[Scout] CONFIG position_size_max_pct={os.getenv('SCOUT_POSITION_SIZE_MAX_PERCENT', '5.0')} "
+          f"(env SCOUT_POSITION_SIZE_MAX_PERCENT={os.getenv('SCOUT_POSITION_SIZE_MAX_PERCENT') or 'not set'})")
+    print(f"[Scout] CONFIG rugcheck_fail_mode={os.getenv('RUGCHECK_FAIL_MODE', 'closed')} "
+          f"(env RUGCHECK_FAIL_MODE={os.getenv('RUGCHECK_FAIL_MODE') or 'not set'})")
+    print(f"[Scout] CONFIG parse_rate_exit_pct={os.getenv('SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT', '40')} "
+          f"(env SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT={os.getenv('SCOUT_PARSE_HEALTH_EXIT_FAIL_PCT') or 'not set'})")
+    print(f"[Scout] CONFIG max_heuristic_boost={os.getenv('SCOUT_MAX_HEURISTIC_BOOST', '10.0')} "
+          f"(env SCOUT_MAX_HEURISTIC_BOOST={os.getenv('SCOUT_MAX_HEURISTIC_BOOST') or 'not set'})")
+    print(f"[Scout] CONFIG priority_fee_sol={args.priority_fee_sol} jito_tip_sol={args.jito_tip_sol} "
+          f"min_liquidity_shield={args.min_liquidity_shield} min_liquidity_spear={args.min_liquidity_spear}")
+
+
 async def main_async():
     """Async main entry point for the Scout."""
     # Setup file logging
@@ -1798,6 +1872,8 @@ async def main_async():
     print("Chimera Scout - Wallet Intelligence Layer")
     print(f"Started at: {utcnow().isoformat()}")
     print("=" * 70)
+    
+    _print_config_snapshot(args)
     
     # Print configuration summary if config module available
     if CONFIG_AVAILABLE and ScoutConfig:
@@ -2479,6 +2555,11 @@ async def main_async():
 
         try:
             success_count = write_wallets_to_db(records)
+            active_count = sum(1 for r in records if r.status == "ACTIVE")
+            candidate_count = sum(1 for r in records if r.status == "CANDIDATE")
+            rejected_count = sum(1 for r in records if r.status == "REJECTED")
+            print(f"[Scout] PUBLISH total={len(records)} active={active_count} "
+                  f"candidate={candidate_count} rejected={rejected_count}")
             print(f"[Scout] Successfully wrote {success_count}/{len(records)} wallets to database")
 
             if success_count < len(records):

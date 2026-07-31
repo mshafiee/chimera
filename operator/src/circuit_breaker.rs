@@ -321,28 +321,36 @@ impl CircuitBreaker {
     /// Returns None if no breach conditions are met.
     async fn check_breach_conditions(&self) -> AppResult<Option<TripReason>> {
         let (unrealized_sol, realized_pnl_sol, mut realized_usd, null_price_pnl_sol) =
-            self.db.get_evaluation_data().await?;
+            match self.db.get_evaluation_data().await {
+                Ok(data) => data,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Circuit breaker: failed to fetch evaluation data (price/DB) — \
+                         skipping evaluation this tick"
+                    );
+                    return Err(e);
+                }
+            };
 
         let total_capital = *self.total_capital_sol.read();
         // Skip portfolio stop check for paper trading or zero/low capital scenarios
         // Paper trading often uses test wallets with minimal or no capital
-        if total_capital > dec!(1.0) {
-            let total_loss_sol = realized_pnl_sol + unrealized_sol;
-            let daily_loss_percent = (total_loss_sol / total_capital) * Decimal::from(100);
-            // portfolio_stop_loss_percent is negative by convention (default -5.0,
-            // validated < 0 in config). Use it directly as the comparison threshold
-            // so we trip only when the loss is worse than it (e.g. -6% < -5%).
-            // Previously this negated the value (-(-5.0) = +5.0), inverting the
-            // comparison and false-tripping on ANY pnl below +5% — including 0%.
-            let loss_threshold = self.config.portfolio_stop_loss_percent;
-
-            if daily_loss_percent < loss_threshold {
-                return Ok(Some(TripReason::PortfolioStop24h {
-                    loss_pct: daily_loss_percent.abs(),
-                    threshold: self.config.portfolio_stop_loss_percent,
-                }));
-            }
-        }
+        let portfolio_stop_check_active = total_capital > dec!(1.0);
+        let total_loss_sol = realized_pnl_sol + unrealized_sol;
+        let daily_loss_percent = if portfolio_stop_check_active {
+            (total_loss_sol / total_capital) * Decimal::from(100)
+        } else {
+            Decimal::ZERO
+        };
+        // portfolio_stop_loss_percent is negative by convention (default -5.0,
+        // validated < 0 in config). Use it directly as the comparison threshold
+        // so we trip only when the loss is worse than it (e.g. -6% < -5%).
+        // Previously this negated the value (-(-5.0) = +5.0), inverting the
+        // comparison and false-tripping on ANY pnl below +5% — including 0%.
+        let loss_threshold = self.config.portfolio_stop_loss_percent;
+        let portfolio_stop_breached =
+            portfolio_stop_check_active && daily_loss_percent < loss_threshold;
 
         if null_price_pnl_sol != Decimal::ZERO {
             tracing::warn!(
@@ -358,6 +366,9 @@ impl CircuitBreaker {
             None
         };
 
+        let mut unrealized_usd = Decimal::ZERO;
+        let mut total_pnl_usd = Decimal::ZERO;
+        let mut max_loss_breached = false;
         if let Some(price) = sol_price_usd {
             if price > Decimal::ZERO {
                 if null_price_pnl_sol != Decimal::ZERO {
@@ -365,17 +376,11 @@ impl CircuitBreaker {
                     realized_usd += estimated;
                 }
 
-                let unrealized_usd = unrealized_sol * price;
-                let total_pnl_usd = realized_usd + unrealized_usd;
+                unrealized_usd = unrealized_sol * price;
+                total_pnl_usd = realized_usd + unrealized_usd;
 
-                if total_pnl_usd < Decimal::ZERO
-                    && total_pnl_usd.abs() >= self.config.max_loss_24h_usd
-                {
-                    return Ok(Some(TripReason::MaxLoss24h {
-                        loss: total_pnl_usd.abs(),
-                        threshold: self.config.max_loss_24h_usd,
-                    }));
-                }
+                max_loss_breached = total_pnl_usd < Decimal::ZERO
+                    && total_pnl_usd.abs() >= self.config.max_loss_24h_usd;
             } else {
                 tracing::warn!(
                     "SOL price from cache is zero — skipping USD loss check for this tick"
@@ -387,17 +392,77 @@ impl CircuitBreaker {
             );
         }
 
-        let consecutive = self.db.get_consecutive_losses().await?;
-        if consecutive >= self.config.max_consecutive_losses {
+        let consecutive = match self.db.get_consecutive_losses().await {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Circuit breaker: failed to fetch consecutive losses — \
+                     skipping evaluation this tick"
+                );
+                return Err(e);
+            }
+        };
+        let consecutive_breached = consecutive >= self.config.max_consecutive_losses;
+
+        let total_capital = *self.total_capital_sol.read();
+        let drawdown = match self.db.get_max_drawdown_percent(total_capital).await {
+            Ok(dd) => dd,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Circuit breaker: failed to fetch max drawdown — \
+                     skipping evaluation this tick"
+                );
+                return Err(e);
+            }
+        };
+        let drawdown_breached = drawdown >= self.config.max_drawdown_percent;
+
+        tracing::debug!(
+            realized_pnl_sol = %realized_pnl_sol,
+            unrealized_pnl_sol = %unrealized_sol,
+            total_loss_sol = %total_loss_sol,
+            total_capital_sol = %total_capital,
+            daily_loss_percent = %daily_loss_percent,
+            portfolio_stop_threshold_percent = %loss_threshold,
+            portfolio_stop_breached = portfolio_stop_breached,
+            unrealized_usd = %unrealized_usd,
+            total_pnl_usd = %total_pnl_usd,
+            max_loss_24h_threshold_usd = %self.config.max_loss_24h_usd,
+            max_loss_24h_breached = max_loss_breached,
+            consecutive_losses = consecutive,
+            consecutive_losses_threshold = self.config.max_consecutive_losses,
+            consecutive_losses_breached = consecutive_breached,
+            max_drawdown_percent = %drawdown,
+            max_drawdown_threshold_percent = %self.config.max_drawdown_percent,
+            max_drawdown_breached = drawdown_breached,
+            sol_price_usd = ?sol_price_usd,
+            "circuit_breaker: evaluation"
+        );
+
+        if portfolio_stop_breached {
+            return Ok(Some(TripReason::PortfolioStop24h {
+                loss_pct: daily_loss_percent.abs(),
+                threshold: self.config.portfolio_stop_loss_percent,
+            }));
+        }
+
+        if max_loss_breached {
+            return Ok(Some(TripReason::MaxLoss24h {
+                loss: total_pnl_usd.abs(),
+                threshold: self.config.max_loss_24h_usd,
+            }));
+        }
+
+        if consecutive_breached {
             return Ok(Some(TripReason::ConsecutiveLosses {
                 count: consecutive,
                 threshold: self.config.max_consecutive_losses,
             }));
         }
 
-        let total_capital = *self.total_capital_sol.read();
-        let drawdown = self.db.get_max_drawdown_percent(total_capital).await?;
-        if drawdown >= self.config.max_drawdown_percent {
+        if drawdown_breached {
             return Ok(Some(TripReason::MaxDrawdown {
                 drawdown,
                 threshold: self.config.max_drawdown_percent,
@@ -514,10 +579,103 @@ impl CircuitBreaker {
             state.trip_reason = Some(reason);
         }
 
-        tracing::error!(
-            reason = %reason_str,
-            "Circuit breaker TRIPPED - trading halted"
-        );
+        let trip_reason = self.state.read().trip_reason.clone();
+
+        // Structured trip log with actual numbers vs thresholds for each condition type
+        match trip_reason.as_ref() {
+            Some(TripReason::MaxLoss24h { loss, threshold }) => {
+                tracing::error!(
+                    loss_usd = %loss,
+                    threshold_usd = %threshold,
+                    reason = %reason_str,
+                    "Circuit breaker TRIPPED - trading halted"
+                );
+                tracing::info!(
+                    trading_allowed = false,
+                    loss_usd = %loss,
+                    threshold_usd = %threshold,
+                    reason = %reason_str,
+                    "Circuit breaker: trading halted (is_trading_allowed=false)"
+                );
+            }
+            Some(TripReason::ConsecutiveLosses { count, threshold }) => {
+                tracing::error!(
+                    consecutive_losses = count,
+                    consecutive_losses_threshold = threshold,
+                    reason = %reason_str,
+                    "Circuit breaker TRIPPED - trading halted"
+                );
+                tracing::info!(
+                    trading_allowed = false,
+                    consecutive_losses = count,
+                    consecutive_losses_threshold = threshold,
+                    reason = %reason_str,
+                    "Circuit breaker: trading halted (is_trading_allowed=false)"
+                );
+            }
+            Some(TripReason::MaxDrawdown { drawdown, threshold }) => {
+                tracing::error!(
+                    drawdown_percent = %drawdown,
+                    drawdown_threshold_percent = %threshold,
+                    reason = %reason_str,
+                    "Circuit breaker TRIPPED - trading halted"
+                );
+                tracing::info!(
+                    trading_allowed = false,
+                    drawdown_percent = %drawdown,
+                    drawdown_threshold_percent = %threshold,
+                    reason = %reason_str,
+                    "Circuit breaker: trading halted (is_trading_allowed=false)"
+                );
+            }
+            Some(TripReason::PortfolioStop24h { loss_pct, threshold }) => {
+                tracing::error!(
+                    loss_percent = %loss_pct,
+                    loss_threshold_percent = %threshold,
+                    reason = %reason_str,
+                    "Circuit breaker TRIPPED - trading halted"
+                );
+                tracing::info!(
+                    trading_allowed = false,
+                    loss_percent = %loss_pct,
+                    loss_threshold_percent = %threshold,
+                    reason = %reason_str,
+                    "Circuit breaker: trading halted (is_trading_allowed=false)"
+                );
+            }
+            Some(TripReason::JupiterApiFailures {
+                consecutive_failures,
+                threshold,
+                error_type,
+            }) => {
+                tracing::error!(
+                    jupiter_failures = consecutive_failures,
+                    jupiter_failures_threshold = threshold,
+                    error_type = %error_type,
+                    reason = %reason_str,
+                    "Circuit breaker TRIPPED - trading halted"
+                );
+                tracing::info!(
+                    trading_allowed = false,
+                    jupiter_failures = consecutive_failures,
+                    jupiter_failures_threshold = threshold,
+                    error_type = %error_type,
+                    reason = %reason_str,
+                    "Circuit breaker: trading halted (is_trading_allowed=false)"
+                );
+            }
+            _ => {
+                tracing::error!(
+                    reason = %reason_str,
+                    "Circuit breaker TRIPPED - trading halted"
+                );
+                tracing::info!(
+                    trading_allowed = false,
+                    reason = %reason_str,
+                    "Circuit breaker: trading halted (is_trading_allowed=false)"
+                );
+            }
+        }
 
         // FIX [R-C1]: Persist state to DB so it survives restarts.
         if let Err(e) = persist_cb_state(
@@ -625,6 +783,7 @@ impl CircuitBreaker {
             return Ok(());
         }
 
+        let cleared_trip_reason = self.state.read().trip_reason.as_ref().map(ToString::to_string);
         {
             let mut state = self.state.write();
             state.state = CircuitBreakerState::Active;
@@ -637,7 +796,11 @@ impl CircuitBreaker {
             gauge.set(2);
         }
 
-        tracing::info!("Circuit breaker exiting cooldown - trading resumed");
+        tracing::info!(
+            trading_allowed = true,
+            reason = ?cleared_trip_reason,
+            "Circuit breaker exiting cooldown - trading resumed (is_trading_allowed=true)"
+        );
 
         // FIX [R-C1]: Persist Active state so restarts see cleared state.
         if let Err(e) =
@@ -678,7 +841,8 @@ impl CircuitBreaker {
         tracing::warn!(
             admin = %admin,
             previous_state = %previous_state,
-            "Circuit breaker manually reset"
+            trading_allowed = true,
+            "Circuit breaker manually reset - trading resumed (is_trading_allowed=true)"
         );
 
         // FIX [R-C1]: Persist Active state so restarts don't re-trip unnecessarily.

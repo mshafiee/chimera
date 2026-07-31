@@ -307,8 +307,24 @@ class PrePromotionValidator:
         # Low-churn gate (before expensive WQS/backtest work)
         archetype_result = self.validate_archetype_for_promotion(wallet_address, metrics)
         if not archetype_result.passed:
-            logger.info(f"Wallet {wallet_address[:8]}... rejected by low-churn filter: {archetype_result.reason}")
+            _arch = getattr(metrics, 'archetype', None)
+            _hold_h = metrics.avg_hold_time_hours
+            logger.info(
+                f"[Validator] gate=low_churn addr={wallet_address} "
+                f"archetype={_arch} avg_hold_time_hours={_hold_h if _hold_h is not None else 'N/A'} "
+                f"min_avg_hold_time_hours={self.criteria.min_avg_hold_time_hours} "
+                f"forbidden_archetypes={self.criteria.forbidden_archetypes} "
+                f"FAIL: {archetype_result.reason}"
+            )
             return archetype_result
+        else:
+            _arch = getattr(metrics, 'archetype', None)
+            _hold_h = metrics.avg_hold_time_hours
+            logger.debug(
+                f"[Validator] gate=low_churn addr={wallet_address} "
+                f"archetype={_arch} avg_hold_time_hours={_hold_h if _hold_h is not None else 'N/A'} "
+                f"min_avg_hold_time_hours={self.criteria.min_avg_hold_time_hours} PASS"
+            )
 
         # Step 1: Check WQS score (with archetype-aware thresholds and momentum boost)
         wqs_result = calculate_wqs_with_confidence(metrics, strategy=strategy)
@@ -340,7 +356,13 @@ class PrePromotionValidator:
                 )
             if wqs_confidence < self.criteria.min_confidence:
                 reason_parts.append(f"confidence {wqs_confidence:.2f} < {self.criteria.min_confidence:.2f}")
-            logger.info(f"Wallet failed WQS check: {'; '.join(reason_parts)}")
+            logger.info(
+                f"[Validator] gate=wqs_confidence addr={wallet_address} "
+                f"wqs={wqs_score:.2f} boosted_wqs={boosted_wqs_score:.2f} "
+                f"threshold={archetype_threshold:.2f} confidence={wqs_confidence:.2f} "
+                f"min_confidence={self.criteria.min_confidence:.2f} "
+                f"FAIL: {'; '.join(reason_parts)}"
+            )
             return ValidationResult(
                 wallet_address=wallet_address,
                 status=ValidationStatus.FAILED_WQS,
@@ -348,6 +370,13 @@ class PrePromotionValidator:
                 reason=f"WQS check failed: {'; '.join(reason_parts)}",
                 recommended_status="CANDIDATE",
                 notes=f"WQS: {wqs_score:.1f} (boosted: {boosted_wqs_score:.1f}), confidence: {wqs_confidence:.2f}, archetype: {getattr(metrics, 'archetype', 'N/A')}",
+            )
+        else:
+            logger.debug(
+                f"[Validator] gate=wqs_confidence addr={wallet_address} "
+                f"wqs={wqs_score:.2f} boosted_wqs={boosted_wqs_score:.2f} "
+                f"threshold={archetype_threshold:.2f} confidence={wqs_confidence:.2f} "
+                f"min_confidence={self.criteria.min_confidence:.2f} PASS"
             )
         
         # Fast-track: high-WQS wallets with at least 1 trade bypass the
@@ -360,14 +389,18 @@ class PrePromotionValidator:
         )
         if fast_track:
             logger.info(
-                f"Wallet {wallet_address[:8]} fast-track eligible: "
-                f"WQS {wqs_score:.1f} >= {self.criteria.fast_track_wqs_threshold:.1f}, "
-                f"{len(trades)} trade(s)"
+                f"[Validator] gate=fast_track addr={wallet_address} "
+                f"wqs={wqs_score:.1f} threshold={self.criteria.fast_track_wqs_threshold:.1f} "
+                f"trades={len(trades)} PASS"
             )
 
         # Step 2: Check minimum trades (bypassed for fast-track wallets)
         if not fast_track and len(trades) < self.criteria.min_trades:
-            logger.info(f"Wallet failed trade count check: {len(trades)} < {self.criteria.min_trades}")
+            logger.info(
+                f"[Validator] gate=min_trades addr={wallet_address} "
+                f"trades={len(trades)} min_trades={self.criteria.min_trades} "
+                f"FAIL (delta={len(trades) - self.criteria.min_trades})"
+            )
             return ValidationResult(
                 wallet_address=wallet_address,
                 status=ValidationStatus.FAILED_INSUFFICIENT_TRADES,
@@ -375,6 +408,11 @@ class PrePromotionValidator:
                 reason=f"Insufficient trades: {len(trades)} < {self.criteria.min_trades}",
                 recommended_status="CANDIDATE",
                 notes="Need more trade history",
+            )
+        elif not fast_track:
+            logger.debug(
+                f"[Validator] gate=min_trades addr={wallet_address} "
+                f"trades={len(trades)} min_trades={self.criteria.min_trades} PASS"
             )
 
         # Step 2b: RugCheck validation - filter risky tokens
@@ -390,11 +428,14 @@ class PrePromotionValidator:
             
             if risky_tokens:
                 unique_risky = list(set(risky_tokens))
+                risky_ratio = len(risky_tokens) / len(trades) if trades else 0
                 logger.warning(
-                    f"Wallet {wallet_address[:8]}... has {len(unique_risky)} risky tokens: {unique_risky[:3]}..."
+                    f"[Validator] gate=rugcheck addr={wallet_address} "
+                    f"risky_tokens={len(unique_risky)} risky_ratio={risky_ratio:.3f} "
+                    f"threshold=0.30 total_tokens={len(trades)} "
+                    f"risky={unique_risky[:3]}..."
                 )
                 # If significant portion of trades involve risky tokens, reject
-                risky_ratio = len(risky_tokens) / len(trades) if trades else 0
                 if risky_ratio > 0.3:  # More than 30% risky tokens
                     return ValidationResult(
                         wallet_address=wallet_address,
@@ -406,6 +447,11 @@ class PrePromotionValidator:
                     )
                 # Otherwise, use only safe trades for backtesting
                 trades = safe_trades
+            else:
+                logger.debug(
+                    f"[Validator] gate=rugcheck addr={wallet_address} "
+                    f"risky_tokens=0 total_tokens={len(trades)} PASS"
+                )
 
         # Fast-track promotion: WQS above threshold with at least 1 trade
         # and no RugCheck rejection → promote immediately.
@@ -438,10 +484,14 @@ class PrePromotionValidator:
         min_close_floor = 1
         min_closes = max(min_close_floor, int(len(trades) * close_ratio_threshold))
 
+        close_ratio = len(close_trades) / len(trades) if trades else 0.0
         if len(close_trades) < min_closes:
             logger.info(
-                f"Wallet failed close count check: {len(close_trades)} < {min_closes} "
-                f"({close_ratio_threshold*100:.0f}% of {len(trades)} trades, archetype={archetype})"
+                f"[Validator] gate=close_ratio addr={wallet_address} "
+                f"close_ratio={close_ratio:.3f} close_trades={len(close_trades)} "
+                f"threshold={close_ratio_threshold:.3f} min_closes={min_closes} "
+                f"trades={len(trades)} archetype={archetype} "
+                f"FAIL (delta={len(close_trades) - min_closes})"
             )
             return ValidationResult(
                 wallet_address=wallet_address,
@@ -450,6 +500,13 @@ class PrePromotionValidator:
                 reason=f"Insufficient realized closes: {len(close_trades)} < {min_closes} ({self.criteria.min_close_ratio*100:.0f}% of trades)",
                 recommended_status="CANDIDATE",
                 notes="Need more realized closes (SELLs) for reliable validation",
+            )
+        else:
+            logger.debug(
+                f"[Validator] gate=close_ratio addr={wallet_address} "
+                f"close_ratio={close_ratio:.3f} close_trades={len(close_trades)} "
+                f"threshold={close_ratio_threshold:.3f} min_closes={min_closes} "
+                f"trades={len(trades)} archetype={archetype} PASS"
             )
         
         # Step 3: Walk-forward split (optional)
@@ -493,8 +550,10 @@ class PrePromotionValidator:
                 effective_min_wqs = self.criteria.min_wqs_score + self.criteria.walk_forward_fallback_penalty
                 if wqs_score < effective_min_wqs:
                     logger.info(
-                        f"Wallet failed walk-forward fallback WQS check: "
-                        f"{wqs_score:.1f} < {effective_min_wqs:.1f} (min {self.criteria.min_wqs_score} + {self.criteria.walk_forward_fallback_penalty} penalty)"
+                        f"[Validator] gate=wf_fallback_wqs addr={wallet_address} "
+                        f"wqs={wqs_score:.1f} threshold={effective_min_wqs:.1f} "
+                        f"(min={self.criteria.min_wqs_score:.1f} + penalty={self.criteria.walk_forward_fallback_penalty:.1f}) "
+                        f"FAIL (delta={wqs_score - effective_min_wqs:.1f})"
                     )
                     return ValidationResult(
                         wallet_address=wallet_address,
@@ -504,10 +563,21 @@ class PrePromotionValidator:
                         recommended_status="CANDIDATE",
                         notes=f"Walk-forward skipped; WQS must be >= {effective_min_wqs:.1f} without OOS validation",
                     )
+                else:
+                    logger.debug(
+                        f"[Validator] gate=wf_fallback_wqs addr={wallet_address} "
+                        f"wqs={wqs_score:.1f} threshold={effective_min_wqs:.1f} PASS"
+                    )
             else:
                 is_walk_forward = True
                 # in_sample_trades already set above (date-based or count-based)
                 wf_notes = f"Walk-forward holdout: {len(wf_trades)}/{len(trades)} trades"
+                logger.debug(
+                    f"[Validator] gate=walk_forward addr={wallet_address} "
+                    f"holdout_trades={len(wf_trades)} "
+                    f"in_sample_trades={len(in_sample_trades) if in_sample_trades is not None else 0} "
+                    f"total_trades={len(trades)} PASS"
+                )
 
         # Step 3b: Validate in-sample period first (prevents curve-fitting on OOS)
         if is_walk_forward and in_sample_trades:
@@ -516,6 +586,14 @@ class PrePromotionValidator:
                     wallet_address, in_sample_trades, strategy
                 )
                 if not is_result.passed:
+                    logger.info(
+                        f"[Validator] gate=in_sample addr={wallet_address} "
+                        f"simulated_pnl_sol={is_result.simulated_pnl_sol:.4f} "
+                        f"original_pnl_sol={is_result.original_pnl_sol:.4f} "
+                        f"trades={is_result.simulated_trades}/{is_result.total_trades} "
+                        f"rejected={is_result.rejected_trades} "
+                        f"FAIL: {is_result.failure_reason}"
+                    )
                     status = self._determine_failure_status(is_result.failure_reason)
                     return ValidationResult(
                         wallet_address=wallet_address,
@@ -524,6 +602,14 @@ class PrePromotionValidator:
                         reason=f"Failed in-sample validation: {is_result.failure_reason}",
                         recommended_status="CANDIDATE",
                         notes="In-sample period must be profitable before OOS is evaluated",
+                    )
+                else:
+                    logger.debug(
+                        f"[Validator] gate=in_sample addr={wallet_address} "
+                        f"simulated_pnl_sol={is_result.simulated_pnl_sol:.4f} "
+                        f"original_pnl_sol={is_result.original_pnl_sol:.4f} "
+                        f"trades={is_result.simulated_trades}/{is_result.total_trades} "
+                        f"rejected={is_result.rejected_trades} PASS"
                     )
             except Exception as e:
                 logger.warning(f"In-sample backtest error (non-fatal): {e}")
@@ -546,7 +632,14 @@ class PrePromotionValidator:
         # Step 5: Check backtest results
         if not backtest_result.passed:
             status = self._determine_failure_status(backtest_result.failure_reason)
-            logger.info(f"Wallet failed backtest: {backtest_result.failure_reason}")
+            logger.info(
+                f"[Validator] gate=backtest addr={wallet_address} "
+                f"simulated_pnl_sol={backtest_result.simulated_pnl_sol:.4f} "
+                f"original_pnl_sol={backtest_result.original_pnl_sol:.4f} "
+                f"trades={backtest_result.simulated_trades}/{backtest_result.total_trades} "
+                f"rejected={backtest_result.rejected_trades} "
+                f"FAIL: {backtest_result.failure_reason}"
+            )
             return ValidationResult(
                 wallet_address=wallet_address,
                 status=status,
@@ -555,6 +648,14 @@ class PrePromotionValidator:
                 reason=backtest_result.failure_reason,
                 recommended_status="CANDIDATE",
                 notes=" | ".join([p for p in [wf_notes, self._format_backtest_notes(backtest_result)] if p]),
+            )
+        else:
+            logger.debug(
+                f"[Validator] gate=backtest addr={wallet_address} "
+                f"simulated_pnl_sol={backtest_result.simulated_pnl_sol:.4f} "
+                f"original_pnl_sol={backtest_result.original_pnl_sol:.4f} "
+                f"trades={backtest_result.simulated_trades}/{backtest_result.total_trades} "
+                f"rejected={backtest_result.rejected_trades} PASS"
             )
 
         # Step 5b: Minimum holdout PnL check (D3)
@@ -565,7 +666,9 @@ class PrePromotionValidator:
             holdout_pnl_sol = float(backtest_result.original_pnl_sol) if backtest_result.original_pnl_sol is not None else 0.0
             if holdout_pnl_sol < self.criteria.min_holdout_pnl_sol:
                 logger.info(
-                    f"Wallet failed holdout PnL check: {holdout_pnl_sol:.4f} SOL < {self.criteria.min_holdout_pnl_sol} SOL"
+                    f"[Validator] gate=holdout_pnl addr={wallet_address} "
+                    f"holdout_pnl_sol={holdout_pnl_sol:.4f} threshold={self.criteria.min_holdout_pnl_sol} "
+                    f"FAIL (delta={holdout_pnl_sol - self.criteria.min_holdout_pnl_sol:.4f})"
                 )
                 return ValidationResult(
                     wallet_address=wallet_address,
@@ -576,6 +679,11 @@ class PrePromotionValidator:
                     recommended_status="CANDIDATE",
                     notes=f"OOS PnL: {holdout_pnl_sol:.4f} SOL",
                 )
+            else:
+                logger.debug(
+                    f"[Validator] gate=holdout_pnl addr={wallet_address} "
+                    f"holdout_pnl_sol={holdout_pnl_sol:.4f} threshold={self.criteria.min_holdout_pnl_sol} PASS"
+                )
         
         # Step 6: Additional checks on backtest results
         
@@ -583,7 +691,12 @@ class PrePromotionValidator:
         if backtest_result.total_trades > 0:
             rejection_rate = backtest_result.rejected_trades / backtest_result.total_trades
             if rejection_rate > self.criteria.max_rejection_rate:
-                logger.info(f"Wallet failed rejection rate: {rejection_rate:.0%}")
+                logger.info(
+                    f"[Validator] gate=rejection_rate addr={wallet_address} "
+                    f"rejection_rate={rejection_rate:.3f} rejected={backtest_result.rejected_trades} "
+                    f"total={backtest_result.total_trades} threshold={self.criteria.max_rejection_rate} "
+                    f"FAIL (delta={rejection_rate - self.criteria.max_rejection_rate:.3f})"
+                )
                 return ValidationResult(
                     wallet_address=wallet_address,
                     status=ValidationStatus.FAILED_LIQUIDITY,
@@ -592,6 +705,12 @@ class PrePromotionValidator:
                     reason=f"Too many trades rejected: {rejection_rate:.0%}",
                     recommended_status="CANDIDATE",
                     notes=f"Rejection rate: {rejection_rate:.0%}",
+                )
+            else:
+                logger.debug(
+                    f"[Validator] gate=rejection_rate addr={wallet_address} "
+                    f"rejection_rate={rejection_rate:.3f} rejected={backtest_result.rejected_trades} "
+                    f"total={backtest_result.total_trades} threshold={self.criteria.max_rejection_rate} PASS"
                 )
 
         # 6b. NEW: Check PROFIT FACTOR in Simulator (only when individual trade records available)
@@ -603,7 +722,11 @@ class PrePromotionValidator:
             sim_pf = sim_profit / sim_loss if sim_loss > 0 else (100.0 if sim_profit > 0 else 0.0)
 
             if sim_pf < 1.1:
-                logger.info(f"Wallet failed Simulated Profit Factor: {sim_pf:.2f} (Min 1.1)")
+                logger.info(
+                    f"[Validator] gate=profit_factor addr={wallet_address} "
+                    f"profit_factor={sim_pf:.2f} sim_profit={sim_profit:.4f} sim_loss={sim_loss:.4f} "
+                    f"threshold=1.10 FAIL"
+                )
                 return ValidationResult(
                     wallet_address=wallet_address,
                     status=ValidationStatus.FAILED_NEGATIVE_PNL,
@@ -612,6 +735,12 @@ class PrePromotionValidator:
                     reason=f"Simulated Profit Factor too low: {sim_pf:.2f} (Min 1.1)",
                     recommended_status="CANDIDATE",
                     notes=f"Sim PF: {sim_pf:.2f}, Orig PF: {metrics.profit_factor if metrics.profit_factor else 0.0:.2f}",
+                )
+            else:
+                logger.debug(
+                    f"[Validator] gate=profit_factor addr={wallet_address} "
+                    f"profit_factor={sim_pf:.2f} sim_profit={sim_profit:.4f} sim_loss={sim_loss:.4f} "
+                    f"threshold=1.10 PASS"
                 )
 
         # 6c. Max Drawdown Check — reject if peak-to-trough > max_drawdown_fraction of total gains
@@ -651,9 +780,11 @@ class PrePromotionValidator:
             threshold = total_positive_pnl * _D(str(effective_max_dd))
             if max_dd > threshold:
                 logger.info(
-                    f"Wallet failed drawdown check: max_dd={float(max_dd):.4f} SOL "
-                    f"> {effective_max_dd*100:.0f}% of gains "
-                    f"({float(total_positive_pnl):.4f} SOL, {num_trades} trades, threshold x{threshold_multiplier})"
+                    f"[Validator] gate=drawdown addr={wallet_address} "
+                    f"max_dd={float(max_dd):.4f} threshold_sol={float(threshold):.4f} "
+                    f"total_positive_pnl={float(total_positive_pnl):.4f} "
+                    f"max_dd_fraction={effective_max_dd:.2f} num_trades={num_trades} "
+                    f"threshold_multiplier=x{threshold_multiplier} FAIL"
                 )
                 return ValidationResult(
                     wallet_address=wallet_address,
@@ -667,6 +798,13 @@ class PrePromotionValidator:
                     ),
                     recommended_status="CANDIDATE",
                     notes="Wallet has excessive drawdown relative to gains — too volatile to promote",
+                )
+            else:
+                logger.debug(
+                    f"[Validator] gate=drawdown addr={wallet_address} "
+                    f"max_dd={float(max_dd):.4f} threshold_sol={float(threshold):.4f} "
+                    f"total_positive_pnl={float(total_positive_pnl):.4f} "
+                    f"max_dd_fraction={effective_max_dd:.2f} num_trades={num_trades} PASS"
                 )
 
         # 6d. Token concentration risk — reject wallets with >60% PnL from one token
@@ -686,8 +824,10 @@ class PrePromotionValidator:
                     unique_tokens = len(token_pnl)
                     if concentration > 0.60 and unique_tokens < 5:
                         logger.info(
-                            f"Wallet failed token concentration check: "
-                            f"{concentration*100:.0f}% PnL from one token, only {unique_tokens} unique tokens"
+                            f"[Validator] gate=token_concentration addr={wallet_address} "
+                            f"concentration={concentration:.3f} threshold=0.60 "
+                            f"unique_tokens={unique_tokens} min_tokens=5 "
+                            f"max_token_pnl={float(max_pnl):.4f} total_abs_pnl={float(total_abs_pnl):.4f} FAIL"
                         )
                         return ValidationResult(
                             wallet_address=wallet_address,
@@ -699,11 +839,21 @@ class PrePromotionValidator:
                             recommended_status="CANDIDATE",
                             notes="Wallet PnL is not diversified — likely one lucky trade",
                         )
+                    else:
+                        logger.debug(
+                            f"[Validator] gate=token_concentration addr={wallet_address} "
+                            f"concentration={concentration:.3f} unique_tokens={unique_tokens} "
+                            f"max_token_pnl={float(max_pnl):.4f} total_abs_pnl={float(total_abs_pnl):.4f} PASS"
+                        )
 
         # Check simulated PnL (Original Check)
         if self.criteria.require_positive_simulated_pnl:
             if backtest_result.simulated_pnl_sol < 0:
-                logger.info(f"Wallet failed PnL check: {backtest_result.simulated_pnl_sol:.4f} SOL")
+                logger.info(
+                    f"[Validator] gate=simulated_pnl addr={wallet_address} "
+                    f"simulated_pnl_sol={backtest_result.simulated_pnl_sol:.4f} "
+                    f"original_pnl_sol={backtest_result.original_pnl_sol:.4f} threshold=0.0 FAIL"
+                )
                 return ValidationResult(
                     wallet_address=wallet_address,
                     status=ValidationStatus.FAILED_NEGATIVE_PNL,
@@ -713,6 +863,12 @@ class PrePromotionValidator:
                     recommended_status="CANDIDATE",
                     notes=f"Original PnL: {backtest_result.original_pnl_sol:.4f}, Simulated: {backtest_result.simulated_pnl_sol:.4f}",
                 )
+            else:
+                logger.debug(
+                    f"[Validator] gate=simulated_pnl addr={wallet_address} "
+                    f"simulated_pnl_sol={backtest_result.simulated_pnl_sol:.4f} "
+                    f"original_pnl_sol={backtest_result.original_pnl_sol:.4f} threshold=0.0 PASS"
+                )
         
         # All checks passed!
         if backtest_result.regime_risk == "BULL":
@@ -720,7 +876,13 @@ class PrePromotionValidator:
                 f"Wallet {wallet_address[:8]}... profitable in BULL regime — "
                 f"may underperform in bear/crab markets"
             )
-        logger.info(f"Wallet {wallet_address[:8]}... passed all validation checks")
+        logger.info(
+            f"[Validator] gate=all addr={wallet_address} "
+            f"wqs={wqs_score:.1f} simulated_pnl_sol={backtest_result.simulated_pnl_sol:.4f} "
+            f"original_pnl_sol={backtest_result.original_pnl_sol:.4f} "
+            f"trades={backtest_result.simulated_trades}/{backtest_result.total_trades} "
+            f"rejected={backtest_result.rejected_trades} PASS"
+        )
         return ValidationResult(
             wallet_address=wallet_address,
             status=ValidationStatus.PASSED,

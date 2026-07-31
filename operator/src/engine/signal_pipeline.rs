@@ -147,9 +147,15 @@ impl SignalProcessor {
 
         tracing::info!(
             trade_uuid = %trade_uuid,
-            strategy = %signal.payload.strategy,
             token = %signal.payload.token,
-            "Processing signal"
+            token_address = %signal.token_address(),
+            wallet = %signal.payload.wallet_address,
+            strategy = %signal.payload.strategy,
+            side = %signal.payload.action,
+            amount_sol = %signal.payload.amount_sol,
+            timestamp = signal.timestamp,
+            source_ip = signal.source_ip.as_deref(),
+            "signal_pipeline: processing signal"
         );
 
         // ACQUIRE EXECUTION LOCK - must happen before any state changes
@@ -249,6 +255,9 @@ impl SignalProcessor {
                                 tracing::warn!(
                                     trade_uuid = %trade_uuid,
                                     token = %token_address,
+                                    token_symbol = %signal.payload.token,
+                                    strategy = %signal.payload.strategy,
+                                    wallet = %signal.payload.wallet_address,
                                     reason = %reason,
                                     "Token rejected by slow-path safety check"
                                 );
@@ -383,15 +392,17 @@ impl SignalProcessor {
                 base_mult + t * (rust_decimal::Decimal::ONE - base_mult)
             };
             if off_hours_mult < rust_decimal::Decimal::ONE {
-                tracing::info!(
+                let original_amount_sol = signal.payload.amount_sol;
+                signal.payload.amount_sol *= off_hours_mult;
+                tracing::debug!(
                     trade_uuid = %trade_uuid,
                     hour_utc = hour_utc,
                     minute_utc = minute_utc,
                     multiplier = %off_hours_mult,
-                    original_amount_sol = %signal.payload.amount_sol,
-                    "Off-hours window: reducing position size before heat check (gradual ramp)"
+                    original_amount_sol = %original_amount_sol,
+                    reduced_amount_sol = %signal.payload.amount_sol,
+                    "signal_pipeline: off-hours size reduction applied"
                 );
-                signal.payload.amount_sol *= off_hours_mult;
             }
         }
 
@@ -413,6 +424,16 @@ impl SignalProcessor {
                 let new_exposure = heat.total_exposure_sol + signal.payload.amount_sol;
                 let capital = self.config.position_sizing.total_capital_sol;
                 let max_heat = capital * Decimal::from(20u32) / Decimal::from(100u32);
+                tracing::debug!(
+                    trade_uuid = %trade_uuid,
+                    exposure_sol = %heat.total_exposure_sol,
+                    requested_amount_sol = %signal.payload.amount_sol,
+                    new_exposure_sol = %new_exposure,
+                    cap_sol = %max_heat,
+                    portfolio_total_capital = %capital,
+                    can_open = new_exposure <= max_heat,
+                    "signal_pipeline: portfolio heat re-check (in-memory)"
+                );
                 new_exposure <= max_heat
             } else {
                 // Fallback: database query via PortfolioHeat
@@ -420,7 +441,15 @@ impl SignalProcessor {
                     .can_open_position(signal.payload.amount_sol)
                     .await
                 {
-                    Ok(result) => result,
+                    Ok(result) => {
+                        tracing::debug!(
+                            trade_uuid = %trade_uuid,
+                            requested_amount_sol = %signal.payload.amount_sol,
+                            can_open = result,
+                            "signal_pipeline: portfolio heat re-check (db fallback)"
+                        );
+                        result
+                    }
                     Err(e) => {
                         tracing::error!(error = %e, trade_uuid = %trade_uuid, "Portfolio heat check failed");
                         true // Allow trade on error (fail-open)
@@ -429,30 +458,34 @@ impl SignalProcessor {
             };
 
             if !can_open {
+                let heat = if let Some(ref registry) = self.state_registry {
+                    registry.get_portfolio_heat()
+                } else {
+                    // This shouldn't happen as we have portfolio_heat above, but handle gracefully
+                    PortfolioHeatState {
+                        total_exposure_sol: Decimal::ZERO,
+                        shield_exposure_sol: Decimal::ZERO,
+                        spear_exposure_sol: Decimal::ZERO,
+                        pending_heat_sol: Decimal::ZERO,
+                        last_updated: std::time::SystemTime::now(),
+                    }
+                };
+                let capital = self.config.position_sizing.total_capital_sol;
+                let max_heat = capital * Decimal::from(20u32) / Decimal::from(100u32);
                 let reason = format!(
                     "Portfolio heat limit reached: {} SOL + {} SOL > {} SOL max (20% of capital)",
-                    {
-                        let heat = if let Some(ref registry) = self.state_registry {
-                            registry.get_portfolio_heat()
-                        } else {
-                            // This shouldn't happen as we have portfolio_heat above, but handle gracefully
-                            PortfolioHeatState {
-                                total_exposure_sol: Decimal::ZERO,
-                                shield_exposure_sol: Decimal::ZERO,
-                                spear_exposure_sol: Decimal::ZERO,
-                                pending_heat_sol: Decimal::ZERO,
-                                last_updated: std::time::SystemTime::now(),
-                            }
-                        };
-                        heat.total_exposure_sol
-                    },
-                    signal.payload.amount_sol,
-                    {
-                        let capital = self.config.position_sizing.total_capital_sol;
-                        capital * Decimal::from(20u32) / Decimal::from(100u32)
-                    }
+                    heat.total_exposure_sol, signal.payload.amount_sol, max_heat
                 );
-                tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: {}", reason);
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token = %signal.payload.token,
+                    exposure_sol = %heat.total_exposure_sol,
+                    cap_sol = %max_heat,
+                    portfolio_total_capital = %capital,
+                    requested_amount_sol = %signal.payload.amount_sol,
+                    "Signal rejected: {}",
+                    reason
+                );
 
                 let _ = self
                     .db
@@ -474,6 +507,14 @@ impl SignalProcessor {
                 }
 
             // 2. Strategy Allocation Check
+            tracing::debug!(
+                trade_uuid = %trade_uuid,
+                strategy = ?signal.payload.strategy,
+                requested_amount_sol = %signal.payload.amount_sol,
+                shield_percent = self.config.strategy.shield_percent,
+                spear_percent = self.config.strategy.spear_percent,
+                "signal_pipeline: strategy allocation re-check"
+            );
             match portfolio_heat
                 .can_open_strategy_position(
                     signal.payload.strategy,
@@ -516,7 +557,13 @@ impl SignalProcessor {
                     }
                     return;
                 }
-                Ok(true) => {}
+                Ok(true) => {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        strategy = ?signal.payload.strategy,
+                        "signal_pipeline: strategy allocation check passed"
+                    );
+                }
                 Err(e) => {
                     let reason = format!(
                         "Strategy allocation check failed — rejecting signal (fail-safe): {}",
@@ -580,7 +627,15 @@ impl SignalProcessor {
                         "Duplicate token: {} already has {} active position(s)",
                         token_address, existing
                     );
-                    tracing::warn!(trade_uuid = %trade_uuid, "Signal rejected: duplicate token");
+                    tracing::warn!(
+                        trade_uuid = %trade_uuid,
+                        token = %signal.payload.token,
+                        token_address = %token_address,
+                        wallet = %signal.payload.wallet_address,
+                        existing_positions = existing,
+                        "Signal rejected: duplicate token ({} active position(s))",
+                        existing
+                    );
                     let _ = self
                         .db
                         .mark_trade_dead_letter(
@@ -648,6 +703,7 @@ impl SignalProcessor {
                         trade_uuid = %trade_uuid,
                         wallet = %signal.payload.wallet_address,
                         token = %signal.payload.token,
+                        token_address = %signal.token_address(),
                         "BUY rejected at pre-execution admission: active position already exists for wallet/token"
                     );
                     if let Err(e) = self
@@ -668,7 +724,14 @@ impl SignalProcessor {
                     }
                     return;
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        wallet = %signal.payload.wallet_address,
+                        token = %signal.payload.token,
+                        "Admission pre-check passed: no active position for wallet/token"
+                    );
+                }
                 Err(e) => {
                     tracing::warn!(
                         error = %e,
@@ -688,7 +751,14 @@ impl SignalProcessor {
                 Some(cached) => {
                     match cached.verdict.as_str() {
                         "GO" => {
-                            // Proceed normally
+                            tracing::debug!(
+                                trade_uuid = %signal.trade_uuid,
+                                verdict = %cached.verdict,
+                                sample_size = cached.gates.sample_size.value,
+                                sample_size_threshold = cached.gates.sample_size.threshold,
+                                verdict_confidence = cached.gates.net_return.lower_95_ci,
+                                "Profitability gate verdict GO: proceeding with trade"
+                            );
                         }
                         "INCONCLUSIVE" => {
                             let gates = &cached.gates;
@@ -703,6 +773,8 @@ impl SignalProcessor {
                                 signal.payload.amount_sol = scaled_amount;
                                 tracing::info!(
                                     trade_uuid = %signal.trade_uuid,
+                                    verdict = %cached.verdict,
+                                    sample_size = gates.sample_size.value,
                                     original_amount = %original_amount,
                                     scaled_amount = %scaled_amount,
                                     factor = %self.config.profitability_gate.inconclusive_size_factor,
@@ -712,8 +784,10 @@ impl SignalProcessor {
                                 // Insufficient sample: proceed normally
                                 tracing::debug!(
                                     trade_uuid = %signal.trade_uuid,
+                                    verdict = %cached.verdict,
                                     sample_size = gates.sample_size.value,
                                     threshold = gates.sample_size.threshold,
+                                    verdict_confidence = gates.net_return.lower_95_ci,
                                     "Profitability gate INCONCLUSIVE: sample insufficient, proceeding"
                                 );
                             }
@@ -735,6 +809,8 @@ impl SignalProcessor {
                             }
                             tracing::warn!(
                                 trade_uuid = %signal.trade_uuid,
+                                verdict = %cached.verdict,
+                                sample_size = cached.gates.sample_size.value,
                                 "Profitability verdict STOP: rejecting trade via dead_letter"
                             );
                             return;
@@ -779,6 +855,13 @@ impl SignalProcessor {
                     tx_signature = %outcome.signature,
                     is_paper_trade = is_paper_trade,
                     action = ?signal.payload.action,
+                    confirmed = outcome.confirmed,
+                    fill_price_sol_per_token = ?outcome.fill_price_sol_per_token,
+                    price_impact_pct = ?outcome.price_impact_pct,
+                    token_amount = ?outcome.token_amount,
+                    executed_output_sol = ?outcome.executed_output_sol,
+                    estimated_fee_sol = ?outcome.estimated_fee_sol,
+                    route_fee_sol = ?outcome.route_fee_sol,
                     "Trade executed successfully - checking position lifecycle"
                 );
 
@@ -878,6 +961,9 @@ impl SignalProcessor {
                                 trade_uuid = %trade_uuid,
                                 is_paper_trade = is_paper_trade,
                                 entry_price = %entry_price,
+                                amount_sol = %signal.payload.amount_sol,
+                                fill_price_sol_per_token = ?outcome.fill_price_sol_per_token,
+                                tx_signature = %outcome.signature,
                                 "Position opened successfully for BUY signal"
                             );
 
@@ -1074,6 +1160,16 @@ impl SignalProcessor {
                             };
                             let err_msg = if position_closed { None } else { Some("Skipped: no active position found to close".to_string()) };
 
+                            tracing::info!(
+                                trade_uuid = %trade_uuid,
+                                exit_price = %exit_price,
+                                exit_fraction = %exit_fraction,
+                                position_closed = position_closed,
+                                final_status = final_status,
+                                tx_signature = %outcome.signature,
+                                "SELL executed - position close resolved"
+                            );
+
                             if let Err(e) = self
                                 .db
                                 .update_trade_status(&crate::db_abstraction::UpdateTradeStatus {
@@ -1101,6 +1197,14 @@ impl SignalProcessor {
                                     .flatten()
                                     .and_then(|t| t.net_pnl_sol)
                                     .unwrap_or(Decimal::ZERO);
+
+                                tracing::info!(
+                                    trade_uuid = %trade_uuid,
+                                    wallet = %wallet,
+                                    exit_price = %exit_price,
+                                    pnl_sol = %pnl_sol,
+                                    "Position closed - realized PnL recorded"
+                                );
 
                                 if let Some(ref wp) = self.wallet_performance {
                                     if let Err(e) =
@@ -1163,6 +1267,8 @@ impl SignalProcessor {
                 if signal.payload.action == Action::Buy {
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
+                        token = %signal.payload.token,
+                        side = %signal.payload.action,
                         reason = %reason,
                         "BUY trade deferred — market conditions unfavorable, reverting to PENDING"
                     );
@@ -1182,6 +1288,7 @@ impl SignalProcessor {
                 } else {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
+                        token = %signal.payload.token,
                         reason = %reason,
                         action = %signal.payload.action,
                         "CRITICAL: EXIT signal deferred by market conditions — position may be stuck open"
@@ -1211,7 +1318,13 @@ impl SignalProcessor {
                     "Cost efficiency check failed: total cost {} SOL ({:.1}%) exceeds limit {:.1}% for strategy {:?}",
                     cost, cost_pct, limit_pct, strategy
                 );
-                tracing::warn!(trade_uuid = %trade_uuid, reason = %reason, "Trade rejected due to cost efficiency");
+                tracing::warn!(
+                    trade_uuid = %trade_uuid,
+                    token = %signal.payload.token,
+                    side = %signal.payload.action,
+                    reason = %reason,
+                    "Trade rejected due to cost efficiency"
+                );
 
                 let _ = self
                     .db
@@ -1234,6 +1347,8 @@ impl SignalProcessor {
             Err(e) => {
                 tracing::error!(
                     trade_uuid = %trade_uuid,
+                    token = %signal.payload.token,
+                    side = %signal.payload.action,
                     error = %e,
                     "Trade execution failed"
                 );

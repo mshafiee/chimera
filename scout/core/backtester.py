@@ -108,6 +108,16 @@ class BacktestSimulator:
         strategy: str,
         initial_positions: Dict[str, Dict[str, Decimal]],
     ) -> SimulatedResult:
+        # Per-wallet cost breakdown accumulator (logging-only; reset per run so
+        # repeated simulate_wallet calls on the same instance stay isolated).
+        self._cost_breakdown = {
+            'slippage': Decimal('0'),
+            'dex_fee': Decimal('0'),
+            'priority': Decimal('0'),
+            'jito_tip': Decimal('0'),
+            'delay': Decimal('0'),
+            'mev': Decimal('0'),
+        }
         if not trades:
             return SimulatedResult(
                 wallet_address=wallet_address,
@@ -303,6 +313,36 @@ class BacktestSimulator:
             regime_risk = self.liquidity.classify_market_regime(
                 sorted_trades[0].timestamp, sorted_trades[-1].timestamp,
             )
+
+        # Per-wallet aggregate economics summary (logging-only)
+        _breakdown = getattr(self, '_cost_breakdown', None) or {
+            'slippage': Decimal('0'),
+            'dex_fee': Decimal('0'),
+            'priority': Decimal('0'),
+            'jito_tip': Decimal('0'),
+            'delay': Decimal('0'),
+            'mev': Decimal('0'),
+        }
+        _total_cost_sol = (
+            _breakdown['slippage'] + _breakdown['dex_fee'] + _breakdown['priority']
+            + _breakdown['jito_tip'] + _breakdown['delay'] + _breakdown['mev']
+        )
+        _rejection_reasons = " | ".join(rejected_details[:5])
+        logger.info(
+            f"[Backtest] addr={wallet_address} "
+            f"gross_pnl_sol={decimal_to_float(total_original_realized_pnl):.6f} "
+            f"net_pnl_sol={decimal_to_float(total_simulated_realized_pnl):.6f} "
+            f"total_cost_sol={decimal_to_float(_total_cost_sol):.6f} "
+            f"cost_breakdown={{slippage: {decimal_to_float(_breakdown['slippage']):.6f}, "
+            f"dex_fee: {decimal_to_float(_breakdown['dex_fee']):.6f}, "
+            f"priority: {decimal_to_float(_breakdown['priority']):.6f}, "
+            f"jito_tip: {decimal_to_float(_breakdown['jito_tip']):.6f}, "
+            f"delay: {decimal_to_float(_breakdown['delay']):.6f}, "
+            f"mev: {decimal_to_float(_breakdown['mev']):.6f}}} "
+            f"trades={len(sorted_trades) - rejected_count}/{len(sorted_trades)} "
+            f"rejections={rejected_count} low_confidence={low_confidence_trades_count} "
+            f"rejection_reasons={_rejection_reasons or 'none'}"
+        )
         
         return SimulatedResult(
             wallet_address=wallet_address,
@@ -760,7 +800,18 @@ class BacktestSimulator:
                 MIN_QTY_EPSILON = Decimal('0.000000000001')
                 if position["qty"] <= MIN_QTY_EPSILON:
                     positions.pop(token, None)
-        
+
+        # Accumulate per-trade costs for the wallet-level summary (logging-only).
+        # Skipped for low-confidence trades to match the wallet-loop totals.
+        _breakdown = getattr(self, '_cost_breakdown', None)
+        if _breakdown is not None and not is_low_confidence:
+            _breakdown['slippage'] += slippage_cost
+            _breakdown['dex_fee'] += fee_cost
+            _breakdown['priority'] += priority_fee_cost
+            _breakdown['jito_tip'] += jito_tip_cost
+            _breakdown['delay'] += delay_slippage
+            _breakdown['mev'] += mev_penalty
+
         return SimulatedTrade(
             original_trade=trade,
             current_liquidity_usd=historical_liquidity,

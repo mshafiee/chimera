@@ -342,7 +342,17 @@ impl LaserStreamClient {
 
         // Check circuit breaker
         if !self.circuit_breaker.is_trading_allowed() {
-            tracing::debug!("Circuit breaker triggered, skipping transaction");
+            let reason = self
+                .circuit_breaker
+                .trip_reason()
+                .map(|r| r.to_string())
+                .unwrap_or_else(|| "Circuit breaker tripped".to_string());
+            tracing::debug!(
+                wallet = %wallet_address,
+                signature = %tx.signature,
+                reason = %reason,
+                "wss: transaction rejected by circuit breaker"
+            );
             return Ok(());
         }
 
@@ -350,7 +360,11 @@ impl LaserStreamClient {
         let wallet = match self.db.get_wallet(&wallet_address).await {
             Ok(Some(w)) => w,
             Ok(None) => {
-                tracing::debug!(wallet = %wallet_address, "Wallet not found in database");
+                tracing::debug!(
+                    wallet = %wallet_address,
+                    signature = %tx.signature,
+                    "Wallet not found in database"
+                );
                 return Ok(());
             }
             Err(e) => {
@@ -360,7 +374,12 @@ impl LaserStreamClient {
         };
 
         if wallet.status != "ACTIVE" {
-            tracing::debug!(wallet = %wallet_address, status = %wallet.status, "Wallet not active");
+            tracing::debug!(
+                wallet = %wallet_address,
+                status = %wallet.status,
+                signature = %tx.signature,
+                "Wallet not active"
+            );
             return Ok(());
         }
 
@@ -414,26 +433,52 @@ impl LaserStreamClient {
         let signal = self.generate_signal(&parsed_swap, &wallet_address)?;
 
         // Token safety fast-path check
-        if let Some(token_address) = &signal.payload.token_address {
-            if let Err(e) = self
+        let fast_check_result = if let Some(token_address) = &signal.payload.token_address {
+            match self
                 .token_parser
                 .fast_check(token_address, signal.payload.strategy)
                 .await
             {
-                tracing::warn!(
-                    error = %e,
-                    token = %token_address,
-                    "Token safety check failed"
-                );
-                return Ok(());
+                Ok(result) => Some(result),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        token = %token_address,
+                        wallet = %wallet_address,
+                        signature = %tx.signature,
+                        "Token safety check failed"
+                    );
+                    return Ok(());
+                }
             }
-        }
+        } else {
+            None
+        };
 
         // Queue signal with wallet WQS score
         let wallet_wqs = wallet
             .wqs_score
             .map(|score| score.to_f64().unwrap_or(0.0))
             .unwrap_or(0.0);
+
+        tracing::info!(
+            wallet = %wallet_address,
+            token = %signal.payload.token_address.as_deref().unwrap_or("unknown"),
+            token_in = %parsed_swap.token_in,
+            token_out = %parsed_swap.token_out,
+            amount_in = %parsed_swap.amount_in,
+            amount_out = %parsed_swap.amount_out,
+            action = ?signal.payload.action,
+            strategy = ?signal.payload.strategy,
+            dex = %parsed_swap.dex,
+            signature = %tx.signature,
+            fast_check_liquidity_usd = ?fast_check_result.as_ref().and_then(|r| r.liquidity_usd),
+            fast_check_safe = ?fast_check_result.as_ref().map(|r| r.safe),
+            wallet_wqs = wallet_wqs,
+            bypasses_selection_engine = true,
+            bypasses_position_sizer = true,
+            "wss: signal queued bypassing selection engine (raw amount_in, no PositionSizer)"
+        );
 
         if let Err(e) = self
             .engine
