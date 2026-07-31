@@ -542,14 +542,22 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         tracker.add_pos("consistency_score", 5.0)
 
     if metrics.avg_entry_delay_seconds is not None:
-        if metrics.avg_entry_delay_seconds < 30:
+        # Relaxed threshold: only instant reject if entering within 10 seconds of token creation
+        # This catches actual snipers without rejecting fast but legitimate traders
+        if metrics.avg_entry_delay_seconds < 10:
             return tracker.to_components(is_instant_reject=True)
         
+        # Apply moderate penalty for very fast entries (10-60 seconds)
         elif metrics.avg_entry_delay_seconds < 60:
             tracker.add_neg(PenaltyCategory.SNIPER, 15.0)
             
+        # Bonus for reasonable entry timing (2-60 minutes)
         elif 120 < metrics.avg_entry_delay_seconds < 3600:
             tracker.add_pos("entry_delay_score", 15.0)
+    else:
+        # If avg_entry_delay_seconds is None (API failed), don't instant reject
+        # Just log a warning and skip this check
+        logger.debug(f"Warning: avg_entry_delay_seconds is None, skipping sniper check")
 
     if metrics.profit_factor is not None:
         if metrics.profit_factor > 3.0:
