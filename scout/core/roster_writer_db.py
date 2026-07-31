@@ -239,7 +239,7 @@ def get_wallets_by_status(status: str) -> List[dict]:
     try:
         from .db import execute_and_fetchall
         
-        query = "SELECT * FROM wallets WHERE status = %s ORDER BY wqs_score DESC"
+        query = "SELECT * FROM wallets WHERE status = %s ORDER BY wqs_score DESC NULLS LAST"
         wallets = execute_and_fetchall(query, (status,))
         return wallets
         
