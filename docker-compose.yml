@@ -187,7 +187,7 @@ services:
       - BIRDEYE_API_KEY=${BIRDEYE_API_KEY:-}
       # Improved Discovery Configuration
       - SCOUT_MIN_TRADE_COUNT=1
-      - SCOUT_MAX_WALLETS=100
+      - SCOUT_MAX_WALLETS=300
       - SCOUT_DISCOVERY_HOURS=24
       - SCOUT_LIQUIDITY_MODE=${SCOUT_LIQUIDITY_MODE:-simulated}
       # Historical liquidity fallback: 'flexible' uses current liquidity with confidence
