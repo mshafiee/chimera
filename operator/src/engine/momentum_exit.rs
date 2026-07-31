@@ -96,7 +96,7 @@ impl MomentumExit {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
-                        "STALE_PRICE: cached price is stale (>30s old) — momentum exit forcing exit"
+                        "STALE_PRICE: cached price is stale (>90s old) — momentum exit forcing exit"
                     );
                     return MomentumExitAction::Exit;
                 }
@@ -104,13 +104,13 @@ impl MomentumExit {
             }
             None => {
                 // §1.5 FIX: If this token is actively tracked but hasn't received a
-                // price update in >2 minutes, force exit. Aligns with stop_loss.rs
+                // price update in >90s, force exit. Aligns with stop_loss.rs
                 // staleness guard — both modules must agree on escalation.
                 if self.price_cache.is_price_stale(token_address) {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
-                        "STALE_PRICE: no price update for >2 min on tracked token — momentum exit forcing exit"
+                        "STALE_PRICE: no price update for >90s on tracked token — momentum exit forcing exit"
                     );
                     return MomentumExitAction::Exit;
                 }

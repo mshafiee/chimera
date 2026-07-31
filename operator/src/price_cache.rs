@@ -472,6 +472,24 @@ impl PriceCache {
             Ok(_) => {
                 tracing::warn!(token = token_address, "Eager price fetch returned 0 prices");
             }
+            Err(PriceCacheError::RateLimited) => {
+                // Primary API is rate-limited (position opens coincide with
+                // trading bursts that consume the shared Jupiter bucket) — fall
+                // back to lite-api so the position monitor is not left blind.
+                let lite_url = "https://lite-api.jup.ag/price";
+                match self.fetch_prices_jupiter(&tokens, Some(lite_url)).await {
+                    Ok((prices, decimals_map)) if !prices.is_empty() => {
+                        tracing::debug!(token = token_address, "Eager fetch served by lite-api fallback");
+                        let _ = self.apply_price_updates(prices, decimals_map);
+                    }
+                    Ok(_) => {
+                        tracing::warn!(token = token_address, "Eager price fetch fallback returned 0 prices");
+                    }
+                    Err(fallback_err) => {
+                        tracing::warn!(token = token_address, error = %fallback_err, "Eager price fetch fallback failed");
+                    }
+                }
+            }
             Err(e) => {
                 tracing::warn!(token = token_address, error = %e, "Eager price fetch failed");
             }

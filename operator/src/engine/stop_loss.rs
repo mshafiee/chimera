@@ -195,7 +195,7 @@ impl StopLossManager {
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
                         current_price = %price,
-                        "STALE_PRICE: cached price is stale (>30s old) — forcing exit (risk management blind)"
+                        "STALE_PRICE: cached price is stale (>90s old) — forcing exit (risk management blind)"
                     );
                     return StopLossAction::Exit;
                 }
@@ -207,7 +207,7 @@ impl StopLossManager {
                     tracing::error!(
                         trade_uuid = %trade_uuid,
                         token_address = token_address,
-                        "STALE_PRICE: no price update for >2 min on tracked token — forcing exit (risk management blind)"
+                        "STALE_PRICE: no price update for >90s on tracked token — forcing exit (risk management blind)"
                     );
                     return StopLossAction::Exit;
                 }
