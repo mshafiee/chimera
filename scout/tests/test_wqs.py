@@ -56,9 +56,12 @@ def test_wqs_low_trade_count_penalty():
     score_high = calculate_wqs_with_confidence(wallet_high).adjusted_score
     
     assert score_high > score_low, f"High trade count should score higher: {score_high} vs {score_low}"
-    # Very low counts should not be zeroed out, but should be significantly discounted.
-    assert score_low > 0.0
-    assert (score_low / score_high) < 0.6
+    # Very low counts should be heavily discounted — ROI on 2 trades is
+    # statistically meaningless (thin-history ROI guard) and may zero out the
+    # score entirely, which is the intended conservative behavior.
+    assert score_low < score_high * 0.6, (
+        f"Low trade count must be heavily discounted: {score_low} vs {score_high}"
+    )
 
 
 def test_wqs_medium_trade_count_penalty():
@@ -803,3 +806,39 @@ def test_roi_momentum_bonus_requires_recent_trade_and_both_roi_positive():
     assert score_with_date > score_no_momentum, (
         "WMI momentum bonus should not apply when WMI < 0.2"
     )
+
+
+def test_wqs_thin_history_roi_guard():
+    """The thin-history ROI guard must cap ROI contributions for wallets with
+    few trades: a 1-trade wallet with astronomical ROI must not saturate the
+    raw score (this was the scoring artifact that produced WQS 105 phantom
+    wallets). With the same ROI, more trades => higher raw score."""
+    import os
+    os.environ["SCOUT_WQS_RECENCY_WEIGHT"] = "true"
+
+    base = dict(
+        roi_30d=5000.0,      # extreme ROI — would saturate roi_score to max
+        roi_7d=5000.0,
+        win_rate=1.0,
+        profit_factor=10.0,
+        win_streak_consistency=1.0,
+        max_drawdown_30d=0.0,
+        avg_trade_size_sol=Decimal('1'),
+    )
+    wallet_1_trade = WalletMetrics(address="thin_roi_1", trade_count_30d=1, **base)
+    wallet_10_trade = WalletMetrics(address="thin_roi_10", trade_count_30d=10, **base)
+    wallet_50_trade = WalletMetrics(address="thin_roi_50", trade_count_30d=50, **base)
+
+    score_1 = calculate_wqs(wallet_1_trade)
+    score_10 = calculate_wqs(wallet_10_trade)
+    score_50 = calculate_wqs(wallet_50_trade)
+
+    # Full-credit (>= MIN_TRADES_FOR_FULL_ROI=10) must strictly exceed 1-trade
+    assert score_10 > score_1, (
+        f"Thin-history guard: 10-trade wallet must outscore 1-trade wallet "
+        f"({score_10} vs {score_1})"
+    )
+    assert score_50 >= score_10
+    # 1-trade extreme-ROI wallet must NOT reach WQS 100 (the artifact threshold
+    # that fast-tracked phantom wallets)
+    assert score_1 < 100.0, f"1-trade wallet must not hit WQS 100, got {score_1}"

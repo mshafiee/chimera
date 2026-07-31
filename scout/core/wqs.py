@@ -27,6 +27,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Minimum trade count for ROI components to contribute their full value.
+# Below this, ROI (which can be astronomically large on 1-2 lucky trades) is
+# scaled down linearly. Prevents thin-history wallets from saturating the
+# score to WQS 100+ and being fast-tracked to ACTIVE.
+MIN_TRADES_FOR_FULL_ROI = 10
+
 
 class PenaltyCategory(Enum):
     MARTINGALE = auto()
@@ -459,6 +465,21 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     roi_7d = float(metrics.roi_7d) if metrics.roi_7d is not None else 0.0
     roi_30d = float(metrics.roi_30d) if metrics.roi_30d is not None else 0.0
 
+    # Thin-history guard: ROI on a handful of trades is statistically
+    # meaningless — one lucky trade on a low-liquidity pump token can produce
+    # a 394,830% ROI that saturates every ROI component to max and yields
+    # WQS 100+ (a scoring artifact that promoted phantom wallets to ACTIVE).
+    # Scale ROI contributions by trade count so thin-history wallets cannot
+    # game the score; only wallets with enough trades earn full ROI credit.
+    # FULL at >= MIN_TRADES_FOR_FULL_ROI; linear below.
+    trade_count = metrics.trade_count_30d if metrics.trade_count_30d is not None else 0
+    roi_reliability = min(1.0, trade_count / MIN_TRADES_FOR_FULL_ROI) if MIN_TRADES_FOR_FULL_ROI > 0 else 1.0
+    if roi_reliability < 1.0:
+        logger.debug(
+            "[WQS] thin-history ROI scale x%.2f addr=%s trade_count_30d=%d (ROI unreliable below %d trades)",
+            roi_reliability, addr, trade_count, MIN_TRADES_FOR_FULL_ROI,
+        )
+
     try:
         from config import ScoutConfig
         _use_recency = ScoutConfig.get_wqs_recency_weight() if ScoutConfig else True
@@ -474,26 +495,26 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
         _is_pump_spike = roi_7d > max(abs(roi_30d) * 3.0, 15.0) and roi_7d > 50
 
     if _use_recency and not _is_pump_spike and roi_30d >= 1.0 and roi_7d > 0:
-        base_30d = min(25.0, (roi_30d / 100.0) * 25.0)
+        base_30d = min(25.0, (roi_30d / 100.0) * 25.0) * roi_reliability
         weighted_roi = roi_7d * 0.5 + roi_30d * 0.5
-        recency_score = min(25.0, (weighted_roi / 100.0) * 25.0)
+        recency_score = min(25.0, (weighted_roi / 100.0) * 25.0) * roi_reliability
         logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_7d=%.2f roi_30d=%.2f", max(base_30d, recency_score), addr, roi_7d, roi_30d)
         tracker.add_pos("roi_score", max(base_30d, recency_score))
         if roi_30d >= 1.0 and roi_7d > roi_30d * 0.6:
             logger.debug("[WQS] bonus roi_score +5.00 addr=%s roi_7d=%.2f roi_30d=%.2f", addr, roi_7d, roi_30d)
-            tracker.add_pos("roi_score", 5.0)
+            tracker.add_pos("roi_score", 5.0 * roi_reliability)
     else:
         if roi_30d > 0:
-            logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_30d=%.2f", min(25.0, (roi_30d / 100.0) * 25.0), addr, roi_30d)
-            tracker.add_pos("roi_score", min(25.0, (roi_30d / 100.0) * 25.0))
+            logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_30d=%.2f", min(25.0, (roi_30d / 100.0) * 25.0) * roi_reliability, addr, roi_30d)
+            tracker.add_pos("roi_score", min(25.0, (roi_30d / 100.0) * 25.0) * roi_reliability)
 
     if roi_7d > 0 and not _is_pump_spike:
-        logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_7d=%.2f", min(10.0, (roi_7d / 100.0) * 10.0), addr, roi_7d)
-        tracker.add_pos("roi_score", min(10.0, (roi_7d / 100.0) * 10.0))
+        logger.debug("[WQS] bonus roi_score +%.2f addr=%s roi_7d=%.2f", min(10.0, (roi_7d / 100.0) * 10.0) * roi_reliability, addr, roi_7d)
+        tracker.add_pos("roi_score", min(10.0, (roi_7d / 100.0) * 10.0) * roi_reliability)
 
     if roi_7d > -5.0 and roi_30d > 20.0:
         logger.debug("[WQS] bonus roi_score +10.00 addr=%s roi_7d=%.2f roi_30d=%.2f", addr, roi_7d, roi_30d)
-        tracker.add_pos("roi_score", 10.0)
+        tracker.add_pos("roi_score", 10.0 * roi_reliability)
 
     # Apply confidence penalty for wallets with FIFO replay data gaps
     # This reduces confidence in PnL-based scores when sell data is incomplete
@@ -599,7 +620,7 @@ def _calculate_raw_score(metrics: WalletMetrics, strategy: str = "SHIELD") -> Ra
     else:
         # If avg_entry_delay_seconds is None (API failed), don't instant reject
         # Just log a warning and skip this check
-        logger.debug(f"Warning: avg_entry_delay_seconds is None, skipping sniper check")
+        logger.debug("Warning: avg_entry_delay_seconds is None, skipping sniper check")
 
     if metrics.profit_factor is not None:
         if metrics.profit_factor > 3.0:

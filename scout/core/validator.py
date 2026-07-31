@@ -90,11 +90,15 @@ class PromotionCriteria:
     # keep high (0.70) in live mode. Mirrors SCOUT_MIN_CONFIDENCE_ACTIVE.
     min_confidence: float = 0.50
 
-    # Fast-track promotion: wallets with WQS above this threshold and at least
-    # 1 trade bypass the close-count / walk-forward / backtest gates (RugCheck
-    # is still enforced). Unblocks high-conviction wallets with thin trade
-    # history from being stuck in CANDIDATE limbo.
+    # Fast-track promotion: wallets with WQS above this threshold AND enough
+    # verified on-chain trade history bypass the close-count / walk-forward /
+    # backtest gates (RugCheck is still enforced). The minimum trade count
+    # prevents a single lucky trade (astronomical ROI on 1-trade history) from
+    # promoting a phantom wallet — WQS alone is not proof of a replicable edge.
     fast_track_wqs_threshold: float = 80.0
+    # Minimum verified trades required for fast-track. Wallets below this must
+    # pass the normal gates (min_trades etc.).
+    fast_track_min_trades: int = 5
 
     # Low-churn filter to prevent promotion of latency-impaired wallets
     forbidden_archetypes: set[str] = None
@@ -379,19 +383,19 @@ class PrePromotionValidator:
                 f"min_confidence={self.criteria.min_confidence:.2f} PASS"
             )
         
-        # Fast-track: high-WQS wallets with at least 1 trade bypass the
+        # Fast-track: high-WQS wallets with enough verified trades bypass the
         # min-trades, close-count, walk-forward, and backtest gates. RugCheck
         # (step 2b) is still enforced — a wallet trading all honeypots must
         # never be promoted regardless of WQS.
         fast_track = (
             wqs_score >= self.criteria.fast_track_wqs_threshold
-            and len(trades) >= 1
+            and len(trades) >= self.criteria.fast_track_min_trades
         )
         if fast_track:
             logger.info(
                 f"[Validator] gate=fast_track addr={wallet_address} "
                 f"wqs={wqs_score:.1f} threshold={self.criteria.fast_track_wqs_threshold:.1f} "
-                f"trades={len(trades)} PASS"
+                f"trades={len(trades)} min_trades={self.criteria.fast_track_min_trades} PASS"
             )
 
         # Step 2: Check minimum trades (bypassed for fast-track wallets)
