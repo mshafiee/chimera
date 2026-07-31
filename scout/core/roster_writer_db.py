@@ -160,21 +160,50 @@ def write_wallets_to_db(wallets: List[WalletRecord]) -> int:
 def update_wallet_status(address: str, status: str) -> bool:
     """
     Update wallet status in the database.
-    
+
+    When promoting to ACTIVE, sets promoted_at = now so the operator's
+    inactivity-rotation logic anchors "last activity" to the promotion moment
+    (otherwise newly promoted wallets with stale last_trade_at are immediately
+    demoted). Also resets the operator's inactivity_demotion_count so a wallet
+    promoted again isn't instantly escalated to REJECTED on its next inactivity
+    check.
+
     Args:
         address: Wallet address
         status: New status ('ACTIVE', 'CANDIDATE', 'REJECTED')
-        
+
     Returns:
         True if successful, False otherwise
     """
     try:
-        query = """
-            UPDATE wallets
-            SET status = %s, updated_at = CURRENT_TIMESTAMP
-            WHERE address = %s
-        """
+        if status == "ACTIVE":
+            query = """
+                UPDATE wallets
+                SET status = %s,
+                    promoted_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE address = %s
+            """
+        else:
+            query = """
+                UPDATE wallets
+                SET status = %s, updated_at = CURRENT_TIMESTAMP
+                WHERE address = %s
+            """
         execute_update(query, (status, address))
+
+        # Reset operator inactivity-demotion count when (re)promoting to ACTIVE
+        if status == "ACTIVE":
+            try:
+                reset_query = """
+                    UPDATE wallet_monitoring
+                    SET inactivity_demotion_count = 0, updated_at = CURRENT_TIMESTAMP
+                    WHERE wallet_address = %s
+                """
+                execute_update(reset_query, (address,))
+            except Exception as e:
+                logger.debug(f"Failed to reset inactivity_demotion_count for {address}: {e}")
+
         logger.debug(f"Updated wallet {address} status to {status}")
         return True
 
