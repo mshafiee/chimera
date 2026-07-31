@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 mod tools;
 
 use chimera_operator::circuit_breaker::CircuitBreaker;
-use chimera_operator::config::AppConfig;
+use chimera_operator::config::{AppConfig, TradeMode};
 use chimera_operator::db_abstraction;
 use chimera_operator::db_abstraction::ActivePositionEntry;
 use chimera_operator::engine::{
@@ -567,6 +567,19 @@ async fn main() -> anyhow::Result<()> {
     let tip_manager = Arc::new(TipManager::new(config.jito.clone(), db_pool.clone()));
     if let Err(e) = tip_manager.init().await {
         tracing::error!(error = %e, "Failed to initialize tip manager — operating in cold-start mode");
+    }
+
+    // In paper mode, seed the tip history with realistic mainnet values so the
+    // TipManager escapes cold-start. Paper trades never record tips, so without
+    // a seed the SELL/Exit tip stays at the config ceiling forever (~0.003 SOL
+    // = 3% of a 0.1 SOL position) — a structural cost drag that makes paper
+    // trading look unprofitable even when live percentile-based tips would be
+    // realistic. Seeding is a no-op once >= MIN_SAMPLES_FOR_PERCENTILE rows
+    // exist, and live mode never seeds.
+    if config.trade_mode == TradeMode::Paper {
+        if let Err(e) = tip_manager.seed_paper_history_if_empty().await {
+            tracing::warn!(error = %e, "Failed to seed paper tip history — continuing in cold-start mode");
+        }
     }
 
     // Initialize token parser (needed for slow-path safety checks in engine)

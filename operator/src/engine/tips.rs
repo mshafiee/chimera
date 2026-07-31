@@ -29,6 +29,36 @@ fn cold_start_multiplier() -> Decimal {
     Decimal::from_str("2.0").unwrap_or(Decimal::from(2))
 }
 
+/// Compute the percentile-based tip from a tip sample set.
+///
+/// Pure helper (no DB / TipManager dependency) so the percentile selection —
+/// the mechanism that makes seeded paper-mode tips escape cold-start — is
+/// directly unit-testable.
+fn percentile_tip_from_history(tips: &mut Vec<Decimal>, strategy: Strategy, config: &JitoConfig) -> Decimal {
+    // Sort ascending for percentile indexing
+    tips.sort();
+
+    // Calculate percentile index
+    let percentile = match strategy {
+        Strategy::Shield => 25, // Conservative: 25th percentile
+        Strategy::Spear => config.tip_percentile as usize, // Configured percentile (default 50)
+        Strategy::Exit => 75, // Higher: 75th percentile for exits
+    };
+
+    let index = (tips.len() * percentile / 100).min(tips.len() - 1);
+    let percentile_tip = tips[index];
+
+    // For Spear/Exit, use max of percentile and config floor
+    match strategy {
+        Strategy::Shield => percentile_tip.max(config.tip_floor_sol),
+        Strategy::Spear => percentile_tip.max(config.tip_floor_sol),
+        Strategy::Exit => {
+            let mid = (config.tip_floor_sol + config.tip_ceiling_sol) / Decimal::from(2);
+            percentile_tip.max(mid)
+        }
+    }
+}
+
 /// Tip entry for in-memory history
 #[derive(Debug, Clone)]
 struct TipEntry {
@@ -100,6 +130,69 @@ impl TipManager {
         Ok(())
     }
 
+    /// Seed the tip history with realistic mainnet values for PAPER mode.
+    ///
+    /// Paper trades never record tips (by design — recording simulated tips
+    /// would pollute the live percentile data), which means the history stays
+    /// empty forever and the TipManager is permanently stuck in cold-start.
+    /// In cold-start, the SELL/Exit tip is the config ceiling (e.g. 0.003 SOL),
+    /// so every paper exit is charged the maximum modeled cost — a structural
+    /// cost drag that makes paper trading unprofitable even when live trading
+    /// would clear percentile-based tips.
+    ///
+    /// Seeding with realistic mainnet tips lets percentile-based calculation
+    /// kick in, so paper exits reflect realistic live costs. The seed only
+    /// runs when the history is empty; once >= MIN_SAMPLES_FOR_PERCENTILE
+    /// rows exist, this is a no-op. Live mode never seeds (it records real
+    /// tips), so the percentile data is never polluted.
+    pub async fn seed_paper_history_if_empty(&self) -> AppResult<()> {
+        let count = self.db.get_jito_tip_count().await?;
+        if count >= MIN_SAMPLES_FOR_PERCENTILE {
+            return Ok(());
+        }
+
+        // Realistic mainnet Jito bundle tips for small (< 0.15 SOL) positions.
+        // These reflect typical landing tips for low-to-moderate congestion —
+        // the exact distribution matters less than escaping cold-start, since
+        // percentile selection (Shield: 25th, Exit: 75th) just needs >= 10
+        // samples to produce a realistic value well below the ceiling.
+        let seed_tips: &[&str] = &[
+            "0.0005", "0.0006", "0.0007", "0.0008", "0.0009",
+            "0.0010", "0.0011", "0.0012", "0.0014", "0.0016",
+            "0.0018", "0.0020",
+        ];
+        for tip_str in seed_tips {
+            let tip = Decimal::from_str(tip_str).map_err(|_| {
+                crate::error::AppError::Validation(format!("invalid seed tip: {tip_str}"))
+            })?;
+            self.db
+                .insert_jito_tip(&tip, Some("paper-seed"), Some("SHIELD"), true)
+                .await?;
+        }
+
+        // Reload history now that rows exist, and exit cold-start.
+        let tips = self
+            .db
+            .get_recent_jito_tips(self.max_history_size as i32)
+            .await?;
+        {
+            let mut history = self.history.write();
+            history.clear();
+            for tip in tips {
+                history.push(TipEntry {
+                    amount_sol: tip,
+                    strategy: Strategy::Shield,
+                });
+            }
+        }
+        *self.cold_start.write() = false;
+        tracing::info!(
+            seeded = seed_tips.len(),
+            "TipManager: seeded paper-mode tip history with realistic values (exiting cold-start)"
+        );
+        Ok(())
+    }
+
     /// Calculate optimal tip for a given strategy and trade size
     /// Uses Decimal for precision in financial calculations
     pub fn calculate_tip(
@@ -148,31 +241,8 @@ impl TipManager {
             return self.cold_start_tip(strategy);
         }
 
-        // Get all tip amounts sorted (using Decimal for precision)
         let mut tips: Vec<Decimal> = history.iter().map(|e| e.amount_sol).collect();
-        tips.sort();
-
-        // Calculate percentile index
-        let percentile = match strategy {
-            Strategy::Shield => 25, // Conservative: 25th percentile
-            Strategy::Spear => self.config.tip_percentile as usize, // Configured percentile (default 50)
-            Strategy::Exit => 75, // Higher: 75th percentile for exits
-        };
-
-        let index = (tips.len() * percentile / 100).min(tips.len() - 1);
-        let percentile_tip = tips[index];
-
-        // For Spear/Exit, use max of percentile and config floor
-
-        match strategy {
-            Strategy::Shield => percentile_tip.max(self.config.tip_floor_sol),
-            Strategy::Spear => percentile_tip.max(self.config.tip_floor_sol),
-            Strategy::Exit => {
-                let mid =
-                    (self.config.tip_floor_sol + self.config.tip_ceiling_sol) / Decimal::from(2);
-                percentile_tip.max(mid)
-            }
-        }
+        percentile_tip_from_history(&mut tips, strategy, &self.config)
     }
 
     /// Get success rate for a given tip amount range
@@ -445,6 +515,43 @@ mod tests {
     // ==========================================================================
     // PERCENTILE CALCULATION TESTS
     // ==========================================================================
+
+    #[test]
+    fn test_paper_seed_escapes_cold_start_and_lowers_exit_tip() {
+        // Simulate the seeded paper-mode tip history (values from seed_paper_history_if_empty)
+        let config = test_config();
+        let mut seeded: Vec<Decimal> = vec![
+            "0.0005", "0.0006", "0.0007", "0.0008", "0.0009",
+            "0.0010", "0.0011", "0.0012", "0.0014", "0.0016",
+            "0.0018", "0.0020",
+        ]
+        .iter()
+        .map(|s| Decimal::from_str(s).unwrap())
+        .collect();
+
+        // Exit cold-start tip would be the ceiling (0.01 in test config).
+        // With seeded history, the Exit tip uses max(75th percentile, mid) where
+        // mid = (floor+ceiling)/2 — must be strictly below the cold-start ceiling.
+        let seeded_exit_tip = percentile_tip_from_history(&mut seeded, Strategy::Exit, &config);
+        assert!(
+            seeded_exit_tip < Decimal::from_str("0.01").unwrap(),
+            "Seeded exit tip should be below the cold-start ceiling, got {seeded_exit_tip}"
+        );
+        // The 75th percentile of the seed set ≈ 0.0016; the Exit mid-floor
+        // (floor+ceiling)/2 = 0.0055 in the test config raises it, but it must
+        // still be strictly less than the cold-start ceiling.
+        assert!(
+            seeded_exit_tip < config.tip_ceiling_sol,
+            "Seeded Exit tip must beat cold-start ceiling"
+        );
+
+        // Shield BUY tip uses 25th percentile ≈ 0.0007; must be below floor*2 (0.002)
+        let seeded_buy_tip = percentile_tip_from_history(&mut seeded, Strategy::Shield, &config);
+        assert!(
+            seeded_buy_tip < Decimal::from_str("0.002").unwrap(),
+            "Seeded Shield tip should be below cold-start floor*2, got {seeded_buy_tip}"
+        );
+    }
 
     #[test]
     fn test_percentile_50th() {
