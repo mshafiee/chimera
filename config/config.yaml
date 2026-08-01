@@ -101,8 +101,8 @@ token_safety:
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 2.0         # Aggressive throughput: 2 hours minimum (allows DexScreener indexing)
-  min_token_age_pumpfun_hours: 2.0 # Pump.fun tokens: 2h minimum (survived initial rug window)
+  min_token_age_hours: 0.5         # 30 min minimum (sufficient for DexScreener indexing)
+  min_token_age_pumpfun_hours: 0.5 # Pump.fun tokens: 30 min minimum
   # Allow pump.fun tokens >2h old. With signal-based exit management (copy_wallet_sells: false),
   # positions are managed by profit targets/stop-loss instead of copying wallet sells.
   allow_graduated_pumpfun: true
