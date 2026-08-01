@@ -100,7 +100,7 @@ token_safety:
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 24.0        # Production: 24 hours minimum for established tokens
+  min_token_age_hours: 6.0         # Production: 6 hours minimum for established tokens
   min_token_age_pumpfun_hours: 0.0 # Pump.fun tokens: no minimum age; $25K liquidity gate is the safety filter
   # ⚠️  SECURITY CRITICAL: NEVER enable this in production ⚠️
   # When false (default, SAFE), tokens not indexed by DexScreener are treated as $0 liquidity
@@ -202,13 +202,13 @@ profit_management:
   hard_stop_loss: -25                 # Updated from -8 to -25 to allow adaptive volatility stop-loss room to breathe
   time_exit_hours: 12
   losing_time_exit_hours_spear: 1
-  wick_protection_secs: 30
+  wick_protection_secs: 60
 
 # Position sizing configuration
 position_sizing:
   base_size_sol: 0.25
   max_size_sol: 2.0
-  min_size_sol: 0.05
+  min_size_sol: 0.25
   min_live_position_sol: 0.02  # Minimum position size for live trading (distinct from paper)
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
   max_concurrent_positions: 8
