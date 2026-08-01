@@ -138,10 +138,10 @@ services:
        - CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-jup_7e095c7e729dadb3070b15417faaeed98464afde972184fdd93e0b24247fc857}
        # Helius API key (config crate reads CHIMERA_ prefix, not raw HELIUS_API_KEY)
        - CHIMERA_MONITORING__HELIUS_API_KEY=${HELIUS_API_KEY}
-        # Minimum WQS for signal admission
+       # Minimum WQS for signal admission
        - CHIMERA_SELECTION__MIN_WQS_SCORE=15.0
-        # Micro-position cap for low-WQS wallets (WQS < 40 → max 0.1 SOL)
-       - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.1
+       # Position cap for low-WQS wallets (WQS < 40 → max 0.25 SOL = min_size_sol)
+       - CHIMERA_SELECTION__SPEAR_LITE_MAX_SIZE_SOL=0.25
        - CHIMERA_SELECTION__SPEAR_LITE_WQS_THRESHOLD=40.0
        # Paper trading mode (simulated execution, no real SOL)
        - CHIMERA_TRADE_MODE=paper
