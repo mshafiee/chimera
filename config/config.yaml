@@ -199,13 +199,14 @@ monitoring:
 
 # Profit management configuration
 profit_management:
-  targets: [15, 40, 80, 150]
+  targets: [30, 100]
   tiered_exit_percent: 50
-  trailing_stop_activation: 10
-  trailing_stop_distance: 10
+  trailing_stop_activation: 15
+  trailing_stop_distance: 15
   hard_stop_loss: -25                 # Updated from -8 to -25 to allow adaptive volatility stop-loss room to breathe
   time_exit_hours: 12
-  losing_time_exit_hours_spear: 1
+  losing_time_exit_hours_shield: 12  # Give SHIELD positions 12h to recover
+  losing_time_exit_hours_spear: 4
   wick_protection_secs: 60
 
 # Position sizing configuration
