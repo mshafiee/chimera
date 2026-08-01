@@ -449,6 +449,13 @@ pub struct StrategyConfig {
     /// is less than or equal to total transaction friction (tip + fee + slippage)
     #[serde(default = "default_friction_gating_enabled")]
     pub friction_gating_enabled: bool,
+    /// When true (default), copy wallet SELL signals to close positions immediately.
+    /// When false, ignore wallet SELLs — positions are managed solely by profit targets,
+    /// stop-loss, momentum exit, and time exit. This transforms the system from
+    /// copy-trading (follow both BUY and SELL) to signal-trading (use wallet BUYs
+    /// as entry signals only).
+    #[serde(default = "default_copy_wallet_sells")]
+    pub copy_wallet_sells: bool,
 }
 
 /// Profitability gate configuration for live trading enforcement.
@@ -527,6 +534,10 @@ fn default_slippage_fallback_threshold() -> Decimal {
 
 fn default_friction_gating_enabled() -> bool {
     true // Enabled by default to prevent unprofitable micro-trades
+}
+
+fn default_copy_wallet_sells() -> bool {
+    true // Backward compatible: copy both BUY and SELL by default
 }
 
 /// Jito bundle tip configuration
@@ -2378,6 +2389,7 @@ impl Default for AppConfig {
                 slippage_fallback_large_percent: dec!(0.01),
                 slippage_fallback_threshold_sol: dec!(0.5),
                 friction_gating_enabled: true,
+                copy_wallet_sells: true,
             },
             jito: JitoConfig {
                 enabled: true,

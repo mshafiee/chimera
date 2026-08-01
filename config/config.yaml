@@ -55,6 +55,7 @@ strategy:
   slippage_fallback_small_percent: 0.005   # 0.5% slippage estimate for trades < threshold when Jupiter impact unavailable
   slippage_fallback_large_percent: 0.01    # 1.0% slippage estimate for trades >= threshold
   slippage_fallback_threshold_sol: 0.5     # SOL boundary between small/large for slippage fallback
+  copy_wallet_sells: false  # Signal-based exit: ignore wallet SELLs, manage exits via profit targets/stop-loss
 
 jito:
   enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
@@ -101,11 +102,10 @@ token_safety:
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
   min_token_age_hours: 2.0         # Aggressive throughput: 2 hours minimum (allows DexScreener indexing)
-  min_token_age_pumpfun_hours: 0.0 # Pump.fun tokens: no minimum age; $25K liquidity gate is the safety filter
-  # Block all pump.fun tokens (bonding curve AND graduated). Addresses ending
-  # in "pump" are rejected at the earliest selection gate. Pump.fun trades have
-  # a proven 0/24 win rate in paper trading.
-  allow_graduated_pumpfun: false
+  min_token_age_pumpfun_hours: 2.0 # Pump.fun tokens: 2h minimum (survived initial rug window)
+  # Allow pump.fun tokens >2h old. With signal-based exit management (copy_wallet_sells: false),
+  # positions are managed by profit targets/stop-loss instead of copying wallet sells.
+  allow_graduated_pumpfun: true
   # ⚠️  SECURITY CRITICAL: NEVER enable this in production ⚠️
   # When false (default, SAFE), tokens not indexed by DexScreener are treated as $0 liquidity
   # and BUY signals are rejected (fail-closed security posture).
