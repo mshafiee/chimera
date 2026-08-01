@@ -95,6 +95,7 @@ token_safety:
   # Minimum liquidity thresholds (USD) - with 20% buffer for safety
   min_liquidity_shield_usd: 10000  # Aggressive throughput: $10K floor (0.25 SOL on $10K pool = ~0.2% impact)
   min_liquidity_spear_usd: 10000   # Aggressive throughput: $10K floor
+  min_liquidity_pumpfun_usd: 5000  # Pump.fun floor: $5K (was default $25K, blocking all pump.fun signals)
   # Enable honeypot detection via transaction simulation
   honeypot_detection_enabled: true
   # Token cache settings
