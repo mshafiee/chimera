@@ -331,6 +331,36 @@ class PrePromotionValidator:
             )
 
         # Step 1: Check WQS score (with archetype-aware thresholds and momentum boost)
+        # Gate-admission feedback: query the operator's decision_records for this
+        # wallet so the WQS can instant-reject wallets whose BUY signals are 100%
+        # rejected by the operator's selection gates (ghost wallets). This is the
+        # single choke point used by both the main analysis and the candidate
+        # re-validation sweep — putting it here ensures every promotion path
+        # applies the gate. Mirrors selection gates: BUY decisions only.
+        try:
+            from core.db import execute_and_fetchone
+            _row = execute_and_fetchone(
+                """
+                SELECT COUNT(*) AS total,
+                       COUNT(*) FILTER (WHERE admitted) AS admitted
+                FROM decision_records
+                WHERE wallet_address = %s AND action = 'BUY'
+                """,
+                (wallet_address,),
+            )
+            if _row:
+                _total = int(_row.get("total", 0) or 0)
+                _admitted = int(_row.get("admitted", 0) or 0)
+                if _total > 0:
+                    metrics.operator_admission_rate = _admitted / _total
+                    metrics.operator_decision_count = _total
+                    logger.info(
+                        f"[Validator] gate_admission_data addr={wallet_address} "
+                        f"admitted={_admitted}/{_total} rate={metrics.operator_admission_rate:.2%}"
+                    )
+        except Exception as e:
+            logger.warning(f"[Validator] gate-admission lookup failed for {wallet_address}: {e}")
+
         wqs_result = calculate_wqs_with_confidence(metrics, strategy=strategy)
         wqs_score = wqs_result.score
         wqs_confidence = wqs_result.confidence
