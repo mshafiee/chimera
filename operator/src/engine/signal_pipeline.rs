@@ -196,12 +196,15 @@ impl SignalProcessor {
         // copy-trading (follow both BUY and SELL) to signal-trading (use
         // wallet BUYs as entry signals only).
         //
-        // IMPORTANT: Only skip SELL signals from wallets (Strategy::Shield/Spear).
-        // Internal EXIT signals (Strategy::Exit) from profit targets, stop-loss,
-        // and time exit must NOT be skipped — otherwise positions can never close.
+        // Distinguishing wallet SELLs from internal EXITs:
+        // The selection service labels ALL admitted SELLs as Strategy::Exit
+        // (selection.rs:510), so strategy alone can't tell them apart.
+        // However, wallet-originated SELLs always have exit_fraction=None
+        // (monitoring.rs:344), while internal EXITs from build_exit_signal
+        // always have exit_fraction=Some(fraction) (main.rs:3038).
         if signal.payload.action == Action::Sell
             && !self.config.strategy.copy_wallet_sells
-            && signal.payload.strategy != Strategy::Exit
+            && signal.payload.exit_fraction.is_none()
         {
             tracing::info!(
                 trade_uuid = %trade_uuid,
