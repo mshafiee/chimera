@@ -59,8 +59,8 @@ strategy:
 
 jito:
   enabled: true  # Overridden by CHIMERA_JITO__ENABLED env var for mainnet-paper
-  tip_floor_sol: 0.0005
-  tip_ceiling_sol: 0.003
+  tip_floor_sol: 0.0003
+  tip_ceiling_sol: 0.001
   tip_percentile: 50
   tip_percent_max: 0.03
 
@@ -199,7 +199,7 @@ monitoring:
 
 # Profit management configuration
 profit_management:
-  targets: [30, 100]
+  targets: []  # No fixed targets — trailing stop only (minimum exit transactions)
   tiered_exit_percent: 50
   trailing_stop_activation: 15
   trailing_stop_distance: 15
