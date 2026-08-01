@@ -47,8 +47,8 @@ strategy:
   spear_percent: 50
   max_position_sol: 1.0
   min_position_sol: 0.01
-  shield_signal_quality_threshold: 0.40  # Lowered to allow high-WQS single-wallet signals through
-  spear_signal_quality_threshold: 0.40  # Lowered to allow single-wallet pump.fun signals through
+  shield_signal_quality_threshold: 0.30  # Lowered to allow single-wallet established-token signals through
+  spear_signal_quality_threshold: 0.30  # Lowered to allow single-wallet established-token signals through
   dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
   shield_max_total_cost_percent: 0.05  # Rejects Shield trades if costs exceed 5% of trade size
   spear_max_total_cost_percent: 0.08   # Rejects Spear trades if costs exceed 8% of trade size
@@ -102,6 +102,10 @@ token_safety:
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
   min_token_age_hours: 6.0         # Production: 6 hours minimum for established tokens
   min_token_age_pumpfun_hours: 0.0 # Pump.fun tokens: no minimum age; $25K liquidity gate is the safety filter
+  # Block all pump.fun tokens (bonding curve AND graduated). Addresses ending
+  # in "pump" are rejected at the earliest selection gate. Pump.fun trades have
+  # a proven 0/24 win rate in paper trading.
+  allow_graduated_pumpfun: false
   # ⚠️  SECURITY CRITICAL: NEVER enable this in production ⚠️
   # When false (default, SAFE), tokens not indexed by DexScreener are treated as $0 liquidity
   # and BUY signals are rejected (fail-closed security posture).
