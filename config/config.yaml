@@ -47,8 +47,8 @@ strategy:
   spear_percent: 50
   max_position_sol: 1.0
   min_position_sol: 0.01
-  shield_signal_quality_threshold: 0.30  # Lowered to allow single-wallet established-token signals through
-  spear_signal_quality_threshold: 0.30  # Lowered to allow single-wallet established-token signals through
+  shield_signal_quality_threshold: 0.20  # Aggressive throughput: allow WQS 16+ single-wallet signals
+  spear_signal_quality_threshold: 0.20  # Aggressive throughput: allow WQS 16+ single-wallet signals
   dex_fee_rate: 0.003             # Default Raydium/Orca fee rate (0.3%)
   shield_max_total_cost_percent: 0.05  # Rejects Shield trades if costs exceed 5% of trade size
   spear_max_total_cost_percent: 0.08   # Rejects Spear trades if costs exceed 8% of trade size
@@ -92,15 +92,15 @@ token_safety:
     - "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"  # USDT
     - "So11111111111111111111111111111111111111112"   # Wrapped SOL
   # Minimum liquidity thresholds (USD) - with 20% buffer for safety
-  min_liquidity_shield_usd: 25000  # Production: 150% buffer over $10k base
-  min_liquidity_spear_usd: 25000   # Updated from 15000 to 25000 to eliminate high price-impact trades
+  min_liquidity_shield_usd: 10000  # Aggressive throughput: $10K floor (0.25 SOL on $10K pool = ~0.2% impact)
+  min_liquidity_spear_usd: 10000   # Aggressive throughput: $10K floor
   # Enable honeypot detection via transaction simulation
   honeypot_detection_enabled: true
   # Token cache settings
   cache_capacity: 1000
   cache_ttl_seconds: 3600  # 1 hour
   # Minimum token age in hours to allow a BUY signal (0 disables the check)
-  min_token_age_hours: 6.0         # Production: 6 hours minimum for established tokens
+  min_token_age_hours: 2.0         # Aggressive throughput: 2 hours minimum (allows DexScreener indexing)
   min_token_age_pumpfun_hours: 0.0 # Pump.fun tokens: no minimum age; $25K liquidity gate is the safety filter
   # Block all pump.fun tokens (bonding curve AND graduated). Addresses ending
   # in "pump" are rejected at the earliest selection gate. Pump.fun trades have
