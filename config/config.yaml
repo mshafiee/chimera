@@ -217,8 +217,8 @@ position_sizing:
   min_size_sol: 0.25
   min_live_position_sol: 0.02  # Minimum position size for live trading (distinct from paper)
   consensus_multiplier: 2.0  # Increased from 1.5x to 2.0x for stronger consensus signals
-  max_concurrent_positions: 8
-  use_kelly_sizing: true   # Kelly Criterion sizing enabled
+  max_concurrent_positions: 12
+  use_kelly_sizing: false  # Fixed sizing at base_size_sol for consistent cost ratios
   total_capital_sol: 10.0  # Total trading capital in SOL (adjust to actual wallet balance)
   off_hours_size_multiplier: 0.5  # 50% position size during 02:00–06:00 UTC (wider spreads, lower liquidity)
 
