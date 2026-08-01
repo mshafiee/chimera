@@ -189,18 +189,25 @@ impl SignalProcessor {
             None
         };
 
-        // Signal-based exit management: skip SELL signals when copy_wallet_sells
+        // Signal-based exit management: skip wallet SELL signals when copy_wallet_sells
         // is disabled. The position remains ACTIVE and is managed by profit
         // targets, stop-loss, momentum exit, and time exit via the
         // position_monitor tick loop. This transforms the system from
         // copy-trading (follow both BUY and SELL) to signal-trading (use
         // wallet BUYs as entry signals only).
-        if signal.payload.action == Action::Sell && !self.config.strategy.copy_wallet_sells {
+        //
+        // IMPORTANT: Only skip SELL signals from wallets (Strategy::Shield/Spear).
+        // Internal EXIT signals (Strategy::Exit) from profit targets, stop-loss,
+        // and time exit must NOT be skipped — otherwise positions can never close.
+        if signal.payload.action == Action::Sell
+            && !self.config.strategy.copy_wallet_sells
+            && signal.payload.strategy != Strategy::Exit
+        {
             tracing::info!(
                 trade_uuid = %trade_uuid,
                 wallet = %signal.payload.wallet_address,
                 token = %signal.token_address(),
-                "SELL signal skipped (copy_wallet_sells=false) — position managed by exit system"
+                "Wallet SELL signal skipped (copy_wallet_sells=false) — position managed by exit system"
             );
             return;
         }
