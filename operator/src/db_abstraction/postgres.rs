@@ -799,18 +799,18 @@ impl Database for PostgresBackend {
     async fn update_circuit_breaker_state(
         &self,
         state: &str,
-        tripped_at: Option<&str>,
+        tripped_at: Option<chrono::DateTime<chrono::Utc>>,
         trip_reason: Option<&str>,
     ) -> AppResult<()> {
         let mut sql = "UPDATE circuit_breaker_state SET state = $1, updated_at = CURRENT_TIMESTAMP"
             .to_string();
         let mut param_idx = 2;
 
-        if let Some(_t) = tripped_at {
+        if tripped_at.is_some() {
             sql.push_str(&format!(", tripped_at = ${}", param_idx));
             param_idx += 1;
         }
-        if let Some(_r) = trip_reason {
+        if trip_reason.is_some() {
             sql.push_str(&format!(", trip_reason = ${}", param_idx));
         }
 

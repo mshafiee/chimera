@@ -179,7 +179,7 @@ pub trait Database: Send + Sync {
     async fn update_circuit_breaker_state(
         &self,
         state: &str,
-        tripped_at: Option<&str>,
+        tripped_at: Option<chrono::DateTime<chrono::Utc>>,
         trip_reason: Option<&str>,
     ) -> AppResult<()>;
 
