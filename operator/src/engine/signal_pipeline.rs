@@ -430,6 +430,24 @@ impl SignalProcessor {
                     "signal_pipeline: off-hours size reduction applied"
                 );
             }
+
+            // Hard floor re-clamp: off-hours reduction (or any prior shrinkage)
+            // may only bring a position DOWN to the floor, never below it.
+            // Without this, every 00:01-06:00 UTC position halves to ~0.125 SOL
+            // and is cost-killed on the round trip. Applied to every BUY so no
+            // sub-floor size can reach execution regardless of the shrink path.
+            let pre_floor_sol = signal.payload.amount_sol;
+            let min_size_sol = self.config.position_sizing.min_size_sol;
+            signal.payload.amount_sol = signal.payload.amount_sol.max(min_size_sol);
+            tracing::info!(
+                trade_uuid = %trade_uuid,
+                final_amount_sol = %signal.payload.amount_sol,
+                pre_floor_sol = %pre_floor_sol,
+                off_hours_mult = %off_hours_mult,
+                min_size_sol = %min_size_sol,
+                strategy = ?signal.payload.strategy,
+                "signal_pipeline: final position size after floor re-clamp"
+            );
         }
 
         // Re-check portfolio heat and strategy allocation before execution (for BUY signals)
@@ -1045,10 +1063,36 @@ impl SignalProcessor {
                                     tracing::warn!(error = %e, "Failed to set token_amount on position");
                                 }
                             } else {
+                                // Defense of last resort: a successful BUY
+                                // without a usable token_amount can never be
+                                // sold (paper SELL requires it). Force-close the
+                                // just-opened position rather than leaving an
+                                // unsellable slot that blocks
+                                // max_concurrent_positions and spams EXIT
+                                // failures every few seconds.
                                 tracing::warn!(
                                     trade_uuid = %trade_uuid,
-                                    "outcome.token_amount is None — position will lack token_amount (blocks SELL)"
+                                    token = %signal.token_address(),
+                                    "outcome.token_amount is None after BUY — force-closing orphaned position to free slot"
                                 );
+                                if let Err(e) = self
+                                    .db
+                                    .force_close_orphan_position(
+                                        &trade_uuid,
+                                        "orphan_null_token_amount_buy",
+                                    )
+                                    .await
+                                {
+                                    tracing::error!(
+                                        error = %e,
+                                        trade_uuid = %trade_uuid,
+                                        "Failed to force-close orphaned position"
+                                    );
+                                }
+                                if let Some(ref registry) = self.state_registry {
+                                    let _ =
+                                        registry.update_position_state(&trade_uuid, "CLOSED");
+                                }
                             }
 
                             if let Some(ref ws) = self.ws_state {

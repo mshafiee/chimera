@@ -374,6 +374,14 @@ impl PositionSizer {
             }
         }
 
+        // Hard floor guarantee: the returned size can never fall below
+        // min_size_sol regardless of any earlier cap (strategy max, WQS
+        // micro-position cap, or multiplicative shrinkage). Sub-floor positions
+        // incur a fixed round-trip cost (~1.2% at 0.25 SOL) that turns marginal
+        // winners into net losses. Negative-EV signals are rejected earlier
+        // (Kelly zero-cap / dust checks) and never reach this point.
+        size = size.max(self.config.min_size_sol);
+
         size
     }
 

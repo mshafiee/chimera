@@ -138,6 +138,23 @@ pub trait Database: Send + Sync {
         realized_pnl_usd: rust_decimal::Decimal,
     ) -> AppResult<()>;
 
+    /// Force-close an orphaned ACTIVE position whose `token_amount` is NULL.
+    ///
+    /// Non-destructive: sets state=CLOSED, closed_at=NOW(), zero realized PnL,
+    /// and records the reason in `exit_tx_signature`. Idempotent — the SQL only
+    /// matches rows that are still ACTIVE with a NULL token_amount, so a
+    /// repeated call (or a row already resolved) is a safe no-op.
+    ///
+    /// Used by the signal-pipeline BUY path and the main startup/monitor sweep
+    /// to free `max_concurrent_positions` slots that would otherwise be
+    /// permanently blocked by unsellable positions (paper SELL requires
+    /// token_amount).
+    async fn force_close_orphan_position(
+        &self,
+        trade_uuid: &str,
+        reason: &str,
+    ) -> AppResult<()>;
+
     // ========================================================================
     // WALLET OPERATIONS
     // ========================================================================

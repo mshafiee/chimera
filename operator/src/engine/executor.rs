@@ -230,6 +230,30 @@ pub fn convert_fill_price(
     }
 }
 
+/// Derive a token base-unit amount from entry SOL and the SOL-per-token fill
+/// price: `token_amount = (entry_sol / fill_price_sol_per_token) * 10^decimals`.
+///
+/// Used as a fallback when a paper/devnet BUY quote returns a zero output
+/// amount, so the position always carries a usable `token_amount`. A NULL or
+/// zero `token_amount` blocks every paper SELL and orphans the slot. Returns
+/// `None` only when the fill price or decimals are unavailable/zero.
+pub fn derive_token_amount(
+    entry_amount_sol: Decimal,
+    fill_price_sol_per_token: Option<Decimal>,
+    token_decimals: Option<u8>,
+) -> Option<u64> {
+    let fp = fill_price_sol_per_token?;
+    if fp.is_zero() {
+        return None;
+    }
+    // Refuse to guess decimals (matches convert_fill_price): without them we
+    // cannot scale whole tokens to base units reliably.
+    let decimals = token_decimals?.min(18) as u32;
+    let scale = Decimal::from(10u64.pow(decimals));
+    let raw = (entry_amount_sol / fp) * scale;
+    raw.to_u64()
+}
+
 /// Mutable execution state — wrapped in a Mutex so `execute` can take `&self`,
 /// allowing the RwLock in Engine to be held as a read lock during the 60 s RPC call
 /// instead of a write lock that would serialise all concurrent executions.
@@ -3403,10 +3427,24 @@ impl Executor {
                     signal.token_decimals,
                     &signal.trade_uuid,
                 );
+                // Guarantee a usable token_amount for every successful paper BUY.
+                // Prefer the quote's actual output; if the quote returned 0 tokens
+                // (degenerate edge quote), derive base units from the entry SOL and
+                // the SOL-per-token fill price. A NULL/zero token_amount blocks
+                // every SELL and orphans the position slot.
+                let token_amount = if result.out_amount > 0 {
+                    Some(result.out_amount)
+                } else {
+                    derive_token_amount(
+                        signal.payload.amount_sol,
+                        fill_price_sol,
+                        signal.token_decimals,
+                    )
+                };
                 Ok((
                     result.price_impact_pct,
                     fill_price_sol,
-                    Some(result.out_amount),
+                    token_amount,
                     result.route_fee_sol,
                     None,
                 ))
@@ -3802,5 +3840,28 @@ mod tests {
     fn test_rpc_mode_debug() {
         assert_eq!(format!("{:?}", RpcMode::Jito), "Jito");
         assert_eq!(format!("{:?}", RpcMode::Standard), "Standard");
+    }
+
+    #[test]
+    fn test_derive_token_amount_scales_to_base_units() {
+        use rust_decimal_macros::dec;
+        // 0.25 SOL into a token priced at 0.001 SOL/token (9 decimals) = 250 tokens
+        // = 250 * 10^9 base units.
+        let amt = derive_token_amount(dec!(0.25), Some(dec!(0.001)), Some(9));
+        assert_eq!(amt, Some(250_000_000_000));
+
+        // Round numbers: 1 SOL @ 0.5 SOL/token, 6 decimals -> 2 tokens = 2_000_000.
+        let amt = derive_token_amount(dec!(1), Some(dec!(0.5)), Some(6));
+        assert_eq!(amt, Some(2_000_000));
+    }
+
+    #[test]
+    fn test_derive_token_amount_none_on_missing_or_zero() {
+        use rust_decimal_macros::dec;
+        // Missing fill price / decimals -> None (cannot derive safely).
+        assert_eq!(derive_token_amount(dec!(0.25), None, Some(9)), None);
+        assert_eq!(derive_token_amount(dec!(0.25), Some(dec!(0.001)), None), None);
+        // Zero fill price -> None (would divide by zero).
+        assert_eq!(derive_token_amount(dec!(0.25), Some(dec!(0)), Some(9)), None);
     }
 }

@@ -191,6 +191,54 @@ pub(crate) fn validate_jwt_secret(secret: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Detect and force-close orphaned ACTIVE positions whose `token_amount` is
+/// NULL and that are older than `min_age_secs`.
+///
+/// Such positions can never be sold (paper SELL requires `token_amount`) and
+/// permanently block a `max_concurrent_positions` slot while spamming
+/// unsellable EXIT signals every few seconds. The age guard gives a fresh
+/// BUY's token_amount persistence path time to settle before intervening.
+///
+/// Idempotent: the underlying UPDATE only matches rows that are still ACTIVE
+/// with a NULL token_amount. Safe to call at startup and periodically.
+async fn cleanup_orphaned_positions(db: &Arc<dyn db_abstraction::Database>, min_age_secs: i64) {
+    let now = Utc::now();
+    let positions = match db.get_active_positions().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "orphan-position sweep: get_active_positions failed");
+            return;
+        }
+    };
+    for pos in positions {
+        if pos.token_amount.is_some() {
+            continue;
+        }
+        let age = now.signed_duration_since(pos.opened_at);
+        if age.num_seconds() < min_age_secs {
+            continue;
+        }
+        tracing::warn!(
+            trade_uuid = %pos.trade_uuid,
+            token = %pos.token_address,
+            wallet = %pos.wallet_address,
+            opened_at = %pos.opened_at,
+            age_secs = age.num_seconds(),
+            "orphan-position sweep: force-closing ACTIVE position with NULL token_amount"
+        );
+        if let Err(e) = db
+            .force_close_orphan_position(&pos.trade_uuid, "orphan_null_token_amount_sweep")
+            .await
+        {
+            tracing::error!(
+                error = %e,
+                trade_uuid = %pos.trade_uuid,
+                "orphan-position sweep: force-close failed"
+            );
+        }
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -326,6 +374,11 @@ async fn main() -> anyhow::Result<()> {
     db_pool.run_migrations().await?;
     db_pool.startup_integrity_check().await?;
     db_pool.recover_executing_trades().await?;
+    // Reclaim slots held by orphaned ACTIVE positions (NULL token_amount) that
+    // block max_concurrent_positions and spam unsellable EXIT signals. Only
+    // closes positions older than 10 minutes so a fresh BUY's token_amount
+    // persistence path is not raced.
+    cleanup_orphaned_positions(&db_pool, 600).await;
     tracing::info!("Database initialized");
 
     // C1: Run-scoped evidence. Build the admission threshold config once, then
@@ -736,6 +789,8 @@ async fn main() -> anyhow::Result<()> {
                     ),
                     Err(e) => tracing::error!(error = %e, "Periodic EXECUTING cleanup failed"),
                 }
+                // Reclaim orphaned slots (NULL token_amount, >10 min old).
+                cleanup_orphaned_positions(&exec_cleanup_db, 600).await;
             }
         }));
     }

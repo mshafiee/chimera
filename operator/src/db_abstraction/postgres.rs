@@ -1855,6 +1855,37 @@ impl Database for PostgresBackend {
         Ok(())
     }
 
+    async fn force_close_orphan_position(
+        &self,
+        trade_uuid: &str,
+        reason: &str,
+    ) -> AppResult<()> {
+        // Guard on state='ACTIVE' AND token_amount IS NULL for idempotency:
+        // once closed (or once token_amount is populated) the row no longer
+        // matches, so this is safe to call repeatedly and from multiple paths.
+        // Non-destructive — sets state + timestamps + zero PnL, never deletes.
+        sqlx::query(
+            r#"
+            UPDATE positions
+            SET state = 'CLOSED',
+                closed_at = CURRENT_TIMESTAMP,
+                realized_pnl_sol = 0,
+                realized_pnl_usd = 0,
+                unrealized_pnl_sol = 0,
+                exit_tx_signature = $2
+            WHERE trade_uuid = $1
+              AND state = 'ACTIVE'
+              AND token_amount IS NULL
+            "#,
+        )
+        .bind(trade_uuid)
+        .bind(reason)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(())
+    }
+
     async fn revert_position_exit(&self, position_trade_uuid: &str) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
 
