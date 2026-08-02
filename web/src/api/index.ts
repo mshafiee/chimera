@@ -7,6 +7,7 @@ export { useConfig, useUpdateConfig, useResetCircuitBreaker, useTripCircuitBreak
 export { useDeadLetterQueue, useConfigAudit, retryDeadLetterItem } from './incidents'
 export { usePerformanceMetrics, useStrategyPerformance } from './metrics'
 export { useBalanceAndNAV } from './balance'
+export { useNavHistory } from './navHistory'
 
 // New API clients
 export {

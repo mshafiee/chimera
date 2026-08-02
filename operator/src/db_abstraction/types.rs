@@ -606,3 +606,20 @@ pub struct ExitTargetData {
     pub trailing_stop_price: rust_decimal::Decimal,
     pub remaining_fraction: rust_decimal::Decimal,
 }
+
+/// One point on the mark-to-market NAV / equity-curve time series.
+///
+/// `nav_sol = capital_sol + realized_pnl_sol + unrealized_pnl_sol` and is computed
+/// from the positions table (CLOSED realized, ACTIVE unrealized) so it matches the
+/// operator's own portfolio-risk / circuit-breaker accounting.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct PortfolioSnapshot {
+    pub recorded_at: chrono::DateTime<chrono::Utc>,
+    pub nav_sol: rust_decimal::Decimal,
+    pub capital_sol: rust_decimal::Decimal,
+    pub realized_pnl_sol: rust_decimal::Decimal,
+    pub unrealized_pnl_sol: rust_decimal::Decimal,
+    pub open_positions: i32,
+    pub sol_price_usd: Option<rust_decimal::Decimal>,
+    pub trade_mode: Option<String>,
+}

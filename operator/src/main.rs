@@ -2166,6 +2166,15 @@ async fn main() -> anyhow::Result<()> {
         profitability_verdict: verdict_cache.clone(),
     });
 
+    // Spawn the periodic mark-to-market NAV snapshot writer (dashboard equity curve).
+    chimera_operator::monitoring::nav_snapshot::spawn_nav_snapshot_task(
+        api_state.db.clone(),
+        api_state.config.clone(),
+        price_cache.clone(),
+        config.trade_mode.to_string(),
+        cancel_token.clone(),
+    );
+
     // Run startup webhook management check
     // This ensures all ACTIVE wallets have registered webhooks before server starts
     if config
@@ -2351,6 +2360,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/risk/portfolio",
             get(chimera_operator::handlers::get_portfolio_risk),
+        )
+        .route(
+            "/portfolio/nav-history",
+            get(chimera_operator::handlers::get_nav_history),
         )
         .route(
             "/risk/stop-loss",

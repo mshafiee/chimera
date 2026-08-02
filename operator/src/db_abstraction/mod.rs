@@ -283,6 +283,27 @@ pub trait Database: Send + Sync {
     /// Get cumulative realized PnL (all-time, from CLOSED positions)
     async fn get_total_realized_pnl(&self) -> AppResult<rust_decimal::Decimal>;
 
+    /// Record one mark-to-market NAV snapshot (equity-curve point).
+    async fn record_portfolio_snapshot(
+        &self,
+        nav_sol: rust_decimal::Decimal,
+        capital_sol: rust_decimal::Decimal,
+        realized_pnl_sol: rust_decimal::Decimal,
+        unrealized_pnl_sol: rust_decimal::Decimal,
+        open_positions: i32,
+        sol_price_usd: Option<rust_decimal::Decimal>,
+        trade_mode: Option<String>,
+    ) -> AppResult<()>;
+
+    /// Read the NAV time series for the last `days` days (oldest first).
+    async fn get_portfolio_nav_history(
+        &self,
+        days: u32,
+    ) -> AppResult<Vec<crate::db_abstraction::types::PortfolioSnapshot>>;
+
+    /// Delete NAV snapshots older than `days` days. Returns rows deleted.
+    async fn delete_portfolio_snapshots_before(&self, days: i32) -> AppResult<u64>;
+
     /// Get total capital deployed (sum of entry_amount_sol for CLOSED positions) in the last 30 days
     async fn get_capital_deployed_30d(&self) -> AppResult<rust_decimal::Decimal>;
 

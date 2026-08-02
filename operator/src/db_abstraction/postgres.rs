@@ -1136,6 +1136,68 @@ impl Database for PostgresBackend {
         Ok(total)
     }
 
+    async fn record_portfolio_snapshot(
+        &self,
+        nav_sol: Decimal,
+        capital_sol: Decimal,
+        realized_pnl_sol: Decimal,
+        unrealized_pnl_sol: Decimal,
+        open_positions: i32,
+        sol_price_usd: Option<Decimal>,
+        trade_mode: Option<String>,
+    ) -> AppResult<()> {
+        sqlx::query(
+            r#"INSERT INTO portfolio_snapshots
+                 (nav_sol, capital_sol, realized_pnl_sol, unrealized_pnl_sol,
+                  open_positions, sol_price_usd, trade_mode)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+        )
+        .bind(nav_sol)
+        .bind(capital_sol)
+        .bind(realized_pnl_sol)
+        .bind(unrealized_pnl_sol)
+        .bind(open_positions)
+        .bind(sol_price_usd)
+        .bind(trade_mode)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(())
+    }
+
+    async fn get_portfolio_nav_history(
+        &self,
+        days: u32,
+    ) -> AppResult<Vec<crate::db_abstraction::types::PortfolioSnapshot>> {
+        let rows: Vec<crate::db_abstraction::types::PortfolioSnapshot> = sqlx::query_as::<
+            _,
+            crate::db_abstraction::types::PortfolioSnapshot,
+        >(
+            r#"SELECT recorded_at, nav_sol, capital_sol, realized_pnl_sol,
+                      unrealized_pnl_sol, open_positions, sol_price_usd, trade_mode
+               FROM portfolio_snapshots
+               WHERE recorded_at >= NOW() - INTERVAL '1 day' * $1
+               ORDER BY recorded_at ASC"#,
+        )
+        .bind(days as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(rows)
+    }
+
+    async fn delete_portfolio_snapshots_before(&self, days: i32) -> AppResult<u64> {
+        let res = sqlx::query(
+            r#"DELETE FROM portfolio_snapshots
+               WHERE recorded_at < NOW() - INTERVAL '1 day' * $1"#,
+        )
+        .bind(days)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(res.rows_affected())
+    }
+
     async fn get_capital_deployed_30d(&self) -> AppResult<Decimal> {
         let total: Decimal = sqlx::query_scalar::<_, Decimal>(
             r#"SELECT COALESCE(SUM(entry_amount_sol), 0.0) FROM positions

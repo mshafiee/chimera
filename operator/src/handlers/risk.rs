@@ -848,6 +848,71 @@ pub async fn get_portfolio_risk(
     }))
 }
 
+// =============================================================================
+// NAV / EQUITY-CURVE HISTORY
+// =============================================================================
+
+/// One point on the mark-to-market NAV (equity) curve.
+#[derive(Debug, Serialize)]
+pub struct NavHistoryPoint {
+    /// ISO-8601 timestamp.
+    pub recorded_at: String,
+    /// Mark-to-market NAV = capital + realized + unrealized (SOL).
+    pub nav_sol: f64,
+    /// Configured total capital at snapshot time (SOL).
+    pub capital_sol: f64,
+    /// Cumulative realized PnL from CLOSED positions (SOL).
+    pub realized_pnl_sol: f64,
+    /// Unrealized PnL of ACTIVE positions at snapshot time (SOL).
+    pub unrealized_pnl_sol: f64,
+    /// Number of open (ACTIVE/EXITING) positions at snapshot time.
+    pub open_positions: i32,
+}
+
+/// Response for `GET /api/v1/portfolio/nav-history`.
+#[derive(Debug, Serialize)]
+pub struct NavHistoryResponse {
+    pub points: Vec<NavHistoryPoint>,
+    /// Most recent NAV (SOL), if any snapshots exist.
+    pub latest_nav_sol: Option<f64>,
+    /// Most recent unrealized PnL (SOL), if any snapshots exist.
+    pub latest_unrealized_pnl_sol: Option<f64>,
+}
+
+/// `GET /api/v1/portfolio/nav-history?days=30`
+///
+/// Returns the mark-to-market NAV time series for the dashboard equity curve.
+pub async fn get_nav_history(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<TimeRangeQuery>,
+) -> Result<Json<NavHistoryResponse>, AppError> {
+    let days = query.days.max(1);
+    let rows = state
+        .db
+        .get_portfolio_nav_history(days)
+        .await
+        .unwrap_or_default();
+
+    let points: Vec<NavHistoryPoint> = rows
+        .iter()
+        .map(|r| NavHistoryPoint {
+            recorded_at: r.recorded_at.to_rfc3339(),
+            nav_sol: r.nav_sol.to_f64().unwrap_or(0.0),
+            capital_sol: r.capital_sol.to_f64().unwrap_or(0.0),
+            realized_pnl_sol: r.realized_pnl_sol.to_f64().unwrap_or(0.0),
+            unrealized_pnl_sol: r.unrealized_pnl_sol.to_f64().unwrap_or(0.0),
+            open_positions: r.open_positions,
+        })
+        .collect();
+
+    let latest = points.last();
+    Ok(Json(NavHistoryResponse {
+        latest_nav_sol: latest.map(|p| p.nav_sol),
+        latest_unrealized_pnl_sol: latest.map(|p| p.unrealized_pnl_sol),
+        points,
+    }))
+}
+
 /// Get stop loss metrics
 ///
 /// GET /api/v1/risk/stop-loss?days=30

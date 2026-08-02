@@ -8,6 +8,7 @@ pub mod dexscreener;
 pub mod helius;
 pub mod helius_wss;
 pub mod helius_wss_health;
+pub mod nav_snapshot;
 pub mod helius_wss_subscription;
 pub mod polling_task;
 pub mod pre_validator;

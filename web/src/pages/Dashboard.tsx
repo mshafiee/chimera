@@ -4,6 +4,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '../components/ui/Card'
 import { Badge, StrategyBadge, StatusBadge } from '../components/ui/Badge'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '../components/ui/Table'
 import { PnLChart } from '../components/charts/PnLChart'
+import { NavChart } from '../components/charts/NavChart'
 import { useHealth, usePositions, useWallets } from '../api'
 import { useCostMetrics, usePerformanceMetrics, useStrategyPerformance } from '../api/metrics'
 import { useTrades } from '../api/trades'
@@ -13,7 +14,7 @@ import { useWebSocket } from '../hooks/useWebSocket'
 import { useAuthStore } from '../stores/authStore'
 import { toast } from '../components/ui/Toast'
 import { MetricCard } from '../components/ui/MetricCard'
-import { usePortfolioRisk, useRPCLatency, useCostAnalysis, useBalanceAndNAV } from '../api'
+import { usePortfolioRisk, useRPCLatency, useCostAnalysis, useBalanceAndNAV, useNavHistory } from '../api'
 import { ApiErrorBanner } from '../components/ui/ApiErrorBanner'
 import { CostBreakdownChart } from '../components/dashboard/CostBreakdownChart'
 import { WalletAttribution } from '../components/dashboard/WalletAttribution'
@@ -45,6 +46,24 @@ export function Dashboard() {
     return d.toISOString()
   }, [])
   const { data: tradesData } = useTrades({ from: thirtyDaysAgo, status: 'CLOSED', limit: 1000 })
+
+  // Mark-to-market NAV history (equity curve) — reflects paper performance
+  const { data: navHistoryData, isLoading: navHistoryLoading } = useNavHistory(30)
+  const startCapital = navHistoryData?.points?.[0]?.capital_sol
+  const navChartData = useMemo(() => {
+    if (!navHistoryData?.points?.length) return []
+    return navHistoryData.points.map((p) => ({
+      time: new Date(p.recorded_at).toLocaleString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+      nav: Number(p.nav_sol),
+      capital: Number(p.capital_sol),
+    }))
+  }, [navHistoryData])
+
   
   // WebSocket for real-time updates
   const userToken = useAuthStore(state => state.user?.token)
@@ -261,13 +280,14 @@ export function Dashboard() {
               </span>
             </div>
 
-            {/* NAV - computed from balance and unrealized PnL */}
+            {/* NAV — prefer the mark-to-market snapshot (capital + realized + unrealized),
+                which reflects paper-performance; fall back to balance + unrealized. */}
             <div className="hidden sm:flex items-center gap-2 text-xs md:text-sm">
               <span className="text-text-muted">NAV:</span>
               <span className={`font-mono-numbers font-semibold ${
                 balanceLoading ? 'text-text-muted' : 'text-text'
               }`}>
-                {balanceLoading ? '...' : `${nav.toFixed(4)} SOL`}
+                {balanceLoading ? '...' : `${(navHistoryData?.latest_nav_sol ?? nav).toFixed(4)} SOL`}
               </span>
             </div>
           </div>
@@ -363,6 +383,26 @@ export function Dashboard() {
           ) : (
             <div className="h-[200px] flex items-center justify-center text-text-muted text-sm">
               No trade history available
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* NAV / Equity Curve (mark-to-market: capital + realized + unrealized) */}
+      <Card>
+        <CardHeader>
+          <CardTitle>NAV (Equity Curve, 30d)</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {navHistoryLoading ? (
+            <div className="h-[200px] flex items-center justify-center text-text-muted text-sm">
+              Loading NAV history…
+            </div>
+          ) : navChartData.length > 0 ? (
+            <NavChart data={navChartData} startCapital={startCapital} />
+          ) : (
+            <div className="h-[200px] flex items-center justify-center text-text-muted text-sm">
+              Collecting NAV data — the equity curve appears after the first snapshot.
             </div>
           )}
         </CardContent>

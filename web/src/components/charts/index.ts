@@ -1,4 +1,5 @@
 export { PnLChart } from './PnLChart'
+export { NavChart } from './NavChart'
 export { PortfolioHeatChart } from './PortfolioHeatChart'
 export { ConcentrationRiskChart } from './ConcentrationRiskChart'
 export { DrawdownChart } from './DrawdownChart'
