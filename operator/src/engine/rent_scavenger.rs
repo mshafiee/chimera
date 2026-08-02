@@ -280,29 +280,28 @@ impl RentScavenger {
         
         for keyed_account in accounts {
             if let UiAccountData::Json(parsed) = keyed_account.account.data {
-                if let Some(token_account) = parsed.parsed.get("tokenAmount") {
+                // jsonParsed token accounts nest under `parsed.parsed.info`:
+                //   info = { tokenAmount: { amount, ... }, delegate, delegatedAmount: { amount, ... }, ... }
+                if let Some(info) = parsed.parsed.get("info") {
                     if let (Some(amount_str), Some(delegated_amount)) = (
-                        token_account.get("amount").and_then(|a| a.as_str()),
-                        token_account.get("delegatedAmount").and_then(|d| d.get("amount")).and_then(|a| a.as_str()),
+                        info.get("tokenAmount").and_then(|t| t.get("amount")).and_then(|a| a.as_str()),
+                        info.get("delegatedAmount").and_then(|d| d.get("amount")).and_then(|a| a.as_str()),
                     ) {
                         // Check if balance is zero and no delegated amount
                         if amount_str == "0" && delegated_amount == "0" {
-                            // Parse the token account structure to check for delegate
-                            if let Some(info) = parsed.parsed.get("info") {
-                                let has_delegate = info
-                                    .get("delegate")
-                                    .and_then(|d| d.as_str())
-                                    .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
-                                    .unwrap_or(false);
+                            let has_delegate = info
+                                .get("delegate")
+                                .and_then(|d| d.as_str())
+                                .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
+                                .unwrap_or(false);
 
-                                if !has_delegate {
-                                    if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
-                                        let rent = rpc_client
-                                            .get_minimum_balance_for_rent_exemption(165)
-                                            .unwrap_or(2_040_000); // Default to ~0.002 SOL
+                            if !has_delegate {
+                                if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
+                                    let rent = rpc_client
+                                        .get_minimum_balance_for_rent_exemption(165)
+                                        .unwrap_or(2_040_000); // Default to ~0.002 SOL
 
-                                        empty_accounts.push((account_pubkey, rent));
-                                    }
+                                    empty_accounts.push((account_pubkey, rent));
                                 }
                             }
                         }
@@ -392,23 +391,23 @@ impl RentScavenger {
         
         for keyed_account in current_accounts {
             if let UiAccountData::Json(parsed) = keyed_account.account.data {
-                if let Some(token_account) = parsed.parsed.get("tokenAmount") {
+                // jsonParsed token accounts nest under `parsed.parsed.info`:
+                //   info = { tokenAmount: { amount, ... }, delegate, delegatedAmount: { amount, ... }, ... }
+                if let Some(info) = parsed.parsed.get("info") {
                     if let (Some(amount_str), Some(delegated_amount)) = (
-                        token_account.get("amount").and_then(|a| a.as_str()),
-                        token_account.get("delegatedAmount").and_then(|d| d.get("amount")).and_then(|a| a.as_str()),
+                        info.get("tokenAmount").and_then(|t| t.get("amount")).and_then(|a| a.as_str()),
+                        info.get("delegatedAmount").and_then(|d| d.get("amount")).and_then(|a| a.as_str()),
                     ) {
                         if amount_str == "0" && delegated_amount == "0" {
-                            if let Some(info) = parsed.parsed.get("info") {
-                                let has_delegate = info
-                                    .get("delegate")
-                                    .and_then(|d| d.as_str())
-                                    .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
-                                    .unwrap_or(false);
+                            let has_delegate = info
+                                .get("delegate")
+                                .and_then(|d| d.as_str())
+                                .map(|s| !s.is_empty() && s != "11111111111111111111111111111111")
+                                .unwrap_or(false);
 
-                                if !has_delegate {
-                                    if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
-                                        current_empty.insert(account_pubkey);
-                                    }
+                            if !has_delegate {
+                                if let Ok(account_pubkey) = keyed_account.pubkey.parse::<Pubkey>() {
+                                    current_empty.insert(account_pubkey);
                                 }
                             }
                         }

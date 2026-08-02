@@ -115,15 +115,16 @@ reconcile() {
         return 0
     fi
     
-    # Process each position
-    echo "$positions" | jq -c '.[]' | while read -r position; do
+    # Process each position (process substitution so counter increments
+    # survive into the current shell — a pipe would run the loop in a subshell)
+    while read -r position; do
         local trade_uuid=$(echo "$position" | jq -r '.trade_uuid')
         local entry_sig=$(echo "$position" | jq -r '.entry_tx_signature')
         local exit_sig=$(echo "$position" | jq -r '.exit_tx_signature // empty')
         local expected_amount=$(echo "$position" | jq -r '.entry_amount_sol')
         local state=$(echo "$position" | jq -r '.state')
         
-        ((total_checked++))
+        ((total_checked += 1))
         
         log "DEBUG" "Checking position: $trade_uuid (state: $state)"
         
@@ -133,7 +134,7 @@ reconcile() {
             
             if [[ "$entry_status" == "MISSING" ]]; then
                 log "WARNING" "Entry TX missing for $trade_uuid: $entry_sig"
-                ((discrepancies_found++))
+                ((discrepancies_found += 1))
                 
                 # Log to reconciliation table
                 sqlite3 "$DB_PATH" "
@@ -154,7 +155,7 @@ reconcile() {
             if [[ "$exit_status" == "FOUND" ]]; then
                 # Transaction confirmed but DB still shows EXITING - auto-resolve
                 log "INFO" "Auto-resolving: $trade_uuid exit confirmed on-chain"
-                ((auto_resolved++))
+                ((auto_resolved += 1))
                 
                 sqlite3 "$DB_PATH" "
                     UPDATE positions SET state = 'CLOSED', closed_at = datetime('now') 
@@ -172,7 +173,7 @@ reconcile() {
                 "
             elif [[ "$exit_status" == "MISSING" ]]; then
                 log "WARNING" "Exit TX missing for $trade_uuid: $exit_sig"
-                ((discrepancies_found++))
+                ((discrepancies_found += 1))
                 
                 sqlite3 "$DB_PATH" "
                     INSERT INTO reconciliation_log 
@@ -187,7 +188,7 @@ reconcile() {
         
         # Rate limit to avoid RPC throttling
         sleep 0.2
-    done
+    done < <(echo "$positions" | jq -c '.[]')
     
     # Check for unresolved discrepancies
     local unresolved_count

@@ -352,31 +352,6 @@ async def metrics():
     """Prometheus metrics endpoint"""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-@app.get("/geoip/{ip_address}", response_model=GeoIPResponse)
-async def get_geoip(ip_address: str):
-    """Get GeoIP information for an IP address"""
-    try:
-        # Basic IP validation
-        if not ip_address or len(ip_address) < 7:
-            raise HTTPException(status_code=400, detail="Invalid IP address")
-
-        # Perform lookup
-        result = await perform_geoip_lookup(ip_address)
-
-        return GeoIPResponse(
-            status="success",
-            data=GeoIPInfo(**result)
-        )
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error processing GeoIP request: {e}")
-        return GeoIPResponse(
-            status="error",
-            error=str(e)
-        )
-
 @app.get("/geoip/batch", response_model=Dict[str, Any])
 async def get_batch_geoip(ip_addresses: str):
     """Get GeoIP information for multiple IP addresses (comma-separated)"""
@@ -497,6 +472,35 @@ async def evaluate_policy(ip_address: str, policy_type: str = "default"):
     except Exception as e:
         logger.error(f"Error evaluating policy: {e}")
         return PolicyResponse(
+            status="error",
+            error=str(e)
+        )
+
+@app.get("/geoip/{ip_address}", response_model=GeoIPResponse)
+async def get_geoip(ip_address: str):
+    """Get GeoIP information for an IP address.
+
+    Declared AFTER the more specific /geoip/batch and /geoip/evaluate/{ip_address}
+    routes so FastAPI's path matching does not shadow them with this dynamic path.
+    """
+    try:
+        # Basic IP validation
+        if not ip_address or len(ip_address) < 7:
+            raise HTTPException(status_code=400, detail="Invalid IP address")
+
+        # Perform lookup
+        result = await perform_geoip_lookup(ip_address)
+
+        return GeoIPResponse(
+            status="success",
+            data=GeoIPInfo(**result)
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing GeoIP request: {e}")
+        return GeoIPResponse(
             status="error",
             error=str(e)
         )

@@ -52,7 +52,7 @@ async fn insert_closed_trade_with_pnl(pool: &Pool<Postgres>, uuid: &str, pnl_usd
     sqlx::query(
         "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, \
          amount_sol, status, pnl_usd, created_at, updated_at) \
-         VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+         VALUES ($1, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
     )
     .bind(uuid)
     .bind(pnl_usd)
@@ -65,9 +65,10 @@ async fn insert_closed_trade_with_pnl(pool: &Pool<Postgres>, uuid: &str, pnl_usd
 async fn insert_closed_position_with_pnl(pool: &Pool<Postgres>, trade_uuid: &str, pnl_sol: f64) {
     // Insert backing trade
     sqlx::query(
-        "INSERT OR IGNORE INTO trades \
+        "INSERT INTO trades \
          (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-         VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')",
+         VALUES ($1, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED') \
+         ON CONFLICT (trade_uuid) DO NOTHING",
     )
     .bind(trade_uuid)
     .execute(pool)
@@ -78,7 +79,7 @@ async fn insert_closed_position_with_pnl(pool: &Pool<Postgres>, trade_uuid: &str
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
           entry_tx_signature, state, realized_pnl_sol, realized_pnl_usd, closed_at) \
-         VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', ?, ?, CURRENT_TIMESTAMP)",
+         VALUES ($1, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', $2, $3, CURRENT_TIMESTAMP)",
     )
     .bind(trade_uuid)
     .bind(pnl_sol)
@@ -361,7 +362,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
         let ts = format!("2026-01-01 00:00:{:02}", i);
         sqlx::query(
             "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-             VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
+             VALUES ($1, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
         )
         .bind(format!("uuid-hist-{}", i))
         .execute(&pool).await.unwrap();
@@ -370,7 +371,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
             "INSERT INTO positions \
              (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
               entry_tx_signature, state, realized_pnl_sol, closed_at) \
-             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 100.0, ?)",
+              VALUES ($1, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 100.0, $2)",
         )
         .bind(format!("uuid-hist-{}", i))
         .bind(&ts)
@@ -384,7 +385,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
         let ts = format!("2026-01-01 00:01:{:02}", i);
         sqlx::query(
             "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-             VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
+             VALUES ($1, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
         )
         .bind(format!("uuid-dd-{}", i))
         .execute(&pool).await.unwrap();
@@ -393,7 +394,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
             "INSERT INTO positions \
              (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
               entry_tx_signature, state, realized_pnl_sol, closed_at) \
-             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', -100.0, ?)",
+              VALUES ($1, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', -100.0, $2)",
         )
         .bind(format!("uuid-dd-{}", i))
         .bind(&ts)
@@ -407,7 +408,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
         let ts = format!("2026-01-01 00:02:{:02}", i);
         sqlx::query(
             "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-             VALUES (?, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
+             VALUES ($1, 'w', 't', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
         )
         .bind(format!("uuid-rec-{}", i))
         .execute(&pool).await.unwrap();
@@ -416,7 +417,7 @@ async fn test_drawdown_from_all_time_peak_not_session_peak() {
             "INSERT INTO positions \
              (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
               entry_tx_signature, state, realized_pnl_sol, closed_at) \
-             VALUES (?, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 25.0, ?)",
+              VALUES ($1, 'w', 't', 'SHIELD', 1.0, 1.0, 'sig', 'CLOSED', 25.0, $2)",
         )
         .bind(format!("uuid-rec-{}", i))
         .bind(&ts)

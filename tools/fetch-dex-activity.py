@@ -6,12 +6,15 @@ Focuses on actual DEX program activity rather than specific wallets.
 
 import requests
 import json
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 import random
 
-HELIUS_API_KEY = "609cb910-17a5-4a76-9d1b-2ca9c42f759e"
+HELIUS_API_KEY = os.environ.get("HELIUS_API_KEY")
+if not HELIUS_API_KEY:
+    raise RuntimeError("HELIUS_API_KEY environment variable is required")
 BASE_URL = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
 
 # Real DEX program addresses

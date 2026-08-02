@@ -130,7 +130,7 @@ class RealtimeProfitTracker:
     def __init__(self, config: Optional[TrackerConfig] = None):
         """Initialize the profit tracker."""
         self._config = config or TrackerConfig()
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Current capital state
         self._current_capital = self._config.STARTING_CAPITAL

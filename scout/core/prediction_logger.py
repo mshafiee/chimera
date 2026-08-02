@@ -214,11 +214,11 @@ class PredictionLogger:
         Returns:
             Prediction ID if successful, None otherwise
         """
+        now = datetime.utcnow().isoformat()
+        conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-
-            now = datetime.utcnow().isoformat()
 
             self._exec(cursor, 
                 """
@@ -249,7 +249,6 @@ class PredictionLogger:
             row = cursor.fetchone()
             prediction_id = row["id"] if row else None
             conn.commit()
-            conn.close()
 
             logger.debug(f"Logged prediction {prediction_id} for {wallet_address} using {model_type}")
             return prediction_id
@@ -265,6 +264,9 @@ class PredictionLogger:
                 return None
             logger.error(f"Failed to log prediction: {e}")
             return None
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_pending_predictions(
         self,
@@ -283,6 +285,7 @@ class PredictionLogger:
         Returns:
             List of pending prediction records
         """
+        conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -313,12 +316,14 @@ class PredictionLogger:
             for row in cursor.fetchall():
                 records.append(PredictionRecord(**dict(row)))
 
-            conn.close()
             return records
 
         except Exception as e:
             logger.error(f"Failed to get pending predictions: {e}")
             return []
+        finally:
+            if conn is not None:
+                conn.close()
 
     def mark_matched(
         self,
@@ -339,6 +344,7 @@ class PredictionLogger:
         Returns:
             True if successful, False otherwise
         """
+        conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -352,7 +358,6 @@ class PredictionLogger:
 
             if not row:
                 logger.warning(f"Prediction {prediction_id} not found")
-                conn.close()
                 return False
 
             pred_timestamp = datetime.fromisoformat(row['prediction_timestamp'])
@@ -385,7 +390,6 @@ class PredictionLogger:
             )
 
             conn.commit()
-            conn.close()
 
             logger.debug(f"Marked prediction {prediction_id} as matched")
             return True
@@ -393,6 +397,9 @@ class PredictionLogger:
         except Exception as e:
             logger.error(f"Failed to mark prediction as matched: {e}")
             return False
+        finally:
+            if conn is not None:
+                conn.close()
 
     def mark_matched_by_address(
         self,
@@ -417,6 +424,7 @@ class PredictionLogger:
         Returns:
             Number of predictions updated
         """
+        conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -455,7 +463,6 @@ class PredictionLogger:
 
             updated_count = cursor.rowcount
             conn.commit()
-            conn.close()
 
             logger.debug(f"Marked {updated_count} predictions for {wallet_address} as matched")
             return updated_count
@@ -463,6 +470,9 @@ class PredictionLogger:
         except Exception as e:
             logger.error(f"Failed to mark predictions as matched by address: {e}")
             return 0
+        finally:
+            if conn is not None:
+                conn.close()
 
     def mark_expired(self, max_age_days: Optional[int] = None) -> int:
         """
@@ -474,6 +484,7 @@ class PredictionLogger:
         Returns:
             Number of predictions marked as expired
         """
+        conn = None
         try:
             if max_age_days is None:
                 max_age_days = self.auto_expire_days
@@ -496,7 +507,6 @@ class PredictionLogger:
 
             expired_count = cursor.rowcount
             conn.commit()
-            conn.close()
 
             logger.info(f"Marked {expired_count} predictions as expired (>{max_age_days} days old)")
             return expired_count
@@ -504,6 +514,9 @@ class PredictionLogger:
         except Exception as e:
             logger.error(f"Failed to mark predictions as expired: {e}")
             return 0
+        finally:
+            if conn is not None:
+                conn.close()
 
     def get_statistics(self) -> Dict[str, Any]:
         """
@@ -512,6 +525,7 @@ class PredictionLogger:
         Returns:
             Dictionary with prediction statistics
         """
+        conn = None
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -557,8 +571,6 @@ class PredictionLogger:
 
             matched_stats = cursor.fetchone()
 
-            conn.close()
-
             return {
                 'total_predictions': total,
                 'by_status': status_counts,
@@ -574,6 +586,9 @@ class PredictionLogger:
         except Exception as e:
             logger.error(f"Failed to get statistics: {e}")
             return {}
+        finally:
+            if conn is not None:
+                conn.close()
 
     def cleanup_old_records(self, keep_days: int = 180) -> int:
         """
@@ -585,6 +600,7 @@ class PredictionLogger:
         Returns:
             Number of records deleted
         """
+        conn = None
         try:
             threshold = (datetime.utcnow() - timedelta(days=keep_days)).isoformat()
 
@@ -602,7 +618,6 @@ class PredictionLogger:
 
             deleted_count = cursor.rowcount
             conn.commit()
-            conn.close()
 
             logger.info(f"Cleaned up {deleted_count} old prediction records")
             return deleted_count
@@ -610,6 +625,9 @@ class PredictionLogger:
         except Exception as e:
             logger.error(f"Failed to cleanup old records: {e}")
             return 0
+        finally:
+            if conn is not None:
+                conn.close()
 
 
 # Global instance

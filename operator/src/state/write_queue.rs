@@ -241,56 +241,48 @@ impl AsyncWriteQueue {
     ) {
         let mut batch_buffer: Vec<WriteOperation> = Vec::with_capacity(batch_config.max_batch_size);
         let mut last_batch_time = Instant::now();
-        let _shutdown_rx = shutdown.notified();
 
         info!("Worker {} started", worker_id);
 
-        // Create a timeout for periodic shutdown checks
-        let mut shutdown_interval = tokio::time::interval(Duration::from_secs(1));
-        shutdown_interval.tick().await; // Skip first tick
-
         loop {
-            // Try to receive with a timeout
-            let recv_result = tokio::time::timeout(
-                Duration::from_secs(1),
-                Self::receive_operation(&rx)
-            ).await;
-
-            match recv_result {
-                Ok(Some(operation)) => {
-                    batch_buffer.push(operation);
-                    metrics.current_queue_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-
-                    // Check if we should flush the batch
-                    let elapsed = last_batch_time.elapsed();
-                    let should_flush = batch_buffer.len() >= batch_config.max_batch_size
-                        || elapsed >= Duration::from_millis(batch_config.batch_window_ms);
-
-                    if should_flush {
-                        debug!("Worker {} processing batch of {} operations", worker_id, batch_buffer.len());
-                        Self::process_batch(&batch_buffer, &db, &retry_config, &metrics).await;
-                        batch_buffer.clear();
-                        last_batch_time = Instant::now();
-                    }
-                }
-                Ok(None) => {
-                    // Channel closed - flush and exit
+            tokio::select! {
+                biased;
+                _ = shutdown.notified() => {
+                    // Shutdown signaled - flush any remaining batch and exit
                     if !batch_buffer.is_empty() {
-                        Self::process_batch(&batch_buffer, &db, &retry_config, &metrics).await;
-                    }
-                    info!("Worker {} channel closed, exiting", worker_id);
-                    break;
-                }
-                Err(_) => {
-                    // Timeout - check for shutdown signal
-                    shutdown.notified().await;
-                    // Flush remaining batch
-                    if !batch_buffer.is_empty() {
-                        debug!("Worker {} flushing final batch of {} operations", worker_id, batch_buffer.len());
+                        debug!("Worker {} flushing final batch of {} operations on shutdown", worker_id, batch_buffer.len());
                         Self::process_batch(&batch_buffer, &db, &retry_config, &metrics).await;
                     }
                     info!("Worker {} shutting down", worker_id);
                     break;
+                }
+                recv = Self::receive_operation(&rx) => {
+                    match recv {
+                        Some(operation) => {
+                            batch_buffer.push(operation);
+                            metrics.current_queue_depth.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+
+                            // Check if we should flush the batch
+                            let elapsed = last_batch_time.elapsed();
+                            let should_flush = batch_buffer.len() >= batch_config.max_batch_size
+                                || elapsed >= Duration::from_millis(batch_config.batch_window_ms);
+
+                            if should_flush {
+                                debug!("Worker {} processing batch of {} operations", worker_id, batch_buffer.len());
+                                Self::process_batch(&batch_buffer, &db, &retry_config, &metrics).await;
+                                batch_buffer.clear();
+                                last_batch_time = Instant::now();
+                            }
+                        }
+                        None => {
+                            // Channel closed - flush and exit
+                            if !batch_buffer.is_empty() {
+                                Self::process_batch(&batch_buffer, &db, &retry_config, &metrics).await;
+                            }
+                            info!("Worker {} channel closed, exiting", worker_id);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -415,9 +407,21 @@ impl AsyncWriteQueue {
                     }).await
                 }
 
-                WriteOperation::UpsertWallet { .. } => {
-                    // Placeholder - would need DB method implementation
-                    Ok(())
+                WriteOperation::UpsertWallet { address, status, wqs_score, win_rate } => {
+                    match db.upsert_wallet(
+                        address,
+                        *wqs_score,
+                        None,
+                        None,
+                        None,
+                        *win_rate,
+                        None,
+                        None,
+                        None,
+                    ).await {
+                        Ok(_) => db.update_wallet_status_ext(address, status, None, None).await.map(|_| ()),
+                        Err(e) => Err(e),
+                    }
                 }
             };
 

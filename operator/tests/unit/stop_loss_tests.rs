@@ -59,7 +59,7 @@ fn config_with_hard_stop(hard_stop_positive: &str) -> Arc<ProfitManagementConfig
 async fn insert_wallet(pool: &Pool<Postgres>, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
-         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+         VALUES ($1, 'ACTIVE', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(address)
     .bind(wqs)
@@ -73,7 +73,7 @@ async fn insert_consensus_signal(pool: &Pool<Postgres>, token: &str, wallet: &st
     sqlx::query(
         "INSERT INTO signal_aggregation \
          (token_address, wallet_address, direction, amount_sol, created_at) \
-         VALUES (?, ?, 'BUY', 1.0, CURRENT_TIMESTAMP)",
+         VALUES ($1, $2, 'BUY', 1.0, CURRENT_TIMESTAMP)",
     )
     .bind(token)
     .bind(wallet)
@@ -97,7 +97,7 @@ async fn insert_closed_position(
     // Entry BUY trade (FK anchor for position)
     sqlx::query(
         "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-         VALUES (?, ?, ?, 'SHIELD', 'BUY', ?, 'CLOSED')"
+         VALUES ($1, $2, $3, 'SHIELD', 'BUY', $4, 'CLOSED')"
     )
     .bind(trade_uuid)
     .bind(wallet)
@@ -112,7 +112,7 @@ async fn insert_closed_position(
     sqlx::query(
         "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, \
          status, net_pnl_sol, updated_at) \
-         VALUES (?, ?, ?, 'SHIELD', 'SELL', ?, 'CLOSED', ?, CURRENT_TIMESTAMP)"
+         VALUES ($1, $2, $3, 'SHIELD', 'SELL', $4, 'CLOSED', $5, CURRENT_TIMESTAMP)"
     )
     .bind(&exit_uuid)
     .bind(wallet)
@@ -127,7 +127,7 @@ async fn insert_closed_position(
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
           entry_tx_signature, state, realized_pnl_sol, closed_at) \
-         VALUES (?, ?, ?, 'SHIELD', ?, 1.0, 'sig', 'CLOSED', ?, CURRENT_TIMESTAMP)",
+         VALUES ($1, $2, $3, 'SHIELD', $4, 1.0, 'sig', 'CLOSED', $5, CURRENT_TIMESTAMP)",
     )
     .bind(trade_uuid)
     .bind(wallet)
@@ -150,7 +150,7 @@ async fn insert_active_position(
 ) {
     sqlx::query(
         "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-         VALUES (?, ?, ?, 'SHIELD', 'BUY', ?, 'ACTIVE')"
+         VALUES ($1, $2, $3, 'SHIELD', 'BUY', $4, 'ACTIVE')"
     )
     .bind(trade_uuid)
     .bind(wallet)
@@ -164,7 +164,7 @@ async fn insert_active_position(
         "INSERT INTO positions \
          (trade_uuid, wallet_address, token_address, strategy, entry_amount_sol, entry_price, \
           entry_tx_signature, state) \
-         VALUES (?, ?, ?, 'SHIELD', ?, 1.0, 'sig', 'ACTIVE')",
+         VALUES ($1, $2, $3, 'SHIELD', $4, 1.0, 'sig', 'ACTIVE')",
     )
     .bind(trade_uuid)
     .bind(wallet)

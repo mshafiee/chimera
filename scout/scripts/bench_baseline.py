@@ -35,7 +35,7 @@ except ImportError:
     print("WARNING: memory_profiler not available. Install with: pip install memory-profiler")
 
 from core.helius_client import HeliusClient
-from core.helius_credit_tracker import CreditTracker
+from core.helius_credit_tracker import HeliusCreditTracker
 from tests.fixtures.replay import FixtureReplayer, create_replay_patch
 
 
@@ -112,7 +112,7 @@ class BaselineRunner:
         client = HeliusClient(api_key="dummy")
         
         # Track credit consumption
-        credit_tracker = CreditTracker()
+        credit_tracker = HeliusCreditTracker()
         initial_credits = credit_tracker.get_remaining_credits()
         
         try:

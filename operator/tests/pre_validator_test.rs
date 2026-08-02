@@ -40,6 +40,7 @@ async fn test_validate_local_cache_miss() {
         liquidity_update_interval_secs: 30,
         cache_backend: "memory".to_string(),
         redis_url: None,
+        ..Default::default()
     };
 
     let config = AppConfig {
@@ -105,6 +106,7 @@ async fn test_pre_validator_initialization() {
         liquidity_update_interval_secs: 30,
         cache_backend: "memory".to_string(),
         redis_url: None,
+        ..Default::default()
     };
 
     let config = AppConfig {
@@ -146,6 +148,7 @@ async fn test_validate_local_returns_immediately() {
         liquidity_update_interval_secs: 30,
         cache_backend: "memory".to_string(),
         redis_url: None,
+        ..Default::default()
     };
 
     let config = AppConfig {

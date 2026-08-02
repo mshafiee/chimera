@@ -434,7 +434,7 @@ Examples:
         report = generate_report(
             db_path=db_path,
             time_window=args.time_window,
-            model_type=[args.model_type] if args.model_type else None
+            model_types=[args.model_type] if args.model_type else None
         )
 
         # Save report

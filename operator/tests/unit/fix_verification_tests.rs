@@ -56,7 +56,7 @@ fn config_with_hard_stop(hard_stop: &str) -> Arc<ProfitManagementConfig> {
 async fn insert_wallet(pool: &Pool<Postgres>, address: &str, wqs: f64) {
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, created_at, updated_at) \
-         VALUES (?, 'ACTIVE', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+         VALUES ($1, 'ACTIVE', $2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
     )
     .bind(address)
     .bind(wqs)

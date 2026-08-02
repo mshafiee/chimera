@@ -5,6 +5,23 @@ Tests credit cost tracking, monthly hard cap enforcement, and pagination integra
 """
 
 import pytest
+
+# TODO(scout): This entire module is written against a legacy/non-existent API of
+# core.helius_credit_tracker. Mismatches include: a `CreditCost` enum (does not
+# exist — real API takes an int cost), `HeliusCreditTracker(monthly_credits=...)`
+# kwarg (real __init__ takes no args), attrs `_credits_used`/`monthly_credits`
+# (real: `_credits_used_today`/`_credits_used_month`), methods
+# `get_usage_percentage`/`_get_reset_time`/`CreditCost.PAGINATION` (absent), and
+# `patch(...)` used 7x without `from unittest.mock import patch`. The CreditCost
+# value assertions are also wrong (GET_TRANSACTIONS is 50 credits, not 10).
+# Rewrite these tests against the real HeliusCreditTracker before re-enabling.
+# See docs/reviews/full-repo-scan-2026-08-02.md (T5.3).
+pytest.skip(
+    "test_credit_tracking.py targets a legacy/non-existent credit-tracking API; "
+    "rewrite against the real HeliusCreditTracker before re-enabling",
+    allow_module_level=True,
+)
+
 from datetime import datetime
 
 from core.helius_client import HeliusClient

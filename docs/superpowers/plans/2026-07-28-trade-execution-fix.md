@@ -270,7 +270,7 @@ Expected: JSON response with SOL price data. If this fails, the Jupiter API key 
 - [ ] **Step 2: Test Helius RPC from operator container**
 
 ```bash
-ssh root@chimera-01.moez.tech "docker exec chimera-operator curl -s -X POST 'https://mainnet.helius-rpc.com/?api-key=609cb910-17a5-4a76-9d1b-2ca9c42f759e' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}'"
+ssh root@chimera-01.moez.tech "docker exec chimera-operator curl -s -X POST 'https://mainnet.helius-rpc.com/?api-key=<HELIUS_API_KEY>' -H 'Content-Type: application/json' -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getHealth\"}'"
 ```
 
 Expected: `{"jsonrpc":"2.0","result":"ok","id":1}`. If this fails, the Helius API key may be invalid or the endpoint is down.
@@ -285,9 +285,9 @@ Expected: `{"jsonrpc":"2.0","result":"ok","id":1}`.
 
 - [ ] **Step 4: Update Jupiter API key if needed**
 
-If the Jupiter API key `jup_7e095c7e729dadb3070b15417faaeed98464afde972184fdd93e0b24247fc857` is invalid or expired, obtain a new one from https://docs.jup.ag/jupiter-price-api and update:
+If the Jupiter API key `<JUPITER_API_KEY>` is invalid or expired, obtain a new one from https://docs.jup.ag/jupiter-price-api and update:
 - `.env` file: `CHIMERA_JUPITER__API_KEY=<new_key>`
-- `docker-compose.yml`: `CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY:-<new_key>}`
+- `docker-compose.yml`: `CHIMERA_JUPITER__API_KEY=${JUPITER_API_KEY}`
 
 - [ ] **Step 5: Restart operator and verify**
 

@@ -98,7 +98,7 @@ DELETED_COUNT=0
 while IFS= read -r old_backup; do
     if [[ -n "$old_backup" && -f "$old_backup" ]]; then
         rm -f "$old_backup"
-        ((DELETED_COUNT++))
+        ((DELETED_COUNT += 1))
         log "INFO" "Deleted old backup: $old_backup"
     fi
 done < <(find "$BACKUP_DIR" -name "chimera_*.db" -type f -mtime +${RETENTION_DAYS} 2>/dev/null)

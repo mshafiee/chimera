@@ -100,7 +100,13 @@ fn build_selection_service(
         spear_percent: 40,
         min_liquidity_shield_usd: dec("10000"),
         min_liquidity_spear_usd: dec("10000"),
+        min_liquidity_pumpfun_usd: dec("25000"),
+        allow_graduated_pumpfun: true,
         min_token_age_hours: 1.0,
+        min_token_age_pumpfun_hours: 4.0,
+        min_wqs_score: 70.0,
+        spear_lite_max_size_sol: dec("0.10"),
+        spear_lite_wqs_threshold: 40.0,
     };
     let service = SelectionService::new(
         db,

@@ -133,7 +133,7 @@ class CostEstimator:
         return os.getenv("SCOUT_FEE_CACHE_PATH", DEFAULT_FEE_CACHE_PATH)
 
     def _load_fee_cache(self) -> None:
-        path = self._fee_cache_path
+        path = self._fee_cache_path()
         try:
             if not os.path.exists(path):
                 return
@@ -161,7 +161,7 @@ class CostEstimator:
         timestamp, fee_levels = cache_entry
         if not isinstance(fee_levels, (list, tuple)) or not fee_levels:
             return
-        path = self._fee_cache_path
+        path = self._fee_cache_path()
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             data = {

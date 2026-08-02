@@ -2,7 +2,7 @@
 
 ## ✅ Configuration Status: COMPLETE
 
-**API Key**: ✅ Configured (609cb910-17a5-4a76-9d1b-2ca9c42f759e)
+**API Key**: ✅ Configured (redacted — set via HELIUS_API_KEY)
 **Network**: ✅ Validated (152ms response time)
 **Historical Signals**: ✅ Generated (1,500 signals × 10 days)
 **Infrastructure**: ✅ Ready (all services configured)

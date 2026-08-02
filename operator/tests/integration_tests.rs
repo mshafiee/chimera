@@ -76,7 +76,7 @@ async fn test_trade_idempotency() {
     );
 
     // Confirm only one row exists
-    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = ?")
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -116,7 +116,7 @@ async fn test_circuit_breaker_loss_tracking() {
         .unwrap();
 
     // Verify the loss is stored correctly
-    let row: (String,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = ?")
+    let row: (String,) = sqlx::query_as("SELECT net_pnl_sol FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -162,7 +162,7 @@ async fn test_trade_status_update() {
     .await
     .unwrap();
 
-    let row: (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = ?")
+    let row: (String,) = sqlx::query_as("SELECT status FROM trades WHERE trade_uuid = $1")
         .bind(uuid)
         .fetch_one(&pool)
         .await
@@ -180,14 +180,14 @@ async fn test_wallet_insert_and_query() {
 
     sqlx::query(
         "INSERT INTO wallets (address, status, wqs_score, roi_7d, roi_30d, trade_count_30d, win_rate, max_drawdown_30d, avg_trade_size_sol)
-         VALUES (?, 'CANDIDATE', 55.0, 12.0, 30.0, 25, 0.65, 10.0, 0.5)",
+         VALUES ($1, 'CANDIDATE', 55.0, 12.0, 30.0, 25, 0.65, 10.0, 0.5)",
     )
     .bind(address)
     .execute(&pool)
     .await
     .expect("Wallet insert should succeed");
 
-    let row: (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = ?")
+    let row: (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = $1")
         .bind(address)
         .fetch_one(&pool)
         .await
@@ -195,13 +195,13 @@ async fn test_wallet_insert_and_query() {
     assert_eq!(row.0, "CANDIDATE", "Wallet status should be CANDIDATE");
 
     // Simulate wallet promotion
-    sqlx::query("UPDATE wallets SET status = 'ACTIVE' WHERE address = ?")
+    sqlx::query("UPDATE wallets SET status = 'ACTIVE' WHERE address = $1")
         .bind(address)
         .execute(&pool)
         .await
         .unwrap();
 
-    let row: (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = ?")
+    let row: (String,) = sqlx::query_as("SELECT status FROM wallets WHERE address = $1")
         .bind(address)
         .fetch_one(&pool)
         .await

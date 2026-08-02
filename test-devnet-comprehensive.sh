@@ -24,12 +24,12 @@ log_info() {
 
 log_success() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((PASSED++))
+    ((PASSED += 1))
 }
 
 log_error() {
     echo -e "${RED}[FAIL]${NC} $1"
-    ((FAILED++))
+    ((FAILED += 1))
 }
 
 log_section() {

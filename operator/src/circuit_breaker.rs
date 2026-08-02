@@ -533,6 +533,11 @@ impl CircuitBreaker {
         // Transition from Tripped → Cooldown after trip is recorded
         if current == CircuitBreakerState::Tripped {
             self.enter_cooldown().await?;
+            // Clear evaluation flag before returning
+            {
+                let mut state = self.state.write();
+                state.evaluation_in_progress = false;
+            }
             return Ok(());
         }
 

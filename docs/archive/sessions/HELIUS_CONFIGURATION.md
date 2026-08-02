@@ -2,34 +2,34 @@
 
 ## ✅ Configuration Complete
 
-All Helius endpoints have been configured with your API key: `609cb910-17a5-4a76-9d1b-2ca9c42f759e`
+All Helius endpoints have been configured with your API key: `<HELIUS_API_KEY>`
 
 ## Configured Endpoints
 
 ### 1. HTTP RPC Endpoint (Primary)
 ```
-https://mainnet.helius-rpc.com/?api-key=609cb910-17a5-4a76-9d1b-2ca9c42f759e
+https://mainnet.helius-rpc.com/?api-key=<HELIUS_API_KEY>
 ```
 - **Usage**: Primary RPC endpoint for all Solana RPC calls
 - **Status**: ✅ Configured in `CHIMERA_RPC__PRIMARY_URL`
 
 ### 2. WebSocket Endpoint (WSS)
 ```
-wss://mainnet.helius-rpc.com/?api-key=609cb910-17a5-4a76-9d1b-2ca9c42f759e
+wss://mainnet.helius-rpc.com/?api-key=<HELIUS_API_KEY>
 ```
 - **Usage**: Real-time subscriptions and WebSocket connections
 - **Status**: ✅ Documented (Solana RPC client handles WebSocket automatically)
 
 ### 3. Transaction API Endpoint
 ```
-https://api-mainnet.helius-rpc.com/v0/transactions/?api-key=609cb910-17a5-4a76-9d1b-2ca9c42f759e
+https://api-mainnet.helius-rpc.com/v0/transactions/?api-key=<HELIUS_API_KEY>
 ```
 - **Usage**: Enhanced transaction queries via Helius Transaction API
 - **Status**: ✅ Documented (used by monitoring system when available)
 
 ### 4. Address Transactions Endpoint
 ```
-https://api-mainnet.helius-rpc.com/v0/addresses/{address}/transactions/?api-key=609cb910-17a5-4a76-9d1b-2ca9c42f759e
+https://api-mainnet.helius-rpc.com/v0/addresses/{address}/transactions/?api-key=<HELIUS_API_KEY>
 ```
 - **Usage**: Query transactions for specific wallet addresses
 - **Status**: ✅ Documented (used by wallet monitoring)

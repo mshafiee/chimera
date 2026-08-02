@@ -95,10 +95,10 @@ for i in {1..10}; do
     STATUS=$(echo "$RESPONSE" | tail -1)
     
     if [ "$STATUS" = "200" ] || [ "$STATUS" = "202" ]; then
-        ((SUCCESS++))
+        ((SUCCESS += 1))
         echo -n "."
     else
-        ((FAILED++))
+        ((FAILED += 1))
         echo -n "F"
     fi
 done

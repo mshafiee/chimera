@@ -79,7 +79,7 @@ async fn insert_active_positions(pool: &Pool<Postgres>, count: usize) {
         let uuid = format!("uuid-pos-{}", i);
         sqlx::query(
             "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-             VALUES (?, 'wallet_x', 'token_x', 'SHIELD', 'BUY', 1.0, 'ACTIVE')"
+             VALUES ($1, 'wallet_x', 'token_x', 'SHIELD', 'BUY', 1.0, 'ACTIVE')"
         )
         .bind(&uuid)
         .execute(pool)
@@ -89,7 +89,7 @@ async fn insert_active_positions(pool: &Pool<Postgres>, count: usize) {
         sqlx::query(
             "INSERT INTO positions (trade_uuid, wallet_address, token_address, strategy, \
              entry_amount_sol, entry_price, entry_tx_signature, state) \
-             VALUES (?, 'wallet_x', 'token_x', 'SHIELD', 1.0, 1.0, 'sig', 'ACTIVE')",
+             VALUES ($1, 'wallet_x', 'token_x', 'SHIELD', 1.0, 1.0, 'sig', 'ACTIVE')",
         )
         .bind(&uuid)
         .execute(pool)
@@ -177,7 +177,7 @@ async fn insert_closed_trades(pool: &Pool<Postgres>, wallet: &str, count: usize)
         let uuid = format!("closed-{}-{}", wallet, i);
         sqlx::query(
             "INSERT INTO trades (trade_uuid, wallet_address, token_address, strategy, side, amount_sol, status) \
-             VALUES (?, ?, 'token_age_test', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
+             VALUES ($1, $2, 'token_age_test', 'SHIELD', 'BUY', 1.0, 'CLOSED')"
         )
         .bind(&uuid)
         .bind(wallet)

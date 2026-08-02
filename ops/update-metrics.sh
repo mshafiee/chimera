@@ -168,12 +168,12 @@ main() {
     
     # Update reconciliation metrics
     if ! update_reconciliation_metrics; then
-        ((errors++))
+        ((errors += 1))
     fi
     
     # Update secret rotation metrics
     if ! update_secret_rotation_metrics; then
-        ((errors++))
+        ((errors += 1))
     fi
     
     if [[ $errors -eq 0 ]]; then

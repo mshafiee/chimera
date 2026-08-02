@@ -25,17 +25,17 @@ log_info() {
 
 log_success() {
     echo -e "${GREEN}[✓ PASS]${NC} $1"
-    ((PASSED++))
+    ((PASSED += 1))
 }
 
 log_error() {
     echo -e "${RED}[✗ FAIL]${NC} $1"
-    ((FAILED++))
+    ((FAILED += 1))
 }
 
 log_warning() {
     echo -e "${YELLOW}[! WARN]${NC} $1"
-    ((WARNINGS++))
+    ((WARNINGS += 1))
 }
 
 log_section() {
@@ -308,10 +308,10 @@ test_load() {
         local status=$(echo "$response" | tail -1)
         
         if [ "$status" = "200" ] || [ "$status" = "202" ]; then
-            ((success++))
+            ((success += 1))
             echo -n "."
         else
-            ((failed++))
+            ((failed += 1))
             echo -n "F"
         fi
     done

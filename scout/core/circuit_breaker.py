@@ -132,7 +132,7 @@ class CircuitBreaker:
         self._config = config or CircuitBreakerConfig()
         self._state = CircuitBreakerState()
         self._events: List[CircuitBreakerEvent] = []
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
         # Volatility tracking for dynamic thresholds
         self._volatility_samples: List[float] = []

@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from core.helius_client import HeliusClient
-from core.helius_credit_tracker import CreditTracker
+from core.helius_credit_tracker import HeliusCreditTracker
 
 FIXTURE_DIR = Path(__file__).parent.parent / "tests" / "fixtures" / "helius"
 FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,7 +67,7 @@ async def capture_wallet_transactions(
     print(f"Capturing transactions for {fixture_name} ({wallet})...")
     
     # Track credit consumption
-    credit_tracker = CreditTracker()
+    credit_tracker = HeliusCreditTracker()
     initial_credits = credit_tracker.get_remaining_credits()
     
     # Capture transactions with different parameters for cache key testing

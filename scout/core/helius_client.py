@@ -3527,19 +3527,25 @@ class HeliusClient:
                 token_amount = abs(primary_in_delta)
                 direction = "BUY"
 
-                # Calculate USD spent (wSOL converted to USD)
-                if spent_any and received_any and stable_received is not None and stable_spent is not None:
-                    # Multi-sided swap with both stablecoin and wSOL
+                # Calculate USD value of the quote side. A USD-pegged stablecoin
+                # quote has a directly computable USD price; a wSOL quote's USD
+                # price is unknown in this code path (no SOL/USD feed here).
+                usd_spent = next(
+                    (abs(delta) for mint, delta in all_outflows if mint in stable_mints),
+                    None,
+                )
+                wsol_spent = stable_spent  # wSOL amount spent, if any
+
+                if usd_spent is not None and wsol_spent is not None:
+                    # Multi-sided swap with both USD stablecoin and wSOL
                     price_usd = None
-                elif spent_any and stable_spent is not None:
-                    # Spending stablecoin or wSOL only
-                    price_usd = None
-                elif spent_any and stable_spent is not None:
-                    # Spending stablecoin or wSOL only
-                    usd_spent = stable_spent
+                elif usd_spent is not None:
+                    # Spending a USD-pegged stablecoin -> USD price computable
                     price_usd = usd_spent / token_amount if token_amount > 0 else None
                 else:
+                    # Spending wSOL (or non-stable quote) -> unknown USD price
                     price_usd = None
+                    usd_spent = None
 
                 quote_mint = next(mint for mint, _ in all_outflows if mint in stable_mints or mint == sol_mint)
 
@@ -3553,7 +3559,7 @@ class HeliusClient:
                     "direction": direction,
                     "price_sol": None,
                     "price_usd": price_usd,
-                    "usd_amount": usd_spent if spent_any else None,
+                    "usd_amount": usd_spent,
                     "quote_mint": quote_mint,
                     "net_sol_delta": 0.0,
                     "net_token_delta": primary_in_delta,
@@ -3565,19 +3571,23 @@ class HeliusClient:
                 token_amount = abs(primary_out_delta)
                 direction = "SELL"
 
-                # Calculate USD received (wSOL converted to USD)
-                if spent_any and received_any and stable_received is not None and stable_spent is not None:
+                # Calculate USD value of the quote side (see BUY branch above).
+                usd_received = next(
+                    (abs(delta) for mint, delta in all_inflows if mint in stable_mints),
+                    None,
+                )
+                wsol_received = stable_received  # wSOL amount received, if any
+
+                if usd_received is not None and wsol_received is not None:
                     # Multi-sided swap
                     price_usd = None
-                elif received_any and stable_received is not None:
-                    # Receiving stablecoin or wSOL only
-                    price_usd = None
-                elif received_any and stable_received is not None:
-                    # Receiving stablecoin or wSOL only
-                    usd_received = stable_received
+                elif usd_received is not None:
+                    # Receiving a USD-pegged stablecoin -> USD price computable
                     price_usd = usd_received / token_amount if token_amount > 0 else None
                 else:
+                    # Receiving wSOL (or non-stable quote) -> unknown USD price
                     price_usd = None
+                    usd_received = None
 
                 quote_mint = next(mint for mint, _ in all_inflows if mint in stable_mints or mint == sol_mint)
 
@@ -3591,7 +3601,7 @@ class HeliusClient:
                     "direction": direction,
                     "price_sol": None,
                     "price_usd": price_usd,
-                    "usd_amount": usd_received if received_any else None,
+                    "usd_amount": usd_received,
                     "quote_mint": quote_mint,
                     "net_sol_delta": 0.0,
                     "net_token_delta": -primary_out_delta,

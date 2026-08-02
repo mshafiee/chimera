@@ -39,7 +39,7 @@ async fn create_test_circuit_breaker(config: CircuitBreakerConfig) -> (CircuitBr
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS config_audit (
-            id SERIAL PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             key TEXT NOT NULL,
             old_value TEXT,
             new_value TEXT,

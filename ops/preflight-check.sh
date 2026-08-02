@@ -36,17 +36,17 @@ WARNINGS=0
 
 log_pass() {
     echo -e "${GREEN}✓${NC} $1"
-    ((PASSED++))
+    ((PASSED += 1))
 }
 
 log_fail() {
     echo -e "${RED}✗${NC} $1"
-    ((FAILED++))
+    ((FAILED += 1))
 }
 
 log_warn() {
     echo -e "${YELLOW}⚠${NC} $1"
-    ((WARNINGS++))
+    ((WARNINGS += 1))
 }
 
 log_info() {
@@ -213,7 +213,7 @@ check_rpc_latency() {
             local latency_ms
             latency_ms=$(( (end_time - start_time) / 1000000 ))
             latencies+=($latency_ms)
-            ((success_count++))
+            ((success_count += 1))
         else
             log_warn "Request $i failed or timed out"
         fi

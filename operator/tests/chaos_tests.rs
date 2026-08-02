@@ -224,7 +224,7 @@ mod tests {
         // manual_trip() calls log_config_change which writes to config_audit
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS config_audit (\
-             id SERIAL PRIMARY KEY AUTOINCREMENT, \
+             id SERIAL PRIMARY KEY, \
              key TEXT NOT NULL, \
              old_value TEXT, \
              new_value TEXT NOT NULL, \
@@ -537,7 +537,7 @@ mod tests {
         // Schema required by get_stuck_positions() query
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS positions (\
-             id SERIAL PRIMARY KEY AUTOINCREMENT, \
+             id SERIAL PRIMARY KEY, \
              trade_uuid TEXT NOT NULL, \
              wallet_address TEXT NOT NULL DEFAULT 'wallet1', \
              token_address TEXT NOT NULL, \
@@ -632,7 +632,7 @@ mod tests {
         for i in 0..n {
             let pool_clone = pool.clone();
             handles.push(tokio::spawn(async move {
-                sqlx::query("INSERT OR IGNORE INTO trades (trade_uuid) VALUES (?)")
+                sqlx::query("INSERT INTO trades (trade_uuid) VALUES ($1) ON CONFLICT (trade_uuid) DO NOTHING")
                     .bind(format!("concurrent-uuid-{}", i))
                     .execute(&pool_clone)
                     .await

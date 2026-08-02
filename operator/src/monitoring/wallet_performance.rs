@@ -74,33 +74,39 @@ impl WalletPerformanceTracker {
         wallet_address: &str,
         pnl_sol: Decimal,
     ) -> Result<(), String> {
-        // Get or create metrics
-        let mut cache = self.metrics_cache.write().await;
-        let metrics =
-            cache
-                .entry(wallet_address.to_string())
-                .or_insert_with(|| WalletCopyMetrics {
-                    wallet_address: wallet_address.to_string(),
-                    copy_pnl_7d: Decimal::ZERO,
-                    signal_success_rate: 0.0,
-                    avg_return_per_trade: Decimal::ZERO,
-                    total_trades: 0,
-                    winning_trades: 0,
-                    last_updated: std::time::SystemTime::now(),
-                    breach_started_at: None,
-                });
+        // Phase 1: update trade counters under the write lock, then release the guard
+        // before any await that could re-enter the cache. Holding the write guard across
+        // update_wqs_from_copy_performance -> should_demote -> get_metrics (which takes a
+        // read lock) self-deadlocks.
+        {
+            let mut cache = self.metrics_cache.write().await;
+            let metrics =
+                cache
+                    .entry(wallet_address.to_string())
+                    .or_insert_with(|| WalletCopyMetrics {
+                        wallet_address: wallet_address.to_string(),
+                        copy_pnl_7d: Decimal::ZERO,
+                        signal_success_rate: 0.0,
+                        avg_return_per_trade: Decimal::ZERO,
+                        total_trades: 0,
+                        winning_trades: 0,
+                        last_updated: std::time::SystemTime::now(),
+                        breach_started_at: None,
+                    });
 
-        // Update metrics
-        metrics.total_trades += 1;
-        if pnl_sol > Decimal::ZERO {
-            metrics.winning_trades += 1;
+            // Update metrics
+            metrics.total_trades += 1;
+            if pnl_sol > Decimal::ZERO {
+                metrics.winning_trades += 1;
+            }
+
+            // Recalculate averages
+            metrics.signal_success_rate =
+                (metrics.winning_trades as f64 / metrics.total_trades as f64) * 100.0;
         }
+        // write guard dropped here
 
-        // Recalculate averages
-        metrics.signal_success_rate =
-            (metrics.winning_trades as f64 / metrics.total_trades as f64) * 100.0;
-
-        // Update 7-day PnL from database (actual 7-day window)
+        // Phase 2: query 7-day PnL from the database (no cache lock held)
         let seven_days_ago = chrono::Utc::now() - chrono::Duration::days(7);
         let from_date_str = seven_days_ago.format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
@@ -126,40 +132,48 @@ impl WalletPerformanceTracker {
         // avg_return must use the 7d trade count, not all-time total_trades.
         let trades_7d_count = trades.len();
 
-        metrics.copy_pnl_7d = copy_pnl_7d;
-        metrics.avg_return_per_trade = if trades_7d_count > 0 {
-            copy_pnl_7d / Decimal::from(trades_7d_count as u64)
-        } else {
-            Decimal::ZERO
-        };
-        metrics.last_updated = std::time::SystemTime::now();
+        // Phase 3: persist computed PnL + breach timer under the write lock, clone the
+        // snapshot out, then release the guard before the WQS update below.
+        let metrics_snapshot: WalletCopyMetrics = {
+            let mut cache = self.metrics_cache.write().await;
+            let metrics = cache
+                .entry(wallet_address.to_string())
+                .or_insert_with(|| WalletCopyMetrics {
+                    wallet_address: wallet_address.to_string(),
+                    copy_pnl_7d: Decimal::ZERO,
+                    signal_success_rate: 0.0,
+                    avg_return_per_trade: Decimal::ZERO,
+                    total_trades: 0,
+                    winning_trades: 0,
+                    last_updated: std::time::SystemTime::now(),
+                    breach_started_at: None,
+                });
 
-        // Track how long this wallet has continuously breached the demotion threshold.
-        // We need the wallet's ROI to compute the threshold; retrieve it from the cache
-        // without holding the lock across await points. We clone what we need here.
-        // The actual demotion decision is made in should_demote() which reads breach_started_at.
-        //
-        // Inline threshold check (mirrors should_demote logic) so we can update the timer:
-        {
-            // Compute expected PnL — same formula used in should_demote().
-            // We don't have the wallet here without an await, so we use a conservative
-            // heuristic: if copy_pnl_7d < 0 treat it as a breach (worst-case).
-            // The full threshold check (with original_roi_7d) happens in should_demote().
-            // Here we only maintain the timer: start it on first negative period, clear on recovery.
+            metrics.copy_pnl_7d = copy_pnl_7d;
+            metrics.avg_return_per_trade = if trades_7d_count > 0 {
+                copy_pnl_7d / Decimal::from(trades_7d_count as u64)
+            } else {
+                Decimal::ZERO
+            };
+            metrics.last_updated = std::time::SystemTime::now();
+
+            // Inline threshold check (mirrors should_demote logic) to maintain the breach timer.
             let currently_breaching = metrics.copy_pnl_7d < Decimal::ZERO;
             if currently_breaching {
                 if metrics.breach_started_at.is_none() {
                     metrics.breach_started_at = Some(std::time::Instant::now());
                 }
-                // else: timer already running — do not reset it
             } else {
-                // Performance recovered — reset the breach timer
                 metrics.breach_started_at = None;
             }
-        }
 
-        // Update WQS in database based on copy performance
-        self.update_wqs_from_copy_performance(wallet_address, metrics)
+            metrics.clone()
+        };
+        // write guard dropped here
+
+        // Phase 4: WQS update + auto-demote using the snapshot. This may re-enter the
+        // cache (should_demote -> get_metrics), which is now safe because no guard is held.
+        self.update_wqs_from_copy_performance(wallet_address, &metrics_snapshot)
             .await?;
 
         Ok(())
