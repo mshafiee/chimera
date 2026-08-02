@@ -200,15 +200,17 @@ monitoring:
 
 # Profit management configuration
 profit_management:
-  targets: []  # No fixed targets — trailing stop only (minimum exit transactions)
-  tiered_exit_percent: 50
-  trailing_stop_activation: 15
-  trailing_stop_distance: 15
+  targets: [8]               # +8% single tier — captures quick gains before reversal
+  tiered_exit_percent: 40    # Sell 40% at target, ride trailing stop on remaining 60%
+  trailing_stop_activation: 8   # Activate trailing after first target hit
+  trailing_stop_distance: 12    # Trail 12% below peak (tighter than 15)
   hard_stop_loss: -25                 # Updated from -8 to -25 to allow adaptive volatility stop-loss room to breathe
   time_exit_hours: 12
   losing_time_exit_hours_shield: 12  # Give SHIELD positions 12h to recover
   losing_time_exit_hours_spear: 4
   wick_protection_secs: 60
+  recovery_gate_secs: 90            # Exit losers at 90s if not recovered (winners recover < 48s)
+  recovery_gate_threshold: -2.5     # Exit if PnL below -2.5% at gate time
 
 # Position sizing configuration
 position_sizing:

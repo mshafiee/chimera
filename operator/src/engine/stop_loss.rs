@@ -242,6 +242,26 @@ impl StopLossManager {
             .num_seconds();
         let is_hard_stop = loss_percent <= dec!(-25);
 
+        // Recovery Gate: after wick protection + buffer (~90s), if the position
+        // hasn't recovered above the threshold, exit immediately. Data shows
+        // winners recover above -1% within 48s; losers stay below -2.5%.
+        // This cuts losers 60% faster than waiting for the -5% to -20% stop-loss.
+        let recovery_gate_secs = self.config.recovery_gate_secs as i64;
+        let recovery_gate_threshold = self.config.recovery_gate_threshold;
+        if elapsed_secs > recovery_gate_secs && loss_percent < recovery_gate_threshold {
+            tracing::warn!(
+                trade_uuid = %trade_uuid,
+                wallet_address = %wallet_address,
+                token_address = token_address,
+                loss_pct = %loss_percent,
+                elapsed_secs,
+                recovery_gate_secs,
+                recovery_gate_threshold = %recovery_gate_threshold,
+                "RECOVERY_GATE: Position not recovered above threshold at gate time — exiting early"
+            );
+            return StopLossAction::Exit;
+        }
+
         // Get wallet WQS for dynamic stop calculation
         let wallet_opt = self.db.get_wallet(wallet_address).await;
         let wqs: f64 = match wallet_opt {

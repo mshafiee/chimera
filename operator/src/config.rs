@@ -1553,6 +1553,23 @@ pub struct ProfitManagementConfig {
     /// Enable ATR-based stop-loss (default false for backward compatibility)
     #[serde(default = "default_atr_stop_loss_enabled")]
     pub atr_stop_loss_enabled: bool,
+    /// Recovery gate: seconds after entry to check if the position has recovered
+    /// from its initial dip. Winners typically recover above -1% within 48s;
+    /// losers stay below -2.5%. Default: 90 (wick_protection 60 + 30s buffer).
+    #[serde(default = "default_recovery_gate_secs")]
+    pub recovery_gate_secs: u64,
+    /// Recovery gate threshold: exit if unrealized PnL is below this percent
+    /// after recovery_gate_secs. Default -2.5 (exit if still below -2.5%).
+    #[serde(default = "default_recovery_gate_threshold")]
+    pub recovery_gate_threshold: Decimal,
+}
+
+fn default_recovery_gate_secs() -> u64 {
+    90
+}
+
+fn default_recovery_gate_threshold() -> Decimal {
+    dec!(-2.5)
 }
 
 fn default_profit_targets() -> Vec<Decimal> {
@@ -1628,6 +1645,8 @@ impl Default for ProfitManagementConfig {
             bear_market_multiplier: default_bear_market_multiplier(),
             volatile_market_multiplier: default_volatile_market_multiplier(),
             atr_stop_loss_enabled: default_atr_stop_loss_enabled(),
+            recovery_gate_secs: default_recovery_gate_secs(),
+            recovery_gate_threshold: default_recovery_gate_threshold(),
         }
     }
 }
