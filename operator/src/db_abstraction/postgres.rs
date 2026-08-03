@@ -798,6 +798,37 @@ impl Database for PostgresBackend {
         rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
     }
 
+    async fn get_promotion_candidates(
+        &self,
+        min_wqs: f64,
+        limit: i64,
+    ) -> AppResult<Vec<Wallet>> {
+        // Bind min_wqs as f64; sqlx encodes f64 to float8 and Postgres compares
+        // it against the numeric wqs_score column cleanly. NULLS LAST keeps
+        // wallets with unknown WQS out of promotion.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, address, status, wqs_score, wqs_confidence,
+                roi_7d, roi_30d, trade_count_30d, win_rate, max_drawdown_30d,
+                avg_trade_size_sol, avg_win_sol, avg_loss_sol, profit_factor,
+                realized_pnl_30d_sol, last_trade_at, promoted_at, ttl_expires_at,
+                notes, archetype, avg_entry_delay_seconds, created_at, updated_at
+            FROM wallets
+            WHERE status = 'CANDIDATE' AND wqs_score >= $1
+            ORDER BY wqs_score DESC NULLS LAST
+            LIMIT $2
+            "#,
+        )
+        .bind(min_wqs)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+
+        rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
+    }
+
     // ========================================================================
     // SYSTEM OPERATIONS
     // ========================================================================

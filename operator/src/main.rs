@@ -239,6 +239,93 @@ async fn cleanup_orphaned_positions(db: &Arc<dyn db_abstraction::Database>, min_
     }
 }
 
+/// Refill the ACTIVE wallet roster from the scout-discovered CANDIDATE pool.
+///
+/// The wallet lifecycle is otherwise one-sided — `auto_demote_wallets` and
+/// inactivity rotation drain ACTIVE → CANDIDATE/REJECTED, but nothing promotes
+/// back. This left the monitored roster stuck at a handful of manually-promoted
+/// wallets, capping copy-trading throughput regardless of how many candidates
+/// scout discovered. This task counterbalances demotion: when the ACTIVE count
+/// is below `max_active`, it promotes the highest-WQS CANDIDATEs up to the gap.
+///
+/// Promoted wallets are immediately covered by the tiered RPC polling task
+/// (which polls all ACTIVE wallets), so they begin generating live signals
+/// without requiring a separate webhook-registration step. Auto-demote then
+/// prunes any that underperform or go dormant — the lifecycle becomes
+/// self-correcting instead of only draining.
+///
+/// Idempotent and safe to call repeatedly: only CANDIDATE → ACTIVE transitions
+/// occur, capped at `max_active`, and a no-op when the roster is full or no
+/// eligible candidates exist.
+async fn auto_promote_wallets(
+    db: &Arc<dyn db_abstraction::Database>,
+    max_active: usize,
+    min_wqs: f64,
+    ttl_hours: i64,
+) {
+    let active_count = match db.get_active_wallets().await {
+        Ok(w) => w.len(),
+        Err(e) => {
+            tracing::error!(error = %e, "auto_promote: get_active_wallets failed");
+            return;
+        }
+    };
+    if active_count >= max_active {
+        return; // roster full — nothing to do
+    }
+    let gap = (max_active - active_count) as i64;
+    let candidates = match db.get_promotion_candidates(min_wqs, gap).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "auto_promote: get_promotion_candidates failed");
+            return;
+        }
+    };
+    if candidates.is_empty() {
+        return;
+    }
+    let mut promoted = 0usize;
+    for w in &candidates {
+        let wqs_f = w.wqs_score.and_then(|d| d.to_f64()).unwrap_or(0.0);
+        let reason = format!(
+            "auto_promote: high-WQS CANDIDATE refill (wqs={:.1})",
+            wqs_f
+        );
+        match db
+            .update_wallet_status_ext(&w.address, "ACTIVE", Some(ttl_hours as i32), Some(&reason))
+            .await
+        {
+            Ok(true) => {
+                promoted += 1;
+                tracing::info!(
+                    wallet = %w.address,
+                    wqs = wqs_f,
+                    ttl_hours = ttl_hours,
+                    "auto_promote: promoted CANDIDATE -> ACTIVE"
+                );
+            }
+            Ok(false) => tracing::warn!(
+                wallet = %w.address,
+                "auto_promote: promotion no-op (status changed concurrently)"
+            ),
+            Err(e) => tracing::error!(
+                error = %e,
+                wallet = %w.address,
+                "auto_promote: promotion failed"
+            ),
+        }
+    }
+    if promoted > 0 {
+        tracing::info!(
+            promoted = promoted,
+            active_before = active_count,
+            max_active = max_active,
+            min_wqs = min_wqs,
+            "auto_promote: refilled ACTIVE roster from CANDIDATE pool"
+        );
+    }
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -382,6 +469,32 @@ async fn main() -> anyhow::Result<()> {
     // closes positions older than 10 minutes so a fresh BUY's token_amount
     // persistence path is not raced.
     cleanup_orphaned_positions(&db_pool, 600).await;
+    // Auto-promote: refill the ACTIVE wallet roster from high-WQS CANDIDATEs so
+    // the monitored pool self-replenishes (counterbalances auto-demote, which
+    // otherwise leaves the roster stuck at a few manually-promoted wallets and
+    // caps copy-trading throughput). Extract the (Copy) settings once while
+    // config is owned; the periodic task reuses the same values.
+    let auto_promote_cfg = config
+        .monitoring
+        .as_ref()
+        .map(|m| {
+            (
+                m.auto_promote_enabled,
+                m.auto_promote_min_wqs,
+                m.auto_promote_ttl_hours,
+                m.max_active_wallets,
+            )
+        })
+        .unwrap_or((false, 60.0, 168, 20));
+    if auto_promote_cfg.0 {
+        auto_promote_wallets(
+            &db_pool,
+            auto_promote_cfg.3,
+            auto_promote_cfg.1,
+            auto_promote_cfg.2,
+        )
+        .await;
+    }
     tracing::info!("Database initialized");
 
     // C1: Run-scoped evidence. Build the admission threshold config once, then
@@ -792,6 +905,7 @@ async fn main() -> anyhow::Result<()> {
     // Periodic EXECUTING cleanup
     {
         let exec_cleanup_db = db_pool.clone();
+        let ap_cfg = auto_promote_cfg;
         task_handles.push(tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
             loop {
@@ -806,6 +920,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 // Reclaim orphaned slots (NULL token_amount, >10 min old).
                 cleanup_orphaned_positions(&exec_cleanup_db, 600).await;
+                // Refill the ACTIVE wallet roster from high-WQS CANDIDATEs.
+                if ap_cfg.0 {
+                    auto_promote_wallets(&exec_cleanup_db, ap_cfg.3, ap_cfg.1, ap_cfg.2).await;
+                }
             }
         }));
     }
@@ -3405,5 +3523,16 @@ mod tests {
     fn test_version() {
         // Ensure version is set
         assert!(!env!("CARGO_PKG_VERSION").is_empty());
+    }
+
+    #[test]
+    fn test_auto_promote_config_defaults() {
+        // Defaults must be safe: disabled unless explicitly opted in, sensible
+        // WQS floor (60 = "regular" conviction), 7-day TTL.
+        let m = chimera_operator::config::MonitoringConfig::default();
+        assert!(!m.auto_promote_enabled, "auto_promote must default to false");
+        assert_eq!(m.auto_promote_min_wqs, 60.0);
+        assert_eq!(m.auto_promote_ttl_hours, 168);
+        assert_eq!(m.max_active_wallets, 20);
     }
 }

@@ -1429,6 +1429,19 @@ pub struct MonitoringConfig {
     /// Tiered inactivity thresholds + oscillation limit.
     #[serde(default)]
     pub inactivity_rotation: Option<InactivityRotationConfig>,
+    /// Auto-promote high-WQS CANDIDATE wallets to ACTIVE when the roster is
+    /// below `max_active_wallets`. Counterbalances auto-demote so the monitored
+    /// roster self-replenishes instead of only draining. Default false (opt-in).
+    #[serde(default = "default_false")]
+    pub auto_promote_enabled: bool,
+    /// Minimum WQS for auto-promotion eligibility (default 60.0 — "regular"
+    /// conviction). Candidates below this are not promoted automatically.
+    #[serde(default = "default_auto_promote_min_wqs")]
+    pub auto_promote_min_wqs: f64,
+    /// TTL (hours) applied to auto-promoted wallets (default 168 = 7 days).
+    /// Combined with promoted_at; auto-demote re-evaluates them on performance.
+    #[serde(default = "default_auto_promote_ttl_hours")]
+    pub auto_promote_ttl_hours: i64,
     /// Webhook lifecycle management configuration
     #[serde(default)]
     pub webhook_lifecycle: Option<WebhookLifecycleConfig>,
@@ -1608,6 +1621,14 @@ fn default_auto_demote_wallets() -> bool {
     false
 }
 
+fn default_auto_promote_min_wqs() -> f64 {
+    60.0
+}
+
+fn default_auto_promote_ttl_hours() -> i64 {
+    168
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         // Keep in sync with the serde default fns (enabled, rate limits).
@@ -1629,6 +1650,9 @@ impl Default for MonitoringConfig {
             auto_demote_wallets: default_auto_demote_wallets(),
             inactivity_rotation_enabled: default_false(),
             inactivity_rotation: None,
+            auto_promote_enabled: default_false(),
+            auto_promote_min_wqs: default_auto_promote_min_wqs(),
+            auto_promote_ttl_hours: default_auto_promote_ttl_hours(),
             webhook_lifecycle: None,
             use_websocket: false,
             helius_websocket_url: None,

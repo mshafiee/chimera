@@ -198,6 +198,16 @@ pub trait Database: Send + Sync {
         max_wqs: Option<i32>,
     ) -> AppResult<Vec<Wallet>>;
 
+    /// Get top CANDIDATE wallets eligible for auto-promotion: status=CANDIDATE,
+    /// wqs_score >= min_wqs, ordered by WQS descending, limited to `limit`.
+    /// REJECTED wallets are excluded. Used by the auto-promote task to refill
+    /// the ACTIVE roster from the scout-discovered candidate pool.
+    async fn get_promotion_candidates(
+        &self,
+        min_wqs: f64,
+        limit: i64,
+    ) -> AppResult<Vec<Wallet>>;
+
     // ========================================================================
     // SYSTEM OPERATIONS
     // ========================================================================

@@ -152,6 +152,9 @@ monitoring:
   max_active_wallets: 20
   auto_demote_wallets: true  # Enable automatic wallet demotion based on copy performance
   inactivity_rotation_enabled: true  # Demote wallets that haven't traded recently
+  auto_promote_enabled: true  # Refill ACTIVE roster from high-WQS CANDIDATEs (counterbalances auto-demote)
+  auto_promote_min_wqs: 60.0  # Only auto-promote candidates with WQS >= 60 ("regular" conviction)
+  auto_promote_ttl_hours: 168  # 7-day TTL on auto-promoted wallets; auto-demote re-evaluates them
 
   # Tiered inactivity thresholds: demote wallets with no recent trading activity
   inactivity_rotation:
