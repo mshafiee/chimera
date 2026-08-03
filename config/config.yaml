@@ -215,10 +215,10 @@ profit_management:
   targets: [8]               # +8% single tier — captures quick gains before reversal
   tiered_exit_percent: 40    # Sell 40% at target, ride trailing stop on remaining 60%
   trailing_stop_activation: 8   # Activate trailing after first target hit
-  trailing_stop_distance: 12    # Trail 12% below peak (tighter than 15)
+  trailing_stop_distance: 7     # Trail ~5% below peak at typical vol_scale 0.75 (was 12→effective 9%; winners gave back to +1%)
   hard_stop_loss: -25                 # Updated from -8 to -25 to allow adaptive volatility stop-loss room to breathe
-  time_exit_hours: 12
-  losing_time_exit_hours_shield: 12  # Give SHIELD positions 12h to recover
+  time_exit_hours: 4           # Force-close after 4h (was 12h; winners held >1hr captured only +1.48%)
+  losing_time_exit_hours_shield: 4  # SHIELD losers time out at 4h (was 12h; losers that survive >10min avg only -2.5%)
   losing_time_exit_hours_spear: 4
   wick_protection_secs: 60
   wick_protection_max_loss_percent: -10.0  # Override wick grace: exit if loss reaches -10% during the first 60s (genuine dump, not entry wick)
