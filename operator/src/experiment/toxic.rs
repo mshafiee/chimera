@@ -211,7 +211,7 @@ impl ToxicFlowDetector {
         let rows = sqlx::query_as::<_, ToxicWalletRow>(
             r#"
             SELECT wallet_address, selection_roi, post_promotion_roi,
-                   local_top_entries, total_entries, is_toxic,
+                   local_top_entries::bigint, total_entries::bigint, is_toxic,
                    toxic_reason, detected_at
             FROM toxic_wallets
             WHERE is_toxic = TRUE
