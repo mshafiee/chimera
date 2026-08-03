@@ -262,7 +262,22 @@ async fn auto_promote_wallets(
     max_active: usize,
     min_wqs: f64,
     ttl_hours: i64,
+    max_age_days: i64,
 ) {
+    // First, demote ACTIVE wallets that haven't traded on-chain within
+    // max_age_days. These generate no copy signals and occupy roster slots the
+    // inactivity rotation won't reclaim during its promotion grace period.
+    // Demoting them frees slots for active candidates below.
+    match db.demote_dormant_active_wallets(max_age_days).await {
+        Ok(n) if n > 0 => tracing::info!(
+            demoted = n,
+            max_age_days = max_age_days,
+            "auto_promote: demoted dormant ACTIVE wallets (no trade within window) to CANDIDATE"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "auto_promote: demote_dormant_active_wallets failed"),
+    }
+
     let active_count = match db.get_active_wallets().await {
         Ok(w) => w.len(),
         Err(e) => {
@@ -274,7 +289,7 @@ async fn auto_promote_wallets(
         return; // roster full — nothing to do
     }
     let gap = (max_active - active_count) as i64;
-    let candidates = match db.get_promotion_candidates(min_wqs, gap).await {
+    let candidates = match db.get_promotion_candidates(min_wqs, max_age_days, gap).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "auto_promote: get_promotion_candidates failed");
@@ -288,8 +303,11 @@ async fn auto_promote_wallets(
     for w in &candidates {
         let wqs_f = w.wqs_score.and_then(|d| d.to_f64()).unwrap_or(0.0);
         let reason = format!(
-            "auto_promote: high-WQS CANDIDATE refill (wqs={:.1})",
-            wqs_f
+            "auto_promote: recency-first refill (wqs={:.1}, last_trade={})",
+            wqs_f,
+            w.last_trade_at
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string())
         );
         match db
             .update_wallet_status_ext(&w.address, "ACTIVE", Some(ttl_hours as i32), Some(&reason))
@@ -300,6 +318,7 @@ async fn auto_promote_wallets(
                 tracing::info!(
                     wallet = %w.address,
                     wqs = wqs_f,
+                    last_trade_at = ?w.last_trade_at,
                     ttl_hours = ttl_hours,
                     "auto_promote: promoted CANDIDATE -> ACTIVE"
                 );
@@ -321,7 +340,8 @@ async fn auto_promote_wallets(
             active_before = active_count,
             max_active = max_active,
             min_wqs = min_wqs,
-            "auto_promote: refilled ACTIVE roster from CANDIDATE pool"
+            max_age_days = max_age_days,
+            "auto_promote: refilled ACTIVE roster from recent CANDIDATE pool"
         );
     }
 }
@@ -483,15 +503,17 @@ async fn main() -> anyhow::Result<()> {
                 m.auto_promote_min_wqs,
                 m.auto_promote_ttl_hours,
                 m.max_active_wallets,
+                m.auto_promote_max_age_days,
             )
         })
-        .unwrap_or((false, 60.0, 168, 20));
+        .unwrap_or((false, 60.0, 168, 20, 7));
     if auto_promote_cfg.0 {
         auto_promote_wallets(
             &db_pool,
             auto_promote_cfg.3,
             auto_promote_cfg.1,
             auto_promote_cfg.2,
+            auto_promote_cfg.4,
         )
         .await;
     }
@@ -922,7 +944,8 @@ async fn main() -> anyhow::Result<()> {
                 cleanup_orphaned_positions(&exec_cleanup_db, 600).await;
                 // Refill the ACTIVE wallet roster from high-WQS CANDIDATEs.
                 if ap_cfg.0 {
-                    auto_promote_wallets(&exec_cleanup_db, ap_cfg.3, ap_cfg.1, ap_cfg.2).await;
+                    auto_promote_wallets(&exec_cleanup_db, ap_cfg.3, ap_cfg.1, ap_cfg.2, ap_cfg.4)
+                        .await;
                 }
             }
         }));
@@ -3533,6 +3556,7 @@ mod tests {
         assert!(!m.auto_promote_enabled, "auto_promote must default to false");
         assert_eq!(m.auto_promote_min_wqs, 60.0);
         assert_eq!(m.auto_promote_ttl_hours, 168);
+        assert_eq!(m.auto_promote_max_age_days, 7);
         assert_eq!(m.max_active_wallets, 20);
     }
 }

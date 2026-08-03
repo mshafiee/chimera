@@ -801,11 +801,12 @@ impl Database for PostgresBackend {
     async fn get_promotion_candidates(
         &self,
         min_wqs: f64,
+        max_age_days: i64,
         limit: i64,
     ) -> AppResult<Vec<Wallet>> {
-        // Bind min_wqs as f64; sqlx encodes f64 to float8 and Postgres compares
-        // it against the numeric wqs_score column cleanly. NULLS LAST keeps
-        // wallets with unknown WQS out of promotion.
+        // Recency-first: require a trade within max_age_days so promotion
+        // surfaces wallets that actually trade, and order by last_trade_at DESC
+        // (most recent first) so the freshest active wallets fill the roster.
         let rows = sqlx::query(
             r#"
             SELECT
@@ -815,18 +816,44 @@ impl Database for PostgresBackend {
                 realized_pnl_30d_sol, last_trade_at, promoted_at, ttl_expires_at,
                 notes, archetype, avg_entry_delay_seconds, created_at, updated_at
             FROM wallets
-            WHERE status = 'CANDIDATE' AND wqs_score >= $1
-            ORDER BY wqs_score DESC NULLS LAST
-            LIMIT $2
+            WHERE status = 'CANDIDATE'
+              AND wqs_score >= $1
+              AND last_trade_at > NOW() - make_interval(days => $2)
+            ORDER BY last_trade_at DESC NULLS LAST, wqs_score DESC
+            LIMIT $3
             "#,
         )
         .bind(min_wqs)
+        .bind(max_age_days)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(AppError::Database)?;
 
         rows.into_iter().map(|r| self.row_to_wallet(r)).collect()
+    }
+
+    async fn demote_dormant_active_wallets(&self, max_age_days: i64) -> AppResult<u64> {
+        // Demote ACTIVE wallets that haven't traded on-chain within max_age_days
+        // back to CANDIDATE. Frees roster slots for active candidates and removes
+        // dead-weight wallets that generate no copy signals. Skips wallets with
+        // unknown last_trade_at (NULL) — those are handled by the inactivity
+        // rotation's own logic.
+        let result = sqlx::query(
+            r#"
+            UPDATE wallets
+            SET status = 'CANDIDATE',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'ACTIVE'
+              AND last_trade_at IS NOT NULL
+              AND last_trade_at <= NOW() - make_interval(days => $1)
+            "#,
+        )
+        .bind(max_age_days)
+        .execute(&self.pool)
+        .await
+        .map_err(AppError::Database)?;
+        Ok(result.rows_affected())
     }
 
     // ========================================================================

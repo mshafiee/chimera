@@ -199,14 +199,23 @@ pub trait Database: Send + Sync {
     ) -> AppResult<Vec<Wallet>>;
 
     /// Get top CANDIDATE wallets eligible for auto-promotion: status=CANDIDATE,
-    /// wqs_score >= min_wqs, ordered by WQS descending, limited to `limit`.
-    /// REJECTED wallets are excluded. Used by the auto-promote task to refill
-    /// the ACTIVE roster from the scout-discovered candidate pool.
+    /// wqs_score >= min_wqs, last_trade_at within `max_age_days`, ordered by
+    /// recency (most recently traded first) then WQS, limited to `limit`.
+    /// REJECTED wallets are excluded. Recency-first ordering surfaces wallets
+    /// that actually trade rather than dormant high-historical-WQS ones.
     async fn get_promotion_candidates(
         &self,
         min_wqs: f64,
+        max_age_days: i64,
         limit: i64,
     ) -> AppResult<Vec<Wallet>>;
+
+    /// Demote ACTIVE wallets whose last on-chain trade is older than
+    /// `max_age_days` back to CANDIDATE, freeing roster slots for active
+    /// candidates. Returns the number demoted. Bypasses the inactivity-rotation
+    /// grace period (which otherwise keeps freshly-promoted dormant wallets
+    /// ACTIVE). Orphan webhooks are cleaned up by the webhook-lifecycle task.
+    async fn demote_dormant_active_wallets(&self, max_age_days: i64) -> AppResult<u64>;
 
     // ========================================================================
     // SYSTEM OPERATIONS

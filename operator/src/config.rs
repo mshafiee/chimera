@@ -1442,6 +1442,13 @@ pub struct MonitoringConfig {
     /// Combined with promoted_at; auto-demote re-evaluates them on performance.
     #[serde(default = "default_auto_promote_ttl_hours")]
     pub auto_promote_ttl_hours: i64,
+    /// Max age (days) of a CANDIDATE's last on-chain trade to be eligible for
+    /// auto-promotion (default 7). Surfaces wallets that actually trade rather
+    /// than dormant high-historical-WQS ones. ACTIVE wallets whose last trade
+    /// exceeds this are demoted to CANDIDATE by the auto-promote task, freeing
+    /// slots for active candidates.
+    #[serde(default = "default_auto_promote_max_age_days")]
+    pub auto_promote_max_age_days: i64,
     /// Webhook lifecycle management configuration
     #[serde(default)]
     pub webhook_lifecycle: Option<WebhookLifecycleConfig>,
@@ -1629,6 +1636,10 @@ fn default_auto_promote_ttl_hours() -> i64 {
     168
 }
 
+fn default_auto_promote_max_age_days() -> i64 {
+    7
+}
+
 impl Default for MonitoringConfig {
     fn default() -> Self {
         // Keep in sync with the serde default fns (enabled, rate limits).
@@ -1653,6 +1664,7 @@ impl Default for MonitoringConfig {
             auto_promote_enabled: default_false(),
             auto_promote_min_wqs: default_auto_promote_min_wqs(),
             auto_promote_ttl_hours: default_auto_promote_ttl_hours(),
+            auto_promote_max_age_days: default_auto_promote_max_age_days(),
             webhook_lifecycle: None,
             use_websocket: false,
             helius_websocket_url: None,
