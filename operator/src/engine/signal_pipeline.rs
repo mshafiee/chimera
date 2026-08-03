@@ -748,26 +748,24 @@ impl SignalProcessor {
                 )
                 .await
             {
+                // Self-match guard: the trade row is created by the webhook
+                // handler (monitoring.rs) BEFORE this pre-check runs, so a
+                // first-delivery BUY always finds its OWN just-created PENDING
+                // row. That is the current trade, not a different concurrent
+                // one — fall through to execution. Only a genuinely different
+                // trade_uuid (different on-chain trade for the same
+                // wallet/token) should be rejected. (Redeliveries of an
+                // already-completed trade are caught by the monitoring-signal
+                // dedup upstream; a duplicate ACTIVE position is caught by the
+                // position-open guard.)
+                Ok(Some(existing_uuid)) if existing_uuid == trade_uuid => {
+                    tracing::debug!(
+                        trade_uuid = %trade_uuid,
+                        wallet = %signal.payload.wallet_address,
+                        "pre-check: unresolved trade is the BUY's own in-flight row — proceeding"
+                    );
+                }
                 Ok(Some(existing_uuid)) => {
-                    if existing_uuid == trade_uuid {
-                        // Self-redelivery: Helius re-delivered the SAME on-chain
-                        // trade (deterministic trade_uuid) while its first
-                        // delivery is still in flight (PENDING/EXECUTING). This
-                        // is NOT a different concurrent BUY — the in-flight
-                        // delivery will complete (or the stale-trade reaper will
-                        // reap it). Skipping here prevents a trade from rejecting
-                        // its OWN in-flight row on every redelivery, which was
-                        // blocking every BUY once the liquidity floor let them
-                        // through. (Redeliveries of an already-COMPLETED trade
-                        // are caught earlier by the monitoring-signal dedup.)
-                        tracing::info!(
-                            trade_uuid = %trade_uuid,
-                            wallet = %signal.payload.wallet_address,
-                            token = %signal.payload.token,
-                            "BUY self-redelivery (same trade_uuid in flight) — skipping; in-flight delivery completes it"
-                        );
-                        return;
-                    }
                     tracing::warn!(
                         trade_uuid = %trade_uuid,
                         existing_trade_uuid = %existing_uuid,
