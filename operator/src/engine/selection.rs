@@ -1006,6 +1006,7 @@ impl SelectionService {
                 } else {
                     None
                 },
+                boost_target_sol: None, // set in Task 5 from the wallet's CopyTier
             };
             let size = match sizer.calculate_size(factors).await {
                 Ok(s) => s,

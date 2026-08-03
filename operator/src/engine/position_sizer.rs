@@ -48,6 +48,11 @@ pub struct SizingFactors {
     /// Optional WQS-based max size cap. When set, the final position size
     /// is clamped to this value (for low-WQS wallet micro-positions).
     pub wqs_capped_max_size: Option<Decimal>,
+    /// Optional per-wallet copy-performance boost target (SOL). When set, the
+    /// final size starts from this value (still capped by strategy_max and
+    /// floored by min_size_sol). Set by selection for wallets whose recent copy
+    /// trades qualify them as BOOSTED.
+    pub boost_target_sol: Option<Decimal>,
 }
 
 impl PositionSizer {
@@ -363,6 +368,14 @@ impl PositionSizer {
             return Ok(Decimal::ZERO);
         }
 
+        // Per-wallet copy-performance boost: a proven wallet's boost target
+        // overrides the computed size. Still bounded by strategy_max (next
+        // line) and the min_size_sol floor, so a misconfigured boost cannot
+        // exceed strategy caps or breach the floor.
+        if let Some(boost) = factors.boost_target_sol {
+            size = boost;
+        }
+
         size = size.max(self.config.min_size_sol).min(strategy_max);
 
         // WQS-based micro-position cap for low-conviction wallets.
@@ -475,6 +488,7 @@ impl PositionSizer {
             consensus_wallet_count: None,
             regime_multiplier: Decimal::ONE,
             wqs_capped_max_size: None,
+            boost_target_sol: None,
         })
     }
 
