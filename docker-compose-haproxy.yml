@@ -97,6 +97,8 @@ services:
       - METRICS_PORT=8000
       - LOG_CHECK_INTERVAL=5
       - HAPROXY_LOG_PATH=/var/log/haproxy/haproxy.log
+      # Trusted IPs that skip attack-pattern detection (admin/operator machines)
+      - SECURITY_TRUSTED_IPS=${SECURITY_TRUSTED_IPS:-88.134.30.225}
     volumes:
       - haproxy-logs:/var/log/haproxy:ro
     networks:

@@ -196,7 +196,10 @@ pub async fn helius_webhook_handler(
             let wallet_address = match tracked_wallet_ref {
                 Some(wallet) => wallet.to_string(),
                 None => {
-                    tracing::warn!(
+                    // This is expected: Helius webhooks fire for many wallets,
+                    // most of which are not in our ACTIVE set. Logging at debug
+                    // avoids ~13k WARN lines/day of non-actionable noise.
+                    tracing::debug!(
                         signature = %event.signature,
                         transaction_type = %event.transaction_type,
                         "Webhook event has no tracked wallet (no ACTIVE wallet matched user_account)"

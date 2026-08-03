@@ -177,7 +177,7 @@ impl ToxicFlowDetector {
                     toxic_reason, detected_at, run_id
                 ) VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9
-                ) ON CONFLICT(run_id, wallet_address) DO UPDATE SET
+                ) ON CONFLICT(wallet_address) DO UPDATE SET
                     post_promotion_roi = excluded.post_promotion_roi,
                     local_top_entries = excluded.local_top_entries,
                     total_entries = excluded.total_entries,

@@ -766,7 +766,10 @@ class HeliusClient:
                 if attempt == max_retries - 1:
                     # Final attempt failed, log and raise
                     logger = logging.getLogger(__name__)
-                    logger.warning(f"Retry exhausted after {max_retries} attempts: {e}")
+                    logger.warning(
+                        f"Retry exhausted after {max_retries} attempts: "
+                        f"{HeliusClient._redact_api_key(str(e))}"
+                    )
                     await self._record_failure()
                     raise
 
@@ -784,7 +787,10 @@ class HeliusClient:
                 if not self._is_retryable_error(status_code, e):
                     # Non-retryable error, fail immediately
                     logger = logging.getLogger(__name__)
-                    logger.warning(f"Non-retryable error (status {status_code}): {e}")
+                    logger.warning(
+                        f"Non-retryable error (status {status_code}): "
+                        f"{HeliusClient._redact_api_key(str(e))}"
+                    )
                     await self._record_failure()
                     raise
 
@@ -2785,6 +2791,16 @@ class HeliusClient:
             List of transaction dictionaries
         """
         if not self.api_key:
+            return []
+
+        # Validate wallet address before making API calls. Malformed or
+        # truncated addresses (e.g. 43 chars) cause Helius 400 Bad Request
+        # errors that waste credits and pollute logs.
+        if not self._is_valid_solana_address(wallet_address):
+            logger = logging.getLogger(__name__)
+            logger.debug(
+                f"Skipping invalid/short wallet address: {wallet_address[:12]}..."
+            )
             return []
 
         # Normalize the limit to canonical buckets to ensure cache hits across

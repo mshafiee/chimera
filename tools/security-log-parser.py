@@ -38,6 +38,11 @@ HA_PROXY_LOG_PATH = os.getenv("HAPROXY_LOG_PATH", "/var/log/haproxy/security.log
 METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 LOG_CHECK_INTERVAL = int(os.getenv("LOG_CHECK_INTERVAL", "5"))
 
+# Trusted IP whitelist — traffic from these addresses skips attack-pattern detection.
+# Comma-separated list via env var (e.g. SECURITY_TRUSTED_IPS=1.2.3.4,5.6.7.8).
+_trusted_ips_env = os.getenv("SECURITY_TRUSTED_IPS", "")
+TRUSTED_IPS = {ip.strip() for ip in _trusted_ips_env.split(",") if ip.strip()}
+
 # FastAPI app
 app = FastAPI(
     title="Chimera Security Log Parser",
@@ -265,6 +270,10 @@ class LogProcessor:
     async def _detect_patterns(self, event: Dict[str, Any], source_ip: str, user_agent: str):
         """Detect attack patterns in security events"""
         try:
+            # Skip pattern detection for trusted/admin IPs
+            if source_ip in TRUSTED_IPS:
+                return
+
             http_path = event.get("http_path", "")
             http_query = event.get("http_query", "")
 
