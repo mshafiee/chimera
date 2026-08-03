@@ -45,6 +45,10 @@ pub struct WalletCopyMetrics {
     pub avg_return_per_trade: Decimal,
     pub total_trades: u32,
     pub winning_trades: u32,
+    /// Count of CLOSED copy trades in the last 7 days (used for fast
+    /// net-negative demotion — distinguishes "one unlucky trade" from a
+    /// consistently-losing wallet churning a dying token).
+    pub recent_trade_count: u32,
     pub last_updated: std::time::SystemTime,
     /// When performance first continuously breached the demotion threshold.
     /// None means performance is currently within acceptable bounds.
@@ -108,6 +112,7 @@ impl WalletPerformanceTracker {
                         avg_return_per_trade: Decimal::ZERO,
                         total_trades: 0,
                         winning_trades: 0,
+                        recent_trade_count: 0,
                         last_updated: std::time::SystemTime::now(),
                         breach_started_at: None,
                     });
@@ -163,11 +168,13 @@ impl WalletPerformanceTracker {
                     avg_return_per_trade: Decimal::ZERO,
                     total_trades: 0,
                     winning_trades: 0,
+                    recent_trade_count: 0,
                     last_updated: std::time::SystemTime::now(),
                     breach_started_at: None,
                 });
 
             metrics.copy_pnl_7d = copy_pnl_7d;
+            metrics.recent_trade_count = trades_7d_count as u32;
             metrics.avg_return_per_trade = if trades_7d_count > 0 {
                 copy_pnl_7d / Decimal::from(trades_7d_count as u64)
             } else {
@@ -458,6 +465,27 @@ impl WalletPerformanceTracker {
             // Get wallet from database to compare copy vs original performance
             if let Ok(Some(wallet)) = self.db.get_wallet(wallet_address).await {
                 if let Some(metrics) = self.get_metrics(wallet_address).await {
+                    // FAST net-negative demotion: a wallet with several recent
+                    // copies that are clearly net-negative is bad — demote
+                    // immediately instead of waiting 7 days. Catches wallets
+                    // churning a dying token (e.g., 11 consecutive losses on
+                    // one token) within hours. The count guard prevents one
+                    // unlucky trade from triggering it.
+                    const FAST_DEMOTE_MIN_TRADES: u32 = 5;
+                    let fast_demote_net =
+                        Decimal::from_str("-0.03").unwrap_or(Decimal::ZERO);
+                    if metrics.recent_trade_count >= FAST_DEMOTE_MIN_TRADES
+                        && metrics.copy_pnl_7d < fast_demote_net
+                    {
+                        tracing::warn!(
+                            wallet_address = %wallet_address,
+                            copy_pnl_7d = %metrics.copy_pnl_7d,
+                            recent_trades = metrics.recent_trade_count,
+                            "Fast demotion: wallet clearly net-negative over recent copies (churn protection)"
+                        );
+                        return Some(DemotionReason::CopyPnl);
+                    }
+
                     // Get original wallet ROI (from Scout analysis)
                     let original_roi_7d = wallet.roi_7d.unwrap_or(rust_decimal::Decimal::ZERO);
 
