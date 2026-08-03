@@ -531,6 +531,30 @@ impl WalletPerformanceTracker {
         classify_copy_tier(count, net, winrate, days_since, cfg)
     }
 
+    /// Convenience for the position-sizing path: returns `Some(boost_size)` if
+    /// the wallet qualifies as BOOSTED, else `None` (floor sizing applies).
+    /// Encapsulates both the tier classification and the configured boost size
+    /// so callers (selection) don't need MonitoringConfig plumbing.
+    pub async fn boost_target_for(&self, wallet: &str) -> Option<rust_decimal::Decimal> {
+        let enabled = self
+            .config
+            .monitoring
+            .as_ref()
+            .map(|m| m.wallet_boost_enabled)
+            .unwrap_or(false);
+        if !enabled {
+            return None;
+        }
+        match self.compute_copy_tier(wallet).await {
+            CopyTier::Boosted => self
+                .config
+                .monitoring
+                .as_ref()
+                .map(|m| m.wallet_boost_size_sol),
+            CopyTier::Base => None,
+        }
+    }
+
     pub async fn should_demote(&self, wallet_address: &str) -> Option<DemotionReason> {
         // Phase 1: Inactivity-based rotation
         if let Some(monitoring_config) = &self.config.monitoring {

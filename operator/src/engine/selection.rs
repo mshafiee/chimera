@@ -986,6 +986,20 @@ impl SelectionService {
         };
 
         // ── 10. Position size via PositionSizer ─────────────────────────────
+        // Per-wallet copy-performance boost: if this wallet qualifies as BOOSTED
+        // (proven recent copy profitability), seed the size from the boost
+        // target; otherwise None and the floor applies.
+        let boost_target_sol = match self.wallet_performance {
+            Some(ref tracker) => tracker.boost_target_for(&req.wallet_address).await,
+            None => None,
+        };
+        if let Some(bt) = boost_target_sol {
+            tracing::info!(
+                wallet = %req.wallet_address,
+                boost_target_sol = %bt,
+                "Wallet qualified for copy-performance size boost"
+            );
+        }
         let size_sol = if let Some(ref sizer) = self.position_sizer {
             let factors = SizingFactors {
                 is_consensus,
@@ -1006,7 +1020,7 @@ impl SelectionService {
                 } else {
                     None
                 },
-                boost_target_sol: None, // set in Task 5 from the wallet's CopyTier
+                boost_target_sol,
             };
             let size = match sizer.calculate_size(factors).await {
                 Ok(s) => s,
