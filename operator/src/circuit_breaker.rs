@@ -41,9 +41,17 @@ async fn persist_cb_state(
 /// treated as "no persisted state".
 async fn load_cb_state(
     db: &dyn Database,
-) -> AppResult<Option<(String, Option<String>, Option<String>)>> {
+) -> AppResult<Option<(String, Option<String>, Option<String>, Option<DateTime<Utc>>)>> {
     let state = db.get_circuit_breaker_state().await?;
-    Ok(Some((state.state, state.tripped_at, state.trip_reason)))
+    let updated_at = state
+        .updated_at
+        .parse::<DateTime<Utc>>()
+        .or_else(|_| {
+            DateTime::parse_from_rfc3339(&state.updated_at)
+                .map(|d| d.with_timezone(&Utc))
+        })
+        .ok();
+    Ok(Some((state.state, state.tripped_at, state.trip_reason, updated_at)))
 }
 
 /// RAII guard that clears the `evaluation_in_progress` flag on drop.
@@ -203,6 +211,12 @@ struct InternalState {
     last_jupiter_error: Option<String>,
     /// Evaluation in progress flag to prevent concurrent evaluations
     evaluation_in_progress: bool,
+    /// Baseline timestamp for the consecutive-loss counter. Set on manual reset
+    /// (and on startup from the persisted Active-state `updated_at`). The
+    /// consecutive-loss check only counts losing trades closed AFTER this
+    /// moment, so a reset actually clears the streak instead of re-tripping on
+    /// the next tick because the historical losses are still in the DB.
+    last_reset_at: Option<DateTime<Utc>>,
 }
 
 /// Circuit Breaker
@@ -258,6 +272,7 @@ impl CircuitBreaker {
                 jupiter_failure_count: 0,
                 last_jupiter_error: None,
                 evaluation_in_progress: false,
+                last_reset_at: None,
             })),
             check_interval: Duration::seconds(5), // Reduced from 30s to 5s for faster loss detection
             ws_state,
@@ -299,7 +314,9 @@ impl CircuitBreaker {
         // A failed read propagates here (fail-closed): silently resuming trading
         // when the persisted state said Tripped/Cooldown would be unsafe.
         match load_cb_state(self.db.as_ref()).await? {
-            Some((state_str, tripped_at_str, trip_reason_str)) if state_str != "Active" => {
+            Some((state_str, tripped_at_str, trip_reason_str, updated_at))
+                if state_str != "Active" =>
+            {
                 // A missing/unparseable persisted timestamp must not strand the
                 // breaker in Cooldown forever (the cooldown-expiry check returns
                 // false when tripped_at is None) — fall back to now so the
@@ -328,6 +345,11 @@ impl CircuitBreaker {
                     state.state = CircuitBreakerState::Tripped;
                     state.tripped_at = tripped_at;
                     state.trip_reason = Some(reason);
+                    // Baseline the consecutive-loss counter at the persisted
+                    // state timestamp so the immediate re-evaluate() below does
+                    // not re-trip on the historical losing streak. A manual
+                    // reset updates this baseline to the reset moment.
+                    state.last_reset_at = updated_at.or(tripped_at);
                 }
 
                 tracing::warn!(
@@ -340,10 +362,20 @@ impl CircuitBreaker {
                 // Re-evaluate immediately to transition Tripped → Cooldown → Active if appropriate
                 self.evaluate().await?;
             }
-            _ => {
+            Some((_state_str, _tripped_at, _trip_reason, updated_at)) => {
+                // Persisted state is Active (or absent). Baseline the
+                // consecutive-loss counter at the persisted Active-state
+                // timestamp so a restart right after a manual reset does not
+                // re-trip on the historical losing streak still in the DB.
+                if let Some(dt) = updated_at {
+                    self.state.write().last_reset_at = Some(dt);
+                }
                 tracing::debug!(
                     "Circuit breaker persisted state is Active or absent — no restore needed"
                 );
+            }
+            None => {
+                tracing::debug!("No persisted circuit breaker state — starting Active");
             }
         }
         Ok(())
@@ -445,7 +477,11 @@ impl CircuitBreaker {
             );
         }
 
-        let consecutive = match self.db.get_consecutive_losses().await {
+        // Count consecutive losses only since the last reset baseline (if any),
+        // so a manual reset clears the streak instead of re-tripping on the
+        // historical losing trades still in the DB.
+        let reset_baseline = self.state.read().last_reset_at;
+        let consecutive = match self.db.get_consecutive_losses_since(reset_baseline).await {
             Ok(count) => count,
             Err(e) => {
                 tracing::warn!(
@@ -888,6 +924,10 @@ impl CircuitBreaker {
             // Clear Jupiter failure accumulation on manual reset.
             state.jupiter_failure_count = 0;
             state.last_jupiter_error = None;
+            // Baseline the consecutive-loss counter at the reset moment so the
+            // historical losing streak doesn't re-trip the breaker on the next
+            // evaluation tick.
+            state.last_reset_at = Some(Utc::now());
         }
 
         // Update Prometheus gauge to Active (2)

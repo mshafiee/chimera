@@ -1389,6 +1389,59 @@ impl Database for PostgresBackend {
         Ok(consecutive)
     }
 
+    async fn get_consecutive_losses_since(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> AppResult<u32> {
+        // Same logic as get_consecutive_losses but optionally restricted to
+        // trades created after `since` (the circuit-breaker reset baseline),
+        // so a reset clears the streak instead of re-tripping on history.
+        let rows: Vec<Decimal> = if let Some(since) = since {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"
+                SELECT COALESCE(p.realized_pnl_sol, 0.0)
+                FROM trades t
+                LEFT JOIN positions p ON p.trade_uuid = t.trade_uuid
+                WHERE t.status = 'CLOSED'
+                AND t.pnl_data_valid
+                AND t.created_at > $1
+                ORDER BY t.created_at DESC
+                LIMIT 20
+                "#,
+            )
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::Database)?
+        } else {
+            sqlx::query_scalar::<_, Decimal>(
+                r#"
+                SELECT COALESCE(p.realized_pnl_sol, 0.0)
+                FROM trades t
+                LEFT JOIN positions p ON p.trade_uuid = t.trade_uuid
+                WHERE t.status = 'CLOSED'
+                AND t.pnl_data_valid
+                ORDER BY t.created_at DESC
+                LIMIT 20
+                "#,
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(AppError::Database)?
+        };
+
+        let mut consecutive = 0u32;
+        for pnl in rows {
+            if pnl < Decimal::ZERO {
+                consecutive += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(consecutive)
+    }
+
     async fn get_max_drawdown_percent(
         &self,
         cap: Decimal,

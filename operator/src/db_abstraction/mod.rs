@@ -356,6 +356,15 @@ pub trait Database: Send + Sync {
     /// Get count of consecutive losses
     async fn get_consecutive_losses(&self) -> AppResult<u32>;
 
+    /// Get count of consecutive losses, counting only CLOSED trades created
+    /// AFTER `since` (if provided). Used by the circuit breaker so a manual
+    /// reset (which sets the baseline) doesn't immediately re-trip on the
+    /// historical losing streak still present in the trades table.
+    async fn get_consecutive_losses_since(
+        &self,
+        since: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> AppResult<u32>;
+
     /// Get drawdown percentages from peak.
     ///
     /// Returns `(current_drawdown_percent, max_drawdown_percent)`: the
